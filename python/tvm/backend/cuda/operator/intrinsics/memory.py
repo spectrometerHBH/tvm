@@ -74,6 +74,137 @@ def codegen_cuda_copy_bytes(dst, src, num_bytes):
 
 
 # =============================================================================
+# Shared-aware N-byte copy variants.
+#
+# The generic ``copy_{N}b`` helpers above take ``void*`` for both pointers. When
+# one side is SHARED memory, the generic-pointer round-trip strips the shared
+# address space, so ptxas materializes the SMEM base in a vector register and
+# does per-thread vector address math. These variants keep the shared base in a
+# uniform register by going through ``__cvta_generic_to_shared`` + an inline-asm
+# ``ld.shared`` / ``st.shared`` (exactly like the PTX ld/st shared helpers
+# above), offloading address math to the uniform datapath.
+#
+#   _lds variant: shared side is the SOURCE  (shared -> reg load).
+#   _sts variant: shared side is the DESTINATION (reg -> shared store).
+#
+# The number of 32-bit (or smaller) sub-words and the PTX vector form depend on
+# the copy width: 16B -> v4.u32, 8B -> v2.u32, 4B -> u32, 2B -> u16, 1B -> u8.
+# =============================================================================
+# (num_bytes, ptx ld/st suffix, [(register C type, asm constraint), ...])
+_SHARED_COPY_MAP = {
+    16: ("v4.u32", [("unsigned int", "r")] * 4),
+    8: ("v2.u32", [("unsigned int", "r")] * 2),
+    4: ("u32", [("unsigned int", "r")]),
+    2: ("u16", [("unsigned short", "h")]),
+    1: ("u8", [("unsigned int", "r")]),
+}
+
+
+def _shared_copy_lds_body(num_bytes):
+    """``ld.shared`` load: dst is reg (generic), src is shared."""
+    ptx_vec, regs = _SHARED_COPY_MAP[num_bytes]
+    n = len(regs)
+    reg_decls = "".join(f"    {ctype} r{i};\n" for i, (ctype, _c) in enumerate(regs))
+    if n > 1:
+        slot = "{" + ", ".join(f"%{i}" for i in range(n)) + "}"
+        out_constraints = ", ".join(f'"={c}"(r{i})' for i, (_t, c) in enumerate(regs))
+    else:
+        slot = "%0"
+        out_constraints = f'"={regs[0][1]}"(r0)'
+    if num_bytes == 1:
+        # 1B is loaded into a 32-bit register via ld.shared.u8; store low byte.
+        store_stmt = "    *reinterpret_cast<unsigned char*>(dst_ptr) = static_cast<unsigned char>(r0);"
+    elif n > 1:
+        store_stmt = (
+            f"    *reinterpret_cast<{_TYPE_MAP[num_bytes]}*>(dst_ptr) = "
+            + "{" + ", ".join(f"r{i}" for i in range(n)) + "};"
+        )
+    else:
+        store_stmt = f"    *reinterpret_cast<{_TYPE_MAP[num_bytes]}*>(dst_ptr) = r0;"
+    return (
+        f"    unsigned int addr = (unsigned int)__cvta_generic_to_shared(src_ptr);\n"
+        f"{reg_decls}"
+        f'    asm volatile("ld.shared.{ptx_vec} {slot}, [%{n}];"\n'
+        f"                 : {out_constraints}\n"
+        f'                 : "r"(addr));\n'
+        f"{store_stmt}"
+    )
+
+
+def _shared_copy_sts_body(num_bytes):
+    """``st.shared`` store: dst is shared, src is reg (generic)."""
+    ptx_vec, regs = _SHARED_COPY_MAP[num_bytes]
+    n = len(regs)
+    if num_bytes == 1:
+        load_regs = "    unsigned int r0 = *reinterpret_cast<unsigned char*>(src_ptr);\n"
+    elif n > 1:
+        load_regs = (
+            f"    {_TYPE_MAP[num_bytes]} src_ = *reinterpret_cast<{_TYPE_MAP[num_bytes]}*>(src_ptr);\n"
+            + "".join(
+                f"    unsigned int r{i} = src_.{c};\n" for i, c in enumerate("xyzw"[:n])
+            )
+        )
+    else:
+        ctype = regs[0][0]
+        load_regs = f"    {ctype} r0 = *reinterpret_cast<{ctype}*>(src_ptr);\n"
+    if n > 1:
+        slot = "{" + ", ".join(f"%{i + 1}" for i in range(n)) + "}"
+        in_constraints = ", ".join(f'"{c}"(r{i})' for i, (_t, c) in enumerate(regs))
+    else:
+        slot = "%1"
+        in_constraints = f'"{regs[0][1]}"(r0)'
+    return (
+        f"    unsigned int addr = (unsigned int)__cvta_generic_to_shared(dst_ptr);\n"
+        f"{load_regs}"
+        f'    asm volatile("st.shared.{ptx_vec} [%0], {slot};"\n'
+        "                 :\n"
+        f'                 : "r"(addr), {in_constraints});'
+    )
+
+
+for _num_bytes in _SHARED_COPY_MAP:
+    device_intrinsic(
+        f"_cuda_copy_bytes_{_num_bytes}_lds_impl",
+        helper_name=f"tvm_builtin_copy_{_num_bytes * 8}b_lds",
+        c_signature="(void* dst_ptr, void* src_ptr)",
+        body=_shared_copy_lds_body(_num_bytes),
+    )
+    device_intrinsic(
+        f"_cuda_copy_bytes_{_num_bytes}_sts_impl",
+        helper_name=f"tvm_builtin_copy_{_num_bytes * 8}b_sts",
+        c_signature="(void* dst_ptr, void* src_ptr)",
+        body=_shared_copy_sts_body(_num_bytes),
+    )
+del _num_bytes
+
+
+@register_codegen("cuda_copy_bytes_lds")
+def codegen_cuda_copy_bytes_lds(dst, src, num_bytes):
+    """Dispatch the shared-source (``ld.shared``) variant by ``num_bytes``."""
+    num_bytes_int = int(num_bytes)
+    if num_bytes_int not in _SHARED_COPY_MAP:
+        raise ValueError(
+            f"Unsupported cuda_copy_bytes_lds num_bytes {num_bytes_int}, "
+            f"expected one of {sorted(_SHARED_COPY_MAP)}"
+        )
+    result = CODEGEN_REGISTRY[f"tirx._cuda_copy_bytes_{num_bytes_int}_lds_impl"]([dst, src])
+    return result[0] if isinstance(result, tuple) else result
+
+
+@register_codegen("cuda_copy_bytes_sts")
+def codegen_cuda_copy_bytes_sts(dst, src, num_bytes):
+    """Dispatch the shared-dest (``st.shared``) variant by ``num_bytes``."""
+    num_bytes_int = int(num_bytes)
+    if num_bytes_int not in _SHARED_COPY_MAP:
+        raise ValueError(
+            f"Unsupported cuda_copy_bytes_sts num_bytes {num_bytes_int}, "
+            f"expected one of {sorted(_SHARED_COPY_MAP)}"
+        )
+    result = CODEGEN_REGISTRY[f"tirx._cuda_copy_bytes_{num_bytes_int}_sts_impl"]([dst, src])
+    return result[0] if isinstance(result, tuple) else result
+
+
+# =============================================================================
 # __ldg — templated read-only cached load; ``T`` resolved at call time from
 # the ``dtype`` argument. Hand-written because the helper signature uses a
 # template parameter for both arg and return.
