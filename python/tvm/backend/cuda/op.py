@@ -210,6 +210,79 @@ def cuda_copy_8b(dst, src):
     return cuda_copy_bytes(dst, src, 1)
 
 
+def cuda_copy_bytes_lds(dst, src, num_bytes):
+    """Shared-source N-byte copy (``ld.shared`` / uniform-register addressing).
+
+    Like :func:`cuda_copy_bytes`, but ``src`` is in SHARED memory and ``dst``
+    is a register-backed (generic) pointer. Goes through
+    ``__cvta_generic_to_shared`` + inline-asm ``ld.shared`` so the SMEM base
+    stays in a uniform register (offloading address math from the vector
+    datapath). ``num_bytes`` must be one of {1, 2, 4, 8, 16}.
+    """
+    return call_intrin("void", "tirx.cuda_copy_bytes_lds", dst, src, num_bytes)
+
+
+def cuda_copy_bytes_sts(dst, src, num_bytes):
+    """Shared-dest N-byte copy (``st.shared`` / uniform-register addressing).
+
+    Like :func:`cuda_copy_bytes`, but ``dst`` is in SHARED memory and ``src``
+    is a register-backed (generic) pointer. Goes through
+    ``__cvta_generic_to_shared`` + inline-asm ``st.shared`` so the SMEM base
+    stays in a uniform register. ``num_bytes`` must be one of {1, 2, 4, 8, 16}.
+    """
+    return call_intrin("void", "tirx.cuda_copy_bytes_sts", dst, src, num_bytes)
+
+
+def cuda_copy_128b_lds(dst, src):
+    """Convenience wrapper: ``cuda_copy_bytes_lds(dst, src, 16)`` — 128b shared load."""
+    return cuda_copy_bytes_lds(dst, src, 16)
+
+
+def cuda_copy_64b_lds(dst, src):
+    """Convenience wrapper: ``cuda_copy_bytes_lds(dst, src, 8)`` — 64b shared load."""
+    return cuda_copy_bytes_lds(dst, src, 8)
+
+
+def cuda_copy_32b_lds(dst, src):
+    """Convenience wrapper: ``cuda_copy_bytes_lds(dst, src, 4)`` — 32b shared load."""
+    return cuda_copy_bytes_lds(dst, src, 4)
+
+
+def cuda_copy_16b_lds(dst, src):
+    """Convenience wrapper: ``cuda_copy_bytes_lds(dst, src, 2)`` — 16b shared load."""
+    return cuda_copy_bytes_lds(dst, src, 2)
+
+
+def cuda_copy_8b_lds(dst, src):
+    """Convenience wrapper: ``cuda_copy_bytes_lds(dst, src, 1)`` — 8b shared load."""
+    return cuda_copy_bytes_lds(dst, src, 1)
+
+
+def cuda_copy_128b_sts(dst, src):
+    """Convenience wrapper: ``cuda_copy_bytes_sts(dst, src, 16)`` — 128b shared store."""
+    return cuda_copy_bytes_sts(dst, src, 16)
+
+
+def cuda_copy_64b_sts(dst, src):
+    """Convenience wrapper: ``cuda_copy_bytes_sts(dst, src, 8)`` — 64b shared store."""
+    return cuda_copy_bytes_sts(dst, src, 8)
+
+
+def cuda_copy_32b_sts(dst, src):
+    """Convenience wrapper: ``cuda_copy_bytes_sts(dst, src, 4)`` — 32b shared store."""
+    return cuda_copy_bytes_sts(dst, src, 4)
+
+
+def cuda_copy_16b_sts(dst, src):
+    """Convenience wrapper: ``cuda_copy_bytes_sts(dst, src, 2)`` — 16b shared store."""
+    return cuda_copy_bytes_sts(dst, src, 2)
+
+
+def cuda_copy_8b_sts(dst, src):
+    """Convenience wrapper: ``cuda_copy_bytes_sts(dst, src, 1)`` — 8b shared store."""
+    return cuda_copy_bytes_sts(dst, src, 1)
+
+
 def cuda_warp_sync():
     """TVM intrinsic to synchronize threads within the current warp.
 

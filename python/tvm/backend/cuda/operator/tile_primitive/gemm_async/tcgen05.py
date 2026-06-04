@@ -538,8 +538,27 @@ def gemm_async_tcgen05_impl(op_call: TilePrimitiveCall, sctx: DispatchContext) -
                 tiler_shape = [s // a for s, a in zip(shape_2d, atom_shape)]
                 tiler_grouped, seps = tiler.canonicalize().group(tiler_shape)
                 elem_per_128b = 128 // tvm.DataType(dtype).bits
-                ldo = (tiler_grouped.shard[-1].stride * atom_size) // elem_per_128b
-                sdo = (tiler_grouped.shard[-2].stride * atom_size) // elem_per_128b
+                # A group dimension with extent 1 spans exactly one atom: the hardware
+                # never advances along it (there is no second tile to step to), so its
+                # descriptor stride offset is unused and should be 0.
+                # ``canonicalize().group()`` collapses a singleton group and leaves a
+                # sibling stride in ``shard[-1].stride`` — emitting that as the LBO
+                # leaks a bogus leading-dim offset (e.g. mqa fp4 K=128 = one 64B atom
+                # encodes ldo=32 instead of the hand-rolled descriptor's ldo=0). The
+                # bogus offset is on an unused axis so it was tolerated at runtime
+                # here, but zeroing it makes the emitted descriptor byte-exact to the
+                # hand-rolled one. Zero each offset whose group extent is 1; no-op for
+                # multi-atom dims (nvfp4/fp16/fa4 K spans many atoms).
+                ldo = (
+                    0
+                    if int(tiler_grouped.shard[-1].extent) == 1
+                    else (tiler_grouped.shard[-1].stride * atom_size) // elem_per_128b
+                )
+                sdo = (
+                    0
+                    if int(tiler_grouped.shard[-2].extent) == 1
+                    else (tiler_grouped.shard[-2].stride * atom_size) // elem_per_128b
+                )
                 return mode, ldo, sdo
 
             for mode in (
@@ -789,15 +808,26 @@ def gemm_async_tcgen05_impl(op_call: TilePrimitiveCall, sctx: DispatchContext) -
     if not a_is_tmem:
         A_elem_per_16B = 128 // DataType(A_type).bits
 
-    # Allocate descriptor cells and encode once, right after A/B buffer defs.
-    # The callback is inserted as a flat SeqStmt after the target buffer def.
-    # Descriptors with identical construction parameters are cached and reused
-    # across dispatch calls via sctx.shared_state.
-    B_base = [0] * len(B_buffer.shape)
-    krp = Evaluate(tirx_op.tvm_kernel_replace_point())
+    elect_pred = T.ptx.elect_sync() if warp_scope else True
+
+    # Two per-MMA descriptor strategies, chosen per operand by whether its tile
+    # offset is a compile-time constant:
+    #
+    #   CONSTANT offset (e.g. fa4's A operand: 0,2,4,6) -> hoist + ``add``.
+    #     Encode the base once, then per MMA ``desc.lo += const`` -> a single
+    #     ``UIADD3`` on the uniform datapath (the offset is a literal). Cheapest
+    #     for many-step loops. Recomputing via cvta would add a per-MMA
+    #     ``cvta>>4 & mask`` (USHF/ULOP3) for no benefit (~+1% on fa4).
+    #
+    #   RUNTIME offset (e.g. mqa: ``kv_stage*stride``) -> recompute via cvta.
+    #     ``add`` would add the runtime index to the stored descriptor *value*,
+    #     which ptxas keeps in a regular register (``IMAD.IADD`` + ``R2UR`` per
+    #     MMA, ~+3% on latency-bound mqa). Routing the index through
+    #     ``cvta.to.shared`` keeps it on the uniform datapath (``ULEA``).
+    _SWIZZLE_TO_LAYOUT = {0: 0, 1: 6, 2: 4, 3: 2, 4: 1}
+    _krp = Evaluate(tirx_op.tvm_kernel_replace_point())
 
     def _make_lo_uniform(desc):
-        """Shuffle the lower 32 bits of the descriptor to ensure warp-uniformity."""
         func_name = "smem_desc_make_lo_uniform_"
         source_code = f"""
         __forceinline__ __device__ void {func_name}(uint64_t* desc) {{
@@ -809,56 +839,96 @@ def gemm_async_tcgen05_impl(op_call: TilePrimitiveCall, sctx: DispatchContext) -
             func_name, T.address_of(desc), source_code=source_code, return_type="void"
         )
 
-    def _make_desc_wrap(desc_buf, smem_buf, base, ldo, sdo, swizzle_val):
-        """Build: { AllocBuffer(desc); encode(desc, smem); krp }"""
+    def _make_desc(smem_buf, ldo, sdo, swizzle_val, name):
+        desc_buf = tvm.tirx.decl_buffer((1,), "uint64", name=name, scope="local")
         encode_call = tvm.tirx.call_intrin(
             "",
             "tirx.ptx_tcgen05_encode_matrix_descriptor",
             tvm.tirx.address_of(desc_buf[0]),
-            smem_buf.ptr_to(base),
+            smem_buf.ptr_to([0] * len(smem_buf.shape)),
             ldo,
             sdo,
             swizzle_val,
         )
-        return SeqStmt(
+        wrap = SeqStmt(
             [
                 AllocBuffer(desc_buf),
                 Evaluate(encode_call),
                 Evaluate(_make_lo_uniform(desc_buf[0])),
-                krp,
+                _krp,
             ]
         )
-
-    # Per-dispatch-call descriptor (no kernel-scope cache). Each gemm_async
-    # call allocates + encodes its own ``alignas(64) uint64_t descX[1]``
-    # right after the smem buffer definition. Without the previous cache the
-    # descriptor's lifetime is bounded by the surrounding loop scope rather
-    # than the entire kernel, which lets ptxas free the register sooner and
-    # reduces register pressure on the fa4 hot path. The descriptor base is
-    # the buffer origin (stage=0); the per-MMA operand still adds the
-    # stage-dependent offset via ``smem_desc_add_16B_offset``.
-    def _make_desc(smem_buf, base, ldo, sdo, swizzle_val, name):
-        desc_buf = tvm.tirx.decl_buffer((1,), "uint64", name=name, scope="local")
-        wrap = _make_desc_wrap(desc_buf, smem_buf, base, ldo, sdo, swizzle_val)
         sctx.add_post_buffer_def_stmt(smem_buf, wrap)
         return desc_buf
 
-    B_base = [0] * len(B_buffer.shape)
-    descB_buf = _make_desc(B_buffer, B_base, B_ldo, B_sdo, B_swizzle_mode.value, "descB")
-    if not a_is_tmem:
-        A_base = [0] * len(A_buffer.shape)
-        descA_buf = _make_desc(A_buffer, A_base, A_ldo, A_sdo, A_swizzle_mode.value, "descA")
-    elect_pred = T.ptx.elect_sync() if warp_scope else True
+    def _uniform_desc(smem_buf, off16, ldo, sdo, swizzle):
+        layout = _SWIZZLE_TO_LAYOUT[int(swizzle)]
+        const_hi = (int(sdo) & 0x3FFF) | (1 << 14) | (layout << 29)
+        lo_const = (int(ldo) & 0x3FFF) << 16
+        base_ptr = smem_buf.ptr_to([0] * len(smem_buf.shape))
+        addr = T.ptr_byte_offset(base_ptr, off16 * 16, smem_buf.dtype)
+        sa = T.bitwise_and(
+            T.shift_right(T.cuda.cvta_generic_to_shared(addr), T.uint32(4)),
+            T.uint32(0x3FFF),
+        )
+        lo = T.bitwise_or(T.uint32(lo_const), sa) if lo_const else sa
+        return T.bitwise_or(
+            T.shift_left(T.uint64(const_hi), T.uint64(32)), T.cast(lo, "uint64")
+        )
 
-    # Helper: compute B descriptor value for a given (ni, ki) tile
-    def _b_desc_val(descB_in, ni, ki):
+    def _b_offset(ni, ki):
         B_linear = (
             ki * MMA_K * B_extent[-1] + ni * N_mma_per_cta
             if transB
             else ni * N_mma_per_cta * B_extent[-1] + ki * MMA_K
         )
-        B_offset = tvm.tirx.floordiv(B_slice_tile.apply(B_linear)["m"], B_elem_per_16B)
-        return smem_desc_add_16B_offset(descB_in, B_offset)
+        return tvm.tirx.floordiv(B_slice_tile.apply(B_linear)["m"], B_elem_per_16B)
+
+    def _a_offset(mi, ki):
+        A_linear = (
+            ki * MMA_K * A_extent[-1] + mi * M_mma
+            if transA
+            else mi * M_mma * A_extent[-1] + ki * MMA_K
+        )
+        return tvm.tirx.floordiv(A_slice_tile.apply(A_linear)["m"], A_elem_per_16B)
+
+    # Per-MMA SMEM descriptor strategy — caller-selected via the ``smem_desc``
+    # kwarg on ``gemm_async`` (flows through ``op_call.config``):
+    #
+    #   "hoist"  (default) — encode the base descriptor ONCE, then per MMA do a
+    #       cheap ``desc.lo += offset`` (``smem_desc_add_16B_offset``). Optimal
+    #       when the tile index is already warp-uniform: the add folds to a
+    #       single ``UIADD3``. True for most kernels (fa4 / fp16 / nvfp4 / fp8).
+    #       This is the original behavior.
+    #
+    #   "recompute" — rebuild the descriptor from the SMEM address every MMA
+    #       (``_uniform_desc``: ``cvta`` the per-MMA address + constant fields).
+    #       Optimal when the tile index lands in a *regular* register (e.g. mqa
+    #       logits: the kv-stage index is used only here, so ptxas keeps it in
+    #       R; "hoist" then pays IMAD.IADD + an R2UR per MMA, ~+3% on that
+    #       latency-bound kernel). Re-encoding via ``cvta`` keeps the index on
+    #       the uniform datapath (ULEA), at the cost of a few extra ops that the
+    #       idle (latency-bound) machine absorbs for free.
+    #
+    # Whether the index ends up in R vs UR is a ptxas register-allocation
+    # outcome (decided from whole-kernel dataflow), invisible to the dispatcher
+    # — so the caller, who can profile both, picks. Default is the safe "hoist".
+    use_add = op_call.config.get("smem_desc", "hoist") != "recompute"
+    descB_buf = (
+        _make_desc(B_buffer, B_ldo, B_sdo, B_swizzle_mode.value, "descB") if use_add else None
+    )
+    A_use_add = use_add and not a_is_tmem
+    descA_buf = (
+        _make_desc(A_buffer, A_ldo, A_sdo, A_swizzle_mode.value, "descA") if A_use_add else None
+    )
+    B_use_add = use_add
+
+    # Helper: compute B descriptor value for a given (ni, ki) tile
+    def _b_desc_val(descB_in, ni, ki):
+        B_offset = _b_offset(ni, ki)
+        if B_use_add:
+            return smem_desc_add_16B_offset(descB_buf[0], B_offset)
+        return _uniform_desc(B_buffer, B_offset, B_ldo, B_sdo, B_swizzle_mode.value)
 
     # Helper: compute A operand (TMEM address or SMEM descriptor) for a given (mi, ki) tile
     def _a_operand(mi, ki, descA_in=None):
@@ -867,14 +937,10 @@ def gemm_async_tcgen05_impl(op_call: TilePrimitiveCall, sctx: DispatchContext) -
             a_row = mi * M_mma
             a_col = A_tmem_offset_32b + ki * (MMA_K // A_elem_per_32b)
             return T.cuda.get_tmem_addr(A_tmem_addr, a_row, a_col)
-        else:
-            A_linear = (
-                ki * MMA_K * A_extent[-1] + mi * M_mma
-                if transA
-                else mi * M_mma * A_extent[-1] + ki * MMA_K
-            )
-            A_offset = tvm.tirx.floordiv(A_slice_tile.apply(A_linear)["m"], A_elem_per_16B)
-            return smem_desc_add_16B_offset(descA_in, A_offset)
+        A_offset = _a_offset(mi, ki)
+        if A_use_add:
+            return smem_desc_add_16B_offset(descA_buf[0], A_offset)
+        return _uniform_desc(A_buffer, A_offset, A_ldo, A_sdo, A_swizzle_mode.value)
 
     if is_block_scaled:
         # Compute per-ki SF element steps from region extents
@@ -898,7 +964,16 @@ def gemm_async_tcgen05_impl(op_call: TilePrimitiveCall, sctx: DispatchContext) -
         # Determine if sf_id rotation is needed:
         # sf_mma_k < epc means multiple ki's pack in one column, AND we need per-ki
         # distinct SF (i.e. sfa_elems_per_ki > 0 so each ki advances to a new element)
-        needs_sf_id = sfa_sf_mma_k < SFA_elem_per_col and sfa_elems_per_ki > 0 and descI is None
+        # NOTE: decoupled from ``descI is None`` — the per-ki sf_id rotation is a
+        # property of the SF packing, NOT of who supplies the base descriptor. When
+        # a caller hoists + passes a pre-encoded ``descI``, we still rotate the
+        # sf_id per ki (on a local copy below), matching the hand-rolled kernels.
+        needs_sf_id = sfa_sf_mma_k < SFA_elem_per_col and sfa_elems_per_ki > 0
+
+    else:
+        # Not block-scaled: no SF id rotation. Define the flag so the impl-branch
+        # selection below (which is shared with the descI-passed path) is valid.
+        needs_sf_id = False
 
     # Physical TMEM columns per MMA N tile.
     # 2x2 layout (Layout B): each MMA tile spans N_mma/2 physical columns
@@ -913,19 +988,37 @@ def gemm_async_tcgen05_impl(op_call: TilePrimitiveCall, sctx: DispatchContext) -
             for mi in T.unroll(M_tiles):
               for ni in T.unroll(N_tiles):
                 for ki in T.unroll(K_iters):
-                    a_val = _a_operand(mi, ki, descA_in)
-                    descB_val = _b_desc_val(descB_in, ni, ki)
-                    should_accum = tvm.tirx.any(ki != 0, accum_expr)
+                    # Wrap each per-MMA operand in ``T.meta_var`` so the parser
+                    # inlines the value (a compile-time constant for SF addrs /
+                    # accum / tmem_col, a single add for the A/B descriptors)
+                    # directly into the ``mma.block_scale`` call. Without this the
+                    # block-scaled path materializes ~8 throw-away ``alignas(64)
+                    # T x[1]`` locals per MMA (sfa_linear/sfb_linear/sfa_tcol/
+                    # sfb_tcol/sfa_addr/sfb_addr/should_accum/tmem_col) which
+                    # ptxas keeps as LMEM round-trips — the residual per-call cost
+                    # vs the hand-rolled MMA. Mirrors the non-block-scaled branch.
+                    a_val = T.meta_var(_a_operand(mi, ki, descA_in))
+                    descB_val = T.meta_var(_b_desc_val(descB_in, ni, ki))
+                    should_accum = T.meta_var(tvm.tirx.any(ki != 0, accum_expr))
                     sfa_linear = mi * M_mma * SFA_K_total + ki * sfa_elems_per_ki
                     sfb_linear = ni * N_mma_per_cta * SFB_K_total + ki * sfb_elems_per_ki
-                    sfa_tcol = SFA_slice_layout.apply(sfa_linear).get("TCol", 0)
-                    sfb_tcol = SFB_slice_layout.apply(sfb_linear).get("TCol", 0)
-                    sfa_addr = sfa_base + tvm.tirx.floordiv(sfa_tcol, SFA_elem_per_col)
-                    sfb_addr = sfb_base + tvm.tirx.floordiv(sfb_tcol, SFB_elem_per_col)
+                    # Simplify the tcol expressions to constants up front so they
+                    # fold into both the SF address and the sf_id (avoids a stray
+                    # ``sfa_tcol[1]`` LMEM local shared between the two uses).
+                    sfa_tcol = T.meta_var(analyzer.simplify(SFA_slice_layout.apply(sfa_linear).get("TCol", 0)))  # noqa: E501
+                    sfb_tcol = T.meta_var(analyzer.simplify(SFB_slice_layout.apply(sfb_linear).get("TCol", 0)))  # noqa: E501
+                    sfa_addr = T.meta_var(
+                        analyzer.simplify(sfa_base + tvm.tirx.floordiv(sfa_tcol, SFA_elem_per_col))
+                    )
+                    sfb_addr = T.meta_var(
+                        analyzer.simplify(sfb_base + tvm.tirx.floordiv(sfb_tcol, SFB_elem_per_col))
+                    )
                     if needs_sf_id:
                         sf_id = T.meta_var(analyzer.simplify(tvm.tirx.floormod(sfa_tcol, SFA_elem_per_col)))  # noqa: E501
                         T.cuda.runtime_instr_desc(T.address_of(descI_in), sf_id)
-                    tmem_col = tmem_offset_32b + ni * (N_mma_phys_cols // C_elem_per_32b)
+                    tmem_col = T.meta_var(
+                        tmem_offset_32b + ni * (N_mma_phys_cols // C_elem_per_32b)
+                    )
                     if elect_pred:
                         T.ptx.tcgen05.mma.block_scale(
                             T.cuda.get_tmem_addr(tmem_addr, mi * M_mma, tmem_col),
@@ -966,12 +1059,22 @@ def gemm_async_tcgen05_impl(op_call: TilePrimitiveCall, sctx: DispatchContext) -
                             enable_input_d=should_accum,
                         )
 
-    descA_val = None if a_is_tmem else descA_buf[0]
+    descA_val = None  # descriptors built per-MMA from SMEM addr via _uniform_desc
 
-    if descI is not None:
+    if descI is not None and not needs_sf_id:
         @T.prim_func(check_well_formed=False)
         def impl():
-            main_impl(descA_val, descB_buf[0], descI)
+            main_impl(descA_val, None, descI)
+    elif descI is not None:
+        # Caller hoisted + passed a pre-encoded base descI, but the block-scaled
+        # SF packing still needs the per-ki sf_id rotation. Copy to a local so the
+        # in-place ``runtime_instr_desc`` rotation inside ``main_impl`` doesn't
+        # clobber the caller's (loop-hoisted, shared-across-calls) descI.
+        @T.prim_func(check_well_formed=False)
+        def impl():
+            descI_local: T.uint32
+            descI_local = descI
+            main_impl(descA_val, None, descI_local)
     elif is_block_scaled:
         @T.prim_func(check_well_formed=False)
         def impl():
@@ -979,7 +1082,7 @@ def gemm_async_tcgen05_impl(op_call: TilePrimitiveCall, sctx: DispatchContext) -
             T.ptx.tcgen05.encode_instr_descriptor_block_scaled(T.address_of(descI_local), d_dtype=C_type, a_dtype=A_type, b_dtype=B_type, sfa_dtype=SFA_type, sfb_dtype=SFB_type,  # noqa: E501, F821
                                                                sfa_tmem_addr=SFA_init_addr, sfb_tmem_addr=SFB_init_addr,  # noqa: E501
                                                                M=M_mma * cta_group, N=N_mma, K=MMA_K, trans_a=a_mn_major, trans_b=b_mn_major, n_cta_groups=cta_group)  # noqa: E501
-            main_impl(descA_val, descB_buf[0], descI_local)  # noqa: F821
+            main_impl(descA_val, None, descI_local)  # noqa: F821
     else:
         # Pre-compute the dense instruction descriptor at dispatcher time so
         # the MMA's 4th operand is a literal ``uint32`` instead of a per-call
@@ -999,7 +1102,7 @@ def gemm_async_tcgen05_impl(op_call: TilePrimitiveCall, sctx: DispatchContext) -
 
         @T.prim_func(check_well_formed=False)
         def impl():
-            main_impl(descA_val, descB_buf[0], descI_const)
+            main_impl(descA_val, None, descI_const)
     # fmt: on
 
     return impl

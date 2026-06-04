@@ -515,7 +515,20 @@ def _emit_reg(op_call: TilePrimitiveCall, sctx: DispatchContext) -> PrimFunc:
     for _ax, val in r_p.offset.items():
         r_off_base = r_off_base + val
 
-    copy_op = getattr(T.cuda, f"copy_{vec_bits}b")
+    # When the non-register side lives in SHARED memory, use the shared-aware
+    # copy variant (``ld.shared`` / ``st.shared`` via __cvta_generic_to_shared),
+    # which keeps the SMEM base in a uniform register instead of round-tripping
+    # through a generic ``void*`` (which strips the shared address space and
+    # forces per-thread vector address math). Global-side copies keep the
+    # generic path unchanged.
+    #   reg -> shared store (r_is_src): shared side is the DESTINATION -> _sts
+    #   shared -> reg load  (not src):  shared side is the SOURCE      -> _lds
+    s_is_shared = s_buf.scope().startswith("shared")
+    if s_is_shared:
+        suffix = "sts" if r_is_src else "lds"
+        copy_op = getattr(T.cuda, f"copy_{vec_bits}b_{suffix}")
+    else:
+        copy_op = getattr(T.cuda, f"copy_{vec_bits}b")
 
     total_outer = 1
     for a in outer:

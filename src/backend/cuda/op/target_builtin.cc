@@ -435,6 +435,8 @@ const DeviceIntrinsicRegistration kDeviceIntrinsics[] = {
     TIRX_DEVICE_INTRIN_ALIAS(cuda_clock64, cuda, kOpaque),
     TIRX_DEVICE_INTRIN_ALIAS(cuda_cluster_sync, cuda, kOpaque),
     TIRX_DEVICE_INTRIN_ALIAS(cuda_copy_bytes, cuda, kOpaque),
+    TIRX_DEVICE_INTRIN_ALIAS(cuda_copy_bytes_lds, cuda, kOpaque),
+    TIRX_DEVICE_INTRIN_ALIAS(cuda_copy_bytes_sts, cuda, kOpaque),
     TIRX_DEVICE_INTRIN_ALIAS(cuda_cta_reduce, cuda, kOpaque),
     TIRX_DEVICE_INTRIN_ALIAS(cuda_cta_sync, cuda, kOpaque),
     TIRX_DEVICE_INTRIN_ALIAS(cuda_cvta_generic_to_shared, cuda, kOpaque),
