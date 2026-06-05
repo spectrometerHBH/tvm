@@ -122,7 +122,6 @@ def _r_side_layout_valid(
         return False, f"R layout is {type(layout).__name__}, not TileLayout"
 
     scope_rank = _SCOPE_RANK[sctx.scope_kind]
-    seen_thread_axes: set[str] = set()
     for it in layout.shard:
         ax = it.axis
         if not ax.is_thread():
@@ -138,15 +137,10 @@ def _r_side_layout_valid(
                 False,
                 f"R thread axis {ax.name!r} scope={ax_scope.name!r} > exec {sctx.scope_kind!r}",
             )
-        # TODO: lift these two; for now i = thread_value (stride=1, each axis appears once).
-        if int(it.stride) != 1:
-            return (
-                False,
-                f"R thread axis {ax.name!r} stride={int(it.stride)} != 1 (not supported yet)",
-            )
-        if ax.name in seen_thread_axes:
-            return False, f"R thread axis {ax.name!r} appears more than once (not supported yet)"
-        seen_thread_axes.add(ax.name)
+        # Non-unit-stride / repeated thread axes (e.g. the tcgen05.ld 16x*b atom
+        # register layout, whose laneid spans two iters) are handled: align_layouts
+        # canonicalizes the sliced R/S partitions into a shared dense iteration and
+        # _s_thread_offset redistributes the strides via apply_to_shape.
 
     r_br = op_call.src if src.scope() == "local" else op_call.dst
     region = [(r.min, r.min + r.extent) for r in r_br.region]
@@ -203,30 +197,60 @@ def _compute_perm_r(r):
     return [i for i, _ in sorted(enumerate(r.shard), key=key)]
 
 
-def align_layouts_raw(r_layout, r_shape, r_region, s_layout, s_shape, s_region):
-    """Returns (r_p, s_p, s_seps)."""
-    r = r_layout.slice(list(r_shape), r_region).canonicalize()
-    s = s_layout.slice(list(s_shape), s_region).canonicalize()
+def align_layouts_raw(r_sliced, s_sliced, s_region):
+    """Returns (r_p, s_p, s_seps, r_perm).
+
+    ``r_sliced`` / ``s_sliced`` are the R/S layouts already sliced to the copy
+    region — sliced OUTSIDE the dispatch target (see ``_align_layouts``); this
+    function canonicalizes them INSIDE it so the scope-aware fusers still run.
+    Slicing under the target pre-fuses split thread axes (e.g. the tcgen05.ld
+    ``16x*b`` atom's ``laneid``, split across two iters) into a partially-fused
+    form that canonicalize then rejects with "conflicting scopes for thread".
+
+    Two views of the permuted R layout are returned:
+
+    - ``r_p`` — the *canonicalized* permuted layout. Its thread axes are fused
+      back to a single per-axis iter (``laneid`` + ``wid_in_wg`` → ``tid_in_wg``),
+      which ``_s_thread_offset`` needs so the per-thread S base offset is one
+      ``apply_to_shape`` over a clean thread iter.
+    - ``r_perm`` — the permuted layout *without* the final canonicalize. Its
+      memory (``m``) iters stay one-per-S-group, so ``_split_thread_loop`` can
+      pair each R ``m``-iter 1:1 with its ``s_seps`` S group. Canonicalizing
+      would fuse a multi-group ``m``-axis (e.g. the ``.16x*b`` atom register
+      axis, which decomposes into several non-contiguous (row, col) groups)
+      into one dense iter, after which the 1:1 pairing breaks and every S group
+      past the first is silently dropped (the m-row-doubling / column-parity
+      bug). For the already-contiguous cases (``.32x32b``, ``wg_local_layout``)
+      the ``m``-axis is a single group, so ``r_perm`` and ``r_p`` agree.
+    """
+    r = r_sliced.canonicalize()
+    s = s_sliced.canonicalize()
     s = _extract_tile(s, s_region)
     perm = _compute_perm_r(r)
     r_shape_for_group = [int(it.extent) for it in r.shard]
     s_grp, seps = s.group(r_shape_for_group)
     s_p = s_grp.permute_by_groups(list(seps), perm)
-    r_p = r.permute_dims(perm).canonicalize()
+    r_perm = r.permute_dims(perm)
+    r_p = r_perm.canonicalize()
     sizes = [seps[i + 1] - seps[i] for i in range(len(seps) - 1)]
     s_seps = [0]
     for p in perm:
         s_seps.append(s_seps[-1] + sizes[p])
-    return r_p, s_p, s_seps
+    return r_p, s_p, s_seps, r_perm
 
 
-def _split_thread_loop(r_p, s_p, s_seps):
+def _split_thread_loop(r_perm, s_p, s_seps):
     """Drop R's thread-axis positions and return per-R-position bundles:
     (r_iters, s_groups) — same length lists; s_groups[k] is the list of S
-    iters belonging to the k-th kept R position."""
+    iters belonging to the k-th kept R position.
+
+    ``r_perm`` is the permuted-but-uncanonicalized R layout: its iter list lines
+    up one-to-one with ``s_seps`` (which is built from the same ``perm``), so a
+    multi-group memory axis keeps each of its groups paired with the matching S
+    group instead of collapsing into one (see ``align_layouts_raw``)."""
     r_iters = []
     s_groups = []
-    for k, r_it in enumerate(r_p.shard):
+    for k, r_it in enumerate(r_perm.shard):
         if r_it.axis.is_thread():
             continue
         r_iters.append(r_it)
@@ -296,17 +320,18 @@ def _align_layouts(op_call: TilePrimitiveCall, sctx: DispatchContext):
     s_buf = s_br.buffer
     r_region = [(r.min, r.min + r.extent) for r in r_br.region]
     s_region = [(r.min, r.min + r.extent) for r in s_br.region]
-    # Push the dispatch target so layout.canonicalize() runs scope-aware
-    # fusers (e.g. laneid+wid_in_wg -> tid_in_wg).
+    # Slice geometrically with cuda scope-fusion DISABLED (a non-cuda target
+    # override). Under the cuda target the slice pre-fuses split thread axes (the
+    # tcgen05.ld 16x*b atom's laneid spans two iters) into a partially-fused form
+    # whose later canonicalize fails with "conflicting scopes for thread". The
+    # llvm override makes the slice scope-agnostic; align_layouts_raw then
+    # re-canonicalizes under the real cuda target so laneid+wid_in_wg -> tid_in_wg
+    # still happens — cleanly this time.
+    with tvm.target.Target("llvm"):
+        r_sliced = r_buf.layout.slice(list(r_buf.shape), r_region)
+        s_sliced = s_buf.layout.slice(list(s_buf.shape), s_region)
     with sctx.target:
-        return align_layouts_raw(
-            r_buf.layout,
-            r_buf.shape,
-            r_region,
-            s_buf.layout,
-            s_buf.shape,
-            s_region,
-        )
+        return align_layouts_raw(r_sliced, s_sliced, s_region)
 
 
 def _make_thread_placeholders(r_p) -> dict[str, _TirVar]:
@@ -490,8 +515,8 @@ def _emit_reg(op_call: TilePrimitiveCall, sctx: DispatchContext) -> PrimFunc:
         r_buf, s_buf, r_is_src = dst, src, False
 
     with sctx.target:
-        r_p, s_p, s_seps = _align_layouts(op_call, sctx)
-    r_iters, s_groups = _split_thread_loop(r_p, s_p, s_seps)
+        r_p, s_p, s_seps, r_perm = _align_layouts(op_call, sctx)
+    r_iters, s_groups = _split_thread_loop(r_perm, s_p, s_seps)
     atoms = _build_atoms(r_iters, s_groups)
     elem_bits = DataType(src.dtype).bits
     vec_len = _choose_vec_len(elem_bits, atoms, r_p, s_p)
