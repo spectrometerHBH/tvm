@@ -400,11 +400,17 @@ def gemm_async_tcgen05_impl(op_call: TilePrimitiveCall, sctx: DispatchContext) -
             f"tcgen05 block-scaled schedule expected B_type in {_BLOCK_SCALED_DTYPES}, got {B_type}"
         )
     else:
-        assert A_type in ["float16", "bfloat16"], (
-            f"tcgen05 schedule expected A_type=float16 or bfloat16, got {A_type}"
+        # Dense (non-block-scaled) MMA: fp16/bf16 and fp8 (F8F6F4 with an implicit
+        # unit scale). fp8 reuses the same tcgen05.mma path — MMA_K=32 below, the
+        # fp8 entries in _INSTR_DESC_FORMAT_MAP fold the dense instruction
+        # descriptor — so any per-block scaling (e.g. the DeepGEMM fp8 MQA KV
+        # scale) is applied by the caller's epilogue, not the MMA.
+        _DENSE_DTYPES = ["float16", "bfloat16", "float8_e4m3fn", "float8_e5m2"]
+        assert A_type in _DENSE_DTYPES, (
+            f"tcgen05 schedule expected A_type in {_DENSE_DTYPES}, got {A_type}"
         )
-        assert B_type in ["float16", "bfloat16"], (
-            f"tcgen05 schedule expected B_type=float16 or bfloat16, got {B_type}"
+        assert B_type in _DENSE_DTYPES, (
+            f"tcgen05 schedule expected B_type in {_DENSE_DTYPES}, got {B_type}"
         )
     assert A_type == B_type, (
         f"tcgen05 schedule expect A_type and B_type to be the same, got A_type={A_type}, B_type={B_type}"  # noqa: E501
