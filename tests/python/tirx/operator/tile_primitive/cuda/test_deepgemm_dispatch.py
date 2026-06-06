@@ -75,10 +75,11 @@ def test_can_prove_divisible_uint32_offset():
 
     # divisor == 1 is always divisible (the elem_per_32b==1 fp32-TMEM case).
     assert _can_prove_divisible(analyzer, u, 1) is True
-    # ... and the bare floormod proof would NOT prove it for an unsigned value:
-    assert not analyzer.can_prove_equal(tvm.tirx.floormod(u, 1), 0)
 
-    # A known-even uint32 index is provably divisible by 2 via the signed view.
+    # A known-even uint32 index is provably divisible by 2. _can_prove_divisible
+    # falls back to a signed view here: the bare unsigned proof of (u*2) % 2 == 0
+    # is not available, since the multiply-cancellation simplifier rule is unsound
+    # under unsigned wraparound and is (correctly) absent.
     assert _can_prove_divisible(analyzer, u * tvm.tirx.const(2, "uint32"), 2) is True
     # A symbolic uint32 is NOT provably divisible by 2.
     assert _can_prove_divisible(analyzer, u, 2) is False
@@ -119,7 +120,6 @@ def test_copy_bytes_lds_sts_ops_registered():
         assert hasattr(T.cuda, attr), attr
 
 
-@tvm.testing.requires_cuda
 def test_copy_bytes_lds_sts_codegen_emits_shared_asm():
     """A shared-source / shared-dest typed copy must codegen to the uniform-reg
     ``ld.shared`` / ``st.shared`` inline asm (via ``__cvta_generic_to_shared``),
@@ -158,7 +158,6 @@ def test_copy_bytes_lds_sts_codegen_emits_shared_asm():
 # ===========================================================================
 # §4 — maximum elementwise CUDA dispatch (ReLU building block)
 # ===========================================================================
-@tvm.testing.requires_cuda
 def test_maximum_elementwise():
     N = 128
 
@@ -299,14 +298,12 @@ def _run_dense_gemm(
 
 
 @pytest.mark.skipif(ml_dtypes is None, reason="Requires ml_dtypes for fp8")
-@tvm.testing.requires_cuda
 def test_gemm_dense_fp8():
     # Dense (non-block-scaled) fp8 e4m3 MMA, MMA_K=32. K=128 so the 128B-swizzle
     # atom (128 fp8 elems / row) tiles evenly. Loose tolerance (fp8 precision).
     _run_dense_gemm("float8_e4m3fn", "float8_e4m3fn", "float32", 128, atol=2.0, rtol=0.15)
 
 
-@tvm.testing.requires_cuda
 def test_gemm_tf32_with_tfloat32_tma():
     # tf32 dense MMA (mma_dtype="tf32", MMA_K=8); B loaded through the TFLOAT32
     # TMA descriptor so the RN-truncation happens on load (matching the MMA).
@@ -320,6 +317,111 @@ def test_gemm_tf32_with_tfloat32_tma():
         atol=2e-2,
         rtol=2e-2,
     )
+
+
+# ===========================================================================
+# Unsigned floormod/floordiv simplification + TMA uint32-shape grouping
+# ===========================================================================
+def test_unsigned_floormod_floordiv_simplify():
+    """The RewriteSimplifier must prove the OVERFLOW-FREE floormod/floordiv
+    identities for uint32/uint64 (the signed IsIndexType block skips unsigned),
+    so a uint shape extent can be grouped without an int32 cast. The
+    multiply-cancellation identity stays UNPROVABLE for unsigned (unsound under
+    wraparound) — and is verified to remain so."""
+    a = tvm.arith.Analyzer()
+    for dt in ("uint32", "uint64"):
+        n = T.Var("n", dt)
+        one = tvm.tirx.const(1, dt)
+        assert a.can_prove_equal(tvm.tirx.floormod(n, n), 0)  # n % n -> 0
+        assert a.can_prove_equal(tvm.tirx.floordiv(n, n), 1)  # n / n -> 1
+        assert a.can_prove_equal(tvm.tirx.floormod(n, one), 0)  # n % 1 -> 0
+        assert a.can_prove_equal(tvm.tirx.floordiv(n, one), n)  # n / 1 -> n
+    # signed is unchanged; unsigned multiply-cancellation stays unprovable.
+    ni, nu = T.Var("ni", "int32"), T.Var("nu", "uint32")
+    assert a.can_prove_equal(tvm.tirx.floormod(ni * tvm.tirx.const(64, "int32"), ni), 0)
+    assert not a.can_prove_equal(tvm.tirx.floormod(nu * tvm.tirx.const(64, "uint32"), nu), 0)
+
+
+def test_tma_uint32_shape_no_cast():
+    """A TMA-source gmem buffer whose shape extent is a runtime uint32 (no int32
+    cast) must compile: the gmem-layout grouping falls back to the raw per-dim
+    layout, which needs only the now-simplifiable ``dim % dim`` proof."""
+    from tvm.backend.cuda.operator.tile_primitive.tma_utils import mma_shared_layout
+
+    BK = 64
+    A_layout = mma_shared_layout("float16", 3, (128, BK))
+
+    # fmt: off
+    @T.prim_func
+    def tma_load(n: T.uint32, a_ptr: T.handle, o_ptr: T.handle) -> None:
+        A = T.match_buffer(a_ptr, (n, BK), "float16")  # uint32 extent, NO int32 cast
+        Out = T.match_buffer(o_ptr, (128, BK), "float16")
+        T.device_entry()
+        T.warp_id([4])
+        T.cta_id([1])
+        T.warpgroup_id([1])
+        tid = T.thread_id_in_wg([128])
+        sm = T.alloc_buffer((128, BK), "float16", scope="shared", layout=A_layout)
+        mb = T.alloc_shared([1], "uint64")
+        if tid == 0:
+            T.ptx.mbarrier.init(mb.ptr_to([0]), 1)
+        T.ptx.fence.proxy_async("shared::cta")
+        T.cuda.cta_sync()
+        if tid == 0:
+            Tx.copy_async(sm[:, :], A[0:128, 0:BK], dispatch="tma", mbar=mb.ptr_to([0]))
+            T.ptx.mbarrier.arrive.expect_tx(mb.ptr_to([0]), 128 * BK * 2)
+        T.ptx.mbarrier.try_wait(mb.ptr_to([0]), 0)
+        T.cuda.cta_sync()
+        reg = T.alloc_local(BK, "float16")
+        Tx.copy(reg[:], sm[tid, 0:BK])
+        Tx.copy(Out[tid, 0:BK], reg[:])
+    # fmt: on
+
+    target = tvm.target.Target("cuda")
+    with target:
+        tvm.compile(tvm.IRModule({"main": tma_load}), target=target, tir_pipeline="tirx")
+
+
+def test_tma_uint32_slice_base_no_cast():
+    """A TMA copy whose gmem slice base is a runtime uint32 (so the copy *extent*
+    carries the uint32 dtype) must compile: the smem regroup re-views the
+    unsigned copy extent as signed (extents are signedness-irrelevant), so the
+    slice base can stay uint32 with no int32 cast."""
+    from tvm.backend.cuda.operator.tile_primitive.tma_utils import mma_shared_layout
+
+    BK = 64
+    A_layout = mma_shared_layout("float16", 3, (128, BK))
+
+    # fmt: off
+    @T.prim_func
+    def tma_off(off: T.uint32, a_ptr: T.handle, o_ptr: T.handle) -> None:
+        A = T.match_buffer(a_ptr, (4096, BK), "float16")
+        Out = T.match_buffer(o_ptr, (128, BK), "float16")
+        T.device_entry()
+        T.warp_id([4])
+        T.cta_id([1])
+        T.warpgroup_id([1])
+        tid = T.thread_id_in_wg([128])
+        sm = T.alloc_buffer((128, BK), "float16", scope="shared", layout=A_layout)
+        mb = T.alloc_shared([1], "uint64")
+        if tid == 0:
+            T.ptx.mbarrier.init(mb.ptr_to([0]), 1)
+        T.ptx.fence.proxy_async("shared::cta")
+        T.cuda.cta_sync()
+        if tid == 0:
+            # uint32 slice base 'off' (no int32 cast)
+            Tx.copy_async(sm[:, :], A[off:off + 128, 0:BK], dispatch="tma", mbar=mb.ptr_to([0]))
+            T.ptx.mbarrier.arrive.expect_tx(mb.ptr_to([0]), 128 * BK * 2)
+        T.ptx.mbarrier.try_wait(mb.ptr_to([0]), 0)
+        T.cuda.cta_sync()
+        reg = T.alloc_local(BK, "float16")
+        Tx.copy(reg[:], sm[tid, 0:BK])
+        Tx.copy(Out[tid, 0:BK], reg[:])
+    # fmt: on
+
+    target = tvm.target.Target("cuda")
+    with target:
+        tvm.compile(tvm.IRModule({"main": tma_off}), target=target, tir_pipeline="tirx")
 
 
 if __name__ == "__main__":
