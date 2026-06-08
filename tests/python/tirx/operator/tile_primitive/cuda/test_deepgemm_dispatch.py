@@ -18,7 +18,7 @@
 """Unit tests for the tile-primitive dispatch changes the fp4/fp8/tf32 deepgemm
 kernels depend on (see docs/deepgemm/dispatch_changes.md in tirx-kernels):
 
-* dense fp8 + ``mma_dtype="tf32"`` tcgen05 ``gemm_async``               (§1)
+* dense fp8 + tf32 (``is_AB_tf32``) tcgen05 ``gemm_async``               (§1)
 * TFLOAT32 TMA descriptor (``tma_dtype="tf32"``)                        (§2)
 * ``maximum`` elementwise CUDA dispatch                                 (§4)
 * uint32 TMEM-column divisibility proof (``_can_prove_divisible``)      (§6)
@@ -197,7 +197,7 @@ def test_maximum_elementwise():
 # §1 / §2 — dense fp8 and tf32 (+ TFLOAT32 TMA) tcgen05 gemm_async
 # ===========================================================================
 def _run_dense_gemm(
-    A_dtype, B_dtype, C_dtype, K, *, mma_dtype=None, tma_dtype_B=None, atol=1e-3, rtol=1e-3
+    A_dtype, B_dtype, C_dtype, K, *, is_AB_tf32=False, tma_dtype_B=None, atol=1e-3, rtol=1e-3
 ):
     """Build + run a single-CTA M=128,N=128 dense tcgen05 GEMM (C = A @ Bᵀ) and
     compare to a numpy reference. Used to exercise the dense fp8 / tf32 MMA
@@ -215,8 +215,8 @@ def _run_dense_gemm(
         tvm.runtime.DataType(A_dtype).bits // 8
     ) + functools.reduce(operator.mul, B_shape, 1) * (tvm.runtime.DataType(B_dtype).bits // 8)
     gemm_kw = {"dispatch": "tcgen05"}
-    if mma_dtype is not None:
-        gemm_kw["mma_dtype"] = mma_dtype
+    if is_AB_tf32:
+        gemm_kw["is_AB_tf32"] = True
     b_tma_kw = {"dispatch": "tma"}
     if tma_dtype_B is not None:
         b_tma_kw["tma_dtype"] = tma_dtype_B
@@ -305,14 +305,14 @@ def test_gemm_dense_fp8():
 
 
 def test_gemm_tf32_with_tfloat32_tma():
-    # tf32 dense MMA (mma_dtype="tf32", MMA_K=8); B loaded through the TFLOAT32
+    # tf32 dense MMA (is_AB_tf32=True, MMA_K=8); B loaded through the TFLOAT32
     # TMA descriptor so the RN-truncation happens on load (matching the MMA).
     _run_dense_gemm(
         "float32",
         "float32",
         "float32",
         64,
-        mma_dtype="tf32",
+        is_AB_tf32=True,
         tma_dtype_B="tf32",
         atol=2e-2,
         rtol=2e-2,

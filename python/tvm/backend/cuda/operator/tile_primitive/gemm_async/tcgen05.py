@@ -387,16 +387,18 @@ def gemm_async_tcgen05_impl(op_call: TilePrimitiveCall, sctx: DispatchContext) -
     C_type, A_type, B_type = C_buffer.dtype, A_buffer.dtype, B_buffer.dtype
     assert C_type == "float32", f"tcgen05 schedule expected C_type=float32, got {C_type}"
 
-    # Semantic MMA dtype: defaults to the buffer dtype, but a caller may override
-    # via config["mma_dtype"] when the storage dtype differs from the MMA's view of
-    # it. tf32 is the case that needs this: there is no `tensor_float32` TVM
-    # DataType, so A/B live in float32 buffers (used for byte/layout math via
-    # DataType(A_type).bits == 32) while the MMA descriptor + MMA_K must treat them
-    # as tf32 (a_format=2, MMA_K=8). The override feeds the format-map / MMA_K /
-    # dtype asserts / descriptor encode + the emitted tcgen05.mma a_dtype/b_dtype.
-    _mma_dtype = op_call.config.get("mma_dtype", None)
-    A_sem = _mma_dtype or A_type
-    B_sem = _mma_dtype or B_type
+    # Semantic MMA dtype: defaults to the buffer dtype. The ONE case where storage
+    # dtype differs from the MMA's view is tf32 -- there is no `tensor_float32` TVM
+    # DataType, so A/B live in bf16/float32 buffers (used for byte/layout math via
+    # DataType(A_type).bits) while the MMA descriptor + MMA_K must treat them as tf32
+    # (a_format=2, MMA_K=8). A caller sets config["is_AB_tf32"]=True to request it;
+    # it feeds the format-map / MMA_K / dtype asserts / descriptor encode + the
+    # emitted tcgen05.mma a_dtype/b_dtype. tf32 is the *only* storage-vs-MMA-dtype
+    # mismatch on tcgen05 (every other precision's storage dtype already is its MMA
+    # dtype), so an explicit bool is exact -- not a speculative general override.
+    is_AB_tf32 = op_call.config.get("is_AB_tf32", False)
+    A_sem = "tf32" if is_AB_tf32 else A_type
+    B_sem = "tf32" if is_AB_tf32 else B_type
 
     # Valid A/B dtypes for block-scaled MMA (low-precision with per-block scale factors)
     _BLOCK_SCALED_DTYPES = ["float4_e2m1fn", "float8_e4m3fn"]
@@ -412,7 +414,7 @@ def gemm_async_tcgen05_impl(op_call: TilePrimitiveCall, sctx: DispatchContext) -
         )
     else:
         # Dense (non-block-scaled) MMA: fp16/bf16, fp8 (F8F6F4), and tf32 (stored in
-        # float32 buffers, MMA dtype via mma_dtype="tf32"). All reuse the same
+        # bf16/float32 buffers, requested via is_AB_tf32=True). All reuse the same
         # tcgen05.mma path — MMA_K below + the _INSTR_DESC_FORMAT_MAP entry fold the
         # dense instruction descriptor; any per-block scaling is the caller's epilogue.
         _DENSE_DTYPES = [
@@ -561,27 +563,20 @@ def gemm_async_tcgen05_impl(op_call: TilePrimitiveCall, sctx: DispatchContext) -
                 tiler_shape = [s // a for s, a in zip(shape_2d, atom_shape)]
                 tiler_grouped, seps = tiler.canonicalize().group(tiler_shape)
                 elem_per_128b = 128 // tvm.DataType(dtype).bits
-                # A group dimension with extent 1 spans exactly one atom: the hardware
-                # never advances along it (there is no second tile to step to), so its
-                # descriptor stride offset is unused and should be 0.
-                # ``canonicalize().group()`` collapses a singleton group and leaves a
-                # sibling stride in ``shard[-1].stride`` — emitting that as the LBO
-                # leaks a bogus leading-dim offset (e.g. mqa fp4 K=128 = one 64B atom
-                # encodes ldo=32 instead of the hand-rolled descriptor's ldo=0). The
-                # bogus offset is on an unused axis so it was tolerated at runtime
-                # here, but zeroing it makes the emitted descriptor byte-exact to the
-                # hand-rolled one. Zero each offset whose group extent is 1; no-op for
-                # multi-atom dims (nvfp4/fp16/fa4 K spans many atoms).
-                ldo = (
-                    0
-                    if int(tiler_grouped.shard[-1].extent) == 1
-                    else (tiler_grouped.shard[-1].stride * atom_size) // elem_per_128b
-                )
-                sdo = (
-                    0
-                    if int(tiler_grouped.shard[-2].extent) == 1
-                    else (tiler_grouped.shard[-2].stride * atom_size) // elem_per_128b
-                )
+                # shard[-1] = leading dim (LBO), shard[-2] = stride dim (SBO).
+                # A single-atom dim (extent==1) gets 0: the hardware never advances
+                # along it, so the offset is unused -- and canonicalize().group() would
+                # otherwise leak a sibling stride left from collapsing the singleton
+                # group (e.g. mqa fp4 K=128 = one 64B atom: ldo 32 -> 0, matching the
+                # hand-rolled descriptor). Multi-atom dims (nvfp4/fp16/fa4 K) keep the
+                # real 128b-unit offset.
+                def _atom_off(dim):
+                    if int(dim.extent) == 1:
+                        return 0
+                    return (dim.stride * atom_size) // elem_per_128b
+
+                ldo = _atom_off(tiler_grouped.shard[-1])
+                sdo = _atom_off(tiler_grouped.shard[-2])
                 return mode, ldo, sdo
 
             for mode in (
@@ -731,7 +726,7 @@ def gemm_async_tcgen05_impl(op_call: TilePrimitiveCall, sctx: DispatchContext) -
     # tcgen05 MMA hardware constraints
     # K dimension per MMA iteration depends on A/B dtype (32 bytes of K per step:
     # fp4=64, fp8=32, fp16/bf16=16, tf32=8). Keyed on the SEMANTIC dtype (A_sem) so
-    # tf32 (float32-buffer storage, mma_dtype="tf32") picks 8, not the fp16 default.
+    # tf32 (bf16/float32-buffer storage, is_AB_tf32=True) picks 8, not the fp16 default.
     if A_sem == "float4_e2m1fn":
         MMA_K = 64
     elif A_sem in ["float8_e4m3fn", "float8_e5m2"]:
