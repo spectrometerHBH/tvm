@@ -551,27 +551,20 @@ def gemm_async_tcgen05_impl(op_call: TilePrimitiveCall, sctx: DispatchContext) -
                 tiler_shape = [s // a for s, a in zip(shape_2d, atom_shape)]
                 tiler_grouped, seps = tiler.canonicalize().group(tiler_shape)
                 elem_per_128b = 128 // tvm.DataType(dtype).bits
-                # A group dimension with extent 1 spans exactly one atom: the hardware
-                # never advances along it (there is no second tile to step to), so its
-                # descriptor stride offset is unused and should be 0.
-                # ``canonicalize().group()`` collapses a singleton group and leaves a
-                # sibling stride in ``shard[-1].stride`` — emitting that as the LBO
-                # leaks a bogus leading-dim offset (e.g. mqa fp4 K=128 = one 64B atom
-                # encodes ldo=32 instead of the hand-rolled descriptor's ldo=0). The
-                # bogus offset is on an unused axis so it was tolerated at runtime
-                # here, but zeroing it makes the emitted descriptor byte-exact to the
-                # hand-rolled one. Zero each offset whose group extent is 1; no-op for
-                # multi-atom dims (nvfp4/fp16/fa4 K spans many atoms).
-                ldo = (
-                    0
-                    if int(tiler_grouped.shard[-1].extent) == 1
-                    else (tiler_grouped.shard[-1].stride * atom_size) // elem_per_128b
-                )
-                sdo = (
-                    0
-                    if int(tiler_grouped.shard[-2].extent) == 1
-                    else (tiler_grouped.shard[-2].stride * atom_size) // elem_per_128b
-                )
+                # shard[-1] = leading dim (LBO), shard[-2] = stride dim (SBO).
+                # A single-atom dim (extent==1) gets 0: the hardware never advances
+                # along it, so the offset is unused -- and canonicalize().group() would
+                # otherwise leak a sibling stride left from collapsing the singleton
+                # group (e.g. mqa fp4 K=128 = one 64B atom: ldo 32 -> 0, matching the
+                # hand-rolled descriptor). Multi-atom dims (nvfp4/fp16/fa4 K) keep the
+                # real 128b-unit offset.
+                def _atom_off(dim):
+                    if int(dim.extent) == 1:
+                        return 0
+                    return (dim.stride * atom_size) // elem_per_128b
+
+                ldo = _atom_off(tiler_grouped.shard[-1])
+                sdo = _atom_off(tiler_grouped.shard[-2])
                 return mode, ldo, sdo
 
             for mode in (
