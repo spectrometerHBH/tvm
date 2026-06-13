@@ -1,0 +1,5443 @@
+{
+  "timestamp": "20260611T135029Z",
+  "label": "sparse-flashmla-head64-full-baseline-rebased+targeted-restable",
+  "git": {
+    "tir": "bf634b79",
+    "tirx-kernels": "3aaf1663",
+    "tirx-bench-ci": "08a57cf3"
+  },
+  "kernel_tree": {
+    "tir:python/tvm/tirx": "68c0515ffc372877393da72993153ee851f58cd0",
+    "tirx-kernels:tirx_kernels": "555a84b28c8e0e7d156307479c6687e9cdf92e2f"
+  },
+  "baselines": {
+    "torch": {
+      "importable": true,
+      "version": "2.11.0+cu130",
+      "cuda": "13.0",
+      "torch_git_version": "70d99e998b4955e0049d13a98d77ae1b14db1f45",
+      "dist": "torch"
+    },
+    "deep_gemm": {
+      "importable": true,
+      "version": "0.1.0",
+      "dist": "deep_gemm",
+      "source_dir": "/home/bohanhou/DeepGEMM",
+      "editable": true,
+      "git_dir": "/home/bohanhou/DeepGEMM",
+      "git_sha": "714dd1a4-dirty"
+    },
+    "flashinfer": {
+      "importable": true,
+      "version": "0.6.12",
+      "dist": "flashinfer-python",
+      "source_dir": "/home/bohanhou/flashinfer",
+      "editable": true,
+      "git_dir": "/home/bohanhou/flashinfer",
+      "git_sha": "bff85f34-dirty"
+    },
+    "flash_attn": {
+      "importable": true,
+      "dist": "flash-attn-4",
+      "version": "4.0.0b15.dev2+g3da76cd",
+      "source_dir": "/home/bohanhou/flash-attention/flash_attn/cute",
+      "editable": true,
+      "git_dir": "/home/bohanhou/flash-attention",
+      "git_sha": "3da76cdb"
+    }
+  },
+  "probe": {
+    "enabled": true,
+    "usable": [
+      "0",
+      "1",
+      "2",
+      "3",
+      "4",
+      "5",
+      "6",
+      "7"
+    ],
+    "failed": {}
+  },
+  "results": [
+    {
+      "kernel": "deepgemm_sm100_fp4_mqa_logits",
+      "config": "s2048_skv4096_h64_d128_bf16_compressed_cp",
+      "gpu": "2",
+      "started_at": "2026-06-11T13:51:22+00:00",
+      "impls": {
+        "deepgemm": 0.04243,
+        "tirx": 0.040408
+      },
+      "errors": {},
+      "timer": "proton",
+      "benchmark_protocol": {
+        "num_groups": 16,
+        "input_bytes": 26509312,
+        "l2_bytes": 134217728,
+        "l2_eviction_factor": 3,
+        "flush_l2": false,
+        "warmup": 100,
+        "repeat": 30,
+        "cooldown_s": 1.0,
+        "order": [
+          "tirx",
+          "deepgemm"
+        ]
+      },
+      "max_diff": 1.3774309132186247e-06,
+      "label": "s2048_skv4096_h64_d128_bf16_compressed_cp",
+      "status": "ok",
+      "finished_at": "2026-06-11T13:51:35+00:00",
+      "attempt": 1
+    },
+    {
+      "kernel": "deepgemm_sm100_fp4_mqa_logits",
+      "config": "s2048_skv4096_h64_d128_bf16_compressed_nocp",
+      "gpu": "3",
+      "started_at": "2026-06-11T13:51:25+00:00",
+      "impls": {
+        "deepgemm": 0.055471,
+        "tirx": 0.052958
+      },
+      "errors": {},
+      "timer": "proton",
+      "benchmark_protocol": {
+        "num_groups": 16,
+        "input_bytes": 26509312,
+        "l2_bytes": 134217728,
+        "l2_eviction_factor": 3,
+        "flush_l2": false,
+        "warmup": 100,
+        "repeat": 30,
+        "cooldown_s": 1.0,
+        "order": [
+          "tirx",
+          "deepgemm"
+        ]
+      },
+      "max_diff": 1.3753107865888126e-06,
+      "label": "s2048_skv4096_h64_d128_bf16_compressed_nocp",
+      "status": "ok",
+      "finished_at": "2026-06-11T13:51:36+00:00",
+      "attempt": 1
+    },
+    {
+      "kernel": "deepgemm_sm100_fp4_mqa_logits",
+      "config": "s2048_skv4096_h64_d128_bf16_dense_cp",
+      "gpu": "1",
+      "started_at": "2026-06-11T13:51:07+00:00",
+      "impls": {
+        "deepgemm": 0.04184,
+        "tirx": 0.041158
+      },
+      "errors": {},
+      "timer": "proton",
+      "benchmark_protocol": {
+        "num_groups": 15,
+        "input_bytes": 27557888,
+        "l2_bytes": 134217728,
+        "l2_eviction_factor": 3,
+        "flush_l2": false,
+        "warmup": 100,
+        "repeat": 30,
+        "cooldown_s": 1.0,
+        "order": [
+          "tirx",
+          "deepgemm"
+        ]
+      },
+      "max_diff": 1.3792105381105202e-06,
+      "label": "s2048_skv4096_h64_d128_bf16_dense_cp",
+      "status": "ok",
+      "finished_at": "2026-06-11T13:51:21+00:00",
+      "attempt": 1
+    },
+    {
+      "kernel": "deepgemm_sm100_fp4_mqa_logits",
+      "config": "s2048_skv4096_h64_d128_bf16_dense_nocp",
+      "gpu": "2",
+      "started_at": "2026-06-11T13:51:08+00:00",
+      "impls": {
+        "deepgemm": 0.054165,
+        "tirx": 0.052847000000000005
+      },
+      "errors": {},
+      "timer": "proton",
+      "benchmark_protocol": {
+        "num_groups": 15,
+        "input_bytes": 27557888,
+        "l2_bytes": 134217728,
+        "l2_eviction_factor": 3,
+        "flush_l2": false,
+        "warmup": 100,
+        "repeat": 30,
+        "cooldown_s": 1.0,
+        "order": [
+          "tirx",
+          "deepgemm"
+        ]
+      },
+      "max_diff": 1.3785051262704684e-06,
+      "label": "s2048_skv4096_h64_d128_bf16_dense_nocp",
+      "status": "ok",
+      "finished_at": "2026-06-11T13:51:22+00:00",
+      "attempt": 1
+    },
+    {
+      "kernel": "deepgemm_sm100_fp4_mqa_logits",
+      "config": "s2048_skv4096_h64_d128_f32_compressed_cp",
+      "gpu": "0",
+      "started_at": "2026-06-11T13:50:53+00:00",
+      "impls": {
+        "deepgemm": 0.043858,
+        "tirx": 0.041135
+      },
+      "errors": {},
+      "timer": "proton",
+      "benchmark_protocol": {
+        "num_groups": 10,
+        "input_bytes": 43286528,
+        "l2_bytes": 134217728,
+        "l2_eviction_factor": 3,
+        "flush_l2": false,
+        "warmup": 100,
+        "repeat": 30,
+        "cooldown_s": 1.0,
+        "order": [
+          "tirx",
+          "deepgemm"
+        ]
+      },
+      "max_diff": 4.107825191113079e-15,
+      "label": "s2048_skv4096_h64_d128_f32_compressed_cp",
+      "status": "ok",
+      "finished_at": "2026-06-11T13:51:05+00:00",
+      "attempt": 1
+    },
+    {
+      "kernel": "deepgemm_sm100_fp4_mqa_logits",
+      "config": "s2048_skv4096_h64_d128_f32_compressed_nocp",
+      "gpu": "1",
+      "started_at": "2026-06-11T13:50:53+00:00",
+      "impls": {
+        "deepgemm": 0.057490000000000006,
+        "tirx": 0.053544
+      },
+      "errors": {},
+      "timer": "proton",
+      "benchmark_protocol": {
+        "num_groups": 10,
+        "input_bytes": 43286528,
+        "l2_bytes": 134217728,
+        "l2_eviction_factor": 3,
+        "flush_l2": false,
+        "warmup": 100,
+        "repeat": 30,
+        "cooldown_s": 1.0,
+        "order": [
+          "tirx",
+          "deepgemm"
+        ]
+      },
+      "max_diff": 3.9968028886505635e-15,
+      "label": "s2048_skv4096_h64_d128_f32_compressed_nocp",
+      "status": "ok",
+      "finished_at": "2026-06-11T13:51:06+00:00",
+      "attempt": 1
+    },
+    {
+      "kernel": "deepgemm_sm100_fp4_mqa_logits",
+      "config": "s2048_skv4096_h64_d128_f32_dense_cp",
+      "gpu": "0",
+      "started_at": "2026-06-11T13:50:39+00:00",
+      "impls": {
+        "deepgemm": 0.039676,
+        "tirx": 0.040216
+      },
+      "errors": {},
+      "timer": "proton",
+      "benchmark_protocol": {
+        "num_groups": 9,
+        "input_bytes": 45383680,
+        "l2_bytes": 134217728,
+        "l2_eviction_factor": 3,
+        "flush_l2": false,
+        "warmup": 100,
+        "repeat": 30,
+        "cooldown_s": 1.0,
+        "order": [
+          "tirx",
+          "deepgemm"
+        ]
+      },
+      "max_diff": 4.218847493575595e-15,
+      "label": "s2048_skv4096_h64_d128_f32_dense_cp",
+      "status": "ok",
+      "finished_at": "2026-06-11T13:50:53+00:00",
+      "attempt": 1
+    },
+    {
+      "kernel": "deepgemm_sm100_fp4_mqa_logits",
+      "config": "s2048_skv4096_h64_d128_f32_dense_nocp",
+      "gpu": "1",
+      "started_at": "2026-06-11T13:50:39+00:00",
+      "impls": {
+        "deepgemm": 0.051554,
+        "tirx": 0.052256000000000004
+      },
+      "errors": {},
+      "timer": "proton",
+      "benchmark_protocol": {
+        "num_groups": 9,
+        "input_bytes": 45383680,
+        "l2_bytes": 134217728,
+        "l2_eviction_factor": 3,
+        "flush_l2": false,
+        "warmup": 100,
+        "repeat": 30,
+        "cooldown_s": 1.0,
+        "order": [
+          "tirx",
+          "deepgemm"
+        ]
+      },
+      "max_diff": 3.9968028886505635e-15,
+      "label": "s2048_skv4096_h64_d128_f32_dense_nocp",
+      "status": "ok",
+      "finished_at": "2026-06-11T13:50:53+00:00",
+      "attempt": 1
+    },
+    {
+      "kernel": "deepgemm_sm100_fp4_mqa_logits",
+      "config": "s2048_skv8192_h64_d128_bf16_compressed_cp",
+      "gpu": "4",
+      "started_at": "2026-06-11T13:51:25+00:00",
+      "impls": {
+        "deepgemm": 0.07338700000000001,
+        "tirx": 0.069716
+      },
+      "errors": {},
+      "timer": "proton",
+      "benchmark_protocol": {
+        "num_groups": 11,
+        "input_bytes": 39370752,
+        "l2_bytes": 134217728,
+        "l2_eviction_factor": 3,
+        "flush_l2": false,
+        "warmup": 100,
+        "repeat": 30,
+        "cooldown_s": 1.0,
+        "order": [
+          "tirx",
+          "deepgemm"
+        ]
+      },
+      "max_diff": 1.3788610764287057e-06,
+      "label": "s2048_skv8192_h64_d128_bf16_compressed_cp",
+      "status": "ok",
+      "finished_at": "2026-06-11T13:51:38+00:00",
+      "attempt": 1
+    },
+    {
+      "kernel": "deepgemm_sm100_fp4_mqa_logits",
+      "config": "s2048_skv8192_h64_d128_bf16_compressed_nocp",
+      "gpu": "7",
+      "started_at": "2026-06-11T13:51:28+00:00",
+      "impls": {
+        "deepgemm": 0.11486700000000001,
+        "tirx": 0.10870300000000001
+      },
+      "errors": {},
+      "timer": "proton",
+      "benchmark_protocol": {
+        "num_groups": 10,
+        "input_bytes": 43565056,
+        "l2_bytes": 134217728,
+        "l2_eviction_factor": 3,
+        "flush_l2": false,
+        "warmup": 100,
+        "repeat": 30,
+        "cooldown_s": 1.0,
+        "order": [
+          "tirx",
+          "deepgemm"
+        ]
+      },
+      "max_diff": 1.3769480183833949e-06,
+      "label": "s2048_skv8192_h64_d128_bf16_compressed_nocp",
+      "status": "ok",
+      "finished_at": "2026-06-11T13:51:39+00:00",
+      "attempt": 1
+    },
+    {
+      "kernel": "deepgemm_sm100_fp4_mqa_logits",
+      "config": "s2048_skv8192_h64_d128_bf16_dense_cp",
+      "gpu": "3",
+      "started_at": "2026-06-11T13:51:10+00:00",
+      "impls": {
+        "deepgemm": 0.072142,
+        "tirx": 0.071075
+      },
+      "errors": {},
+      "timer": "proton",
+      "benchmark_protocol": {
+        "num_groups": 10,
+        "input_bytes": 44613632,
+        "l2_bytes": 134217728,
+        "l2_eviction_factor": 3,
+        "flush_l2": false,
+        "warmup": 100,
+        "repeat": 30,
+        "cooldown_s": 1.0,
+        "order": [
+          "tirx",
+          "deepgemm"
+        ]
+      },
+      "max_diff": 1.3785193276882879e-06,
+      "label": "s2048_skv8192_h64_d128_bf16_dense_cp",
+      "status": "ok",
+      "finished_at": "2026-06-11T13:51:23+00:00",
+      "attempt": 1
+    },
+    {
+      "kernel": "deepgemm_sm100_fp4_mqa_logits",
+      "config": "s2048_skv8192_h64_d128_bf16_dense_nocp",
+      "gpu": "4",
+      "started_at": "2026-06-11T13:51:12+00:00",
+      "impls": {
+        "deepgemm": 0.109502,
+        "tirx": 0.107923
+      },
+      "errors": {},
+      "timer": "proton",
+      "benchmark_protocol": {
+        "num_groups": 10,
+        "input_bytes": 44613632,
+        "l2_bytes": 134217728,
+        "l2_eviction_factor": 3,
+        "flush_l2": false,
+        "warmup": 100,
+        "repeat": 30,
+        "cooldown_s": 1.0,
+        "order": [
+          "tirx",
+          "deepgemm"
+        ]
+      },
+      "max_diff": 1.3775896979817404e-06,
+      "label": "s2048_skv8192_h64_d128_bf16_dense_nocp",
+      "status": "ok",
+      "finished_at": "2026-06-11T13:51:25+00:00",
+      "attempt": 1
+    },
+    {
+      "kernel": "deepgemm_sm100_fp4_mqa_logits",
+      "config": "s2048_skv8192_h64_d128_f32_compressed_cp",
+      "gpu": "2",
+      "started_at": "2026-06-11T13:50:54+00:00",
+      "impls": {
+        "deepgemm": 0.076855,
+        "tirx": 0.071255
+      },
+      "errors": {},
+      "timer": "proton",
+      "benchmark_protocol": {
+        "num_groups": 6,
+        "input_bytes": 68730880,
+        "l2_bytes": 134217728,
+        "l2_eviction_factor": 3,
+        "flush_l2": false,
+        "warmup": 100,
+        "repeat": 30,
+        "cooldown_s": 1.0,
+        "order": [
+          "tirx",
+          "deepgemm"
+        ]
+      },
+      "max_diff": 3.9968028886505635e-15,
+      "label": "s2048_skv8192_h64_d128_f32_compressed_cp",
+      "status": "ok",
+      "finished_at": "2026-06-11T13:51:07+00:00",
+      "attempt": 1
+    },
+    {
+      "kernel": "deepgemm_sm100_fp4_mqa_logits",
+      "config": "s2048_skv8192_h64_d128_f32_compressed_nocp",
+      "gpu": "3",
+      "started_at": "2026-06-11T13:50:55+00:00",
+      "impls": {
+        "deepgemm": 0.11879,
+        "tirx": 0.108475
+      },
+      "errors": {},
+      "timer": "proton",
+      "benchmark_protocol": {
+        "num_groups": 6,
+        "input_bytes": 77119488,
+        "l2_bytes": 134217728,
+        "l2_eviction_factor": 3,
+        "flush_l2": false,
+        "warmup": 100,
+        "repeat": 30,
+        "cooldown_s": 1.0,
+        "order": [
+          "tirx",
+          "deepgemm"
+        ]
+      },
+      "max_diff": 3.9968028886505635e-15,
+      "label": "s2048_skv8192_h64_d128_f32_compressed_nocp",
+      "status": "ok",
+      "finished_at": "2026-06-11T13:51:08+00:00",
+      "attempt": 1
+    },
+    {
+      "kernel": "deepgemm_sm100_fp4_mqa_logits",
+      "config": "s2048_skv8192_h64_d128_f32_dense_cp",
+      "gpu": "2",
+      "started_at": "2026-06-11T13:50:40+00:00",
+      "impls": {
+        "deepgemm": 0.068568,
+        "tirx": 0.06959
+      },
+      "errors": {},
+      "timer": "proton",
+      "benchmark_protocol": {
+        "num_groups": 6,
+        "input_bytes": 79216640,
+        "l2_bytes": 134217728,
+        "l2_eviction_factor": 3,
+        "flush_l2": false,
+        "warmup": 100,
+        "repeat": 30,
+        "cooldown_s": 1.0,
+        "order": [
+          "tirx",
+          "deepgemm"
+        ]
+      },
+      "max_diff": 4.3298697960381105e-15,
+      "label": "s2048_skv8192_h64_d128_f32_dense_cp",
+      "status": "ok",
+      "finished_at": "2026-06-11T13:50:54+00:00",
+      "attempt": 1
+    },
+    {
+      "kernel": "deepgemm_sm100_fp4_mqa_logits",
+      "config": "s2048_skv8192_h64_d128_f32_dense_nocp",
+      "gpu": "3",
+      "started_at": "2026-06-11T13:50:41+00:00",
+      "impls": {
+        "deepgemm": 0.10503,
+        "tirx": 0.106317
+      },
+      "errors": {},
+      "timer": "proton",
+      "benchmark_protocol": {
+        "num_groups": 6,
+        "input_bytes": 79216640,
+        "l2_bytes": 134217728,
+        "l2_eviction_factor": 3,
+        "flush_l2": false,
+        "warmup": 100,
+        "repeat": 30,
+        "cooldown_s": 1.0,
+        "order": [
+          "tirx",
+          "deepgemm"
+        ]
+      },
+      "max_diff": 3.9968028886505635e-15,
+      "label": "s2048_skv8192_h64_d128_f32_dense_nocp",
+      "status": "ok",
+      "finished_at": "2026-06-11T13:50:54+00:00",
+      "attempt": 1
+    },
+    {
+      "kernel": "deepgemm_sm100_fp4_mqa_logits",
+      "config": "s4096_skv4096_h64_d128_bf16_compressed_cp",
+      "gpu": "6",
+      "started_at": "2026-06-11T13:51:28+00:00",
+      "impls": {
+        "deepgemm": 0.07613,
+        "tirx": 0.071465
+      },
+      "errors": {},
+      "timer": "proton",
+      "benchmark_protocol": {
+        "num_groups": 8,
+        "input_bytes": 52740096,
+        "l2_bytes": 134217728,
+        "l2_eviction_factor": 3,
+        "flush_l2": false,
+        "warmup": 100,
+        "repeat": 30,
+        "cooldown_s": 1.0,
+        "order": [
+          "tirx",
+          "deepgemm"
+        ]
+      },
+      "max_diff": 1.379564555148427e-06,
+      "label": "s4096_skv4096_h64_d128_bf16_compressed_cp",
+      "status": "ok",
+      "finished_at": "2026-06-11T13:51:40+00:00",
+      "attempt": 1
+    },
+    {
+      "kernel": "deepgemm_sm100_fp4_mqa_logits",
+      "config": "s4096_skv4096_h64_d128_bf16_compressed_nocp",
+      "gpu": "0",
+      "started_at": "2026-06-11T13:51:33+00:00",
+      "impls": {
+        "deepgemm": 0.075647,
+        "tirx": 0.071022
+      },
+      "errors": {},
+      "timer": "proton",
+      "benchmark_protocol": {
+        "num_groups": 8,
+        "input_bytes": 52740096,
+        "l2_bytes": 134217728,
+        "l2_eviction_factor": 3,
+        "flush_l2": false,
+        "warmup": 100,
+        "repeat": 30,
+        "cooldown_s": 1.0,
+        "order": [
+          "tirx",
+          "deepgemm"
+        ]
+      },
+      "max_diff": 1.3779008407599491e-06,
+      "label": "s4096_skv4096_h64_d128_bf16_compressed_nocp",
+      "status": "ok",
+      "finished_at": "2026-06-11T13:51:45+00:00",
+      "attempt": 1
+    },
+    {
+      "kernel": "deepgemm_sm100_fp4_mqa_logits",
+      "config": "s4096_skv4096_h64_d128_bf16_dense_cp",
+      "gpu": "7",
+      "started_at": "2026-06-11T13:51:14+00:00",
+      "impls": {
+        "deepgemm": 0.075365,
+        "tirx": 0.07260599999999999
+      },
+      "errors": {},
+      "timer": "proton",
+      "benchmark_protocol": {
+        "num_groups": 8,
+        "input_bytes": 54837248,
+        "l2_bytes": 134217728,
+        "l2_eviction_factor": 3,
+        "flush_l2": false,
+        "warmup": 100,
+        "repeat": 30,
+        "cooldown_s": 1.0,
+        "order": [
+          "tirx",
+          "deepgemm"
+        ]
+      },
+      "max_diff": 1.3783752872420507e-06,
+      "label": "s4096_skv4096_h64_d128_bf16_dense_cp",
+      "status": "ok",
+      "finished_at": "2026-06-11T13:51:26+00:00",
+      "attempt": 1
+    },
+    {
+      "kernel": "deepgemm_sm100_fp4_mqa_logits",
+      "config": "s4096_skv4096_h64_d128_bf16_dense_nocp",
+      "gpu": "6",
+      "started_at": "2026-06-11T13:51:16+00:00",
+      "impls": {
+        "deepgemm": 0.074875,
+        "tirx": 0.072187
+      },
+      "errors": {},
+      "timer": "proton",
+      "benchmark_protocol": {
+        "num_groups": 8,
+        "input_bytes": 54837248,
+        "l2_bytes": 134217728,
+        "l2_eviction_factor": 3,
+        "flush_l2": false,
+        "warmup": 100,
+        "repeat": 30,
+        "cooldown_s": 1.0,
+        "order": [
+          "tirx",
+          "deepgemm"
+        ]
+      },
+      "max_diff": 1.3768132963720703e-06,
+      "label": "s4096_skv4096_h64_d128_bf16_dense_nocp",
+      "status": "ok",
+      "finished_at": "2026-06-11T13:51:28+00:00",
+      "attempt": 1
+    },
+    {
+      "kernel": "deepgemm_sm100_fp4_mqa_logits",
+      "config": "s4096_skv4096_h64_d128_f32_compressed_cp",
+      "gpu": "4",
+      "started_at": "2026-06-11T13:50:58+00:00",
+      "impls": {
+        "deepgemm": 0.077413,
+        "tirx": 0.07104099999999999
+      },
+      "errors": {},
+      "timer": "proton",
+      "benchmark_protocol": {
+        "num_groups": 5,
+        "input_bytes": 86294528,
+        "l2_bytes": 134217728,
+        "l2_eviction_factor": 3,
+        "flush_l2": false,
+        "warmup": 100,
+        "repeat": 30,
+        "cooldown_s": 1.0,
+        "order": [
+          "tirx",
+          "deepgemm"
+        ]
+      },
+      "max_diff": 3.9968028886505635e-15,
+      "label": "s4096_skv4096_h64_d128_f32_compressed_cp",
+      "status": "ok",
+      "finished_at": "2026-06-11T13:51:10+00:00",
+      "attempt": 1
+    },
+    {
+      "kernel": "deepgemm_sm100_fp4_mqa_logits",
+      "config": "s4096_skv4096_h64_d128_f32_compressed_nocp",
+      "gpu": "6",
+      "started_at": "2026-06-11T13:50:59+00:00",
+      "impls": {
+        "deepgemm": 0.07864,
+        "tirx": 0.072146
+      },
+      "errors": {},
+      "timer": "proton",
+      "benchmark_protocol": {
+        "num_groups": 5,
+        "input_bytes": 86294528,
+        "l2_bytes": 134217728,
+        "l2_eviction_factor": 3,
+        "flush_l2": false,
+        "warmup": 100,
+        "repeat": 30,
+        "cooldown_s": 1.0,
+        "order": [
+          "tirx",
+          "deepgemm"
+        ]
+      },
+      "max_diff": 4.107825191113079e-15,
+      "label": "s4096_skv4096_h64_d128_f32_compressed_nocp",
+      "status": "ok",
+      "finished_at": "2026-06-11T13:51:15+00:00",
+      "attempt": 1
+    },
+    {
+      "kernel": "deepgemm_sm100_fp4_mqa_logits",
+      "config": "s4096_skv4096_h64_d128_f32_dense_cp",
+      "gpu": "4",
+      "started_at": "2026-06-11T13:50:42+00:00",
+      "impls": {
+        "deepgemm": 0.069527,
+        "tirx": 0.069397
+      },
+      "errors": {},
+      "timer": "proton",
+      "benchmark_protocol": {
+        "num_groups": 5,
+        "input_bytes": 90488832,
+        "l2_bytes": 134217728,
+        "l2_eviction_factor": 3,
+        "flush_l2": false,
+        "warmup": 100,
+        "repeat": 30,
+        "cooldown_s": 1.0,
+        "order": [
+          "tirx",
+          "deepgemm"
+        ]
+      },
+      "max_diff": 4.107825191113079e-15,
+      "label": "s4096_skv4096_h64_d128_f32_dense_cp",
+      "status": "ok",
+      "finished_at": "2026-06-11T13:50:57+00:00",
+      "attempt": 1
+    },
+    {
+      "kernel": "deepgemm_sm100_fp4_mqa_logits",
+      "config": "s4096_skv4096_h64_d128_f32_dense_nocp",
+      "gpu": "6",
+      "started_at": "2026-06-11T13:50:44+00:00",
+      "impls": {
+        "deepgemm": 0.070681,
+        "tirx": 0.070566
+      },
+      "errors": {},
+      "timer": "proton",
+      "benchmark_protocol": {
+        "num_groups": 5,
+        "input_bytes": 90488832,
+        "l2_bytes": 134217728,
+        "l2_eviction_factor": 3,
+        "flush_l2": false,
+        "warmup": 100,
+        "repeat": 30,
+        "cooldown_s": 1.0,
+        "order": [
+          "tirx",
+          "deepgemm"
+        ]
+      },
+      "max_diff": 3.9968028886505635e-15,
+      "label": "s4096_skv4096_h64_d128_f32_dense_nocp",
+      "status": "ok",
+      "finished_at": "2026-06-11T13:50:58+00:00",
+      "attempt": 1
+    },
+    {
+      "kernel": "deepgemm_sm100_fp4_mqa_logits",
+      "config": "s4096_skv8192_h64_d128_bf16_compressed_cp",
+      "gpu": "1",
+      "started_at": "2026-06-11T13:51:33+00:00",
+      "impls": {
+        "deepgemm": 0.13223,
+        "tirx": 0.124437
+      },
+      "errors": {},
+      "timer": "proton",
+      "benchmark_protocol": {
+        "num_groups": 5,
+        "input_bytes": 86573056,
+        "l2_bytes": 134217728,
+        "l2_eviction_factor": 3,
+        "flush_l2": false,
+        "warmup": 100,
+        "repeat": 30,
+        "cooldown_s": 1.0,
+        "order": [
+          "tirx",
+          "deepgemm"
+        ]
+      },
+      "max_diff": 1.3779582305195603e-06,
+      "label": "s4096_skv8192_h64_d128_bf16_compressed_cp",
+      "status": "ok",
+      "finished_at": "2026-06-11T13:51:45+00:00",
+      "attempt": 1
+    },
+    {
+      "kernel": "deepgemm_sm100_fp4_mqa_logits",
+      "config": "s4096_skv8192_h64_d128_bf16_compressed_nocp",
+      "gpu": "2",
+      "started_at": "2026-06-11T13:51:36+00:00",
+      "impls": {
+        "deepgemm": 0.189692,
+        "tirx": 0.178269
+      },
+      "errors": {},
+      "timer": "proton",
+      "benchmark_protocol": {
+        "num_groups": 5,
+        "input_bytes": 86573056,
+        "l2_bytes": 134217728,
+        "l2_eviction_factor": 3,
+        "flush_l2": false,
+        "warmup": 100,
+        "repeat": 30,
+        "cooldown_s": 1.0,
+        "order": [
+          "tirx",
+          "deepgemm"
+        ]
+      },
+      "max_diff": 1.3776171443602436e-06,
+      "label": "s4096_skv8192_h64_d128_bf16_compressed_nocp",
+      "status": "ok",
+      "finished_at": "2026-06-11T13:51:49+00:00",
+      "attempt": 1
+    },
+    {
+      "kernel": "deepgemm_sm100_fp4_mqa_logits",
+      "config": "s4096_skv8192_h64_d128_bf16_dense_cp",
+      "gpu": "0",
+      "started_at": "2026-06-11T13:51:20+00:00",
+      "impls": {
+        "deepgemm": 0.128635,
+        "tirx": 0.125862
+      },
+      "errors": {},
+      "timer": "proton",
+      "benchmark_protocol": {
+        "num_groups": 5,
+        "input_bytes": 88670208,
+        "l2_bytes": 134217728,
+        "l2_eviction_factor": 3,
+        "flush_l2": false,
+        "warmup": 100,
+        "repeat": 30,
+        "cooldown_s": 1.0,
+        "order": [
+          "tirx",
+          "deepgemm"
+        ]
+      },
+      "max_diff": 1.3775181564312788e-06,
+      "label": "s4096_skv8192_h64_d128_bf16_dense_cp",
+      "status": "ok",
+      "finished_at": "2026-06-11T13:51:32+00:00",
+      "attempt": 1
+    },
+    {
+      "kernel": "deepgemm_sm100_fp4_mqa_logits",
+      "config": "s4096_skv8192_h64_d128_bf16_dense_nocp",
+      "gpu": "1",
+      "started_at": "2026-06-11T13:51:22+00:00",
+      "impls": {
+        "deepgemm": 0.183067,
+        "tirx": 0.179777
+      },
+      "errors": {},
+      "timer": "proton",
+      "benchmark_protocol": {
+        "num_groups": 5,
+        "input_bytes": 88670208,
+        "l2_bytes": 134217728,
+        "l2_eviction_factor": 3,
+        "flush_l2": false,
+        "warmup": 100,
+        "repeat": 30,
+        "cooldown_s": 1.0,
+        "order": [
+          "tirx",
+          "deepgemm"
+        ]
+      },
+      "max_diff": 1.377557574455679e-06,
+      "label": "s4096_skv8192_h64_d128_bf16_dense_nocp",
+      "status": "ok",
+      "finished_at": "2026-06-11T13:51:33+00:00",
+      "attempt": 1
+    },
+    {
+      "kernel": "deepgemm_sm100_fp4_mqa_logits",
+      "config": "s4096_skv8192_h64_d128_f32_compressed_cp",
+      "gpu": "7",
+      "started_at": "2026-06-11T13:51:00+00:00",
+      "impls": {
+        "deepgemm": 0.141178,
+        "tirx": 0.128538
+      },
+      "errors": {},
+      "timer": "proton",
+      "benchmark_protocol": {
+        "num_groups": 3,
+        "input_bytes": 153681920,
+        "l2_bytes": 134217728,
+        "l2_eviction_factor": 3,
+        "flush_l2": false,
+        "warmup": 100,
+        "repeat": 30,
+        "cooldown_s": 1.0,
+        "order": [
+          "tirx",
+          "deepgemm"
+        ]
+      },
+      "max_diff": 4.218847493575595e-15,
+      "label": "s4096_skv8192_h64_d128_f32_compressed_cp",
+      "status": "ok",
+      "finished_at": "2026-06-11T13:51:12+00:00",
+      "attempt": 1
+    },
+    {
+      "kernel": "deepgemm_sm100_fp4_mqa_logits",
+      "config": "s4096_skv8192_h64_d128_f32_compressed_nocp",
+      "gpu": "0",
+      "started_at": "2026-06-11T13:51:06+00:00",
+      "impls": {
+        "deepgemm": 0.19863,
+        "tirx": 0.179958
+      },
+      "errors": {},
+      "timer": "proton",
+      "benchmark_protocol": {
+        "num_groups": 3,
+        "input_bytes": 153681920,
+        "l2_bytes": 134217728,
+        "l2_eviction_factor": 3,
+        "flush_l2": false,
+        "warmup": 100,
+        "repeat": 30,
+        "cooldown_s": 1.0,
+        "order": [
+          "tirx",
+          "deepgemm"
+        ]
+      },
+      "max_diff": 4.3298697960381105e-15,
+      "label": "s4096_skv8192_h64_d128_f32_compressed_nocp",
+      "status": "ok",
+      "finished_at": "2026-06-11T13:51:19+00:00",
+      "attempt": 1
+    },
+    {
+      "kernel": "deepgemm_sm100_fp4_mqa_logits",
+      "config": "s4096_skv8192_h64_d128_f32_dense_cp",
+      "gpu": "7",
+      "started_at": "2026-06-11T13:50:46+00:00",
+      "impls": {
+        "deepgemm": 0.12596,
+        "tirx": 0.125806
+      },
+      "errors": {},
+      "timer": "proton",
+      "benchmark_protocol": {
+        "num_groups": 3,
+        "input_bytes": 157876224,
+        "l2_bytes": 134217728,
+        "l2_eviction_factor": 3,
+        "flush_l2": false,
+        "warmup": 100,
+        "repeat": 30,
+        "cooldown_s": 1.0,
+        "order": [
+          "tirx",
+          "deepgemm"
+        ]
+      },
+      "max_diff": 4.3298697960381105e-15,
+      "label": "s4096_skv8192_h64_d128_f32_dense_cp",
+      "status": "ok",
+      "finished_at": "2026-06-11T13:50:58+00:00",
+      "attempt": 1
+    },
+    {
+      "kernel": "deepgemm_sm100_fp4_mqa_logits",
+      "config": "s4096_skv8192_h64_d128_f32_dense_nocp",
+      "gpu": "7",
+      "started_at": "2026-06-11T13:52:09+00:00",
+      "impls": {
+        "deepgemm": 0.17902099999999999,
+        "tirx": 0.179202
+      },
+      "errors": {},
+      "timer": "proton",
+      "benchmark_protocol": {
+        "num_groups": 3,
+        "input_bytes": 157876224,
+        "l2_bytes": 134217728,
+        "l2_eviction_factor": 3,
+        "flush_l2": false,
+        "warmup": 100,
+        "repeat": 30,
+        "cooldown_s": 1.0,
+        "order": [
+          "tirx",
+          "deepgemm"
+        ]
+      },
+      "max_diff": 4.218847493575595e-15,
+      "label": "s4096_skv8192_h64_d128_f32_dense_nocp",
+      "status": "ok",
+      "finished_at": "2026-06-11T13:52:21+00:00",
+      "attempt": 1
+    },
+    {
+      "kernel": "deepgemm_sm100_fp8_mqa_logits",
+      "config": "s2048_skv4096_h64_d128_bf16_compressed_cp",
+      "gpu": "6",
+      "started_at": "2026-06-11T13:52:21+00:00",
+      "impls": {
+        "deepgemm": 0.047016,
+        "tirx": 0.046094
+      },
+      "errors": {},
+      "timer": "proton",
+      "benchmark_protocol": {
+        "num_groups": 12,
+        "input_bytes": 34635776,
+        "l2_bytes": 134217728,
+        "l2_eviction_factor": 3,
+        "flush_l2": false,
+        "warmup": 100,
+        "repeat": 30,
+        "cooldown_s": 1.0,
+        "order": [
+          "tirx",
+          "deepgemm"
+        ]
+      },
+      "max_diff": 2.525219708782167e-06,
+      "label": "s2048_skv4096_h64_d128_bf16_compressed_cp",
+      "status": "ok",
+      "finished_at": "2026-06-11T13:52:34+00:00",
+      "attempt": 1
+    },
+    {
+      "kernel": "deepgemm_sm100_fp8_mqa_logits",
+      "config": "s2048_skv4096_h64_d128_bf16_compressed_nocp",
+      "gpu": "7",
+      "started_at": "2026-06-11T13:52:22+00:00",
+      "impls": {
+        "deepgemm": 0.061247,
+        "tirx": 0.060431
+      },
+      "errors": {},
+      "timer": "proton",
+      "benchmark_protocol": {
+        "num_groups": 12,
+        "input_bytes": 34635776,
+        "l2_bytes": 134217728,
+        "l2_eviction_factor": 3,
+        "flush_l2": false,
+        "warmup": 100,
+        "repeat": 30,
+        "cooldown_s": 1.0,
+        "order": [
+          "tirx",
+          "deepgemm"
+        ]
+      },
+      "max_diff": 2.5434508256205746e-06,
+      "label": "s2048_skv4096_h64_d128_bf16_compressed_nocp",
+      "status": "ok",
+      "finished_at": "2026-06-11T13:52:35+00:00",
+      "attempt": 1
+    },
+    {
+      "kernel": "deepgemm_sm100_fp8_mqa_logits",
+      "config": "s2048_skv4096_h64_d128_bf16_dense_cp",
+      "gpu": "6",
+      "started_at": "2026-06-11T13:52:09+00:00",
+      "impls": {
+        "deepgemm": 0.04462,
+        "tirx": 0.044888
+      },
+      "errors": {},
+      "timer": "proton",
+      "benchmark_protocol": {
+        "num_groups": 12,
+        "input_bytes": 35684352,
+        "l2_bytes": 134217728,
+        "l2_eviction_factor": 3,
+        "flush_l2": false,
+        "warmup": 100,
+        "repeat": 30,
+        "cooldown_s": 1.0,
+        "order": [
+          "tirx",
+          "deepgemm"
+        ]
+      },
+      "max_diff": 2.54763569706995e-06,
+      "label": "s2048_skv4096_h64_d128_bf16_dense_cp",
+      "status": "ok",
+      "finished_at": "2026-06-11T13:52:21+00:00",
+      "attempt": 1
+    },
+    {
+      "kernel": "deepgemm_sm100_fp8_mqa_logits",
+      "config": "s2048_skv4096_h64_d128_bf16_dense_nocp",
+      "gpu": "1",
+      "started_at": "2026-06-11T13:52:39+00:00",
+      "impls": {
+        "deepgemm": 0.058204,
+        "tirx": 0.058199
+      },
+      "errors": {},
+      "timer": "proton",
+      "benchmark_protocol": {
+        "num_groups": 12,
+        "input_bytes": 35684352,
+        "l2_bytes": 134217728,
+        "l2_eviction_factor": 3,
+        "flush_l2": false,
+        "warmup": 100,
+        "repeat": 30,
+        "cooldown_s": 1.0,
+        "order": [
+          "tirx",
+          "deepgemm"
+        ]
+      },
+      "max_diff": 2.5349719559031314e-06,
+      "label": "s2048_skv4096_h64_d128_bf16_dense_nocp",
+      "status": "ok",
+      "finished_at": "2026-06-11T13:52:52+00:00",
+      "attempt": 1
+    },
+    {
+      "kernel": "deepgemm_sm100_fp8_mqa_logits",
+      "config": "s2048_skv4096_h64_d128_f32_compressed_cp",
+      "gpu": "4",
+      "started_at": "2026-06-11T13:51:54+00:00",
+      "impls": {
+        "deepgemm": 0.045705,
+        "tirx": 0.043807000000000006
+      },
+      "errors": {},
+      "timer": "proton",
+      "benchmark_protocol": {
+        "num_groups": 8,
+        "input_bytes": 51412992,
+        "l2_bytes": 134217728,
+        "l2_eviction_factor": 3,
+        "flush_l2": false,
+        "warmup": 100,
+        "repeat": 30,
+        "cooldown_s": 1.0,
+        "order": [
+          "tirx",
+          "deepgemm"
+        ]
+      },
+      "max_diff": 1.2000996665317842e-06,
+      "label": "s2048_skv4096_h64_d128_f32_compressed_cp",
+      "status": "ok",
+      "finished_at": "2026-06-11T13:52:07+00:00",
+      "attempt": 1
+    },
+    {
+      "kernel": "deepgemm_sm100_fp8_mqa_logits",
+      "config": "s2048_skv4096_h64_d128_f32_compressed_nocp",
+      "gpu": "6",
+      "started_at": "2026-06-11T13:51:55+00:00",
+      "impls": {
+        "deepgemm": 0.061327,
+        "tirx": 0.059425
+      },
+      "errors": {},
+      "timer": "proton",
+      "benchmark_protocol": {
+        "num_groups": 8,
+        "input_bytes": 51412992,
+        "l2_bytes": 134217728,
+        "l2_eviction_factor": 3,
+        "flush_l2": false,
+        "warmup": 100,
+        "repeat": 30,
+        "cooldown_s": 1.0,
+        "order": [
+          "tirx",
+          "deepgemm"
+        ]
+      },
+      "max_diff": 1.175091285166019e-06,
+      "label": "s2048_skv4096_h64_d128_f32_compressed_nocp",
+      "status": "ok",
+      "finished_at": "2026-06-11T13:52:08+00:00",
+      "attempt": 1
+    },
+    {
+      "kernel": "deepgemm_sm100_fp8_mqa_logits",
+      "config": "s2048_skv4096_h64_d128_f32_dense_cp",
+      "gpu": "3",
+      "started_at": "2026-06-11T13:51:36+00:00",
+      "impls": {
+        "deepgemm": 0.043590000000000004,
+        "tirx": 0.043972000000000004
+      },
+      "errors": {},
+      "timer": "proton",
+      "benchmark_protocol": {
+        "num_groups": 8,
+        "input_bytes": 53510144,
+        "l2_bytes": 134217728,
+        "l2_eviction_factor": 3,
+        "flush_l2": false,
+        "warmup": 100,
+        "repeat": 30,
+        "cooldown_s": 1.0,
+        "order": [
+          "tirx",
+          "deepgemm"
+        ]
+      },
+      "max_diff": 1.176528334867477e-06,
+      "label": "s2048_skv4096_h64_d128_f32_dense_cp",
+      "status": "ok",
+      "finished_at": "2026-06-11T13:51:52+00:00",
+      "attempt": 1
+    },
+    {
+      "kernel": "deepgemm_sm100_fp8_mqa_logits",
+      "config": "s2048_skv4096_h64_d128_f32_dense_nocp",
+      "gpu": "4",
+      "started_at": "2026-06-11T13:51:39+00:00",
+      "impls": {
+        "deepgemm": 0.056967,
+        "tirx": 0.057503
+      },
+      "errors": {},
+      "timer": "proton",
+      "benchmark_protocol": {
+        "num_groups": 8,
+        "input_bytes": 53510144,
+        "l2_bytes": 134217728,
+        "l2_eviction_factor": 3,
+        "flush_l2": false,
+        "warmup": 100,
+        "repeat": 30,
+        "cooldown_s": 1.0,
+        "order": [
+          "tirx",
+          "deepgemm"
+        ]
+      },
+      "max_diff": 1.1782539057758612e-06,
+      "label": "s2048_skv4096_h64_d128_f32_dense_nocp",
+      "status": "ok",
+      "finished_at": "2026-06-11T13:51:52+00:00",
+      "attempt": 1
+    },
+    {
+      "kernel": "deepgemm_sm100_fp8_mqa_logits",
+      "config": "s2048_skv8192_h64_d128_bf16_compressed_cp",
+      "gpu": "3",
+      "started_at": "2026-06-11T13:52:25+00:00",
+      "impls": {
+        "deepgemm": 0.08067300000000001,
+        "tirx": 0.079402
+      },
+      "errors": {},
+      "timer": "proton",
+      "benchmark_protocol": {
+        "num_groups": 9,
+        "input_bytes": 47759360,
+        "l2_bytes": 134217728,
+        "l2_eviction_factor": 3,
+        "flush_l2": false,
+        "warmup": 100,
+        "repeat": 30,
+        "cooldown_s": 1.0,
+        "order": [
+          "tirx",
+          "deepgemm"
+        ]
+      },
+      "max_diff": 2.549897109349608e-06,
+      "label": "s2048_skv8192_h64_d128_bf16_compressed_cp",
+      "status": "ok",
+      "finished_at": "2026-06-11T13:52:37+00:00",
+      "attempt": 1
+    },
+    {
+      "kernel": "deepgemm_sm100_fp8_mqa_logits",
+      "config": "s2048_skv8192_h64_d128_bf16_compressed_nocp",
+      "gpu": "1",
+      "started_at": "2026-06-11T13:52:26+00:00",
+      "impls": {
+        "deepgemm": 0.12359200000000001,
+        "tirx": 0.121181
+      },
+      "errors": {},
+      "timer": "proton",
+      "benchmark_protocol": {
+        "num_groups": 8,
+        "input_bytes": 51953664,
+        "l2_bytes": 134217728,
+        "l2_eviction_factor": 3,
+        "flush_l2": false,
+        "warmup": 100,
+        "repeat": 30,
+        "cooldown_s": 1.0,
+        "order": [
+          "tirx",
+          "deepgemm"
+        ]
+      },
+      "max_diff": 2.565442067559154e-06,
+      "label": "s2048_skv8192_h64_d128_bf16_compressed_nocp",
+      "status": "ok",
+      "finished_at": "2026-06-11T13:52:38+00:00",
+      "attempt": 1
+    },
+    {
+      "kernel": "deepgemm_sm100_fp8_mqa_logits",
+      "config": "s2048_skv8192_h64_d128_bf16_dense_cp",
+      "gpu": "3",
+      "started_at": "2026-06-11T13:57:25+00:00",
+      "impls": {
+        "deepgemm": 0.07757800000000001,
+        "tirx": 0.077324
+      },
+      "errors": {},
+      "timer": "proton",
+      "benchmark_protocol": {
+        "num_groups": 8,
+        "input_bytes": 53002240,
+        "l2_bytes": 134217728,
+        "l2_eviction_factor": 3,
+        "flush_l2": false,
+        "warmup": 100,
+        "repeat": 30,
+        "cooldown_s": 1.0,
+        "order": [
+          "tirx",
+          "deepgemm"
+        ]
+      },
+      "max_diff": 2.555146156879573e-06,
+      "label": "s2048_skv8192_h64_d128_bf16_dense_cp",
+      "status": "ok",
+      "finished_at": "2026-06-11T13:57:43+00:00",
+      "attempt": 2
+    },
+    {
+      "kernel": "deepgemm_sm100_fp8_mqa_logits",
+      "config": "s2048_skv8192_h64_d128_bf16_dense_nocp",
+      "gpu": "3",
+      "started_at": "2026-06-11T13:52:11+00:00",
+      "impls": {
+        "deepgemm": 0.119407,
+        "tirx": 0.118935
+      },
+      "errors": {},
+      "timer": "proton",
+      "benchmark_protocol": {
+        "num_groups": 8,
+        "input_bytes": 53002240,
+        "l2_bytes": 134217728,
+        "l2_eviction_factor": 3,
+        "flush_l2": false,
+        "warmup": 100,
+        "repeat": 30,
+        "cooldown_s": 1.0,
+        "order": [
+          "tirx",
+          "deepgemm"
+        ]
+      },
+      "max_diff": 2.5727197027203275e-06,
+      "label": "s2048_skv8192_h64_d128_bf16_dense_nocp",
+      "status": "ok",
+      "finished_at": "2026-06-11T13:52:23+00:00",
+      "attempt": 1
+    },
+    {
+      "kernel": "deepgemm_sm100_fp8_mqa_logits",
+      "config": "s2048_skv8192_h64_d128_f32_compressed_cp",
+      "gpu": "7",
+      "started_at": "2026-06-11T13:51:56+00:00",
+      "impls": {
+        "deepgemm": 0.081586,
+        "tirx": 0.079001
+      },
+      "errors": {},
+      "timer": "proton",
+      "benchmark_protocol": {
+        "num_groups": 6,
+        "input_bytes": 77119488,
+        "l2_bytes": 134217728,
+        "l2_eviction_factor": 3,
+        "flush_l2": false,
+        "warmup": 100,
+        "repeat": 30,
+        "cooldown_s": 1.0,
+        "order": [
+          "tirx",
+          "deepgemm"
+        ]
+      },
+      "max_diff": 1.2019895891945964e-06,
+      "label": "s2048_skv8192_h64_d128_f32_compressed_cp",
+      "status": "ok",
+      "finished_at": "2026-06-11T13:52:09+00:00",
+      "attempt": 1
+    },
+    {
+      "kernel": "deepgemm_sm100_fp8_mqa_logits",
+      "config": "s2048_skv8192_h64_d128_f32_compressed_nocp",
+      "gpu": "1",
+      "started_at": "2026-06-11T13:52:01+00:00",
+      "impls": {
+        "deepgemm": 0.12353700000000001,
+        "tirx": 0.11834
+      },
+      "errors": {},
+      "timer": "proton",
+      "benchmark_protocol": {
+        "num_groups": 5,
+        "input_bytes": 85508096,
+        "l2_bytes": 134217728,
+        "l2_eviction_factor": 3,
+        "flush_l2": false,
+        "warmup": 100,
+        "repeat": 30,
+        "cooldown_s": 1.0,
+        "order": [
+          "tirx",
+          "deepgemm"
+        ]
+      },
+      "max_diff": 1.191881321527255e-06,
+      "label": "s2048_skv8192_h64_d128_f32_compressed_nocp",
+      "status": "ok",
+      "finished_at": "2026-06-11T13:52:12+00:00",
+      "attempt": 1,
+      "restabilized": {
+        "reps": 5,
+        "old_impls": {
+          "deepgemm": 0.12372,
+          "tirx": 0.117976
+        }
+      }
+    },
+    {
+      "kernel": "deepgemm_sm100_fp8_mqa_logits",
+      "config": "s2048_skv8192_h64_d128_f32_dense_cp",
+      "gpu": "7",
+      "started_at": "2026-06-11T13:51:40+00:00",
+      "impls": {
+        "deepgemm": 0.077568,
+        "tirx": 0.077965
+      },
+      "errors": {},
+      "timer": "proton",
+      "benchmark_protocol": {
+        "num_groups": 5,
+        "input_bytes": 87605248,
+        "l2_bytes": 134217728,
+        "l2_eviction_factor": 3,
+        "flush_l2": false,
+        "warmup": 100,
+        "repeat": 30,
+        "cooldown_s": 1.0,
+        "order": [
+          "tirx",
+          "deepgemm"
+        ]
+      },
+      "max_diff": 1.1926007633666913e-06,
+      "label": "s2048_skv8192_h64_d128_f32_dense_cp",
+      "status": "ok",
+      "finished_at": "2026-06-11T13:51:54+00:00",
+      "attempt": 1
+    },
+    {
+      "kernel": "deepgemm_sm100_fp8_mqa_logits",
+      "config": "s2048_skv8192_h64_d128_f32_dense_nocp",
+      "gpu": "6",
+      "started_at": "2026-06-11T13:51:42+00:00",
+      "impls": {
+        "deepgemm": 0.118698,
+        "tirx": 0.119661
+      },
+      "errors": {},
+      "timer": "proton",
+      "benchmark_protocol": {
+        "num_groups": 5,
+        "input_bytes": 87605248,
+        "l2_bytes": 134217728,
+        "l2_eviction_factor": 3,
+        "flush_l2": false,
+        "warmup": 100,
+        "repeat": 30,
+        "cooldown_s": 1.0,
+        "order": [
+          "tirx",
+          "deepgemm"
+        ]
+      },
+      "max_diff": 1.1811263653793702e-06,
+      "label": "s2048_skv8192_h64_d128_f32_dense_nocp",
+      "status": "ok",
+      "finished_at": "2026-06-11T13:51:54+00:00",
+      "attempt": 1
+    },
+    {
+      "kernel": "deepgemm_sm100_fp8_mqa_logits",
+      "config": "s4096_skv4096_h64_d128_bf16_compressed_cp",
+      "gpu": "1",
+      "started_at": "2026-06-11T13:57:36+00:00",
+      "impls": {
+        "deepgemm": 0.130594,
+        "tirx": 0.12734600000000001
+      },
+      "errors": {},
+      "timer": "proton",
+      "benchmark_protocol": {
+        "num_groups": 6,
+        "input_bytes": 68730880,
+        "l2_bytes": 134217728,
+        "l2_eviction_factor": 3,
+        "flush_l2": false,
+        "warmup": 100,
+        "repeat": 30,
+        "cooldown_s": 1.0,
+        "order": [
+          "tirx",
+          "deepgemm"
+        ]
+      },
+      "max_diff": 2.5662790410496683e-06,
+      "label": "s4096_skv4096_h64_d128_bf16_compressed_cp",
+      "status": "ok",
+      "finished_at": "2026-06-11T13:57:53+00:00",
+      "attempt": 2
+    },
+    {
+      "kernel": "deepgemm_sm100_fp8_mqa_logits",
+      "config": "s4096_skv4096_h64_d128_bf16_compressed_nocp",
+      "gpu": "2",
+      "started_at": "2026-06-11T13:52:30+00:00",
+      "impls": {
+        "deepgemm": 0.082211,
+        "tirx": 0.08051000000000001
+      },
+      "errors": {},
+      "timer": "proton",
+      "benchmark_protocol": {
+        "num_groups": 6,
+        "input_bytes": 68730880,
+        "l2_bytes": 134217728,
+        "l2_eviction_factor": 3,
+        "flush_l2": false,
+        "warmup": 100,
+        "repeat": 30,
+        "cooldown_s": 1.0,
+        "order": [
+          "tirx",
+          "deepgemm"
+        ]
+      },
+      "max_diff": 2.573891893176139e-06,
+      "label": "s4096_skv4096_h64_d128_bf16_compressed_nocp",
+      "status": "ok",
+      "finished_at": "2026-06-11T13:52:41+00:00",
+      "attempt": 1
+    },
+    {
+      "kernel": "deepgemm_sm100_fp8_mqa_logits",
+      "config": "s4096_skv4096_h64_d128_bf16_dense_cp",
+      "gpu": "1",
+      "started_at": "2026-06-11T13:52:12+00:00",
+      "impls": {
+        "deepgemm": 0.077237,
+        "tirx": 0.077032
+      },
+      "errors": {},
+      "timer": "proton",
+      "benchmark_protocol": {
+        "num_groups": 6,
+        "input_bytes": 70828032,
+        "l2_bytes": 134217728,
+        "l2_eviction_factor": 3,
+        "flush_l2": false,
+        "warmup": 100,
+        "repeat": 30,
+        "cooldown_s": 1.0,
+        "order": [
+          "tirx",
+          "deepgemm"
+        ]
+      },
+      "max_diff": 2.550895423336641e-06,
+      "label": "s4096_skv4096_h64_d128_bf16_dense_cp",
+      "status": "ok",
+      "finished_at": "2026-06-11T13:52:25+00:00",
+      "attempt": 1
+    },
+    {
+      "kernel": "deepgemm_sm100_fp8_mqa_logits",
+      "config": "s4096_skv4096_h64_d128_bf16_dense_nocp",
+      "gpu": "6",
+      "started_at": "2026-06-11T13:57:27+00:00",
+      "impls": {
+        "deepgemm": 0.07823300000000001,
+        "tirx": 0.078376
+      },
+      "errors": {},
+      "timer": "proton",
+      "benchmark_protocol": {
+        "num_groups": 6,
+        "input_bytes": 70828032,
+        "l2_bytes": 134217728,
+        "l2_eviction_factor": 3,
+        "flush_l2": false,
+        "warmup": 100,
+        "repeat": 30,
+        "cooldown_s": 1.0,
+        "order": [
+          "tirx",
+          "deepgemm"
+        ]
+      },
+      "max_diff": 2.555888410804563e-06,
+      "label": "s4096_skv4096_h64_d128_bf16_dense_nocp",
+      "status": "ok",
+      "finished_at": "2026-06-11T13:57:43+00:00",
+      "attempt": 2
+    },
+    {
+      "kernel": "deepgemm_sm100_fp8_mqa_logits",
+      "config": "s4096_skv4096_h64_d128_f32_compressed_cp",
+      "gpu": "0",
+      "started_at": "2026-06-11T13:52:02+00:00",
+      "impls": {
+        "deepgemm": 0.081705,
+        "tirx": 0.07675900000000001
+      },
+      "errors": {},
+      "timer": "proton",
+      "benchmark_protocol": {
+        "num_groups": 4,
+        "input_bytes": 102285312,
+        "l2_bytes": 134217728,
+        "l2_eviction_factor": 3,
+        "flush_l2": false,
+        "warmup": 100,
+        "repeat": 30,
+        "cooldown_s": 1.0,
+        "order": [
+          "tirx",
+          "deepgemm"
+        ]
+      },
+      "max_diff": 1.1731217538502037e-06,
+      "label": "s4096_skv4096_h64_d128_f32_compressed_cp",
+      "status": "ok",
+      "finished_at": "2026-06-11T13:52:13+00:00",
+      "attempt": 1
+    },
+    {
+      "kernel": "deepgemm_sm100_fp8_mqa_logits",
+      "config": "s4096_skv4096_h64_d128_f32_compressed_nocp",
+      "gpu": "2",
+      "started_at": "2026-06-11T13:52:04+00:00",
+      "impls": {
+        "deepgemm": 0.082314,
+        "tirx": 0.07696599999999999
+      },
+      "errors": {},
+      "timer": "proton",
+      "benchmark_protocol": {
+        "num_groups": 4,
+        "input_bytes": 102285312,
+        "l2_bytes": 134217728,
+        "l2_eviction_factor": 3,
+        "flush_l2": false,
+        "warmup": 100,
+        "repeat": 30,
+        "cooldown_s": 1.0,
+        "order": [
+          "tirx",
+          "deepgemm"
+        ]
+      },
+      "max_diff": 1.1873495850966975e-06,
+      "label": "s4096_skv4096_h64_d128_f32_compressed_nocp",
+      "status": "ok",
+      "finished_at": "2026-06-11T13:52:15+00:00",
+      "attempt": 1
+    },
+    {
+      "kernel": "deepgemm_sm100_fp8_mqa_logits",
+      "config": "s4096_skv4096_h64_d128_f32_dense_cp",
+      "gpu": "0",
+      "started_at": "2026-06-11T13:51:45+00:00",
+      "impls": {
+        "deepgemm": 0.07593300000000001,
+        "tirx": 0.07645099999999999
+      },
+      "errors": {},
+      "timer": "proton",
+      "benchmark_protocol": {
+        "num_groups": 4,
+        "input_bytes": 106479616,
+        "l2_bytes": 134217728,
+        "l2_eviction_factor": 3,
+        "flush_l2": false,
+        "warmup": 100,
+        "repeat": 30,
+        "cooldown_s": 1.0,
+        "order": [
+          "tirx",
+          "deepgemm"
+        ]
+      },
+      "max_diff": 1.1959700515484784e-06,
+      "label": "s4096_skv4096_h64_d128_f32_dense_cp",
+      "status": "ok",
+      "finished_at": "2026-06-11T13:52:01+00:00",
+      "attempt": 1
+    },
+    {
+      "kernel": "deepgemm_sm100_fp8_mqa_logits",
+      "config": "s4096_skv4096_h64_d128_f32_dense_nocp",
+      "gpu": "1",
+      "started_at": "2026-06-11T13:51:46+00:00",
+      "impls": {
+        "deepgemm": 0.075715,
+        "tirx": 0.075928
+      },
+      "errors": {},
+      "timer": "proton",
+      "benchmark_protocol": {
+        "num_groups": 4,
+        "input_bytes": 106479616,
+        "l2_bytes": 134217728,
+        "l2_eviction_factor": 3,
+        "flush_l2": false,
+        "warmup": 100,
+        "repeat": 30,
+        "cooldown_s": 1.0,
+        "order": [
+          "tirx",
+          "deepgemm"
+        ]
+      },
+      "max_diff": 1.1760488713985495e-06,
+      "label": "s4096_skv4096_h64_d128_f32_dense_nocp",
+      "status": "ok",
+      "finished_at": "2026-06-11T13:51:58+00:00",
+      "attempt": 1
+    },
+    {
+      "kernel": "deepgemm_sm100_fp8_mqa_logits",
+      "config": "s4096_skv8192_h64_d128_bf16_compressed_cp",
+      "gpu": "4",
+      "started_at": "2026-06-11T13:52:33+00:00",
+      "impls": {
+        "deepgemm": 0.144687,
+        "tirx": 0.1419
+      },
+      "errors": {},
+      "timer": "proton",
+      "benchmark_protocol": {
+        "num_groups": 4,
+        "input_bytes": 102825984,
+        "l2_bytes": 134217728,
+        "l2_eviction_factor": 3,
+        "flush_l2": false,
+        "warmup": 100,
+        "repeat": 30,
+        "cooldown_s": 1.0,
+        "order": [
+          "tirx",
+          "deepgemm"
+        ]
+      },
+      "max_diff": 2.559772938948157e-06,
+      "label": "s4096_skv8192_h64_d128_bf16_compressed_cp",
+      "status": "ok",
+      "finished_at": "2026-06-11T13:52:46+00:00",
+      "attempt": 1
+    },
+    {
+      "kernel": "deepgemm_sm100_fp8_mqa_logits",
+      "config": "s4096_skv8192_h64_d128_bf16_compressed_nocp",
+      "gpu": "6",
+      "started_at": "2026-06-11T13:52:34+00:00",
+      "impls": {
+        "deepgemm": 0.209049,
+        "tirx": 0.203637
+      },
+      "errors": {},
+      "timer": "proton",
+      "benchmark_protocol": {
+        "num_groups": 4,
+        "input_bytes": 102825984,
+        "l2_bytes": 134217728,
+        "l2_eviction_factor": 3,
+        "flush_l2": false,
+        "warmup": 100,
+        "repeat": 30,
+        "cooldown_s": 1.0,
+        "order": [
+          "tirx",
+          "deepgemm"
+        ]
+      },
+      "max_diff": 2.57000874337443e-06,
+      "label": "s4096_skv8192_h64_d128_bf16_compressed_nocp",
+      "status": "ok",
+      "finished_at": "2026-06-11T13:52:46+00:00",
+      "attempt": 1,
+      "restabilized": {
+        "reps": 5,
+        "old_impls": {
+          "deepgemm": 0.209291,
+          "tirx": 0.204412
+        }
+      }
+    },
+    {
+      "kernel": "deepgemm_sm100_fp8_mqa_logits",
+      "config": "s4096_skv8192_h64_d128_bf16_dense_cp",
+      "gpu": "2",
+      "started_at": "2026-06-11T13:52:16+00:00",
+      "impls": {
+        "deepgemm": 0.136802,
+        "tirx": 0.136482
+      },
+      "errors": {},
+      "timer": "proton",
+      "benchmark_protocol": {
+        "num_groups": 4,
+        "input_bytes": 104923136,
+        "l2_bytes": 134217728,
+        "l2_eviction_factor": 3,
+        "flush_l2": false,
+        "warmup": 100,
+        "repeat": 30,
+        "cooldown_s": 1.0,
+        "order": [
+          "tirx",
+          "deepgemm"
+        ]
+      },
+      "max_diff": 2.5559830745258694e-06,
+      "label": "s4096_skv8192_h64_d128_bf16_dense_cp",
+      "status": "ok",
+      "finished_at": "2026-06-11T13:52:29+00:00",
+      "attempt": 1
+    },
+    {
+      "kernel": "deepgemm_sm100_fp8_mqa_logits",
+      "config": "s4096_skv8192_h64_d128_bf16_dense_nocp",
+      "gpu": "4",
+      "started_at": "2026-06-11T13:52:21+00:00",
+      "impls": {
+        "deepgemm": 0.19651400000000002,
+        "tirx": 0.194628
+      },
+      "errors": {},
+      "timer": "proton",
+      "benchmark_protocol": {
+        "num_groups": 4,
+        "input_bytes": 104923136,
+        "l2_bytes": 134217728,
+        "l2_eviction_factor": 3,
+        "flush_l2": false,
+        "warmup": 100,
+        "repeat": 30,
+        "cooldown_s": 1.0,
+        "order": [
+          "tirx",
+          "deepgemm"
+        ]
+      },
+      "max_diff": 2.553350818668143e-06,
+      "label": "s4096_skv8192_h64_d128_bf16_dense_nocp",
+      "status": "ok",
+      "finished_at": "2026-06-11T13:52:33+00:00",
+      "attempt": 1
+    },
+    {
+      "kernel": "deepgemm_sm100_fp8_mqa_logits",
+      "config": "s4096_skv8192_h64_d128_f32_compressed_cp",
+      "gpu": "2",
+      "started_at": "2026-06-11T13:58:41+00:00",
+      "impls": {
+        "deepgemm": 0.14527299999999999,
+        "tirx": 0.135793
+      },
+      "errors": {},
+      "timer": "proton",
+      "benchmark_protocol": {
+        "num_groups": 3,
+        "input_bytes": 169934848,
+        "l2_bytes": 134217728,
+        "l2_eviction_factor": 3,
+        "flush_l2": false,
+        "warmup": 100,
+        "repeat": 30,
+        "cooldown_s": 1.0,
+        "order": [
+          "tirx",
+          "deepgemm"
+        ]
+      },
+      "max_diff": 1.1828110724199092e-06,
+      "label": "s4096_skv8192_h64_d128_f32_compressed_cp",
+      "status": "ok",
+      "finished_at": "2026-06-11T13:58:53+00:00",
+      "attempt": 4
+    },
+    {
+      "kernel": "deepgemm_sm100_fp8_mqa_logits",
+      "config": "s4096_skv8192_h64_d128_f32_compressed_nocp",
+      "gpu": "4",
+      "started_at": "2026-06-11T13:52:08+00:00",
+      "impls": {
+        "deepgemm": 0.20895,
+        "tirx": 0.19637100000000002
+      },
+      "errors": {},
+      "timer": "proton",
+      "benchmark_protocol": {
+        "num_groups": 3,
+        "input_bytes": 169934848,
+        "l2_bytes": 134217728,
+        "l2_eviction_factor": 3,
+        "flush_l2": false,
+        "warmup": 100,
+        "repeat": 30,
+        "cooldown_s": 1.0,
+        "order": [
+          "tirx",
+          "deepgemm"
+        ]
+      },
+      "max_diff": 1.168848233645825e-06,
+      "label": "s4096_skv8192_h64_d128_f32_compressed_nocp",
+      "status": "ok",
+      "finished_at": "2026-06-11T13:52:20+00:00",
+      "attempt": 1,
+      "restabilized": {
+        "reps": 5,
+        "old_impls": {
+          "deepgemm": 0.20765,
+          "tirx": 0.193798
+        }
+      }
+    },
+    {
+      "kernel": "deepgemm_sm100_fp8_mqa_logits",
+      "config": "s4096_skv8192_h64_d128_f32_dense_cp",
+      "gpu": "2",
+      "started_at": "2026-06-11T13:51:52+00:00",
+      "impls": {
+        "deepgemm": 0.134662,
+        "tirx": 0.13365700000000003
+      },
+      "errors": {},
+      "timer": "proton",
+      "benchmark_protocol": {
+        "num_groups": 3,
+        "input_bytes": 174129152,
+        "l2_bytes": 134217728,
+        "l2_eviction_factor": 3,
+        "flush_l2": false,
+        "warmup": 100,
+        "repeat": 30,
+        "cooldown_s": 1.0,
+        "order": [
+          "tirx",
+          "deepgemm"
+        ]
+      },
+      "max_diff": 1.1701566348110148e-06,
+      "label": "s4096_skv8192_h64_d128_f32_dense_cp",
+      "status": "ok",
+      "finished_at": "2026-06-11T13:52:04+00:00",
+      "attempt": 1
+    },
+    {
+      "kernel": "deepgemm_sm100_fp8_mqa_logits",
+      "config": "s4096_skv8192_h64_d128_f32_dense_nocp",
+      "gpu": "3",
+      "started_at": "2026-06-11T13:51:53+00:00",
+      "impls": {
+        "deepgemm": 0.19257400000000002,
+        "tirx": 0.19211699999999998
+      },
+      "errors": {},
+      "timer": "proton",
+      "benchmark_protocol": {
+        "num_groups": 3,
+        "input_bytes": 174129152,
+        "l2_bytes": 134217728,
+        "l2_eviction_factor": 3,
+        "flush_l2": false,
+        "warmup": 100,
+        "repeat": 30,
+        "cooldown_s": 1.0,
+        "order": [
+          "tirx",
+          "deepgemm"
+        ]
+      },
+      "max_diff": 1.1758747723300544e-06,
+      "label": "s4096_skv8192_h64_d128_f32_dense_nocp",
+      "status": "ok",
+      "finished_at": "2026-06-11T13:52:05+00:00",
+      "attempt": 1,
+      "restabilized": {
+        "reps": 5,
+        "old_impls": {
+          "deepgemm": 0.229618,
+          "tirx": 0.194462
+        }
+      }
+    },
+    {
+      "kernel": "deepgemm_sm100_fp8_paged_mqa_logits",
+      "config": "b16_n1_mp128_ps64_h64_d128_bf16_fixed",
+      "gpu": "0",
+      "started_at": "2026-06-11T13:53:40+00:00",
+      "impls": {
+        "deepgemm": 0.004516,
+        "tirx": 0.00459
+      },
+      "errors": {},
+      "timer": "proton",
+      "benchmark_protocol": {
+        "num_groups": 4,
+        "input_bytes": 101132264,
+        "l2_bytes": 134217728,
+        "l2_eviction_factor": 3,
+        "flush_l2": false,
+        "warmup": 100,
+        "repeat": 30,
+        "cooldown_s": 1.0,
+        "order": [
+          "tirx",
+          "deepgemm"
+        ]
+      },
+      "max_diff": 2.2112591535616843e-06,
+      "label": "b16_n1_mp128_ps64_h64_d128_bf16_fixed",
+      "status": "ok",
+      "finished_at": "2026-06-11T13:53:53+00:00",
+      "attempt": 1
+    },
+    {
+      "kernel": "deepgemm_sm100_fp8_paged_mqa_logits",
+      "config": "b16_n1_mp128_ps64_h64_d128_f32_fixed",
+      "gpu": "0",
+      "started_at": "2026-06-11T13:53:05+00:00",
+      "impls": {
+        "deepgemm": 0.004549,
+        "tirx": 0.004595
+      },
+      "errors": {},
+      "timer": "proton",
+      "benchmark_protocol": {
+        "num_groups": 4,
+        "input_bytes": 101394408,
+        "l2_bytes": 134217728,
+        "l2_eviction_factor": 3,
+        "flush_l2": false,
+        "warmup": 100,
+        "repeat": 30,
+        "cooldown_s": 1.0,
+        "order": [
+          "tirx",
+          "deepgemm"
+        ]
+      },
+      "max_diff": 8.497649895966575e-07,
+      "label": "b16_n1_mp128_ps64_h64_d128_f32_fixed",
+      "status": "ok",
+      "finished_at": "2026-06-11T13:53:17+00:00",
+      "attempt": 1
+    },
+    {
+      "kernel": "deepgemm_sm100_fp8_paged_mqa_logits",
+      "config": "b16_n1_mp1_ps64_h64_d128_bf16_fixed",
+      "gpu": "4",
+      "started_at": "2026-06-11T13:53:36+00:00",
+      "impls": {
+        "deepgemm": 0.003971000000000001,
+        "tirx": 0.003972
+      },
+      "errors": {},
+      "timer": "proton",
+      "benchmark_protocol": {
+        "num_groups": 4,
+        "input_bytes": 100870184,
+        "l2_bytes": 134217728,
+        "l2_eviction_factor": 3,
+        "flush_l2": false,
+        "warmup": 100,
+        "repeat": 30,
+        "cooldown_s": 1.0,
+        "order": [
+          "tirx",
+          "deepgemm"
+        ]
+      },
+      "max_diff": 2.2710241126544517e-06,
+      "label": "b16_n1_mp1_ps64_h64_d128_bf16_fixed",
+      "status": "ok",
+      "finished_at": "2026-06-11T13:53:49+00:00",
+      "attempt": 1
+    },
+    {
+      "kernel": "deepgemm_sm100_fp8_paged_mqa_logits",
+      "config": "b16_n1_mp1_ps64_h64_d128_f32_fixed",
+      "gpu": "4",
+      "started_at": "2026-06-11T13:52:59+00:00",
+      "impls": {
+        "deepgemm": 0.00398,
+        "tirx": 0.003962
+      },
+      "errors": {},
+      "timer": "proton",
+      "benchmark_protocol": {
+        "num_groups": 4,
+        "input_bytes": 100878376,
+        "l2_bytes": 134217728,
+        "l2_eviction_factor": 3,
+        "flush_l2": false,
+        "warmup": 100,
+        "repeat": 30,
+        "cooldown_s": 1.0,
+        "order": [
+          "tirx",
+          "deepgemm"
+        ]
+      },
+      "max_diff": 8.562632021202887e-07,
+      "label": "b16_n1_mp1_ps64_h64_d128_f32_fixed",
+      "status": "ok",
+      "finished_at": "2026-06-11T13:53:11+00:00",
+      "attempt": 1
+    },
+    {
+      "kernel": "deepgemm_sm100_fp8_paged_mqa_logits",
+      "config": "b16_n1_mp32_ps64_h64_d128_bf16_fixed",
+      "gpu": "6",
+      "started_at": "2026-06-11T13:57:50+00:00",
+      "impls": {
+        "deepgemm": 0.003946,
+        "tirx": 0.003957
+      },
+      "errors": {},
+      "timer": "proton",
+      "benchmark_protocol": {
+        "num_groups": 4,
+        "input_bytes": 100929512,
+        "l2_bytes": 134217728,
+        "l2_eviction_factor": 3,
+        "flush_l2": false,
+        "warmup": 100,
+        "repeat": 30,
+        "cooldown_s": 1.0,
+        "order": [
+          "tirx",
+          "deepgemm"
+        ]
+      },
+      "max_diff": 2.2989218162461356e-06,
+      "label": "b16_n1_mp32_ps64_h64_d128_bf16_fixed",
+      "status": "ok",
+      "finished_at": "2026-06-11T13:58:09+00:00",
+      "attempt": 2,
+      "restabilized": {
+        "reps": 5,
+        "old_impls": {
+          "deepgemm": 0.003905,
+          "tirx": 0.003925
+        }
+      }
+    },
+    {
+      "kernel": "deepgemm_sm100_fp8_paged_mqa_logits",
+      "config": "b16_n1_mp32_ps64_h64_d128_f32_fixed",
+      "gpu": "7",
+      "started_at": "2026-06-11T13:53:03+00:00",
+      "impls": {
+        "deepgemm": 0.0039,
+        "tirx": 0.003921
+      },
+      "errors": {},
+      "timer": "proton",
+      "benchmark_protocol": {
+        "num_groups": 4,
+        "input_bytes": 100995048,
+        "l2_bytes": 134217728,
+        "l2_eviction_factor": 3,
+        "flush_l2": false,
+        "warmup": 100,
+        "repeat": 30,
+        "cooldown_s": 1.0,
+        "order": [
+          "tirx",
+          "deepgemm"
+        ]
+      },
+      "max_diff": 6.552570275264458e-07,
+      "label": "b16_n1_mp32_ps64_h64_d128_f32_fixed",
+      "status": "ok",
+      "finished_at": "2026-06-11T13:53:15+00:00",
+      "attempt": 1
+    },
+    {
+      "kernel": "deepgemm_sm100_fp8_paged_mqa_logits",
+      "config": "b16_n1_mp8_ps64_h64_d128_bf16_fixed",
+      "gpu": "6",
+      "started_at": "2026-06-11T13:53:37+00:00",
+      "impls": {
+        "deepgemm": 0.003693,
+        "tirx": 0.003716
+      },
+      "errors": {},
+      "timer": "proton",
+      "benchmark_protocol": {
+        "num_groups": 4,
+        "input_bytes": 100878824,
+        "l2_bytes": 134217728,
+        "l2_eviction_factor": 3,
+        "flush_l2": false,
+        "warmup": 100,
+        "repeat": 30,
+        "cooldown_s": 1.0,
+        "order": [
+          "tirx",
+          "deepgemm"
+        ]
+      },
+      "max_diff": 2.245212179841083e-06,
+      "label": "b16_n1_mp8_ps64_h64_d128_bf16_fixed",
+      "status": "ok",
+      "finished_at": "2026-06-11T13:53:50+00:00",
+      "attempt": 1,
+      "restabilized": {
+        "reps": 5,
+        "old_impls": {
+          "deepgemm": 0.003649,
+          "tirx": 0.003649
+        }
+      }
+    },
+    {
+      "kernel": "deepgemm_sm100_fp8_paged_mqa_logits",
+      "config": "b16_n1_mp8_ps64_h64_d128_f32_fixed",
+      "gpu": "3",
+      "started_at": "2026-06-11T13:53:02+00:00",
+      "impls": {
+        "deepgemm": 0.0036090000000000002,
+        "tirx": 0.0036349999999999998
+      },
+      "errors": {},
+      "timer": "proton",
+      "benchmark_protocol": {
+        "num_groups": 4,
+        "input_bytes": 100895208,
+        "l2_bytes": 134217728,
+        "l2_eviction_factor": 3,
+        "flush_l2": false,
+        "warmup": 100,
+        "repeat": 30,
+        "cooldown_s": 1.0,
+        "order": [
+          "tirx",
+          "deepgemm"
+        ]
+      },
+      "max_diff": 1.0555911417187147e-06,
+      "label": "b16_n1_mp8_ps64_h64_d128_f32_fixed",
+      "status": "ok",
+      "finished_at": "2026-06-11T13:53:13+00:00",
+      "attempt": 1
+    },
+    {
+      "kernel": "deepgemm_sm100_fp8_paged_mqa_logits",
+      "config": "b1_n1_mp128_ps64_h64_d128_bf16_fixed",
+      "gpu": "4",
+      "started_at": "2026-06-11T13:53:11+00:00",
+      "impls": {
+        "deepgemm": 0.003979,
+        "tirx": 0.003984
+      },
+      "errors": {},
+      "timer": "proton",
+      "benchmark_protocol": {
+        "num_groups": 4,
+        "input_bytes": 100752044,
+        "l2_bytes": 134217728,
+        "l2_eviction_factor": 3,
+        "flush_l2": false,
+        "warmup": 100,
+        "repeat": 30,
+        "cooldown_s": 1.0,
+        "order": [
+          "tirx",
+          "deepgemm"
+        ]
+      },
+      "max_diff": 2.744638747498307e-06,
+      "label": "b1_n1_mp128_ps64_h64_d128_bf16_fixed",
+      "status": "ok",
+      "finished_at": "2026-06-11T13:53:23+00:00",
+      "attempt": 1
+    },
+    {
+      "kernel": "deepgemm_sm100_fp8_paged_mqa_logits",
+      "config": "b1_n1_mp128_ps64_h64_d128_f32_fixed",
+      "gpu": "0",
+      "started_at": "2026-06-11T13:52:40+00:00",
+      "impls": {
+        "deepgemm": 0.004019,
+        "tirx": 0.004069
+      },
+      "errors": {},
+      "timer": "proton",
+      "benchmark_protocol": {
+        "num_groups": 4,
+        "input_bytes": 100768428,
+        "l2_bytes": 134217728,
+        "l2_eviction_factor": 3,
+        "flush_l2": false,
+        "warmup": 100,
+        "repeat": 30,
+        "cooldown_s": 1.0,
+        "order": [
+          "tirx",
+          "deepgemm"
+        ]
+      },
+      "max_diff": 1.3438036100543727e-06,
+      "label": "b1_n1_mp128_ps64_h64_d128_f32_fixed",
+      "status": "ok",
+      "finished_at": "2026-06-11T13:52:52+00:00",
+      "attempt": 1
+    },
+    {
+      "kernel": "deepgemm_sm100_fp8_paged_mqa_logits",
+      "config": "b1_n1_mp1_ps64_h64_d128_bf16_fixed",
+      "gpu": "1",
+      "started_at": "2026-06-11T13:53:06+00:00",
+      "impls": {
+        "deepgemm": 0.0038690000000000005,
+        "tirx": 0.003901
+      },
+      "errors": {},
+      "timer": "proton",
+      "benchmark_protocol": {
+        "num_groups": 4,
+        "input_bytes": 100735664,
+        "l2_bytes": 134217728,
+        "l2_eviction_factor": 3,
+        "flush_l2": false,
+        "warmup": 100,
+        "repeat": 30,
+        "cooldown_s": 1.0,
+        "order": [
+          "tirx",
+          "deepgemm"
+        ]
+      },
+      "max_diff": 2.694121976176689e-06,
+      "label": "b1_n1_mp1_ps64_h64_d128_bf16_fixed",
+      "status": "ok",
+      "finished_at": "2026-06-11T13:53:20+00:00",
+      "attempt": 1
+    },
+    {
+      "kernel": "deepgemm_sm100_fp8_paged_mqa_logits",
+      "config": "b1_n1_mp1_ps64_h64_d128_f32_fixed",
+      "gpu": "7",
+      "started_at": "2026-06-11T13:52:35+00:00",
+      "impls": {
+        "deepgemm": 0.00367,
+        "tirx": 0.0036650000000000003
+      },
+      "errors": {},
+      "timer": "proton",
+      "benchmark_protocol": {
+        "num_groups": 4,
+        "input_bytes": 100736176,
+        "l2_bytes": 134217728,
+        "l2_eviction_factor": 3,
+        "flush_l2": false,
+        "warmup": 100,
+        "repeat": 30,
+        "cooldown_s": 1.0,
+        "order": [
+          "tirx",
+          "deepgemm"
+        ]
+      },
+      "max_diff": 1.3363154245382702e-06,
+      "label": "b1_n1_mp1_ps64_h64_d128_f32_fixed",
+      "status": "ok",
+      "finished_at": "2026-06-11T13:52:50+00:00",
+      "attempt": 1
+    },
+    {
+      "kernel": "deepgemm_sm100_fp8_paged_mqa_logits",
+      "config": "b1_n1_mp32_ps64_h64_d128_bf16_fixed",
+      "gpu": "6",
+      "started_at": "2026-06-11T13:53:10+00:00",
+      "impls": {
+        "deepgemm": 0.003655,
+        "tirx": 0.003707
+      },
+      "errors": {},
+      "timer": "proton",
+      "benchmark_protocol": {
+        "num_groups": 4,
+        "input_bytes": 100739372,
+        "l2_bytes": 134217728,
+        "l2_eviction_factor": 3,
+        "flush_l2": false,
+        "warmup": 100,
+        "repeat": 30,
+        "cooldown_s": 1.0,
+        "order": [
+          "tirx",
+          "deepgemm"
+        ]
+      },
+      "max_diff": 2.502857083808152e-06,
+      "label": "b1_n1_mp32_ps64_h64_d128_bf16_fixed",
+      "status": "ok",
+      "finished_at": "2026-06-11T13:53:22+00:00",
+      "attempt": 1
+    },
+    {
+      "kernel": "deepgemm_sm100_fp8_paged_mqa_logits",
+      "config": "b1_n1_mp32_ps64_h64_d128_f32_fixed",
+      "gpu": "7",
+      "started_at": "2026-06-11T13:54:13+00:00",
+      "impls": {
+        "deepgemm": 0.003546,
+        "tirx": 0.0035730000000000002
+      },
+      "errors": {},
+      "timer": "proton",
+      "benchmark_protocol": {
+        "num_groups": 4,
+        "input_bytes": 100743468,
+        "l2_bytes": 134217728,
+        "l2_eviction_factor": 3,
+        "flush_l2": false,
+        "warmup": 100,
+        "repeat": 30,
+        "cooldown_s": 1.0,
+        "order": [
+          "tirx",
+          "deepgemm"
+        ]
+      },
+      "max_diff": 9.503645422848095e-07,
+      "label": "b1_n1_mp32_ps64_h64_d128_f32_fixed",
+      "status": "ok",
+      "finished_at": "2026-06-11T13:54:23+00:00",
+      "attempt": 1
+    },
+    {
+      "kernel": "deepgemm_sm100_fp8_paged_mqa_logits",
+      "config": "b1_n1_mp8_ps64_h64_d128_bf16_fixed",
+      "gpu": "2",
+      "started_at": "2026-06-11T13:53:08+00:00",
+      "impls": {
+        "deepgemm": 0.004014,
+        "tirx": 0.00404
+      },
+      "errors": {},
+      "timer": "proton",
+      "benchmark_protocol": {
+        "num_groups": 4,
+        "input_bytes": 100736204,
+        "l2_bytes": 134217728,
+        "l2_eviction_factor": 3,
+        "flush_l2": false,
+        "warmup": 100,
+        "repeat": 30,
+        "cooldown_s": 1.0,
+        "order": [
+          "tirx",
+          "deepgemm"
+        ]
+      },
+      "max_diff": 2.027576392671371e-06,
+      "label": "b1_n1_mp8_ps64_h64_d128_bf16_fixed",
+      "status": "ok",
+      "finished_at": "2026-06-11T13:53:20+00:00",
+      "attempt": 1
+    },
+    {
+      "kernel": "deepgemm_sm100_fp8_paged_mqa_logits",
+      "config": "b1_n1_mp8_ps64_h64_d128_f32_fixed",
+      "gpu": "3",
+      "started_at": "2026-06-11T13:52:38+00:00",
+      "impls": {
+        "deepgemm": 0.0036290000000000003,
+        "tirx": 0.003621
+      },
+      "errors": {},
+      "timer": "proton",
+      "benchmark_protocol": {
+        "num_groups": 4,
+        "input_bytes": 100737228,
+        "l2_bytes": 134217728,
+        "l2_eviction_factor": 3,
+        "flush_l2": false,
+        "warmup": 100,
+        "repeat": 30,
+        "cooldown_s": 1.0,
+        "order": [
+          "tirx",
+          "deepgemm"
+        ]
+      },
+      "max_diff": 1.5249635046954424e-06,
+      "label": "b1_n1_mp8_ps64_h64_d128_f32_fixed",
+      "status": "ok",
+      "finished_at": "2026-06-11T13:52:50+00:00",
+      "attempt": 1
+    },
+    {
+      "kernel": "deepgemm_sm100_fp8_paged_mqa_logits",
+      "config": "b2_n1_mp128_ps64_h64_d128_bf16_fixed",
+      "gpu": "1",
+      "started_at": "2026-06-11T13:53:20+00:00",
+      "impls": {
+        "deepgemm": 0.003934,
+        "tirx": 0.003947
+      },
+      "errors": {},
+      "timer": "proton",
+      "benchmark_protocol": {
+        "num_groups": 4,
+        "input_bytes": 100777392,
+        "l2_bytes": 134217728,
+        "l2_eviction_factor": 3,
+        "flush_l2": false,
+        "warmup": 100,
+        "repeat": 30,
+        "cooldown_s": 1.0,
+        "order": [
+          "tirx",
+          "deepgemm"
+        ]
+      },
+      "max_diff": 2.5834711400163357e-06,
+      "label": "b2_n1_mp128_ps64_h64_d128_bf16_fixed",
+      "status": "ok",
+      "finished_at": "2026-06-11T13:53:34+00:00",
+      "attempt": 1
+    },
+    {
+      "kernel": "deepgemm_sm100_fp8_paged_mqa_logits",
+      "config": "b2_n1_mp128_ps64_h64_d128_f32_fixed",
+      "gpu": "2",
+      "started_at": "2026-06-11T13:57:45+00:00",
+      "impls": {
+        "deepgemm": 0.004046,
+        "tirx": 0.004077
+      },
+      "errors": {},
+      "timer": "proton",
+      "benchmark_protocol": {
+        "num_groups": 4,
+        "input_bytes": 100810160,
+        "l2_bytes": 134217728,
+        "l2_eviction_factor": 3,
+        "flush_l2": false,
+        "warmup": 100,
+        "repeat": 30,
+        "cooldown_s": 1.0,
+        "order": [
+          "tirx",
+          "deepgemm"
+        ]
+      },
+      "max_diff": 1.0830482355395077e-06,
+      "label": "b2_n1_mp128_ps64_h64_d128_f32_fixed",
+      "status": "ok",
+      "finished_at": "2026-06-11T13:58:04+00:00",
+      "attempt": 2
+    },
+    {
+      "kernel": "deepgemm_sm100_fp8_paged_mqa_logits",
+      "config": "b2_n1_mp1_ps64_h64_d128_bf16_fixed",
+      "gpu": "3",
+      "started_at": "2026-06-11T13:53:14+00:00",
+      "impls": {
+        "deepgemm": 0.003698,
+        "tirx": 0.003706
+      },
+      "errors": {},
+      "timer": "proton",
+      "benchmark_protocol": {
+        "num_groups": 4,
+        "input_bytes": 100744632,
+        "l2_bytes": 134217728,
+        "l2_eviction_factor": 3,
+        "flush_l2": false,
+        "warmup": 100,
+        "repeat": 30,
+        "cooldown_s": 1.0,
+        "order": [
+          "tirx",
+          "deepgemm"
+        ]
+      },
+      "max_diff": 2.148378958954922e-06,
+      "label": "b2_n1_mp1_ps64_h64_d128_bf16_fixed",
+      "status": "ok",
+      "finished_at": "2026-06-11T13:53:27+00:00",
+      "attempt": 1
+    },
+    {
+      "kernel": "deepgemm_sm100_fp8_paged_mqa_logits",
+      "config": "b2_n1_mp1_ps64_h64_d128_f32_fixed",
+      "gpu": "4",
+      "started_at": "2026-06-11T13:57:34+00:00",
+      "impls": {
+        "deepgemm": 0.003947,
+        "tirx": 0.003948
+      },
+      "errors": {},
+      "timer": "proton",
+      "benchmark_protocol": {
+        "num_groups": 4,
+        "input_bytes": 100745656,
+        "l2_bytes": 134217728,
+        "l2_eviction_factor": 3,
+        "flush_l2": false,
+        "warmup": 100,
+        "repeat": 30,
+        "cooldown_s": 1.0,
+        "order": [
+          "tirx",
+          "deepgemm"
+        ]
+      },
+      "max_diff": 1.1252990442800481e-06,
+      "label": "b2_n1_mp1_ps64_h64_d128_f32_fixed",
+      "status": "ok",
+      "finished_at": "2026-06-11T13:57:53+00:00",
+      "attempt": 2
+    },
+    {
+      "kernel": "deepgemm_sm100_fp8_paged_mqa_logits",
+      "config": "b2_n1_mp32_ps64_h64_d128_bf16_fixed",
+      "gpu": "0",
+      "started_at": "2026-06-11T13:53:18+00:00",
+      "impls": {
+        "deepgemm": 0.003899,
+        "tirx": 0.0039
+      },
+      "errors": {},
+      "timer": "proton",
+      "benchmark_protocol": {
+        "num_groups": 4,
+        "input_bytes": 100752048,
+        "l2_bytes": 134217728,
+        "l2_eviction_factor": 3,
+        "flush_l2": false,
+        "warmup": 100,
+        "repeat": 30,
+        "cooldown_s": 1.0,
+        "order": [
+          "tirx",
+          "deepgemm"
+        ]
+      },
+      "max_diff": 2.7669951077058386e-06,
+      "label": "b2_n1_mp32_ps64_h64_d128_bf16_fixed",
+      "status": "ok",
+      "finished_at": "2026-06-11T13:53:31+00:00",
+      "attempt": 1,
+      "restabilized": {
+        "reps": 5,
+        "old_impls": {
+          "deepgemm": 0.0040019999999999995,
+          "tirx": 0.0040739999999999995
+        }
+      }
+    },
+    {
+      "kernel": "deepgemm_sm100_fp8_paged_mqa_logits",
+      "config": "b2_n1_mp32_ps64_h64_d128_f32_fixed",
+      "gpu": "4",
+      "started_at": "2026-06-11T13:52:47+00:00",
+      "impls": {
+        "deepgemm": 0.003971000000000001,
+        "tirx": 0.003972
+      },
+      "errors": {},
+      "timer": "proton",
+      "benchmark_protocol": {
+        "num_groups": 4,
+        "input_bytes": 100760240,
+        "l2_bytes": 134217728,
+        "l2_eviction_factor": 3,
+        "flush_l2": false,
+        "warmup": 100,
+        "repeat": 30,
+        "cooldown_s": 1.0,
+        "order": [
+          "tirx",
+          "deepgemm"
+        ]
+      },
+      "max_diff": 8.959778703410137e-07,
+      "label": "b2_n1_mp32_ps64_h64_d128_f32_fixed",
+      "status": "ok",
+      "finished_at": "2026-06-11T13:52:59+00:00",
+      "attempt": 1
+    },
+    {
+      "kernel": "deepgemm_sm100_fp8_paged_mqa_logits",
+      "config": "b2_n1_mp8_ps64_h64_d128_bf16_fixed",
+      "gpu": "7",
+      "started_at": "2026-06-11T13:53:16+00:00",
+      "impls": {
+        "deepgemm": 0.0036000000000000003,
+        "tirx": 0.003641
+      },
+      "errors": {},
+      "timer": "proton",
+      "benchmark_protocol": {
+        "num_groups": 4,
+        "input_bytes": 100745712,
+        "l2_bytes": 134217728,
+        "l2_eviction_factor": 3,
+        "flush_l2": false,
+        "warmup": 100,
+        "repeat": 30,
+        "cooldown_s": 1.0,
+        "order": [
+          "tirx",
+          "deepgemm"
+        ]
+      },
+      "max_diff": 2.5246128765310516e-06,
+      "label": "b2_n1_mp8_ps64_h64_d128_bf16_fixed",
+      "status": "ok",
+      "finished_at": "2026-06-11T13:53:27+00:00",
+      "attempt": 1
+    },
+    {
+      "kernel": "deepgemm_sm100_fp8_paged_mqa_logits",
+      "config": "b2_n1_mp8_ps64_h64_d128_f32_fixed",
+      "gpu": "6",
+      "started_at": "2026-06-11T13:52:46+00:00",
+      "impls": {
+        "deepgemm": 0.0036680000000000003,
+        "tirx": 0.0036720000000000004
+      },
+      "errors": {},
+      "timer": "proton",
+      "benchmark_protocol": {
+        "num_groups": 4,
+        "input_bytes": 100747760,
+        "l2_bytes": 134217728,
+        "l2_eviction_factor": 3,
+        "flush_l2": false,
+        "warmup": 100,
+        "repeat": 30,
+        "cooldown_s": 1.0,
+        "order": [
+          "tirx",
+          "deepgemm"
+        ]
+      },
+      "max_diff": 9.638239937270754e-07,
+      "label": "b2_n1_mp8_ps64_h64_d128_f32_fixed",
+      "status": "ok",
+      "finished_at": "2026-06-11T13:52:58+00:00",
+      "attempt": 1
+    },
+    {
+      "kernel": "deepgemm_sm100_fp8_paged_mqa_logits",
+      "config": "b4_n1_mp128_ps64_h64_d128_bf16_fixed",
+      "gpu": "7",
+      "started_at": "2026-06-11T13:53:28+00:00",
+      "impls": {
+        "deepgemm": 0.003891,
+        "tirx": 0.00391
+      },
+      "errors": {},
+      "timer": "proton",
+      "benchmark_protocol": {
+        "num_groups": 4,
+        "input_bytes": 100828088,
+        "l2_bytes": 134217728,
+        "l2_eviction_factor": 3,
+        "flush_l2": false,
+        "warmup": 100,
+        "repeat": 30,
+        "cooldown_s": 1.0,
+        "order": [
+          "tirx",
+          "deepgemm"
+        ]
+      },
+      "max_diff": 2.431208713349342e-06,
+      "label": "b4_n1_mp128_ps64_h64_d128_bf16_fixed",
+      "status": "ok",
+      "finished_at": "2026-06-11T13:53:39+00:00",
+      "attempt": 1
+    },
+    {
+      "kernel": "deepgemm_sm100_fp8_paged_mqa_logits",
+      "config": "b4_n1_mp128_ps64_h64_d128_f32_fixed",
+      "gpu": "0",
+      "started_at": "2026-06-11T13:52:53+00:00",
+      "impls": {
+        "deepgemm": 0.004068,
+        "tirx": 0.004096
+      },
+      "errors": {},
+      "timer": "proton",
+      "benchmark_protocol": {
+        "num_groups": 4,
+        "input_bytes": 100893624,
+        "l2_bytes": 134217728,
+        "l2_eviction_factor": 3,
+        "flush_l2": false,
+        "warmup": 100,
+        "repeat": 30,
+        "cooldown_s": 1.0,
+        "order": [
+          "tirx",
+          "deepgemm"
+        ]
+      },
+      "max_diff": 1.1336256124927502e-06,
+      "label": "b4_n1_mp128_ps64_h64_d128_f32_fixed",
+      "status": "ok",
+      "finished_at": "2026-06-11T13:53:04+00:00",
+      "attempt": 1
+    },
+    {
+      "kernel": "deepgemm_sm100_fp8_paged_mqa_logits",
+      "config": "b4_n1_mp1_ps64_h64_d128_bf16_fixed",
+      "gpu": "2",
+      "started_at": "2026-06-11T13:53:21+00:00",
+      "impls": {
+        "deepgemm": 0.004014,
+        "tirx": 0.004042
+      },
+      "errors": {},
+      "timer": "proton",
+      "benchmark_protocol": {
+        "num_groups": 4,
+        "input_bytes": 100762568,
+        "l2_bytes": 134217728,
+        "l2_eviction_factor": 3,
+        "flush_l2": false,
+        "warmup": 100,
+        "repeat": 30,
+        "cooldown_s": 1.0,
+        "order": [
+          "tirx",
+          "deepgemm"
+        ]
+      },
+      "max_diff": 2.5435825221631347e-06,
+      "label": "b4_n1_mp1_ps64_h64_d128_bf16_fixed",
+      "status": "ok",
+      "finished_at": "2026-06-11T13:53:34+00:00",
+      "attempt": 1
+    },
+    {
+      "kernel": "deepgemm_sm100_fp8_paged_mqa_logits",
+      "config": "b4_n1_mp1_ps64_h64_d128_f32_fixed",
+      "gpu": "7",
+      "started_at": "2026-06-11T13:57:40+00:00",
+      "impls": {
+        "deepgemm": 0.0035800000000000003,
+        "tirx": 0.003578
+      },
+      "errors": {},
+      "timer": "proton",
+      "benchmark_protocol": {
+        "num_groups": 4,
+        "input_bytes": 100764616,
+        "l2_bytes": 134217728,
+        "l2_eviction_factor": 3,
+        "flush_l2": false,
+        "warmup": 100,
+        "repeat": 30,
+        "cooldown_s": 1.0,
+        "order": [
+          "tirx",
+          "deepgemm"
+        ]
+      },
+      "max_diff": 8.773159194674918e-07,
+      "label": "b4_n1_mp1_ps64_h64_d128_f32_fixed",
+      "status": "ok",
+      "finished_at": "2026-06-11T13:57:58+00:00",
+      "attempt": 2
+    },
+    {
+      "kernel": "deepgemm_sm100_fp8_paged_mqa_logits",
+      "config": "b4_n1_mp32_ps64_h64_d128_bf16_fixed",
+      "gpu": "4",
+      "started_at": "2026-06-11T13:53:24+00:00",
+      "impls": {
+        "deepgemm": 0.003955,
+        "tirx": 0.003974
+      },
+      "errors": {},
+      "timer": "proton",
+      "benchmark_protocol": {
+        "num_groups": 4,
+        "input_bytes": 100777400,
+        "l2_bytes": 134217728,
+        "l2_eviction_factor": 3,
+        "flush_l2": false,
+        "warmup": 100,
+        "repeat": 30,
+        "cooldown_s": 1.0,
+        "order": [
+          "tirx",
+          "deepgemm"
+        ]
+      },
+      "max_diff": 2.324860258418049e-06,
+      "label": "b4_n1_mp32_ps64_h64_d128_bf16_fixed",
+      "status": "ok",
+      "finished_at": "2026-06-11T13:53:35+00:00",
+      "attempt": 1
+    },
+    {
+      "kernel": "deepgemm_sm100_fp8_paged_mqa_logits",
+      "config": "b4_n1_mp32_ps64_h64_d128_f32_fixed",
+      "gpu": "7",
+      "started_at": "2026-06-11T13:52:51+00:00",
+      "impls": {
+        "deepgemm": 0.003572,
+        "tirx": 0.0035870000000000003
+      },
+      "errors": {},
+      "timer": "proton",
+      "benchmark_protocol": {
+        "num_groups": 4,
+        "input_bytes": 100793784,
+        "l2_bytes": 134217728,
+        "l2_eviction_factor": 3,
+        "flush_l2": false,
+        "warmup": 100,
+        "repeat": 30,
+        "cooldown_s": 1.0,
+        "order": [
+          "tirx",
+          "deepgemm"
+        ]
+      },
+      "max_diff": 8.538033809957213e-07,
+      "label": "b4_n1_mp32_ps64_h64_d128_f32_fixed",
+      "status": "ok",
+      "finished_at": "2026-06-11T13:53:03+00:00",
+      "attempt": 1
+    },
+    {
+      "kernel": "deepgemm_sm100_fp8_paged_mqa_logits",
+      "config": "b4_n1_mp8_ps64_h64_d128_bf16_fixed",
+      "gpu": "6",
+      "started_at": "2026-06-11T13:53:23+00:00",
+      "impls": {
+        "deepgemm": 0.0038929999999999998,
+        "tirx": 0.0039369999999999995
+      },
+      "errors": {},
+      "timer": "proton",
+      "benchmark_protocol": {
+        "num_groups": 4,
+        "input_bytes": 100764728,
+        "l2_bytes": 134217728,
+        "l2_eviction_factor": 3,
+        "flush_l2": false,
+        "warmup": 100,
+        "repeat": 30,
+        "cooldown_s": 1.0,
+        "order": [
+          "tirx",
+          "deepgemm"
+        ]
+      },
+      "max_diff": 2.0733016039553576e-06,
+      "label": "b4_n1_mp8_ps64_h64_d128_bf16_fixed",
+      "status": "ok",
+      "finished_at": "2026-06-11T13:53:36+00:00",
+      "attempt": 1,
+      "restabilized": {
+        "reps": 5,
+        "old_impls": {
+          "deepgemm": 0.0036200000000000004,
+          "tirx": 0.0036349999999999998
+        }
+      }
+    },
+    {
+      "kernel": "deepgemm_sm100_fp8_paged_mqa_logits",
+      "config": "b4_n1_mp8_ps64_h64_d128_f32_fixed",
+      "gpu": "3",
+      "started_at": "2026-06-11T13:52:50+00:00",
+      "impls": {
+        "deepgemm": 0.0036349999999999998,
+        "tirx": 0.0036450000000000002
+      },
+      "errors": {},
+      "timer": "proton",
+      "benchmark_protocol": {
+        "num_groups": 4,
+        "input_bytes": 100768824,
+        "l2_bytes": 134217728,
+        "l2_eviction_factor": 3,
+        "flush_l2": false,
+        "warmup": 100,
+        "repeat": 30,
+        "cooldown_s": 1.0,
+        "order": [
+          "tirx",
+          "deepgemm"
+        ]
+      },
+      "max_diff": 1.0909833150218873e-06,
+      "label": "b4_n1_mp8_ps64_h64_d128_f32_fixed",
+      "status": "ok",
+      "finished_at": "2026-06-11T13:53:02+00:00",
+      "attempt": 1
+    },
+    {
+      "kernel": "deepgemm_sm100_fp8_paged_mqa_logits",
+      "config": "b8_n1_mp128_ps64_h64_d128_bf16_fixed",
+      "gpu": "1",
+      "started_at": "2026-06-11T13:53:34+00:00",
+      "impls": {
+        "deepgemm": 0.0039700000000000004,
+        "tirx": 0.004011
+      },
+      "errors": {},
+      "timer": "proton",
+      "benchmark_protocol": {
+        "num_groups": 4,
+        "input_bytes": 100929480,
+        "l2_bytes": 134217728,
+        "l2_eviction_factor": 3,
+        "flush_l2": false,
+        "warmup": 100,
+        "repeat": 30,
+        "cooldown_s": 1.0,
+        "order": [
+          "tirx",
+          "deepgemm"
+        ]
+      },
+      "max_diff": 2.2092357723213496e-06,
+      "label": "b8_n1_mp128_ps64_h64_d128_bf16_fixed",
+      "status": "ok",
+      "finished_at": "2026-06-11T13:53:47+00:00",
+      "attempt": 1
+    },
+    {
+      "kernel": "deepgemm_sm100_fp8_paged_mqa_logits",
+      "config": "b8_n1_mp128_ps64_h64_d128_f32_fixed",
+      "gpu": "6",
+      "started_at": "2026-06-11T13:52:59+00:00",
+      "impls": {
+        "deepgemm": 0.00422,
+        "tirx": 0.004226
+      },
+      "errors": {},
+      "timer": "proton",
+      "benchmark_protocol": {
+        "num_groups": 4,
+        "input_bytes": 101060552,
+        "l2_bytes": 134217728,
+        "l2_eviction_factor": 3,
+        "flush_l2": false,
+        "warmup": 100,
+        "repeat": 30,
+        "cooldown_s": 1.0,
+        "order": [
+          "tirx",
+          "deepgemm"
+        ]
+      },
+      "max_diff": 1.1126551446860589e-06,
+      "label": "b8_n1_mp128_ps64_h64_d128_f32_fixed",
+      "status": "ok",
+      "finished_at": "2026-06-11T13:53:09+00:00",
+      "attempt": 1
+    },
+    {
+      "kernel": "deepgemm_sm100_fp8_paged_mqa_logits",
+      "config": "b8_n1_mp1_ps64_h64_d128_bf16_fixed",
+      "gpu": "3",
+      "started_at": "2026-06-11T13:53:27+00:00",
+      "impls": {
+        "deepgemm": 0.003617,
+        "tirx": 0.003649
+      },
+      "errors": {},
+      "timer": "proton",
+      "benchmark_protocol": {
+        "num_groups": 4,
+        "input_bytes": 100798440,
+        "l2_bytes": 134217728,
+        "l2_eviction_factor": 3,
+        "flush_l2": false,
+        "warmup": 100,
+        "repeat": 30,
+        "cooldown_s": 1.0,
+        "order": [
+          "tirx",
+          "deepgemm"
+        ]
+      },
+      "max_diff": 2.092681822829512e-06,
+      "label": "b8_n1_mp1_ps64_h64_d128_bf16_fixed",
+      "status": "ok",
+      "finished_at": "2026-06-11T13:53:39+00:00",
+      "attempt": 1
+    },
+    {
+      "kernel": "deepgemm_sm100_fp8_paged_mqa_logits",
+      "config": "b8_n1_mp1_ps64_h64_d128_f32_fixed",
+      "gpu": "1",
+      "started_at": "2026-06-11T13:52:53+00:00",
+      "impls": {
+        "deepgemm": 0.003915,
+        "tirx": 0.003908
+      },
+      "errors": {},
+      "timer": "proton",
+      "benchmark_protocol": {
+        "num_groups": 4,
+        "input_bytes": 100802536,
+        "l2_bytes": 134217728,
+        "l2_eviction_factor": 3,
+        "flush_l2": false,
+        "warmup": 100,
+        "repeat": 30,
+        "cooldown_s": 1.0,
+        "order": [
+          "tirx",
+          "deepgemm"
+        ]
+      },
+      "max_diff": 9.509875487090369e-07,
+      "label": "b8_n1_mp1_ps64_h64_d128_f32_fixed",
+      "status": "ok",
+      "finished_at": "2026-06-11T13:53:05+00:00",
+      "attempt": 1
+    },
+    {
+      "kernel": "deepgemm_sm100_fp8_paged_mqa_logits",
+      "config": "b8_n1_mp32_ps64_h64_d128_bf16_fixed",
+      "gpu": "2",
+      "started_at": "2026-06-11T13:53:34+00:00",
+      "impls": {
+        "deepgemm": 0.003943,
+        "tirx": 0.003956
+      },
+      "errors": {},
+      "timer": "proton",
+      "benchmark_protocol": {
+        "num_groups": 4,
+        "input_bytes": 100828104,
+        "l2_bytes": 134217728,
+        "l2_eviction_factor": 3,
+        "flush_l2": false,
+        "warmup": 100,
+        "repeat": 30,
+        "cooldown_s": 1.0,
+        "order": [
+          "tirx",
+          "deepgemm"
+        ]
+      },
+      "max_diff": 2.4469179542574437e-06,
+      "label": "b8_n1_mp32_ps64_h64_d128_bf16_fixed",
+      "status": "ok",
+      "finished_at": "2026-06-11T13:53:46+00:00",
+      "attempt": 1,
+      "restabilized": {
+        "reps": 5,
+        "old_impls": {
+          "deepgemm": 0.003995,
+          "tirx": 0.004083000000000001
+        }
+      }
+    },
+    {
+      "kernel": "deepgemm_sm100_fp8_paged_mqa_logits",
+      "config": "b8_n1_mp32_ps64_h64_d128_f32_fixed",
+      "gpu": "2",
+      "started_at": "2026-06-11T13:52:56+00:00",
+      "impls": {
+        "deepgemm": 0.003843,
+        "tirx": 0.003871
+      },
+      "errors": {},
+      "timer": "proton",
+      "benchmark_protocol": {
+        "num_groups": 4,
+        "input_bytes": 100860872,
+        "l2_bytes": 134217728,
+        "l2_eviction_factor": 3,
+        "flush_l2": false,
+        "warmup": 100,
+        "repeat": 30,
+        "cooldown_s": 1.0,
+        "order": [
+          "tirx",
+          "deepgemm"
+        ]
+      },
+      "max_diff": 9.87694416698659e-07,
+      "label": "b8_n1_mp32_ps64_h64_d128_f32_fixed",
+      "status": "ok",
+      "finished_at": "2026-06-11T13:53:08+00:00",
+      "attempt": 1,
+      "restabilized": {
+        "reps": 5,
+        "old_impls": {
+          "deepgemm": 0.0040160000000000005,
+          "tirx": 0.004089000000000001
+        }
+      }
+    },
+    {
+      "kernel": "deepgemm_sm100_fp8_paged_mqa_logits",
+      "config": "b8_n1_mp8_ps64_h64_d128_bf16_fixed",
+      "gpu": "3",
+      "started_at": "2026-06-11T13:57:47+00:00",
+      "impls": {
+        "deepgemm": 0.003654,
+        "tirx": 0.00366
+      },
+      "errors": {},
+      "timer": "proton",
+      "benchmark_protocol": {
+        "num_groups": 4,
+        "input_bytes": 100802760,
+        "l2_bytes": 134217728,
+        "l2_eviction_factor": 3,
+        "flush_l2": false,
+        "warmup": 100,
+        "repeat": 30,
+        "cooldown_s": 1.0,
+        "order": [
+          "tirx",
+          "deepgemm"
+        ]
+      },
+      "max_diff": 2.5366361581236063e-06,
+      "label": "b8_n1_mp8_ps64_h64_d128_bf16_fixed",
+      "status": "ok",
+      "finished_at": "2026-06-11T13:58:09+00:00",
+      "attempt": 2
+    },
+    {
+      "kernel": "deepgemm_sm100_fp8_paged_mqa_logits",
+      "config": "b8_n1_mp8_ps64_h64_d128_f32_fixed",
+      "gpu": "0",
+      "started_at": "2026-06-11T13:57:43+00:00",
+      "impls": {
+        "deepgemm": 0.003919,
+        "tirx": 0.003933
+      },
+      "errors": {},
+      "timer": "proton",
+      "benchmark_protocol": {
+        "num_groups": 4,
+        "input_bytes": 100810952,
+        "l2_bytes": 134217728,
+        "l2_eviction_factor": 3,
+        "flush_l2": false,
+        "warmup": 100,
+        "repeat": 30,
+        "cooldown_s": 1.0,
+        "order": [
+          "tirx",
+          "deepgemm"
+        ]
+      },
+      "max_diff": 1.0076985925699944e-06,
+      "label": "b8_n1_mp8_ps64_h64_d128_f32_fixed",
+      "status": "ok",
+      "finished_at": "2026-06-11T13:58:04+00:00",
+      "attempt": 2,
+      "restabilized": {
+        "reps": 5,
+        "old_impls": {
+          "deepgemm": 0.00422,
+          "tirx": 0.004345
+        }
+      }
+    },
+    {
+      "kernel": "flash_attention4",
+      "config": "s1024_h32kv16",
+      "gpu": "4",
+      "started_at": "2026-06-11T13:53:49+00:00",
+      "impls": {
+        "flashattn_sm100": 0.020336,
+        "flashinfer": 0.026084,
+        "tir": 0.020980000000000002
+      },
+      "errors": {},
+      "timer": "proton",
+      "benchmark_protocol": {
+        "num_groups": 17,
+        "input_bytes": 25165824,
+        "l2_bytes": 134217728,
+        "l2_eviction_factor": 3,
+        "flush_l2": false,
+        "warmup": 100,
+        "repeat": 30,
+        "cooldown_s": 1.0,
+        "order": [
+          "tir",
+          "flashinfer",
+          "flashattn_sm100"
+        ]
+      },
+      "label": "s1024_h32kv16",
+      "status": "ok",
+      "finished_at": "2026-06-11T13:54:18+00:00",
+      "attempt": 1
+    },
+    {
+      "kernel": "flash_attention4",
+      "config": "s1024_h32kv16_causal",
+      "gpu": "6",
+      "started_at": "2026-06-11T13:53:50+00:00",
+      "impls": {
+        "flashattn_sm100": 0.019959,
+        "flashinfer": 0.026138,
+        "tir": 0.020852000000000002
+      },
+      "errors": {},
+      "timer": "proton",
+      "benchmark_protocol": {
+        "num_groups": 17,
+        "input_bytes": 25165824,
+        "l2_bytes": 134217728,
+        "l2_eviction_factor": 3,
+        "flush_l2": false,
+        "warmup": 100,
+        "repeat": 30,
+        "cooldown_s": 1.0,
+        "order": [
+          "tir",
+          "flashinfer",
+          "flashattn_sm100"
+        ]
+      },
+      "label": "s1024_h32kv16_causal",
+      "status": "ok",
+      "finished_at": "2026-06-11T13:54:22+00:00",
+      "attempt": 1
+    },
+    {
+      "kernel": "flash_attention4",
+      "config": "s1024_h32kv32",
+      "gpu": "7",
+      "started_at": "2026-06-11T13:58:01+00:00",
+      "impls": {
+        "flashattn_sm100": 0.020613,
+        "flashinfer": 0.026337,
+        "tir": 0.021207
+      },
+      "errors": {},
+      "timer": "proton",
+      "benchmark_protocol": {
+        "num_groups": 13,
+        "input_bytes": 33554432,
+        "l2_bytes": 134217728,
+        "l2_eviction_factor": 3,
+        "flush_l2": false,
+        "warmup": 100,
+        "repeat": 30,
+        "cooldown_s": 1.0,
+        "order": [
+          "tir",
+          "flashinfer",
+          "flashattn_sm100"
+        ]
+      },
+      "label": "s1024_h32kv32",
+      "status": "ok",
+      "finished_at": "2026-06-11T13:58:35+00:00",
+      "attempt": 2
+    },
+    {
+      "kernel": "flash_attention4",
+      "config": "s1024_h32kv32_causal",
+      "gpu": "3",
+      "started_at": "2026-06-11T13:54:05+00:00",
+      "impls": {
+        "flashattn_sm100": 0.02063,
+        "flashinfer": 0.026319,
+        "tir": 0.022566
+      },
+      "errors": {},
+      "timer": "proton",
+      "benchmark_protocol": {
+        "num_groups": 13,
+        "input_bytes": 33554432,
+        "l2_bytes": 134217728,
+        "l2_eviction_factor": 3,
+        "flush_l2": false,
+        "warmup": 100,
+        "repeat": 30,
+        "cooldown_s": 1.0,
+        "order": [
+          "tir",
+          "flashinfer",
+          "flashattn_sm100"
+        ]
+      },
+      "label": "s1024_h32kv32_causal",
+      "status": "ok",
+      "finished_at": "2026-06-11T13:54:36+00:00",
+      "attempt": 1
+    },
+    {
+      "kernel": "flash_attention4",
+      "config": "s1024_h32kv4",
+      "gpu": "3",
+      "started_at": "2026-06-11T13:58:12+00:00",
+      "impls": {
+        "flashattn_sm100": 0.020103000000000003,
+        "flashinfer": 0.026012,
+        "tir": 0.020874
+      },
+      "errors": {},
+      "timer": "proton",
+      "benchmark_protocol": {
+        "num_groups": 22,
+        "input_bytes": 18874368,
+        "l2_bytes": 134217728,
+        "l2_eviction_factor": 3,
+        "flush_l2": false,
+        "warmup": 100,
+        "repeat": 30,
+        "cooldown_s": 1.0,
+        "order": [
+          "tir",
+          "flashinfer",
+          "flashattn_sm100"
+        ]
+      },
+      "label": "s1024_h32kv4",
+      "status": "ok",
+      "finished_at": "2026-06-11T13:58:42+00:00",
+      "attempt": 2
+    },
+    {
+      "kernel": "flash_attention4",
+      "config": "s1024_h32kv4_causal",
+      "gpu": "7",
+      "started_at": "2026-06-11T13:53:42+00:00",
+      "impls": {
+        "flashattn_sm100": 0.0194995,
+        "flashinfer": 0.025938000000000003,
+        "tir": 0.019756000000000003
+      },
+      "errors": {},
+      "timer": "proton",
+      "benchmark_protocol": {
+        "num_groups": 22,
+        "input_bytes": 18874368,
+        "l2_bytes": 134217728,
+        "l2_eviction_factor": 3,
+        "flush_l2": false,
+        "warmup": 100,
+        "repeat": 30,
+        "cooldown_s": 1.0,
+        "order": [
+          "tir",
+          "flashinfer",
+          "flashattn_sm100"
+        ]
+      },
+      "label": "s1024_h32kv4_causal",
+      "status": "ok",
+      "finished_at": "2026-06-11T13:54:11+00:00",
+      "attempt": 1,
+      "restabilized": {
+        "reps": 5,
+        "old_impls": {
+          "flashattn_sm100": 0.019582000000000002,
+          "flashinfer": 0.026125,
+          "tir": 0.020280000000000003
+        }
+      }
+    },
+    {
+      "kernel": "flash_attention4",
+      "config": "s1024_h32kv8",
+      "gpu": "2",
+      "started_at": "2026-06-11T13:53:47+00:00",
+      "impls": {
+        "flashattn_sm100": 0.020132999999999998,
+        "flashinfer": 0.026032,
+        "tir": 0.020848
+      },
+      "errors": {},
+      "timer": "proton",
+      "benchmark_protocol": {
+        "num_groups": 20,
+        "input_bytes": 20971520,
+        "l2_bytes": 134217728,
+        "l2_eviction_factor": 3,
+        "flush_l2": false,
+        "warmup": 100,
+        "repeat": 30,
+        "cooldown_s": 1.0,
+        "order": [
+          "tir",
+          "flashinfer",
+          "flashattn_sm100"
+        ]
+      },
+      "label": "s1024_h32kv8",
+      "status": "ok",
+      "finished_at": "2026-06-11T13:54:15+00:00",
+      "attempt": 1
+    },
+    {
+      "kernel": "flash_attention4",
+      "config": "s1024_h32kv8_causal",
+      "gpu": "1",
+      "started_at": "2026-06-11T13:57:56+00:00",
+      "impls": {
+        "flashattn_sm100": 0.019754999999999998,
+        "flashinfer": 0.026041,
+        "tir": 0.020069
+      },
+      "errors": {},
+      "timer": "proton",
+      "benchmark_protocol": {
+        "num_groups": 20,
+        "input_bytes": 20971520,
+        "l2_bytes": 134217728,
+        "l2_eviction_factor": 3,
+        "flush_l2": false,
+        "warmup": 100,
+        "repeat": 30,
+        "cooldown_s": 1.0,
+        "order": [
+          "tir",
+          "flashinfer",
+          "flashattn_sm100"
+        ]
+      },
+      "label": "s1024_h32kv8_causal",
+      "status": "ok",
+      "finished_at": "2026-06-11T13:58:30+00:00",
+      "attempt": 2
+    },
+    {
+      "kernel": "flash_attention4",
+      "config": "s2048_h32kv16",
+      "gpu": "2",
+      "started_at": "2026-06-11T13:54:15+00:00",
+      "impls": {
+        "flashattn_sm100": 0.060508000000000006,
+        "flashinfer": 0.077429,
+        "tir": 0.062585
+      },
+      "errors": {},
+      "timer": "proton",
+      "benchmark_protocol": {
+        "num_groups": 9,
+        "input_bytes": 50331648,
+        "l2_bytes": 134217728,
+        "l2_eviction_factor": 3,
+        "flush_l2": false,
+        "warmup": 100,
+        "repeat": 30,
+        "cooldown_s": 1.0,
+        "order": [
+          "tir",
+          "flashinfer",
+          "flashattn_sm100"
+        ]
+      },
+      "label": "s2048_h32kv16",
+      "status": "ok",
+      "finished_at": "2026-06-11T13:54:44+00:00",
+      "attempt": 1
+    },
+    {
+      "kernel": "flash_attention4",
+      "config": "s2048_h32kv16_causal",
+      "gpu": "4",
+      "started_at": "2026-06-11T13:54:19+00:00",
+      "impls": {
+        "flashattn_sm100": 0.039207,
+        "flashinfer": 0.07772799999999999,
+        "tir": 0.038432
+      },
+      "errors": {},
+      "timer": "proton",
+      "benchmark_protocol": {
+        "num_groups": 9,
+        "input_bytes": 50331648,
+        "l2_bytes": 134217728,
+        "l2_eviction_factor": 3,
+        "flush_l2": false,
+        "warmup": 100,
+        "repeat": 30,
+        "cooldown_s": 1.0,
+        "order": [
+          "tir",
+          "flashinfer",
+          "flashattn_sm100"
+        ]
+      },
+      "label": "s2048_h32kv16_causal",
+      "status": "ok",
+      "finished_at": "2026-06-11T13:54:50+00:00",
+      "attempt": 1
+    },
+    {
+      "kernel": "flash_attention4",
+      "config": "s2048_h32kv32",
+      "gpu": "6",
+      "started_at": "2026-06-11T13:54:22+00:00",
+      "impls": {
+        "flashattn_sm100": 0.060752,
+        "flashinfer": 0.07860400000000001,
+        "tir": 0.062544
+      },
+      "errors": {},
+      "timer": "proton",
+      "benchmark_protocol": {
+        "num_groups": 7,
+        "input_bytes": 67108864,
+        "l2_bytes": 134217728,
+        "l2_eviction_factor": 3,
+        "flush_l2": false,
+        "warmup": 100,
+        "repeat": 30,
+        "cooldown_s": 1.0,
+        "order": [
+          "tir",
+          "flashinfer",
+          "flashattn_sm100"
+        ]
+      },
+      "label": "s2048_h32kv32",
+      "status": "ok",
+      "finished_at": "2026-06-11T13:54:54+00:00",
+      "attempt": 1
+    },
+    {
+      "kernel": "flash_attention4",
+      "config": "s2048_h32kv32_causal",
+      "gpu": "7",
+      "started_at": "2026-06-11T13:54:24+00:00",
+      "impls": {
+        "flashattn_sm100": 0.040695999999999996,
+        "flashinfer": 0.07908799999999999,
+        "tir": 0.043004
+      },
+      "errors": {},
+      "timer": "proton",
+      "benchmark_protocol": {
+        "num_groups": 7,
+        "input_bytes": 67108864,
+        "l2_bytes": 134217728,
+        "l2_eviction_factor": 3,
+        "flush_l2": false,
+        "warmup": 100,
+        "repeat": 30,
+        "cooldown_s": 1.0,
+        "order": [
+          "tir",
+          "flashinfer",
+          "flashattn_sm100"
+        ]
+      },
+      "label": "s2048_h32kv32_causal",
+      "status": "ok",
+      "finished_at": "2026-06-11T13:54:55+00:00",
+      "attempt": 1
+    },
+    {
+      "kernel": "flash_attention4",
+      "config": "s2048_h32kv4",
+      "gpu": "4",
+      "started_at": "2026-06-11T13:57:58+00:00",
+      "impls": {
+        "flashattn_sm100": 0.059858,
+        "flashinfer": 0.077476,
+        "tir": 0.061535
+      },
+      "errors": {},
+      "timer": "proton",
+      "benchmark_protocol": {
+        "num_groups": 11,
+        "input_bytes": 37748736,
+        "l2_bytes": 134217728,
+        "l2_eviction_factor": 3,
+        "flush_l2": false,
+        "warmup": 100,
+        "repeat": 30,
+        "cooldown_s": 1.0,
+        "order": [
+          "tir",
+          "flashinfer",
+          "flashattn_sm100"
+        ]
+      },
+      "label": "s2048_h32kv4",
+      "status": "ok",
+      "finished_at": "2026-06-11T13:58:31+00:00",
+      "attempt": 2
+    },
+    {
+      "kernel": "flash_attention4",
+      "config": "s2048_h32kv4_causal",
+      "gpu": "0",
+      "started_at": "2026-06-11T13:54:32+00:00",
+      "impls": {
+        "flashattn_sm100": 0.038445,
+        "flashinfer": 0.076663,
+        "tir": 0.037386
+      },
+      "errors": {},
+      "timer": "proton",
+      "benchmark_protocol": {
+        "num_groups": 11,
+        "input_bytes": 37748736,
+        "l2_bytes": 134217728,
+        "l2_eviction_factor": 3,
+        "flush_l2": false,
+        "warmup": 100,
+        "repeat": 30,
+        "cooldown_s": 1.0,
+        "order": [
+          "tir",
+          "flashinfer",
+          "flashattn_sm100"
+        ]
+      },
+      "label": "s2048_h32kv4_causal",
+      "status": "ok",
+      "finished_at": "2026-06-11T13:55:02+00:00",
+      "attempt": 1
+    },
+    {
+      "kernel": "flash_attention4",
+      "config": "s2048_h32kv8",
+      "gpu": "1",
+      "started_at": "2026-06-11T13:54:12+00:00",
+      "impls": {
+        "flashattn_sm100": 0.058705,
+        "flashinfer": 0.077571,
+        "tir": 0.060717
+      },
+      "errors": {},
+      "timer": "proton",
+      "benchmark_protocol": {
+        "num_groups": 10,
+        "input_bytes": 41943040,
+        "l2_bytes": 134217728,
+        "l2_eviction_factor": 3,
+        "flush_l2": false,
+        "warmup": 100,
+        "repeat": 30,
+        "cooldown_s": 1.0,
+        "order": [
+          "tir",
+          "flashinfer",
+          "flashattn_sm100"
+        ]
+      },
+      "label": "s2048_h32kv8",
+      "status": "ok",
+      "finished_at": "2026-06-11T13:54:40+00:00",
+      "attempt": 1
+    },
+    {
+      "kernel": "flash_attention4",
+      "config": "s2048_h32kv8_causal",
+      "gpu": "4",
+      "started_at": "2026-06-11T13:58:31+00:00",
+      "impls": {
+        "flashattn_sm100": 0.038644,
+        "flashinfer": 0.077692,
+        "tir": 0.037952
+      },
+      "errors": {},
+      "timer": "proton",
+      "benchmark_protocol": {
+        "num_groups": 10,
+        "input_bytes": 41943040,
+        "l2_bytes": 134217728,
+        "l2_eviction_factor": 3,
+        "flush_l2": false,
+        "warmup": 100,
+        "repeat": 30,
+        "cooldown_s": 1.0,
+        "order": [
+          "tir",
+          "flashinfer",
+          "flashattn_sm100"
+        ]
+      },
+      "label": "s2048_h32kv8_causal",
+      "status": "ok",
+      "finished_at": "2026-06-11T13:59:00+00:00",
+      "attempt": 3
+    },
+    {
+      "kernel": "flash_attention4",
+      "config": "s4096_h32kv16",
+      "gpu": "7",
+      "started_at": "2026-06-11T13:58:35+00:00",
+      "impls": {
+        "flashattn_sm100": 0.208576,
+        "flashinfer": 0.270827,
+        "tir": 0.213272
+      },
+      "errors": {},
+      "timer": "proton",
+      "benchmark_protocol": {
+        "num_groups": 5,
+        "input_bytes": 100663296,
+        "l2_bytes": 134217728,
+        "l2_eviction_factor": 3,
+        "flush_l2": false,
+        "warmup": 100,
+        "repeat": 30,
+        "cooldown_s": 1.0,
+        "order": [
+          "tir",
+          "flashinfer",
+          "flashattn_sm100"
+        ]
+      },
+      "label": "s4096_h32kv16",
+      "status": "ok",
+      "finished_at": "2026-06-11T13:59:06+00:00",
+      "attempt": 3
+    },
+    {
+      "kernel": "flash_attention4",
+      "config": "s4096_h32kv16_causal",
+      "gpu": "2",
+      "started_at": "2026-06-11T13:54:46+00:00",
+      "impls": {
+        "flashattn_sm100": 0.11628000000000001,
+        "flashinfer": 0.268597,
+        "tir": 0.114551
+      },
+      "errors": {},
+      "timer": "proton",
+      "benchmark_protocol": {
+        "num_groups": 5,
+        "input_bytes": 100663296,
+        "l2_bytes": 134217728,
+        "l2_eviction_factor": 3,
+        "flush_l2": false,
+        "warmup": 100,
+        "repeat": 30,
+        "cooldown_s": 1.0,
+        "order": [
+          "tir",
+          "flashinfer",
+          "flashattn_sm100"
+        ]
+      },
+      "label": "s4096_h32kv16_causal",
+      "status": "ok",
+      "finished_at": "2026-06-11T13:55:18+00:00",
+      "attempt": 1
+    },
+    {
+      "kernel": "flash_attention4",
+      "config": "s4096_h32kv32",
+      "gpu": "4",
+      "started_at": "2026-06-11T13:54:50+00:00",
+      "impls": {
+        "flashattn_sm100": 0.215409,
+        "flashinfer": 0.27319299999999996,
+        "tir": 0.219304
+      },
+      "errors": {},
+      "timer": "proton",
+      "benchmark_protocol": {
+        "num_groups": 4,
+        "input_bytes": 134217728,
+        "l2_bytes": 134217728,
+        "l2_eviction_factor": 3,
+        "flush_l2": false,
+        "warmup": 100,
+        "repeat": 30,
+        "cooldown_s": 1.0,
+        "order": [
+          "tir",
+          "flashinfer",
+          "flashattn_sm100"
+        ]
+      },
+      "label": "s4096_h32kv32",
+      "status": "ok",
+      "finished_at": "2026-06-11T13:55:24+00:00",
+      "attempt": 1
+    },
+    {
+      "kernel": "flash_attention4",
+      "config": "s4096_h32kv32_causal",
+      "gpu": "6",
+      "started_at": "2026-06-11T13:54:55+00:00",
+      "impls": {
+        "flashattn_sm100": 0.118184,
+        "flashinfer": 0.272724,
+        "tir": 0.12403700000000001
+      },
+      "errors": {},
+      "timer": "proton",
+      "benchmark_protocol": {
+        "num_groups": 4,
+        "input_bytes": 134217728,
+        "l2_bytes": 134217728,
+        "l2_eviction_factor": 3,
+        "flush_l2": false,
+        "warmup": 100,
+        "repeat": 30,
+        "cooldown_s": 1.0,
+        "order": [
+          "tir",
+          "flashinfer",
+          "flashattn_sm100"
+        ]
+      },
+      "label": "s4096_h32kv32_causal",
+      "status": "ok",
+      "finished_at": "2026-06-11T13:55:28+00:00",
+      "attempt": 1
+    },
+    {
+      "kernel": "flash_attention4",
+      "config": "s4096_h32kv4",
+      "gpu": "2",
+      "started_at": "2026-06-11T13:58:09+00:00",
+      "impls": {
+        "flashattn_sm100": 0.20361,
+        "flashinfer": 0.267178,
+        "tir": 0.20834100000000003
+      },
+      "errors": {},
+      "timer": "proton",
+      "benchmark_protocol": {
+        "num_groups": 6,
+        "input_bytes": 75497472,
+        "l2_bytes": 134217728,
+        "l2_eviction_factor": 3,
+        "flush_l2": false,
+        "warmup": 100,
+        "repeat": 30,
+        "cooldown_s": 1.0,
+        "order": [
+          "tir",
+          "flashinfer",
+          "flashattn_sm100"
+        ]
+      },
+      "label": "s4096_h32kv4",
+      "status": "ok",
+      "finished_at": "2026-06-11T13:58:40+00:00",
+      "attempt": 2
+    },
+    {
+      "kernel": "flash_attention4",
+      "config": "s4096_h32kv4_causal",
+      "gpu": "6",
+      "started_at": "2026-06-11T13:58:14+00:00",
+      "impls": {
+        "flashattn_sm100": 0.113733,
+        "flashinfer": 0.267787,
+        "tir": 0.113402
+      },
+      "errors": {},
+      "timer": "proton",
+      "benchmark_protocol": {
+        "num_groups": 6,
+        "input_bytes": 75497472,
+        "l2_bytes": 134217728,
+        "l2_eviction_factor": 3,
+        "flush_l2": false,
+        "warmup": 100,
+        "repeat": 30,
+        "cooldown_s": 1.0,
+        "order": [
+          "tir",
+          "flashinfer",
+          "flashattn_sm100"
+        ]
+      },
+      "label": "s4096_h32kv4_causal",
+      "status": "ok",
+      "finished_at": "2026-06-11T13:58:44+00:00",
+      "attempt": 2
+    },
+    {
+      "kernel": "flash_attention4",
+      "config": "s4096_h32kv8",
+      "gpu": "3",
+      "started_at": "2026-06-11T13:56:06+00:00",
+      "impls": {
+        "flashattn_sm100": 0.207623,
+        "flashinfer": 0.26988799999999996,
+        "tir": 0.211718
+      },
+      "errors": {},
+      "timer": "proton",
+      "benchmark_protocol": {
+        "num_groups": 5,
+        "input_bytes": 83886080,
+        "l2_bytes": 134217728,
+        "l2_eviction_factor": 3,
+        "flush_l2": false,
+        "warmup": 100,
+        "repeat": 30,
+        "cooldown_s": 1.0,
+        "order": [
+          "tir",
+          "flashinfer",
+          "flashattn_sm100"
+        ]
+      },
+      "label": "s4096_h32kv8",
+      "status": "ok",
+      "finished_at": "2026-06-11T13:56:37+00:00",
+      "attempt": 1
+    },
+    {
+      "kernel": "flash_attention4",
+      "config": "s4096_h32kv8_causal",
+      "gpu": "3",
+      "started_at": "2026-06-11T13:54:36+00:00",
+      "impls": {
+        "flashattn_sm100": 0.116333,
+        "flashinfer": 0.267518,
+        "tir": 0.11518600000000001
+      },
+      "errors": {},
+      "timer": "proton",
+      "benchmark_protocol": {
+        "num_groups": 5,
+        "input_bytes": 83886080,
+        "l2_bytes": 134217728,
+        "l2_eviction_factor": 3,
+        "flush_l2": false,
+        "warmup": 100,
+        "repeat": 30,
+        "cooldown_s": 1.0,
+        "order": [
+          "tir",
+          "flashinfer",
+          "flashattn_sm100"
+        ]
+      },
+      "label": "s4096_h32kv8_causal",
+      "status": "ok",
+      "finished_at": "2026-06-11T13:55:06+00:00",
+      "attempt": 1
+    },
+    {
+      "kernel": "flash_attention4",
+      "config": "s8192_h32kv16",
+      "gpu": "2",
+      "started_at": "2026-06-11T13:55:19+00:00",
+      "impls": {
+        "flashattn_sm100": 0.735362,
+        "flashinfer": 0.9061,
+        "tir": 0.74748
+      },
+      "errors": {},
+      "timer": "proton",
+      "benchmark_protocol": {
+        "num_groups": 3,
+        "input_bytes": 201326592,
+        "l2_bytes": 134217728,
+        "l2_eviction_factor": 3,
+        "flush_l2": false,
+        "warmup": 10,
+        "repeat": 30,
+        "cooldown_s": 1.0,
+        "order": [
+          "tir",
+          "flashinfer",
+          "flashattn_sm100"
+        ]
+      },
+      "label": "s8192_h32kv16",
+      "status": "ok",
+      "finished_at": "2026-06-11T13:55:52+00:00",
+      "attempt": 1
+    },
+    {
+      "kernel": "flash_attention4",
+      "config": "s8192_h32kv16_causal",
+      "gpu": "0",
+      "started_at": "2026-06-11T13:59:01+00:00",
+      "impls": {
+        "flashattn_sm100": 0.40580900000000003,
+        "flashinfer": 0.899222,
+        "tir": 0.40704500000000005
+      },
+      "errors": {},
+      "timer": "proton",
+      "benchmark_protocol": {
+        "num_groups": 3,
+        "input_bytes": 201326592,
+        "l2_bytes": 134217728,
+        "l2_eviction_factor": 3,
+        "flush_l2": false,
+        "warmup": 10,
+        "repeat": 30,
+        "cooldown_s": 1.0,
+        "order": [
+          "tir",
+          "flashinfer",
+          "flashattn_sm100"
+        ]
+      },
+      "label": "s8192_h32kv16_causal",
+      "status": "ok",
+      "finished_at": "2026-06-11T13:59:38+00:00",
+      "attempt": 5
+    },
+    {
+      "kernel": "flash_attention4",
+      "config": "s8192_h32kv32",
+      "gpu": "0",
+      "started_at": "2026-06-11T13:58:24+00:00",
+      "impls": {
+        "flashattn_sm100": 0.7430140000000001,
+        "flashinfer": 0.906079,
+        "tir": 0.751811
+      },
+      "errors": {},
+      "timer": "proton",
+      "benchmark_protocol": {
+        "num_groups": 2,
+        "input_bytes": 268435456,
+        "l2_bytes": 134217728,
+        "l2_eviction_factor": 3,
+        "flush_l2": false,
+        "warmup": 10,
+        "repeat": 30,
+        "cooldown_s": 1.0,
+        "order": [
+          "tir",
+          "flashinfer",
+          "flashattn_sm100"
+        ]
+      },
+      "label": "s8192_h32kv32",
+      "status": "ok",
+      "finished_at": "2026-06-11T13:58:58+00:00",
+      "attempt": 2
+    },
+    {
+      "kernel": "flash_attention4",
+      "config": "s8192_h32kv32_causal",
+      "gpu": "6",
+      "started_at": "2026-06-11T13:55:28+00:00",
+      "impls": {
+        "flashattn_sm100": 0.409146,
+        "flashinfer": 0.907106,
+        "tir": 0.427012
+      },
+      "errors": {},
+      "timer": "proton",
+      "benchmark_protocol": {
+        "num_groups": 2,
+        "input_bytes": 268435456,
+        "l2_bytes": 134217728,
+        "l2_eviction_factor": 3,
+        "flush_l2": false,
+        "warmup": 10,
+        "repeat": 30,
+        "cooldown_s": 1.0,
+        "order": [
+          "tir",
+          "flashinfer",
+          "flashattn_sm100"
+        ]
+      },
+      "label": "s8192_h32kv32_causal",
+      "status": "ok",
+      "finished_at": "2026-06-11T13:56:06+00:00",
+      "attempt": 1
+    },
+    {
+      "kernel": "flash_attention4",
+      "config": "s8192_h32kv4",
+      "gpu": "6",
+      "started_at": "2026-06-11T13:56:08+00:00",
+      "impls": {
+        "flashattn_sm100": 0.721296,
+        "flashinfer": 0.895633,
+        "tir": 0.7441409999999999
+      },
+      "errors": {},
+      "timer": "proton",
+      "benchmark_protocol": {
+        "num_groups": 3,
+        "input_bytes": 150994944,
+        "l2_bytes": 134217728,
+        "l2_eviction_factor": 3,
+        "flush_l2": false,
+        "warmup": 10,
+        "repeat": 30,
+        "cooldown_s": 1.0,
+        "order": [
+          "tir",
+          "flashinfer",
+          "flashattn_sm100"
+        ]
+      },
+      "label": "s8192_h32kv4",
+      "status": "ok",
+      "finished_at": "2026-06-11T13:56:39+00:00",
+      "attempt": 1
+    },
+    {
+      "kernel": "flash_attention4",
+      "config": "s8192_h32kv4_causal",
+      "gpu": "3",
+      "started_at": "2026-06-11T13:58:43+00:00",
+      "impls": {
+        "flashattn_sm100": 0.402601,
+        "flashinfer": 0.904036,
+        "tir": 0.40339600000000003
+      },
+      "errors": {},
+      "timer": "proton",
+      "benchmark_protocol": {
+        "num_groups": 3,
+        "input_bytes": 150994944,
+        "l2_bytes": 134217728,
+        "l2_eviction_factor": 3,
+        "flush_l2": false,
+        "warmup": 10,
+        "repeat": 30,
+        "cooldown_s": 1.0,
+        "order": [
+          "tir",
+          "flashinfer",
+          "flashattn_sm100"
+        ]
+      },
+      "label": "s8192_h32kv4_causal",
+      "status": "ok",
+      "finished_at": "2026-06-11T13:59:14+00:00",
+      "attempt": 2,
+      "restabilized": {
+        "reps": 5,
+        "old_impls": {
+          "flashattn_sm100": 0.410121,
+          "flashinfer": 0.941304,
+          "tir": 0.406928
+        }
+      }
+    },
+    {
+      "kernel": "flash_attention4",
+      "config": "s8192_h32kv8",
+      "gpu": "0",
+      "started_at": "2026-06-11T13:55:03+00:00",
+      "impls": {
+        "flashattn_sm100": 0.723861,
+        "flashinfer": 0.894211,
+        "tir": 0.739365
+      },
+      "errors": {},
+      "timer": "proton",
+      "benchmark_protocol": {
+        "num_groups": 3,
+        "input_bytes": 167772160,
+        "l2_bytes": 134217728,
+        "l2_eviction_factor": 3,
+        "flush_l2": false,
+        "warmup": 10,
+        "repeat": 30,
+        "cooldown_s": 1.0,
+        "order": [
+          "tir",
+          "flashinfer",
+          "flashattn_sm100"
+        ]
+      },
+      "label": "s8192_h32kv8",
+      "status": "ok",
+      "finished_at": "2026-06-11T13:55:33+00:00",
+      "attempt": 1
+    },
+    {
+      "kernel": "flash_attention4",
+      "config": "s8192_h32kv8_causal",
+      "gpu": "3",
+      "started_at": "2026-06-11T13:55:06+00:00",
+      "impls": {
+        "flashattn_sm100": 0.407822,
+        "flashinfer": 0.913828,
+        "tir": 0.408229
+      },
+      "errors": {},
+      "timer": "proton",
+      "benchmark_protocol": {
+        "num_groups": 3,
+        "input_bytes": 167772160,
+        "l2_bytes": 134217728,
+        "l2_eviction_factor": 3,
+        "flush_l2": false,
+        "warmup": 10,
+        "repeat": 30,
+        "cooldown_s": 1.0,
+        "order": [
+          "tir",
+          "flashinfer",
+          "flashattn_sm100"
+        ]
+      },
+      "label": "s8192_h32kv8_causal",
+      "status": "ok",
+      "finished_at": "2026-06-11T13:55:38+00:00",
+      "attempt": 1
+    },
+    {
+      "kernel": "fp16_bf16_gemm",
+      "config": "bf16_1024x1024x1024",
+      "gpu": "1",
+      "started_at": "2026-06-11T13:56:48+00:00",
+      "impls": {
+        "deepgemm-bf16": 0.007489,
+        "deepgemm-cublaslt": 0.005451,
+        "tir": 0.016449000000000002,
+        "torch-cublas": 0.005454
+      },
+      "errors": {},
+      "timer": "proton",
+      "benchmark_protocol": {
+        "num_groups": 65,
+        "input_bytes": 6291456,
+        "l2_bytes": 134217728,
+        "l2_eviction_factor": 3,
+        "flush_l2": false,
+        "warmup": 100,
+        "repeat": 30,
+        "cooldown_s": 1.0,
+        "order": [
+          "tir",
+          "torch-cublas",
+          "deepgemm-cublaslt",
+          "deepgemm-bf16"
+        ]
+      },
+      "label": "bf16_1024x1024x1024",
+      "status": "ok",
+      "finished_at": "2026-06-11T13:57:19+00:00",
+      "attempt": 1
+    },
+    {
+      "kernel": "fp16_bf16_gemm",
+      "config": "bf16_16384x16384x16384",
+      "gpu": "4",
+      "started_at": "2026-06-11T13:56:30+00:00",
+      "impls": {
+        "deepgemm-bf16": 6.616865,
+        "deepgemm-cublaslt": 5.710854,
+        "tir": 5.860429,
+        "torch-cublas": 5.664671
+      },
+      "errors": {},
+      "timer": "proton",
+      "benchmark_protocol": {
+        "num_groups": 1,
+        "input_bytes": 1610612736,
+        "l2_bytes": 134217728,
+        "l2_eviction_factor": 3,
+        "flush_l2": false,
+        "warmup": 10,
+        "repeat": 30,
+        "cooldown_s": 1.0,
+        "order": [
+          "tir",
+          "torch-cublas",
+          "deepgemm-cublaslt",
+          "deepgemm-bf16"
+        ]
+      },
+      "label": "bf16_16384x16384x16384",
+      "status": "ok",
+      "finished_at": "2026-06-11T13:56:49+00:00",
+      "attempt": 1,
+      "restabilized": {
+        "reps": 5,
+        "old_impls": {
+          "deepgemm-bf16": 7.246634,
+          "deepgemm-cublaslt": 5.600671,
+          "tir": 5.952806,
+          "torch-cublas": 5.855783000000001
+        }
+      }
+    },
+    {
+      "kernel": "fp16_bf16_gemm",
+      "config": "bf16_2048x2048x2048",
+      "gpu": "7",
+      "started_at": "2026-06-11T13:56:13+00:00",
+      "impls": {
+        "deepgemm-bf16": 0.018759,
+        "deepgemm-cublaslt": 0.018446,
+        "tir": 0.027803,
+        "torch-cublas": 0.018488
+      },
+      "errors": {},
+      "timer": "proton",
+      "benchmark_protocol": {
+        "num_groups": 17,
+        "input_bytes": 25165824,
+        "l2_bytes": 134217728,
+        "l2_eviction_factor": 3,
+        "flush_l2": false,
+        "warmup": 100,
+        "repeat": 30,
+        "cooldown_s": 1.0,
+        "order": [
+          "tir",
+          "torch-cublas",
+          "deepgemm-cublaslt",
+          "deepgemm-bf16"
+        ]
+      },
+      "label": "bf16_2048x2048x2048",
+      "status": "ok",
+      "finished_at": "2026-06-11T13:56:33+00:00",
+      "attempt": 1
+    },
+    {
+      "kernel": "fp16_bf16_gemm",
+      "config": "bf16_4096x4096x4096",
+      "gpu": "0",
+      "started_at": "2026-06-11T13:56:18+00:00",
+      "impls": {
+        "deepgemm-bf16": 0.093053,
+        "deepgemm-cublaslt": 0.093695,
+        "tir": 0.09228700000000001,
+        "torch-cublas": 0.093577
+      },
+      "errors": {},
+      "timer": "proton",
+      "benchmark_protocol": {
+        "num_groups": 5,
+        "input_bytes": 100663296,
+        "l2_bytes": 134217728,
+        "l2_eviction_factor": 3,
+        "flush_l2": false,
+        "warmup": 100,
+        "repeat": 30,
+        "cooldown_s": 1.0,
+        "order": [
+          "tir",
+          "torch-cublas",
+          "deepgemm-cublaslt",
+          "deepgemm-bf16"
+        ]
+      },
+      "label": "bf16_4096x4096x4096",
+      "status": "ok",
+      "finished_at": "2026-06-11T13:56:37+00:00",
+      "attempt": 1,
+      "restabilized": {
+        "reps": 5,
+        "old_impls": {
+          "deepgemm-bf16": 0.091234,
+          "deepgemm-cublaslt": 0.09192499999999999,
+          "tir": 0.090761,
+          "torch-cublas": 0.091844
+        }
+      }
+    },
+    {
+      "kernel": "fp16_bf16_gemm",
+      "config": "bf16_8192x8192x8192",
+      "gpu": "2",
+      "started_at": "2026-06-11T13:56:26+00:00",
+      "impls": {
+        "deepgemm-bf16": 0.699492,
+        "deepgemm-cublaslt": 0.6877430000000001,
+        "tir": 0.664652,
+        "torch-cublas": 0.6883600000000001
+      },
+      "errors": {},
+      "timer": "proton",
+      "benchmark_protocol": {
+        "num_groups": 1,
+        "input_bytes": 402653184,
+        "l2_bytes": 134217728,
+        "l2_eviction_factor": 3,
+        "flush_l2": false,
+        "warmup": 10,
+        "repeat": 30,
+        "cooldown_s": 1.0,
+        "order": [
+          "tir",
+          "torch-cublas",
+          "deepgemm-cublaslt",
+          "deepgemm-bf16"
+        ]
+      },
+      "label": "bf16_8192x8192x8192",
+      "status": "ok",
+      "finished_at": "2026-06-11T13:56:45+00:00",
+      "attempt": 1
+    },
+    {
+      "kernel": "fp16_bf16_gemm",
+      "config": "fp16_1024x1024x1024",
+      "gpu": "7",
+      "started_at": "2026-06-11T13:55:55+00:00",
+      "impls": {
+        "deepgemm-cublaslt": 0.005569,
+        "tir": 0.016596,
+        "torch-cublas": 0.005514000000000001
+      },
+      "errors": {},
+      "timer": "proton",
+      "benchmark_protocol": {
+        "num_groups": 65,
+        "input_bytes": 6291456,
+        "l2_bytes": 134217728,
+        "l2_eviction_factor": 3,
+        "flush_l2": false,
+        "warmup": 100,
+        "repeat": 30,
+        "cooldown_s": 1.0,
+        "order": [
+          "tir",
+          "torch-cublas",
+          "deepgemm-cublaslt"
+        ]
+      },
+      "label": "fp16_1024x1024x1024",
+      "status": "ok",
+      "finished_at": "2026-06-11T13:56:13+00:00",
+      "attempt": 1
+    },
+    {
+      "kernel": "fp16_bf16_gemm",
+      "config": "fp16_16384x16384x16384",
+      "gpu": "4",
+      "started_at": "2026-06-11T13:56:11+00:00",
+      "impls": {
+        "deepgemm-cublaslt": 6.1511075,
+        "tir": 6.468101,
+        "torch-cublas": 6.2796235
+      },
+      "errors": {},
+      "timer": "proton",
+      "benchmark_protocol": {
+        "num_groups": 1,
+        "input_bytes": 1610612736,
+        "l2_bytes": 134217728,
+        "l2_eviction_factor": 3,
+        "flush_l2": false,
+        "warmup": 10,
+        "repeat": 30,
+        "cooldown_s": 1.0,
+        "order": [
+          "tir",
+          "torch-cublas",
+          "deepgemm-cublaslt"
+        ]
+      },
+      "label": "fp16_16384x16384x16384",
+      "status": "ok",
+      "finished_at": "2026-06-11T13:56:29+00:00",
+      "attempt": 1,
+      "restabilized": {
+        "reps": 5,
+        "old_impls": {
+          "deepgemm-cublaslt": 6.177042,
+          "tir": 6.6422740000000005,
+          "torch-cublas": 6.043677
+        }
+      }
+    },
+    {
+      "kernel": "fp16_bf16_gemm",
+      "config": "fp16_2048x2048x2048",
+      "gpu": "0",
+      "started_at": "2026-06-11T13:55:59+00:00",
+      "impls": {
+        "deepgemm-cublaslt": 0.018453,
+        "tir": 0.027433,
+        "torch-cublas": 0.018528
+      },
+      "errors": {},
+      "timer": "proton",
+      "benchmark_protocol": {
+        "num_groups": 17,
+        "input_bytes": 25165824,
+        "l2_bytes": 134217728,
+        "l2_eviction_factor": 3,
+        "flush_l2": false,
+        "warmup": 100,
+        "repeat": 30,
+        "cooldown_s": 1.0,
+        "order": [
+          "tir",
+          "torch-cublas",
+          "deepgemm-cublaslt"
+        ]
+      },
+      "label": "fp16_2048x2048x2048",
+      "status": "ok",
+      "finished_at": "2026-06-11T13:56:17+00:00",
+      "attempt": 1
+    },
+    {
+      "kernel": "fp16_bf16_gemm",
+      "config": "fp16_4096x4096x4096",
+      "gpu": "2",
+      "started_at": "2026-06-11T13:56:10+00:00",
+      "impls": {
+        "deepgemm-cublaslt": 0.096611,
+        "tir": 0.094966,
+        "torch-cublas": 0.096219
+      },
+      "errors": {},
+      "timer": "proton",
+      "benchmark_protocol": {
+        "num_groups": 5,
+        "input_bytes": 100663296,
+        "l2_bytes": 134217728,
+        "l2_eviction_factor": 3,
+        "flush_l2": false,
+        "warmup": 100,
+        "repeat": 30,
+        "cooldown_s": 1.0,
+        "order": [
+          "tir",
+          "torch-cublas",
+          "deepgemm-cublaslt"
+        ]
+      },
+      "label": "fp16_4096x4096x4096",
+      "status": "ok",
+      "finished_at": "2026-06-11T13:56:26+00:00",
+      "attempt": 1
+    },
+    {
+      "kernel": "fp16_bf16_gemm",
+      "config": "fp16_8192x8192x8192",
+      "gpu": "2",
+      "started_at": "2026-06-11T13:57:25+00:00",
+      "impls": {
+        "deepgemm-cublaslt": 0.72204,
+        "tir": 0.696142,
+        "torch-cublas": 0.721607
+      },
+      "errors": {},
+      "timer": "proton",
+      "benchmark_protocol": {
+        "num_groups": 1,
+        "input_bytes": 402653184,
+        "l2_bytes": 134217728,
+        "l2_eviction_factor": 3,
+        "flush_l2": false,
+        "warmup": 10,
+        "repeat": 30,
+        "cooldown_s": 1.0,
+        "order": [
+          "tir",
+          "torch-cublas",
+          "deepgemm-cublaslt"
+        ]
+      },
+      "label": "fp16_8192x8192x8192",
+      "status": "ok",
+      "finished_at": "2026-06-11T13:57:43+00:00",
+      "attempt": 1
+    },
+    {
+      "kernel": "fp8_blockwise_gemm",
+      "config": "deepgemm_m4096_n2112_k7168",
+      "gpu": "0",
+      "started_at": "2026-06-11T13:56:37+00:00",
+      "impls": {
+        "deepgemm": 0.04965,
+        "tir": 0.048500999999999996
+      },
+      "errors": {},
+      "timer": "proton",
+      "benchmark_protocol": {
+        "num_groups": 7,
+        "input_bytes": 62148096,
+        "l2_bytes": 134217728,
+        "l2_eviction_factor": 3,
+        "flush_l2": false,
+        "warmup": 100,
+        "repeat": 30,
+        "cooldown_s": 1.0,
+        "order": [
+          "tir",
+          "deepgemm"
+        ]
+      },
+      "kernel_fair": true,
+      "label": "deepgemm_m4096_n2112_k7168",
+      "status": "ok",
+      "finished_at": "2026-06-11T13:56:55+00:00",
+      "attempt": 1
+    },
+    {
+      "kernel": "fp8_blockwise_gemm",
+      "config": "deepgemm_m4096_n24576_k1536",
+      "gpu": "6",
+      "started_at": "2026-06-11T13:56:40+00:00",
+      "impls": {
+        "deepgemm": 0.116665,
+        "tir": 0.115223
+      },
+      "errors": {},
+      "timer": "proton",
+      "benchmark_protocol": {
+        "num_groups": 2,
+        "input_bytes": 245710848,
+        "l2_bytes": 134217728,
+        "l2_eviction_factor": 3,
+        "flush_l2": false,
+        "warmup": 100,
+        "repeat": 30,
+        "cooldown_s": 1.0,
+        "order": [
+          "tir",
+          "deepgemm"
+        ]
+      },
+      "kernel_fair": true,
+      "label": "deepgemm_m4096_n24576_k1536",
+      "status": "ok",
+      "finished_at": "2026-06-11T13:56:58+00:00",
+      "attempt": 1
+    },
+    {
+      "kernel": "fp8_blockwise_gemm",
+      "config": "deepgemm_m4096_n32768_k512",
+      "gpu": "2",
+      "started_at": "2026-06-11T13:56:46+00:00",
+      "impls": {
+        "deepgemm": 0.07542900000000001,
+        "tir": 0.071909
+      },
+      "errors": {},
+      "timer": "proton",
+      "benchmark_protocol": {
+        "num_groups": 2,
+        "input_bytes": 287457280,
+        "l2_bytes": 134217728,
+        "l2_eviction_factor": 3,
+        "flush_l2": false,
+        "warmup": 100,
+        "repeat": 30,
+        "cooldown_s": 1.0,
+        "order": [
+          "tir",
+          "deepgemm"
+        ]
+      },
+      "kernel_fair": true,
+      "label": "deepgemm_m4096_n32768_k512",
+      "status": "ok",
+      "finished_at": "2026-06-11T13:56:59+00:00",
+      "attempt": 1
+    },
+    {
+      "kernel": "fp8_blockwise_gemm",
+      "config": "deepgemm_m4096_n4096_k7168",
+      "gpu": "7",
+      "started_at": "2026-06-11T13:56:50+00:00",
+      "impls": {
+        "deepgemm": 0.08379600000000001,
+        "tir": 0.08335
+      },
+      "errors": {},
+      "timer": "proton",
+      "benchmark_protocol": {
+        "num_groups": 5,
+        "input_bytes": 92733440,
+        "l2_bytes": 134217728,
+        "l2_eviction_factor": 3,
+        "flush_l2": false,
+        "warmup": 100,
+        "repeat": 30,
+        "cooldown_s": 1.0,
+        "order": [
+          "tir",
+          "deepgemm"
+        ]
+      },
+      "kernel_fair": true,
+      "label": "deepgemm_m4096_n4096_k7168",
+      "status": "ok",
+      "finished_at": "2026-06-11T13:57:17+00:00",
+      "attempt": 1
+    },
+    {
+      "kernel": "fp8_blockwise_gemm",
+      "config": "deepgemm_m4096_n576_k7168",
+      "gpu": "3",
+      "started_at": "2026-06-11T13:56:38+00:00",
+      "impls": {
+        "deepgemm": 0.019367000000000002,
+        "tir": 0.018618
+      },
+      "errors": {},
+      "timer": "proton",
+      "benchmark_protocol": {
+        "num_groups": 11,
+        "input_bytes": 38469120,
+        "l2_bytes": 134217728,
+        "l2_eviction_factor": 3,
+        "flush_l2": false,
+        "warmup": 100,
+        "repeat": 30,
+        "cooldown_s": 1.0,
+        "order": [
+          "tir",
+          "deepgemm"
+        ]
+      },
+      "kernel_fair": true,
+      "label": "deepgemm_m4096_n576_k7168",
+      "status": "ok",
+      "finished_at": "2026-06-11T13:56:58+00:00",
+      "attempt": 1
+    },
+    {
+      "kernel": "fp8_blockwise_gemm",
+      "config": "deepgemm_m4096_n7168_k16384",
+      "gpu": "4",
+      "started_at": "2026-06-11T13:56:49+00:00",
+      "impls": {
+        "deepgemm": 0.328634,
+        "tir": 0.326692
+      },
+      "errors": {},
+      "timer": "proton",
+      "benchmark_protocol": {
+        "num_groups": 2,
+        "input_bytes": 244711424,
+        "l2_bytes": 134217728,
+        "l2_eviction_factor": 3,
+        "flush_l2": false,
+        "warmup": 100,
+        "repeat": 30,
+        "cooldown_s": 1.0,
+        "order": [
+          "tir",
+          "deepgemm"
+        ]
+      },
+      "kernel_fair": true,
+      "label": "deepgemm_m4096_n7168_k16384",
+      "status": "ok",
+      "finished_at": "2026-06-11T13:57:08+00:00",
+      "attempt": 1,
+      "restabilized": {
+        "reps": 10,
+        "old_impls": {
+          "deepgemm": 0.329007,
+          "tir": 0.322784
+        }
+      }
+    },
+    {
+      "kernel": "fp8_blockwise_gemm",
+      "config": "deepgemm_m4096_n7168_k2048",
+      "gpu": "0",
+      "started_at": "2026-06-11T13:56:55+00:00",
+      "impls": {
+        "deepgemm": 0.04446800000000001,
+        "tir": 0.043584000000000005
+      },
+      "errors": {},
+      "timer": "proton",
+      "benchmark_protocol": {
+        "num_groups": 5,
+        "input_bytes": 81969152,
+        "l2_bytes": 134217728,
+        "l2_eviction_factor": 3,
+        "flush_l2": false,
+        "warmup": 100,
+        "repeat": 30,
+        "cooldown_s": 1.0,
+        "order": [
+          "tir",
+          "deepgemm"
+        ]
+      },
+      "kernel_fair": true,
+      "label": "deepgemm_m4096_n7168_k2048",
+      "status": "ok",
+      "finished_at": "2026-06-11T13:57:19+00:00",
+      "attempt": 1
+    },
+    {
+      "kernel": "fp8_blockwise_gemm",
+      "config": "smoke_1024x1024x1024",
+      "gpu": "7",
+      "started_at": "2026-06-11T13:56:34+00:00",
+      "impls": {
+        "deepgemm": 0.0066595000000000005,
+        "tir": 0.0058475
+      },
+      "errors": {},
+      "timer": "proton",
+      "benchmark_protocol": {
+        "num_groups": 96,
+        "input_bytes": 4210688,
+        "l2_bytes": 134217728,
+        "l2_eviction_factor": 3,
+        "flush_l2": false,
+        "warmup": 100,
+        "repeat": 30,
+        "cooldown_s": 1.0,
+        "order": [
+          "tir",
+          "deepgemm"
+        ]
+      },
+      "kernel_fair": true,
+      "label": "smoke_1024x1024x1024",
+      "status": "ok",
+      "finished_at": "2026-06-11T13:56:49+00:00",
+      "attempt": 1,
+      "restabilized": {
+        "reps": 10,
+        "old_impls": {
+          "deepgemm": 0.006429000000000001,
+          "tir": 0.005664
+        }
+      }
+    },
+    {
+      "kernel": "fp8_blockwise_gemm",
+      "config": "stress_m8192_n7168_k4096",
+      "gpu": "3",
+      "started_at": "2026-06-11T13:56:58+00:00",
+      "impls": {
+        "deepgemm": 0.165653,
+        "tir": 0.164309
+      },
+      "errors": {},
+      "timer": "proton",
+      "benchmark_protocol": {
+        "num_groups": 3,
+        "input_bytes": 180846592,
+        "l2_bytes": 134217728,
+        "l2_eviction_factor": 3,
+        "flush_l2": false,
+        "warmup": 100,
+        "repeat": 30,
+        "cooldown_s": 1.0,
+        "order": [
+          "tir",
+          "deepgemm"
+        ]
+      },
+      "kernel_fair": true,
+      "label": "stress_m8192_n7168_k4096",
+      "status": "ok",
+      "finished_at": "2026-06-11T13:57:23+00:00",
+      "attempt": 1
+    },
+    {
+      "kernel": "nvfp4_gemm",
+      "config": "1024x1024x1024",
+      "gpu": "6",
+      "started_at": "2026-06-11T13:56:58+00:00",
+      "impls": {
+        "flashinfer": 0.005122,
+        "tir": 0.006561
+      },
+      "errors": {},
+      "timer": "proton",
+      "benchmark_protocol": {
+        "num_groups": 123,
+        "input_bytes": 3276804,
+        "l2_bytes": 134217728,
+        "l2_eviction_factor": 3,
+        "flush_l2": false,
+        "warmup": 100,
+        "repeat": 30,
+        "cooldown_s": 1.0,
+        "order": [
+          "tir",
+          "flashinfer"
+        ]
+      },
+      "label": "1024x1024x1024",
+      "status": "ok",
+      "finished_at": "2026-06-11T13:57:23+00:00",
+      "attempt": 1
+    },
+    {
+      "kernel": "nvfp4_gemm",
+      "config": "16384x16384x16384",
+      "gpu": "0",
+      "started_at": "2026-06-11T13:57:22+00:00",
+      "impls": {
+        "flashinfer": 1.6177080000000001,
+        "tir": 1.4647180000000002
+      },
+      "errors": {},
+      "timer": "proton",
+      "benchmark_protocol": {
+        "num_groups": 1,
+        "input_bytes": 838860804,
+        "l2_bytes": 134217728,
+        "l2_eviction_factor": 3,
+        "flush_l2": false,
+        "warmup": 10,
+        "repeat": 30,
+        "cooldown_s": 1.0,
+        "order": [
+          "tir",
+          "flashinfer"
+        ]
+      },
+      "label": "16384x16384x16384",
+      "status": "ok",
+      "finished_at": "2026-06-11T13:57:40+00:00",
+      "attempt": 1,
+      "restabilized": {
+        "reps": 5,
+        "old_impls": {
+          "flashinfer": 1.6033060000000001,
+          "tir": 1.40419
+        }
+      }
+    },
+    {
+      "kernel": "nvfp4_gemm",
+      "config": "2048x2048x2048",
+      "gpu": "2",
+      "started_at": "2026-06-11T13:56:59+00:00",
+      "impls": {
+        "flashinfer": 0.008517,
+        "tir": 0.008821
+      },
+      "errors": {},
+      "timer": "proton",
+      "benchmark_protocol": {
+        "num_groups": 31,
+        "input_bytes": 13107204,
+        "l2_bytes": 134217728,
+        "l2_eviction_factor": 3,
+        "flush_l2": false,
+        "warmup": 100,
+        "repeat": 30,
+        "cooldown_s": 1.0,
+        "order": [
+          "tir",
+          "flashinfer"
+        ]
+      },
+      "label": "2048x2048x2048",
+      "status": "ok",
+      "finished_at": "2026-06-11T13:57:23+00:00",
+      "attempt": 1
+    },
+    {
+      "kernel": "nvfp4_gemm",
+      "config": "4096x4096x4096",
+      "gpu": "4",
+      "started_at": "2026-06-11T13:57:11+00:00",
+      "impls": {
+        "flashinfer": 0.032126,
+        "tir": 0.030271000000000003
+      },
+      "errors": {},
+      "timer": "proton",
+      "benchmark_protocol": {
+        "num_groups": 8,
+        "input_bytes": 52428804,
+        "l2_bytes": 134217728,
+        "l2_eviction_factor": 3,
+        "flush_l2": false,
+        "warmup": 100,
+        "repeat": 30,
+        "cooldown_s": 1.0,
+        "order": [
+          "tir",
+          "flashinfer"
+        ]
+      },
+      "label": "4096x4096x4096",
+      "status": "ok",
+      "finished_at": "2026-06-11T13:57:31+00:00",
+      "attempt": 1
+    },
+    {
+      "kernel": "nvfp4_gemm",
+      "config": "8192x8192x8192",
+      "gpu": "7",
+      "started_at": "2026-06-11T13:57:19+00:00",
+      "impls": {
+        "flashinfer": 0.175695,
+        "tir": 0.187919
+      },
+      "errors": {},
+      "timer": "proton",
+      "benchmark_protocol": {
+        "num_groups": 2,
+        "input_bytes": 209715204,
+        "l2_bytes": 134217728,
+        "l2_eviction_factor": 3,
+        "flush_l2": false,
+        "warmup": 10,
+        "repeat": 30,
+        "cooldown_s": 1.0,
+        "order": [
+          "tir",
+          "flashinfer"
+        ]
+      },
+      "label": "8192x8192x8192",
+      "status": "ok",
+      "finished_at": "2026-06-11T13:57:38+00:00",
+      "attempt": 1,
+      "restabilized": {
+        "reps": 5,
+        "old_impls": {
+          "flashinfer": 0.174431,
+          "tir": 0.188117
+        }
+      }
+    },
+    {
+      "kernel": "sparse_flashmla_prefill_head64_phase1",
+      "config": "bench_dqk512_hq64_s4096_kv32768_topk512",
+      "gpu": "0",
+      "started_at": "2026-06-11T13:55:34+00:00",
+      "impls": {
+        "tirx": 0.373572
+      },
+      "errors": {},
+      "timer": "proton",
+      "benchmark_protocol": {
+        "num_groups": 1,
+        "input_bytes": 580927744,
+        "l2_bytes": 134217728,
+        "l2_eviction_factor": 3,
+        "flush_l2": false,
+        "warmup": 100,
+        "repeat": 30,
+        "cooldown_s": 1.0,
+        "order": [
+          "tirx"
+        ]
+      },
+      "label": "bench_dqk512_hq64_s4096_kv32768_topk512",
+      "status": "ok",
+      "finished_at": "2026-06-11T13:55:45+00:00",
+      "attempt": 1
+    },
+    {
+      "kernel": "sparse_flashmla_prefill_head64_phase1",
+      "config": "bench_dqk512_hq64_s4096_kv49152_topk512",
+      "gpu": "3",
+      "started_at": "2026-06-11T13:55:38+00:00",
+      "impls": {
+        "tirx": 0.37371
+      },
+      "errors": {},
+      "timer": "proton",
+      "benchmark_protocol": {
+        "num_groups": 1,
+        "input_bytes": 597704960,
+        "l2_bytes": 134217728,
+        "l2_eviction_factor": 3,
+        "flush_l2": false,
+        "warmup": 100,
+        "repeat": 30,
+        "cooldown_s": 1.0,
+        "order": [
+          "tirx"
+        ]
+      },
+      "label": "bench_dqk512_hq64_s4096_kv49152_topk512",
+      "status": "ok",
+      "finished_at": "2026-06-11T13:55:49+00:00",
+      "attempt": 1
+    },
+    {
+      "kernel": "sparse_flashmla_prefill_head64_phase1",
+      "config": "bench_dqk512_hq64_s4096_kv65536_topk512",
+      "gpu": "7",
+      "started_at": "2026-06-11T13:55:42+00:00",
+      "impls": {
+        "tirx": 0.382442
+      },
+      "errors": {},
+      "timer": "proton",
+      "benchmark_protocol": {
+        "num_groups": 1,
+        "input_bytes": 614482176,
+        "l2_bytes": 134217728,
+        "l2_eviction_factor": 3,
+        "flush_l2": false,
+        "warmup": 100,
+        "repeat": 30,
+        "cooldown_s": 1.0,
+        "order": [
+          "tirx"
+        ]
+      },
+      "label": "bench_dqk512_hq64_s4096_kv65536_topk512",
+      "status": "ok",
+      "finished_at": "2026-06-11T13:55:54+00:00",
+      "attempt": 1
+    },
+    {
+      "kernel": "sparse_flashmla_prefill_head64_phase1",
+      "config": "bench_dqk512_hq64_s4096_kv8192_topk512",
+      "gpu": "7",
+      "started_at": "2026-06-11T13:55:30+00:00",
+      "impls": {
+        "tirx": 0.372683
+      },
+      "errors": {},
+      "timer": "proton",
+      "benchmark_protocol": {
+        "num_groups": 1,
+        "input_bytes": 555761920,
+        "l2_bytes": 134217728,
+        "l2_eviction_factor": 3,
+        "flush_l2": false,
+        "warmup": 100,
+        "repeat": 30,
+        "cooldown_s": 1.0,
+        "order": [
+          "tirx"
+        ]
+      },
+      "label": "bench_dqk512_hq64_s4096_kv8192_topk512",
+      "status": "ok",
+      "finished_at": "2026-06-11T13:55:41+00:00",
+      "attempt": 1
+    },
+    {
+      "kernel": "sparse_flashmla_prefill_head64_phase1",
+      "config": "bench_dqk576_hq64_s4096_kv32768_topk512",
+      "gpu": "3",
+      "started_at": "2026-06-11T13:55:49+00:00",
+      "impls": {
+        "tirx": 0.384139
+      },
+      "errors": {},
+      "timer": "proton",
+      "benchmark_protocol": {
+        "num_groups": 1,
+        "input_bytes": 618676480,
+        "l2_bytes": 134217728,
+        "l2_eviction_factor": 3,
+        "flush_l2": false,
+        "warmup": 100,
+        "repeat": 30,
+        "cooldown_s": 1.0,
+        "order": [
+          "tirx"
+        ]
+      },
+      "label": "bench_dqk576_hq64_s4096_kv32768_topk512",
+      "status": "ok",
+      "finished_at": "2026-06-11T13:56:01+00:00",
+      "attempt": 1
+    },
+    {
+      "kernel": "sparse_flashmla_prefill_head64_phase1",
+      "config": "bench_dqk576_hq64_s4096_kv49152_topk512",
+      "gpu": "2",
+      "started_at": "2026-06-11T13:55:54+00:00",
+      "impls": {
+        "tirx": 0.386667
+      },
+      "errors": {},
+      "timer": "proton",
+      "benchmark_protocol": {
+        "num_groups": 1,
+        "input_bytes": 637550848,
+        "l2_bytes": 134217728,
+        "l2_eviction_factor": 3,
+        "flush_l2": false,
+        "warmup": 100,
+        "repeat": 30,
+        "cooldown_s": 1.0,
+        "order": [
+          "tirx"
+        ]
+      },
+      "label": "bench_dqk576_hq64_s4096_kv49152_topk512",
+      "status": "ok",
+      "finished_at": "2026-06-11T13:56:09+00:00",
+      "attempt": 1
+    },
+    {
+      "kernel": "sparse_flashmla_prefill_head64_phase1",
+      "config": "bench_dqk576_hq64_s4096_kv65536_topk512",
+      "gpu": "4",
+      "started_at": "2026-06-11T13:55:55+00:00",
+      "impls": {
+        "tirx": 0.404183
+      },
+      "errors": {},
+      "timer": "proton",
+      "benchmark_protocol": {
+        "num_groups": 1,
+        "input_bytes": 656425216,
+        "l2_bytes": 134217728,
+        "l2_eviction_factor": 3,
+        "flush_l2": false,
+        "warmup": 100,
+        "repeat": 30,
+        "cooldown_s": 1.0,
+        "order": [
+          "tirx"
+        ]
+      },
+      "label": "bench_dqk576_hq64_s4096_kv65536_topk512",
+      "status": "ok",
+      "finished_at": "2026-06-11T13:56:10+00:00",
+      "attempt": 1
+    },
+    {
+      "kernel": "sparse_flashmla_prefill_head64_phase1",
+      "config": "bench_dqk576_hq64_s4096_kv8192_topk512",
+      "gpu": "0",
+      "started_at": "2026-06-11T13:55:46+00:00",
+      "impls": {
+        "tirx": 0.37653
+      },
+      "errors": {},
+      "timer": "proton",
+      "benchmark_protocol": {
+        "num_groups": 1,
+        "input_bytes": 590364928,
+        "l2_bytes": 134217728,
+        "l2_eviction_factor": 3,
+        "flush_l2": false,
+        "warmup": 100,
+        "repeat": 30,
+        "cooldown_s": 1.0,
+        "order": [
+          "tirx"
+        ]
+      },
+      "label": "bench_dqk576_hq64_s4096_kv8192_topk512",
+      "status": "ok",
+      "finished_at": "2026-06-11T13:55:58+00:00",
+      "attempt": 1
+    }
+  ]
+}
