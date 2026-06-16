@@ -1,16 +1,10 @@
 Run the full TIRX test suite.
 
-Canonical slash-command doc: `.claude/commands/tir-test.md`
-
 ## Steps
 
-1. Install the kernel package, select the least busy GPU, and enable strict kernel-import checking:
+1. Select the least busy GPU and enable strict kernel-import checking:
    ```bash
-   pip install -e /path/to/tirx-kernels-staging   # or sibling tirx-kernels clone
    export CUDA_VISIBLE_DEVICES=$(nvidia-smi --query-gpu=index,memory.used --format=csv,noheader,nounits | sort -t',' -k2 -n | head -1 | cut -d',' -f1 | tr -d ' ')
-   export TVM_PATH=/path/to/tvm
-   export PYTHONPATH="${TVM_PATH}/python"
-   export TVM_LIBRARY_PATH="${TVM_PATH}/build/lib"
    # MUST stay set for the whole run. Without it, the kernel registry silently
    # drops any module that fails to import (warning + continue), so a framework
    # change that breaks a kernel's imports passes the tests unnoticed. With it,
@@ -21,37 +15,37 @@ Canonical slash-command doc: `.claude/commands/tir-test.md`
 2. Start the GPU monitor in the background so we can detect if anyone else lands on the same GPU mid-run:
    ```bash
    GPU_LOG="/tmp/tir_test_gpu_${CUDA_VISIBLE_DEVICES}.log"
-   bash .agents/scripts/monitor_gpu.sh --gpu "$CUDA_VISIBLE_DEVICES" --interval 5 --log "$GPU_LOG" &
+   bash .claude/scripts/monitor_gpu.sh --gpu "$CUDA_VISIBLE_DEVICES" --interval 5 --log "$GPU_LOG" &
    MON_PID=$!
    trap 'kill $MON_PID 2>/dev/null' EXIT
    ```
 
-3. Import gate — bench workloads: fail fast if any kernel listed in `workloads.yaml` fails to import:
-   ```bash
-   python -m tirx_kernels.tir_bench --check-imports
-   ```
-   A non-zero exit means a pinned workload kernel failed to import — fix it before proceeding.
-
-4. Full kernel import gate (correctness test suite coverage):
+3. Import gate — fail fast if any kernel no longer imports against the framework.
+   `pytest tests/python/tirx/` exercises the framework, not the kernel registry, so
+   a kernel that won't import is invisible to it. Force discovery of every kernel;
+   under `TIRX_KERNELS_STRICT=1` (set in step 1) it exits non-zero on the first
+   failed import:
    ```bash
    TIRX_KERNELS_STRICT=1 python -m tirx_kernels.registry --cc 10
    ```
    A non-zero exit means a kernel failed to import — this is a real failure (triage
    as category A/B below), fix it; never proceed or write it off as pre-existing.
+   (The env var is inlined here, not just exported in step 1, because each command
+   may run in a fresh shell where a prior `export` would not survive.)
 
-5. Run the full test suite with xdist parallelism — keep `TIRX_KERNELS_STRICT=1`
+4. Run the full test suite with xdist parallelism — keep `TIRX_KERNELS_STRICT=1`
    inlined so a kernel import error during collection is a hard failure here too:
    ```bash
    TIRX_KERNELS_STRICT=1 pytest tests/python/tirx/ -n 16
    ```
 
-6. Stop the monitor and check for foreign GPU usage during the run:
+5. Stop the monitor and check for foreign GPU usage during the run:
    ```bash
    kill $MON_PID 2>/dev/null; wait $MON_PID 2>/dev/null
    grep -E 'FOREIGN USER|\[FOREIGN\]' "$GPU_LOG" || echo "no foreign GPU usage observed"
    ```
 
-7. Report results: total passed, failed, skipped, errors — and the import-gate results from steps 3–4. If any foreign-user events are present in step 6, mention them — flaky failures should be re-evaluated on a clean GPU before being attributed to code changes.
+6. Report results: total passed, failed, skipped, errors — and the import-gate result from step 3. If any foreign-user events are present in step 5, mention them — flaky failures should be re-evaluated on a clean GPU before being attributed to code changes.
 
 ## Failure triage rules
 
