@@ -1,0 +1,212 @@
+Run kernel performance benchmarks to verify codegen changes.
+
+## Kernels to benchmark
+
+All commands use `--warmup 100 --repeat 30` for ~3-minute total runtime with reliable medians. Drop to defaults only when chasing a sub-2% regression.
+
+- **GEMM**: square GEMM at M=N=K in {1024, 2048, 4096, 8192, 16384} for three variants:
+  - fp16: `python -m tirx_kernels.bench --kernel fp16_bf16_gemm --warmup 100 --repeat 30 --timer proton`
+  - fp8: `python -m tirx_kernels.bench --kernel fp8_blockwise_gemm --warmup 100 --repeat 30 --timer proton`
+  - nvfp4: `python -m tirx_kernels.bench --kernel nvfp4_gemm --warmup 100 --repeat 30 --timer proton`
+- **FA4** (flash_attention4): all registered configs
+  - `python -m tirx_kernels.bench --kernel flash_attention4 --warmup 100 --repeat 30 --timer proton`
+- **MQA logits** (fp8 / fp4): all registered configs
+  - `python -m tirx_kernels.bench --kernel deepgemm_sm100_fp8_mqa_logits --warmup 100 --repeat 30 --timer proton`
+  - `python -m tirx_kernels.bench --kernel deepgemm_sm100_fp4_mqa_logits --warmup 100 --repeat 30 --timer proton`
+
+## Steps
+
+1. Select the least busy GPU:
+   ```bash
+   export CUDA_VISIBLE_DEVICES=$(nvidia-smi --query-gpu=index,memory.used --format=csv,noheader,nounits | sort -t',' -k2 -n | head -1 | cut -d',' -f1 | tr -d ' ')
+   ```
+
+2. Record the exact provenance for every implementation in the result table:
+   - `tir`: `git rev-parse HEAD` from the TIR checkout being tested.
+   - `tirx-kernels`: `git rev-parse HEAD` from the kernel checkout used by `python -m tirx_kernels.bench`.
+   - Each git-backed baseline implementation repo, such as DeepGEMM, FlashInfer, or FlashAttention: repo path and full commit SHA.
+   - Package/system baselines without a local git repo, such as `torch-cublas`: package version, package git version when available, CUDA version, and any library version that is easy to query.
+
+3. Run benchmarks for each kernel using the commands above.
+
+4. Present results in a table: kernel x config, with times in us, followed by the provenance block from step 2.
+
+## When to use
+
+When modifying anything that affects code generation: kernels, op dispatches, lowering passes, codegen, device ops.
+
+## Reference baseline
+
+Captured 2026-05-24 on B200 (sm_100a), physical GPU 2, `warmup=100 repeat=30`, `timer=proton`.
+
+Rows that were below `0.95x` in the full run were rerun twice; those rows use the median over the full-run measurement plus the two reruns (`runs=3`). Other rows use the full-run measurement (`runs=1`). All times are in us. `baseline/tirx > 1` means TIRX is faster.
+
+- raw full-run results: `/home/bohanhou/tirx-kernels/.porting/tir_bench_full/20260524T165849Z_gpu2_w100_r30`
+- low-ratio reruns: `/home/bohanhou/tirx-kernels/.porting/tir_bench_full/20260524T165849Z_gpu2_w100_r30/reruns_lt095`
+
+Implementation provenance:
+
+- `tir`             : `/home/bohanhou/tir` @ `2a3241a267003249bdf45555a5c6bbcc2a03c90b` (commit date `2026-05-17T00:46:03-04:00`, `feat(op): add bounded mbarrier wait (#627)`, dirty local worktree)
+- `tirx-kernels`    : `/home/bohanhou/tirx-kernels` @ `127cd12de4e4962d4499a39d37beb8a6d4105306` (commit date `2026-05-17T00:44:53-04:00`, `feat(nymph): add experimental lowering stack and acceptance gates (#290)`, dirty local worktree)
+
+Baseline implementation provenance:
+
+- `torch-cublas`    : PyTorch `2.11.0+cu130`, `torch.version.git_version=70d99e998b4955e0049d13a98d77ae1b14db1f45`, `torch.version.cuda=13.0`
+- `deepgemm`        : `/home/bohanhou/DeepGEMM` @ `714dd1a4a980f7937a74343d19a8eba4fe321480` (commit date `2026-05-11T19:20:18+08:00`, `Update test_mega_moe.py`)
+- `flashinfer`      : `/home/bohanhou/flashinfer` @ `bff85f3459707d5d2f1426d1ded4a320ab142078` (commit date `2026-05-22T14:36:34-07:00`, `feat: integrate cute-dsl Blackwell GQA decode into BatchDecodeWithPagedKVCacheWrapper (#3360)`, `flashinfer.__version__=0.6.11.post1`)
+- `flashattn_sm100` : `/home/bohanhou/flash-attention` @ `3da76cdb8aedd842c46511e5194f5f20cdd4cf6f` (commit date `2026-05-22T16:00:00-07:00`, `Build Fix: Update abi3 tag to cp310 and minimum python version to 3.10 (#2532)`)
+
+Notes:
+
+- `fp16_bf16_gemm` still reports `BASELINE_ERROR: triton: No module named 'tirx_kernels.gemm._triton_matmul'`; the recorded baseline is `torch-cublas`.
+- `nvfp4_gemm` FlashInfer baseline uses `backend="cutlass"`, `use_nvfp4=True`, and `flashinfer.autotune(True)`. `backend="auto"` was not recorded because it fails in this environment with mixed CUDA runtime libraries (`libcudart.so.12` and `libcudart.so.13`).
+
+### `fp16_bf16_gemm` (baseline=`torch-cublas`)
+
+| config | torch-cublas | tir | baseline/tirx | runs |
+|---|---:|---:|---:|---:|
+| `fp16_1024x1024x1024` | 5.47us | 16.46us | 0.332 | 3 |
+| `fp16_2048x2048x2048` | 18.57us | 27.22us | 0.682 | 3 |
+| `fp16_4096x4096x4096` | 156.08us | 95.04us | 1.642 | 1 |
+| `fp16_8192x8192x8192` | 894.20us | 855.20us | 1.046 | 3 |
+| `fp16_16384x16384x16384` | 6451.67us | 6740.25us | 0.957 | 3 |
+| `bf16_1024x1024x1024` | 5.48us | 16.45us | 0.333 | 3 |
+| `bf16_2048x2048x2048` | 18.36us | 27.08us | 0.678 | 3 |
+| `bf16_4096x4096x4096` | 92.75us | 91.47us | 1.014 | 1 |
+| `bf16_8192x8192x8192` | 871.44us | 780.62us | 1.116 | 1 |
+| `bf16_16384x16384x16384` | 6043.31us | 6270.93us | 0.964 | 1 |
+
+### `fp8_blockwise_gemm` (baseline=`deepgemm`)
+
+| config | deepgemm | tir | baseline/tirx | runs |
+|---|---:|---:|---:|---:|
+| `smoke_1024x1024x1024` | 6.84us | 6.36us | 1.077 | 1 |
+| `deepgemm_m4096_n2112_k7168` | 49.78us | 48.67us | 1.023 | 1 |
+| `deepgemm_m4096_n576_k7168` | 19.44us | 18.87us | 1.030 | 1 |
+| `deepgemm_m4096_n24576_k1536` | 117.35us | 115.60us | 1.015 | 1 |
+| `deepgemm_m4096_n32768_k512` | 75.29us | 71.92us | 1.047 | 1 |
+| `deepgemm_m4096_n7168_k16384` | 328.45us | 314.40us | 1.045 | 1 |
+| `deepgemm_m4096_n4096_k7168` | 83.71us | 83.71us | 1.000 | 1 |
+| `deepgemm_m4096_n7168_k2048` | 44.64us | 43.97us | 1.015 | 1 |
+| `stress_m8192_n7168_k4096` | 161.47us | 161.74us | 0.998 | 1 |
+
+### `nvfp4_gemm` (baseline=`flashinfer`)
+
+| config | flashinfer | tir | baseline/tirx | runs |
+|---|---:|---:|---:|---:|
+| `1024x1024x1024` | 5.19us | 6.74us | 0.770 | 3 |
+| `2048x2048x2048` | 8.51us | 8.87us | 0.960 | 3 |
+| `4096x4096x4096` | 30.96us | 30.22us | 1.025 | 1 |
+| `8192x8192x8192` | 176.76us | 187.81us | 0.941 | 3 |
+| `16384x16384x16384` | 1673.05us | 1546.78us | 1.082 | 1 |
+
+### `flash_attention4` (baseline=`flashattn_sm100`)
+
+| config | flashattn_sm100 | tir | baseline/tirx | runs |
+|---|---:|---:|---:|---:|
+| `s1024_h32kv4` | 20.26us | 20.59us | 0.984 | 1 |
+| `s1024_h32kv4_causal` | 19.30us | 19.16us | 1.007 | 1 |
+| `s1024_h32kv8` | 20.06us | 20.74us | 0.967 | 1 |
+| `s1024_h32kv8_causal` | 19.43us | 19.35us | 1.004 | 1 |
+| `s1024_h32kv16` | 20.34us | 20.91us | 0.973 | 1 |
+| `s1024_h32kv16_causal` | 19.82us | 20.16us | 0.983 | 1 |
+| `s1024_h32kv32` | 20.59us | 21.26us | 0.968 | 1 |
+| `s1024_h32kv32_causal` | 20.50us | 22.11us | 0.927 | 3 |
+| `s2048_h32kv4` | 59.33us | 60.65us | 0.978 | 1 |
+| `s2048_h32kv4_causal` | 38.53us | 36.74us | 1.049 | 1 |
+| `s2048_h32kv8` | 59.55us | 60.89us | 0.978 | 1 |
+| `s2048_h32kv8_causal` | 38.74us | 37.10us | 1.044 | 1 |
+| `s2048_h32kv16` | 60.52us | 62.69us | 0.966 | 1 |
+| `s2048_h32kv16_causal` | 39.33us | 37.86us | 1.039 | 1 |
+| `s2048_h32kv32` | 61.18us | 63.07us | 0.970 | 1 |
+| `s2048_h32kv32_causal` | 40.00us | 41.94us | 0.954 | 1 |
+| `s4096_h32kv4` | 203.30us | 203.98us | 0.997 | 1 |
+| `s4096_h32kv4_causal` | 114.28us | 110.97us | 1.030 | 1 |
+| `s4096_h32kv8` | 204.64us | 212.61us | 0.963 | 1 |
+| `s4096_h32kv8_causal` | 115.19us | 111.56us | 1.032 | 1 |
+| `s4096_h32kv16` | 208.55us | 215.10us | 0.970 | 1 |
+| `s4096_h32kv16_causal` | 116.25us | 113.04us | 1.028 | 1 |
+| `s4096_h32kv32` | 213.89us | 217.60us | 0.983 | 1 |
+| `s4096_h32kv32_causal` | 118.53us | 123.54us | 0.959 | 1 |
+| `s8192_h32kv4` | 850.39us | 837.22us | 1.016 | 1 |
+| `s8192_h32kv4_causal` | 462.08us | 445.77us | 1.037 | 1 |
+| `s8192_h32kv8` | 863.43us | 850.11us | 1.016 | 1 |
+| `s8192_h32kv8_causal` | 427.58us | 399.58us | 1.070 | 1 |
+| `s8192_h32kv16` | 859.06us | 763.47us | 1.125 | 1 |
+| `s8192_h32kv16_causal` | 415.83us | 405.42us | 1.026 | 1 |
+| `s8192_h32kv32` | 833.86us | 873.28us | 0.955 | 1 |
+| `s8192_h32kv32_causal` | 441.40us | 455.03us | 0.970 | 1 |
+
+### `deepgemm_sm100_fp8_mqa_logits` (baseline=`deepgemm`)
+
+| config | deepgemm | tirx | baseline/tirx | runs |
+|---|---:|---:|---:|---:|
+| `s2048_skv4096_h64_d128_f32_dense_cp` | 44.00us | 44.49us | 0.989 | 1 |
+| `s2048_skv4096_h64_d128_f32_dense_nocp` | 57.69us | 58.43us | 0.987 | 1 |
+| `s2048_skv8192_h64_d128_f32_dense_cp` | 77.33us | 77.38us | 0.999 | 1 |
+| `s2048_skv8192_h64_d128_f32_dense_nocp` | 117.73us | 118.44us | 0.994 | 1 |
+| `s4096_skv4096_h64_d128_f32_dense_cp` | 75.52us | 75.77us | 0.997 | 1 |
+| `s4096_skv4096_h64_d128_f32_dense_nocp` | 75.57us | 76.16us | 0.992 | 1 |
+| `s4096_skv8192_h64_d128_f32_dense_cp` | 133.81us | 133.16us | 1.005 | 1 |
+| `s4096_skv8192_h64_d128_f32_dense_nocp` | 192.41us | 201.40us | 0.955 | 1 |
+| `s2048_skv4096_h64_d128_f32_compressed_cp` | 46.44us | 44.28us | 1.049 | 1 |
+| `s2048_skv4096_h64_d128_f32_compressed_nocp` | 60.38us | 59.15us | 1.021 | 1 |
+| `s2048_skv8192_h64_d128_f32_compressed_cp` | 80.81us | 78.34us | 1.032 | 1 |
+| `s2048_skv8192_h64_d128_f32_compressed_nocp` | 124.10us | 119.19us | 1.041 | 1 |
+| `s4096_skv4096_h64_d128_f32_compressed_cp` | 82.16us | 77.14us | 1.065 | 1 |
+| `s4096_skv4096_h64_d128_f32_compressed_nocp` | 82.26us | 76.78us | 1.071 | 1 |
+| `s4096_skv8192_h64_d128_f32_compressed_cp` | 145.29us | 134.59us | 1.080 | 1 |
+| `s4096_skv8192_h64_d128_f32_compressed_nocp` | 206.64us | 193.31us | 1.069 | 1 |
+| `s2048_skv4096_h64_d128_bf16_dense_cp` | 44.26us | 44.85us | 0.987 | 1 |
+| `s2048_skv4096_h64_d128_bf16_dense_nocp` | 58.90us | 59.06us | 0.997 | 1 |
+| `s2048_skv8192_h64_d128_bf16_dense_cp` | 78.41us | 78.09us | 1.004 | 1 |
+| `s2048_skv8192_h64_d128_bf16_dense_nocp` | 120.82us | 119.50us | 1.011 | 1 |
+| `s4096_skv4096_h64_d128_bf16_dense_cp` | 77.42us | 76.89us | 1.007 | 1 |
+| `s4096_skv4096_h64_d128_bf16_dense_nocp` | 77.03us | 77.42us | 0.995 | 1 |
+| `s4096_skv8192_h64_d128_bf16_dense_cp` | 136.75us | 135.73us | 1.008 | 1 |
+| `s4096_skv8192_h64_d128_bf16_dense_nocp` | 196.20us | 193.79us | 1.012 | 1 |
+| `s2048_skv4096_h64_d128_bf16_compressed_cp` | 46.34us | 45.61us | 1.016 | 1 |
+| `s2048_skv4096_h64_d128_bf16_compressed_nocp` | 60.94us | 59.65us | 1.022 | 1 |
+| `s2048_skv8192_h64_d128_bf16_compressed_cp` | 80.72us | 79.53us | 1.015 | 1 |
+| `s2048_skv8192_h64_d128_bf16_compressed_nocp` | 124.13us | 121.22us | 1.024 | 1 |
+| `s4096_skv4096_h64_d128_bf16_compressed_cp` | 82.07us | 80.63us | 1.018 | 1 |
+| `s4096_skv4096_h64_d128_bf16_compressed_nocp` | 82.30us | 80.60us | 1.021 | 1 |
+| `s4096_skv8192_h64_d128_bf16_compressed_cp` | 145.44us | 141.84us | 1.025 | 1 |
+| `s4096_skv8192_h64_d128_bf16_compressed_nocp` | 206.94us | 202.45us | 1.022 | 1 |
+
+### `deepgemm_sm100_fp4_mqa_logits` (baseline=`deepgemm`)
+
+| config | deepgemm | tirx | baseline/tirx | runs |
+|---|---:|---:|---:|---:|
+| `s2048_skv4096_h64_d128_f32_dense_cp` | 39.78us | 40.41us | 0.984 | 1 |
+| `s2048_skv4096_h64_d128_f32_dense_nocp` | 51.63us | 52.15us | 0.990 | 1 |
+| `s2048_skv8192_h64_d128_f32_dense_cp` | 68.57us | 69.27us | 0.990 | 1 |
+| `s2048_skv8192_h64_d128_f32_dense_nocp` | 105.31us | 105.61us | 0.997 | 1 |
+| `s4096_skv4096_h64_d128_f32_dense_cp` | 69.83us | 69.95us | 0.998 | 1 |
+| `s4096_skv4096_h64_d128_f32_dense_nocp` | 69.74us | 69.72us | 1.000 | 1 |
+| `s4096_skv8192_h64_d128_f32_dense_cp` | 123.12us | 122.59us | 1.004 | 1 |
+| `s4096_skv8192_h64_d128_f32_dense_nocp` | 175.80us | 174.99us | 1.005 | 1 |
+| `s2048_skv4096_h64_d128_f32_compressed_cp` | 44.43us | 41.09us | 1.081 | 1 |
+| `s2048_skv4096_h64_d128_f32_compressed_nocp` | 58.08us | 53.10us | 1.094 | 1 |
+| `s2048_skv8192_h64_d128_f32_compressed_cp` | 77.15us | 70.58us | 1.093 | 1 |
+| `s2048_skv8192_h64_d128_f32_compressed_nocp` | 119.08us | 107.61us | 1.107 | 1 |
+| `s4096_skv4096_h64_d128_f32_compressed_cp` | 77.49us | 70.97us | 1.092 | 1 |
+| `s4096_skv4096_h64_d128_f32_compressed_nocp` | 77.47us | 70.86us | 1.093 | 1 |
+| `s4096_skv8192_h64_d128_f32_compressed_cp` | 138.42us | 124.58us | 1.111 | 1 |
+| `s4096_skv8192_h64_d128_f32_compressed_nocp` | 198.99us | 177.86us | 1.119 | 1 |
+| `s2048_skv4096_h64_d128_bf16_dense_cp` | 42.04us | 41.30us | 1.018 | 1 |
+| `s2048_skv4096_h64_d128_bf16_dense_nocp` | 54.48us | 53.58us | 1.017 | 1 |
+| `s2048_skv8192_h64_d128_bf16_dense_cp` | 72.25us | 71.16us | 1.015 | 1 |
+| `s2048_skv8192_h64_d128_bf16_dense_nocp` | 110.92us | 108.73us | 1.020 | 1 |
+| `s4096_skv4096_h64_d128_bf16_dense_cp` | 73.97us | 71.40us | 1.036 | 1 |
+| `s4096_skv4096_h64_d128_bf16_dense_nocp` | 73.97us | 71.40us | 1.036 | 1 |
+| `s4096_skv8192_h64_d128_bf16_dense_cp` | 129.30us | 126.49us | 1.022 | 1 |
+| `s4096_skv8192_h64_d128_bf16_dense_nocp` | 185.61us | 180.39us | 1.029 | 1 |
+| `s2048_skv4096_h64_d128_bf16_compressed_cp` | 42.89us | 41.88us | 1.024 | 1 |
+| `s2048_skv4096_h64_d128_bf16_compressed_nocp` | 55.43us | 54.18us | 1.023 | 1 |
+| `s2048_skv8192_h64_d128_bf16_compressed_cp` | 73.95us | 72.32us | 1.023 | 1 |
+| `s2048_skv8192_h64_d128_bf16_compressed_nocp` | 113.15us | 110.48us | 1.024 | 1 |
+| `s4096_skv4096_h64_d128_bf16_compressed_cp` | 75.31us | 72.50us | 1.039 | 1 |
+| `s4096_skv4096_h64_d128_bf16_compressed_nocp` | 75.28us | 72.66us | 1.036 | 1 |
+| `s4096_skv8192_h64_d128_bf16_compressed_cp` | 132.59us | 128.38us | 1.033 | 1 |
+| `s4096_skv8192_h64_d128_bf16_compressed_nocp` | 189.25us | 183.46us | 1.032 | 1 |
