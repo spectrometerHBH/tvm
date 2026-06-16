@@ -380,6 +380,44 @@ def _bench_legacy_callable(func, warmup, repeat, proton_name, debug, nsight, flu
     return start_event.elapsed_time(end_event) / repeat
 
 
+# Labels identifying our own kernel (vs external reference impls). Must match
+# OUR_IMPLS in tir-bench's ratio_diff.py. Used by the TIRX_BENCH_IMPLS filter.
+OURS_IMPLS = frozenset({"tir", "tirx"})
+
+
+def bench_impls_mode():
+    """Current impl-selection mode: 'all' (default), 'ours', or 'baseline'.
+
+    Set via the ``TIRX_BENCH_IMPLS`` env var (by tir-bench ``run.py --impls``).
+    A kernel's ``run_bench`` can use this to skip *building/warming* reference
+    impls (e.g. flashinfer autotune, deepgemm/cublas ext setup) that ``bench``'s
+    filter alone cannot avoid, since that setup runs before ``bench`` is called.
+    """
+    mode = os.environ.get("TIRX_BENCH_IMPLS", "all").lower()
+    if mode not in {"all", "ours", "baseline"}:
+        raise ValueError(f"TIRX_BENCH_IMPLS must be 'all', 'ours', or 'baseline', got {mode!r}")
+    return mode
+
+
+def bench_only_ours():
+    """True when only our own kernel should be benched (reference setup skippable)."""
+    return bench_impls_mode() == "ours"
+
+
+def filter_impls(funcs):
+    """Filter a ``{label: callable}`` impl map per the current ``bench_impls_mode``.
+
+    Call this right after building ``funcs`` so any subsequent
+    ``if "<ref>" in funcs:`` reference-setup blocks are skipped in 'ours' mode.
+    """
+    mode = bench_impls_mode()
+    if mode == "ours":
+        return {n: f for n, f in funcs.items() if n in OURS_IMPLS}
+    if mode == "baseline":
+        return {n: f for n, f in funcs.items() if n not in OURS_IMPLS}
+    return funcs
+
+
 def bench(
     funcs,
     input_factory=None,
@@ -392,6 +430,7 @@ def bench(
     debug=False,
     nsight=False,
     flush_l2_size=int(8e8 // 4),
+    references=None,
 ):
     """Benchmark implementations with a factory-owned input footprint.
 
@@ -405,7 +444,14 @@ def bench(
     ----------
     funcs : dict[str, callable]
         Map of implementation name to callable.  Each callable receives one
-        ``case`` returned by ``input_factory``.
+        ``case`` returned by ``input_factory``.  This should hold only *our*
+        kernel(s); external baselines go in ``references``.
+    references : dict[str, callable], optional
+        Map of reference-impl name to a no-arg *builder* that does the heavy
+        import/setup and returns the run callable.  Builders run lazily and only
+        when that impl will actually be benched (skipped entirely under
+        ``--impls ours``); a builder that raises is recorded as a
+        ``BASELINE_ERROR`` instead of failing the workload.
     input_factory : callable
         Factory returning ``(case, input_bytes)`` for one benchmark group.
     warmup : int
@@ -450,12 +496,53 @@ def bench(
         if not callable(func):
             raise TypeError(f"funcs[{name!r}] must be callable")
 
+    # Select impls for this run. ``funcs`` holds our own kernel(s); external
+    # baselines are passed as ``references`` (name -> no-arg builder). A builder
+    # is invoked here ONLY when its impl will actually be benched, so --impls
+    # ours skips all reference setup, --impls baseline skips ours, and a builder
+    # that fails is recorded as a BASELINE_ERROR rather than failing the
+    # workload. Legacy kernels that put references directly in ``funcs`` are
+    # still handled by the label filter (filter_impls) below.
+    funcs = filter_impls(funcs)
+    build_errors: dict[str, str] = {}
+    if bench_impls_mode() != "ours":
+        for ref_name, builder in (references or {}).items():
+            if not isinstance(ref_name, str) or not callable(builder):
+                raise TypeError("references must map a name to a no-arg builder callable")
+            try:
+                ref_fn = builder()
+            except Exception as e:
+                build_errors[ref_name] = str(e)
+                print(f"BASELINE_ERROR: {ref_name}: {e}", file=sys.stderr)
+                continue
+            if ref_fn is None:
+                continue
+            if not callable(ref_fn):
+                raise TypeError(f"references[{ref_name!r}] builder must return a callable")
+            funcs = {**funcs, ref_name: ref_fn}
+
+    if not funcs:
+        # Nothing to bench in this mode (e.g. 'ours' on a kernel with no tir
+        # impl, or 'baseline' with no references). Return an empty-but-valid
+        # result so the workload is a no-op.
+        return {
+            "impls": {},
+            "errors": build_errors,
+            "timer": timer,
+            "benchmark_protocol": {
+                "warmup": warmup,
+                "repeat": repeat,
+                "cooldown_s": cooldown_s,
+                "order": [],
+            },
+        }
+
     inputs, protocol = prepare_input_groups(input_factory, l2_bytes=l2_bytes)
     num_groups = len(inputs)
     if num_groups == 0:
         return {
             "impls": {},
-            "errors": {},
+            "errors": build_errors,
             "timer": timer,
             "benchmark_protocol": {
                 **protocol,
@@ -466,13 +553,14 @@ def bench(
             },
         }
 
-    errors = {}
+    errors = dict(build_errors)
     if timer == "event":
         impls = _bench_event_groups(funcs, inputs, warmup, repeat, cooldown_s)
     else:
-        impls, errors = _bench_proton_groups(
+        impls, proton_errors = _bench_proton_groups(
             funcs, inputs, warmup, repeat, cooldown_s, proton_name, debug, nsight
         )
+        errors.update(proton_errors)
 
     return {
         "impls": impls,
