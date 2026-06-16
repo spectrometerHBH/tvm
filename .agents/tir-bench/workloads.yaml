@@ -1,4 +1,4 @@
-# tir-bench workloads — full sweep mirroring tir/.claude/commands/tir-bench.md.
+# tir-bench workloads — curated sweep for .agents/tir-bench/run.py.
 # Edit freely. Run `python -m tirx_kernels.registry --format=benchrun --cc 10` to see the full set.
 
 defaults:
