@@ -1,7 +1,5 @@
 Run the full TIRX test suite.
 
-Canonical slash-command doc: `.claude/commands/tir-test.md`
-
 ## Steps
 
 1. Select the least busy GPU and enable strict kernel-import checking:
