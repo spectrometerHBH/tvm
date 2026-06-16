@@ -7,8 +7,8 @@ ref/ours ratio (higher = ours beats ref). Sorted by kernel then config.
 Usage:
     python baseline_view.py [run.json] [-o PATH]
 
-Default input: .agents/tir-bench/baseline.json
-Default output: .agents/tir-bench/baseline.md (next to the JSON)
+Default input: .agents/commands/tir-bench/baseline.json
+Default output: .agents/commands/tir-bench/baseline.md (next to the JSON)
 """
 
 from __future__ import annotations
