@@ -15,7 +15,7 @@
 # specific language governing permissions and limitations
 # under the License.
 
-exclude: ^(\.txdev/|\.claude/)
+exclude: ^(\.txdev/)
 
 default_install_hook_types:
   - pre-commit
