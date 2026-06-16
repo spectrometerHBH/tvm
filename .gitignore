@@ -183,6 +183,8 @@ cscope*
 perf
 .bash_history
 *.json
+!.agents/commands/tir-bench/tir.json
+!.agents/commands/tir-bench/ref.json
 *.params
 *.ro
 *.onnx
