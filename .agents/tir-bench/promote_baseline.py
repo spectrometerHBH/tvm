@@ -3,8 +3,7 @@
 
 `baseline.md` is the human-facing rendered view of the baseline and is what
 people actually read; it MUST stay in sync with `tir.json` / `ref.json`. Doing
-the promotion as a bare `cp` leaves baseline.md stale (and `.claude/` is excluded
-from pre-commit, so no hook catches it) — so always promote through this helper,
+the promotion as a bare `cp` leaves baseline.md stale — always promote through this helper,
 which copies the run JSON over the chosen baseline(s) AND regenerates baseline.md
 in one step.
 
