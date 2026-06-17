@@ -563,6 +563,7 @@ def gemm_async_tcgen05_impl(op_call: TilePrimitiveCall, sctx: DispatchContext) -
                 tiler_shape = [s // a for s, a in zip(shape_2d, atom_shape)]
                 tiler_grouped, seps = tiler.canonicalize().group(tiler_shape)
                 elem_per_128b = 128 // tvm.DataType(dtype).bits
+
                 # shard[-1] = leading dim (LBO), shard[-2] = stride dim (SBO).
                 # A single-atom dim (extent==1) gets 0: the hardware never advances
                 # along it, so the offset is unused -- and canonicalize().group() would
@@ -894,9 +895,7 @@ def gemm_async_tcgen05_impl(op_call: TilePrimitiveCall, sctx: DispatchContext) -
             T.uint32(0x3FFF),
         )
         lo = T.bitwise_or(T.uint32(lo_const), sa) if lo_const else sa
-        return T.bitwise_or(
-            T.shift_left(T.uint64(const_hi), T.uint64(32)), T.cast(lo, "uint64")
-        )
+        return T.bitwise_or(T.shift_left(T.uint64(const_hi), T.uint64(32)), T.cast(lo, "uint64"))
 
     def _b_offset(ni, ki):
         B_linear = (

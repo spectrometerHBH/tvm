@@ -441,7 +441,8 @@ TVM_FFI_STATIC_INIT_BLOCK() {
     // tensor_dtype. Omitting it keeps older callers backward-compatible.
     int base_arg_count = static_cast<int>(4 + tensor_rank * 4 + 3);
     TVM_FFI_ICHECK(args.size() == base_arg_count || args.size() == base_arg_count + 1)
-        << "cuTensorMapEncodeTiled expects " << base_arg_count << " (or +1 force_cu_dtype) arguments"
+        << "cuTensorMapEncodeTiled expects " << base_arg_count
+        << " (or +1 force_cu_dtype) arguments"
         << "tensor_map, tensor_dtype, tensor_rank, tensor_ptr, global_shape(" << tensor_rank
         << "), global_strides(" << tensor_rank - 1 << "), shared_shape(" << tensor_rank
         << "), shared_strides(" << tensor_rank << "), interleaved_kind, swizzle_kind"
@@ -483,7 +484,8 @@ TVM_FFI_STATIC_INIT_BLOCK() {
     auto swizzle_kind = static_cast<CUtensorMapSwizzle>(args[arg_cnt++].cast<int>());
     auto l2_promotion_kind = static_cast<CUtensorMapL2promotion>(args[arg_cnt++].cast<int>());
     auto oob_fill_kind = static_cast<CUtensorMapFloatOOBfill>(args[arg_cnt++].cast<int>());
-    int force_cu_dtype = (arg_cnt < static_cast<size_t>(args.size())) ? args[arg_cnt++].cast<int>() : -1;
+    int force_cu_dtype =
+        (arg_cnt < static_cast<size_t>(args.size())) ? args[arg_cnt++].cast<int>() : -1;
 
     TVM_FFI_ICHECK_EQ(tensor_dtype.lanes(), 1)
         << "Expect tensor_dtype to have lanes=1, but get " << tensor_dtype;

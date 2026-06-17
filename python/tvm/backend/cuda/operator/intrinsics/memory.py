@@ -113,11 +113,15 @@ def _shared_copy_lds_body(num_bytes):
         out_constraints = f'"={regs[0][1]}"(r0)'
     if num_bytes == 1:
         # 1B is loaded into a 32-bit register via ld.shared.u8; store low byte.
-        store_stmt = "    *reinterpret_cast<unsigned char*>(dst_ptr) = static_cast<unsigned char>(r0);"
+        store_stmt = (
+            "    *reinterpret_cast<unsigned char*>(dst_ptr) = static_cast<unsigned char>(r0);"
+        )
     elif n > 1:
         store_stmt = (
             f"    *reinterpret_cast<{_TYPE_MAP[num_bytes]}*>(dst_ptr) = "
-            + "{" + ", ".join(f"r{i}" for i in range(n)) + "};"
+            + "{"
+            + ", ".join(f"r{i}" for i in range(n))
+            + "};"
         )
     else:
         store_stmt = f"    *reinterpret_cast<{_TYPE_MAP[num_bytes]}*>(dst_ptr) = r0;"
@@ -140,9 +144,7 @@ def _shared_copy_sts_body(num_bytes):
     elif n > 1:
         load_regs = (
             f"    {_TYPE_MAP[num_bytes]} src_ = *reinterpret_cast<{_TYPE_MAP[num_bytes]}*>(src_ptr);\n"
-            + "".join(
-                f"    unsigned int r{i} = src_.{c};\n" for i, c in enumerate("xyzw"[:n])
-            )
+            + "".join(f"    unsigned int r{i} = src_.{c};\n" for i, c in enumerate("xyzw"[:n]))
         )
     else:
         ctype = regs[0][0]
@@ -331,14 +333,9 @@ device_intrinsic(
     return_type=lambda _addr, _cache_policy, return_dtype, weak, space, cop, ptx_type, has_cache: (
         _ptx_ld_parts(return_dtype, ptx_type, weak, space, cop, has_cache)[1]
     ),
-    tvm_return_type=lambda _addr,
-    _cache_policy,
-    return_dtype,
-    _weak,
-    _space,
-    _cop,
-    _ptx_type,
-    _has_cache: (parse_str(return_dtype)),
+    tvm_return_type=lambda _addr, _cache_policy, return_dtype, _weak, _space, _cop, _ptx_type, _has_cache: (
+        parse_str(return_dtype)
+    ),
     body=lambda _addr, _cache_policy, return_dtype, weak, space, cop, ptx_type, has_cache: (
         _ptx_ld_parts(return_dtype, ptx_type, weak, space, cop, has_cache)[3]
     ),

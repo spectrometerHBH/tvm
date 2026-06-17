@@ -140,7 +140,7 @@ class GpuPool:
             # utilization map as "no occupancy info this tick"; a real co-run
             # conflict is still caught by the per-PID interference check.
             return []
-        return [l.strip() for l in out.stdout.splitlines() if l.strip()]
+        return [line.strip() for line in out.stdout.splitlines() if line.strip()]
 
     def _all_gpus(self) -> list[tuple[str, str]]:
         rows = self._nvidia_smi(["--query-gpu=index,uuid"])
@@ -156,7 +156,7 @@ class GpuPool:
         the informational startup banner only — selection uses _occupied_indices
         (utilization), since a PID may just be parking idle VRAM."""
         rows = self._nvidia_smi(["--query-compute-apps=gpu_uuid"])
-        busy_uuids = {l for l in rows if l}
+        busy_uuids = {row for row in rows if row}
         return {idx for idx, uuid in self._all_gpus() if uuid in busy_uuids}
 
     def _utils(self) -> dict[str, float]:
@@ -1067,7 +1067,8 @@ def write_summary(out_dir: Path, current: dict) -> Path:
         if baseline_impl and ours_impl:
             lines.append("")
             lines.append(
-                f"_baseline impl_: `{baseline_impl}` · _ours_: `{ours_impl}` · _ratio_ = baseline/ours · `>1` means ours is faster"
+                f"_baseline impl_: `{baseline_impl}` · _ours_: `{ours_impl}` · "
+                f"_ratio_ = baseline/ours · `>1` means ours is faster"
             )
         lines.append("")
         # Table header
@@ -1190,7 +1191,8 @@ def diff_report(baseline: dict, current: dict, threshold_pct: float) -> tuple[st
     md.append("")
     md.append(f"- Current:  `{current['timestamp']}` ({current.get('label') or '-'})")
     md.append(
-        f"- Baseline: `{base.get('timestamp')}` ({base.get('label') or '-'})  from `tir.json` + `ref.json`"
+        f"- Baseline: `{base.get('timestamp')}` ({base.get('label') or '-'})  "
+        f"from `tir.json` + `ref.json`"
     )
     md.append(f"- Threshold: ±{threshold_pct:.1f}%")
     md.append("")
@@ -1545,7 +1547,8 @@ def main() -> None:
                     requeue_log.append((workload["kernel"], workload["config"], attempt, intruders))
                     log(
                         f"[tir-bench] >>> REQUEUE {workload['kernel']}/{workload['config']} — "
-                        f"attempt {attempt}/{MAX_INTERFERED_RETRIES} hit interference (intruders {intruders}), retrying <<<"
+                        f"attempt {attempt}/{MAX_INTERFERED_RETRIES} hit interference "
+                        f"(intruders {intruders}), retrying <<<"
                     )
                     # Hold the INTERFERED record so the final result reflects the
                     # latest attempt; it'll get overwritten when the retry lands.
