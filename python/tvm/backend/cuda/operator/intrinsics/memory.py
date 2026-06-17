@@ -333,9 +333,14 @@ device_intrinsic(
     return_type=lambda _addr, _cache_policy, return_dtype, weak, space, cop, ptx_type, has_cache: (
         _ptx_ld_parts(return_dtype, ptx_type, weak, space, cop, has_cache)[1]
     ),
-    tvm_return_type=lambda _addr, _cache_policy, return_dtype, _weak, _space, _cop, _ptx_type, _has_cache: (
-        parse_str(return_dtype)
-    ),
+    tvm_return_type=lambda _addr,
+    _cache_policy,
+    return_dtype,
+    _weak,
+    _space,
+    _cop,
+    _ptx_type,
+    _has_cache: (parse_str(return_dtype)),
     body=lambda _addr, _cache_policy, return_dtype, weak, space, cop, ptx_type, has_cache: (
         _ptx_ld_parts(return_dtype, ptx_type, weak, space, cop, has_cache)[3]
     ),
