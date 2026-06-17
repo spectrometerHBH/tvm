@@ -44,12 +44,12 @@ except ImportError:
 
 import tvm
 import tvm.testing
+from tvm.backend.cuda.operator.tile_primitive.tma_utils import mma_shared_layout
 from tvm.ir import Op
 from tvm.script import tirx as T
 from tvm.script.tirx import tile as Tx
 from tvm.tirx.layout import S, TCol, TileLayout, TLane
 from tvm.tirx.layout import tid_in_wg as axis_tid_in_wg
-from tvm.backend.cuda.operator.tile_primitive.tma_utils import mma_shared_layout
 
 
 def next_power_of_2(n):
