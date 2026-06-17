@@ -106,7 +106,7 @@ def build_report(
     else:
         base_payload = json.loads(Path(baseline_path).read_text())
         baseline_label = str(baseline_path)
-    if isinstance(current, (str, Path)):
+    if isinstance(current, str | Path):
         cur_payload = json.loads(Path(current).read_text())
         current_label = str(current)
     else:
@@ -199,7 +199,8 @@ def build_report(
 
     if rows:
         w(
-            "| kernel | config | ref impl | base ref/ours | cur ref/ours | ratio Δ | ours Δ | ref Δ |"
+            "| kernel | config | ref impl | base ref/ours | cur ref/ours | "
+            "ratio Δ | ours Δ | ref Δ |"
         )
         w("|---|---|---|---:|---:|---:|---:|---:|")
         for k, c, ref, br, cr, d, ref_d, our_d in rows:

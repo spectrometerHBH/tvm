@@ -31,10 +31,18 @@ HERE = Path(__file__).resolve().parent
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("run_json", type=Path, help="run JSON to promote (e.g. .tir-bench/runs/18-stable.json)")
+    ap.add_argument(
+        "run_json",
+        type=Path,
+        help="run JSON to promote (e.g. .tir-bench/runs/18-stable.json)",
+    )
     ap.add_argument("--tir", action="store_true", help="refresh tir.json (our-kernel baseline)")
     ap.add_argument("--ref", action="store_true", help="refresh ref.json (reference baseline)")
-    ap.add_argument("--both", action="store_true", help="refresh both (use for a full --impls all run)")
+    ap.add_argument(
+        "--both",
+        action="store_true",
+        help="refresh both (use for a full --impls all run)",
+    )
     args = ap.parse_args()
 
     if not (args.tir or args.ref or args.both):
@@ -54,7 +62,11 @@ def main() -> None:
 
     # Always regenerate the human-facing baseline.md so it never drifts from the
     # JSON baselines. This is the whole reason to promote through this helper.
-    subprocess.run([sys.executable, str(HERE / "baseline_view.py")], check=True, stdout=subprocess.DEVNULL)
+    subprocess.run(
+        [sys.executable, str(HERE / "baseline_view.py")],
+        check=True,
+        stdout=subprocess.DEVNULL,
+    )
     print(f"[promote] regenerated {(HERE / 'baseline.md').relative_to(HERE)}")
 
 
