@@ -1,17 +1,15 @@
 #!/usr/bin/env python3
 """tir-bench: pre-commit regression benchmark for TIRx kernels.
 
-Methodology mirrors tirx-bench-ci's bench-run.sh: per-GPU utilization
-polling + a lock to assign at most one workload per free GPU. GPU selection
-is fully automatic — there is no --gpus flag on purpose (a human pinning
-cards defeats the util gate and can land work on a busy card). Differences
-from bench-ci: no build phase, no SQLite, no worktrees — we test the
-working tree as-is and emit JSON + a markdown regression report.
+See README.md in this directory for setup, baseline workflow, and flags.
 
-Usage:
-    python run.py [--workloads PATH] [--filter SUBSTR]
-                  [--baseline PATH] [--threshold PCT] [--label STR]
-                  [--util-threshold PCT]
+Quick start:
+    python run.py --impls baseline --rounds 5 --restable-reps 0
+    python reaggregate_from_logs.py --ref
+    python run.py --impls ours
+    python promote_baseline.py .tir-bench/runs/<id>.json --tir
+
+See README.md for the full strategy.
 
 Exit codes:
     0  no regressions (or no baseline yet)
@@ -30,7 +28,7 @@ import sys
 import tempfile
 import threading
 import time
-from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, as_completed, wait
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -43,6 +41,7 @@ DEFAULT_WORKLOADS = SCRIPT_DIR / "workloads.yaml"
 # The diff joins them at read time — there is no combined baseline file.
 DEFAULT_TIR_BASELINE = SCRIPT_DIR / "tir.json"
 DEFAULT_REF_BASELINE = SCRIPT_DIR / "ref.json"
+DEFAULT_RATIO_BASELINE = SCRIPT_DIR / "ratio.json"
 DEFAULT_REGRESSION_THRESHOLD = 1.0
 DEFAULT_RESTABLE_THRESHOLD = (
     3.0  # only re-bench movers past this; sub-3% drifts are usually contention noise
@@ -563,7 +562,9 @@ def run_one(
     pool: GpuPool,
     log_dir: Path,
     *,
+    impls_mode: str = "all",
     no_monitor: bool = False,
+    log_tag: str | None = None,
 ) -> dict:
     kernel = workload["kernel"]
     config = workload["config"]
@@ -573,13 +574,13 @@ def run_one(
 
     gpu = pool.next_gpu()
     started = now_iso()
-    label = f"{kernel}/{config}"
+    label = f"{kernel}/{config}/{impls_mode}"
     worker = threading.current_thread().name
     log(f"[tir-bench] {started} {worker} gpu={gpu} START {label}")
 
     json_tmp = tempfile.NamedTemporaryFile(suffix=".json", delete=False)
     json_tmp.close()
-    log_path = log_dir / f"{kernel}__{config}.log"
+    log_path = log_dir / f"{kernel}__{config}__{log_tag or impls_mode}.log"
 
     cmd = [
         sys.executable,
@@ -601,6 +602,7 @@ def run_one(
 
     env = os.environ.copy()
     env["CUDA_VISIBLE_DEVICES"] = gpu
+    env["TIRX_BENCH_IMPLS"] = impls_mode
     # Serialize the GPU-measurement phase per physical card (the subprocess
     # acquires a per-GPU flock around run_kernel_bench). Lets many subprocesses
     # import + compile in parallel while only one measures per card.
@@ -672,7 +674,7 @@ def run_one(
         log("[tir-bench] " + "*" * 70)
         log(f"[tir-bench] *** INTERFERED *** {worker} gpu={gpu} {label}")
         log(f"[tir-bench] ***   intruder PIDs on gpu {gpu}: {intruder_pids}")
-        log("[tir-bench] ***   subprocess killed, will be requeued by dispatcher")
+        log("[tir-bench] ***   subprocess killed, will be retried")
         log("[tir-bench] " + "*" * 70)
     else:
         log(
@@ -976,6 +978,9 @@ BASELINE_IMPL_BY_KERNEL = {
     "flash_attention4": "flashattn_sm100",
     "deepgemm_sm100_fp8_mqa_logits": "deepgemm",
     "deepgemm_sm100_fp4_mqa_logits": "deepgemm",
+    "deepgemm_sm100_fp4_paged_mqa_logits": "deepgemm",
+    "sparse_flashmla_prefill_head64_phase1": "flashmla",
+    "sparse_flashmla_prefill_head128_phase1": "flashmla",
 }
 
 
@@ -1129,7 +1134,9 @@ def load_baseline(combined=None):
     tir = json.loads(DEFAULT_TIR_BASELINE.read_text()) if DEFAULT_TIR_BASELINE.exists() else {}
     ref = json.loads(DEFAULT_REF_BASELINE.read_text()) if DEFAULT_REF_BASELINE.exists() else {}
     ref_idx = {
-        (r["kernel"], r.get("label") or r.get("config")): (r.get("impls") or {})
+        (r["kernel"], r.get("label") or r.get("config")): {
+            k: v for k, v in (r.get("impls") or {}).items() if k not in OURS_IMPLS
+        }
         for r in ref.get("results", [])
     }
     out = {k: v for k, v in tir.items() if k != "results"}
@@ -1263,48 +1270,188 @@ def _drifted_workloads(
     return drifted
 
 
-def _bench_median(
-    workloads: list[dict],
-    reps: int,
+def _roles_for_impls(impls: str) -> list[str]:
+    if impls == "ours":
+        return ["ours"]
+    if impls == "baseline":
+        return ["baseline"]
+    return ["ours", "baseline"]
+
+
+def run_job_with_retry(
+    workload: dict,
+    role: str,
+    round_idx: int,
     pool: GpuPool,
     log_dir: Path,
     *,
+    max_retry: int,
     no_monitor: bool,
-    cpu_workers: int | None = None,
-) -> dict[tuple[str, str], dict[str, float]]:
-    """Run each workload `reps` times, return per-(kernel, config) median impl times.
+    requeue_log: list[tuple[str, str, str, int, list[int]]] | None = None,
+) -> dict:
+    kernel = workload["kernel"]
+    config = workload["config"]
+    attempt = 1
+    while True:
+        record = run_one(
+            workload,
+            pool,
+            log_dir,
+            impls_mode=role,
+            no_monitor=no_monitor,
+            log_tag=f"{role}_r{round_idx}_a{attempt}",
+        )
+        record["role"] = role
+        record["round_idx"] = round_idx
+        record["attempt"] = attempt
 
-    Treats `INTERFERED` results as discardable but does not requeue —
-    median of the surviving reps is taken. If all reps for a workload
-    fail/interfere, that workload is omitted from the result.
-    """
+        if record.get("status") == "INTERFERED" and attempt < max_retry:
+            intruders = record.get("intruder_pids") or []
+            if requeue_log is not None:
+                requeue_log.append((kernel, config, role, attempt, intruders))
+            log(
+                f"[tir-bench] >>> REQUEUE {kernel}/{config}/{role} r{round_idx} — "
+                f"attempt {attempt}/{max_retry} hit interference "
+                f"(intruders {intruders}), retrying <<<"
+            )
+            attempt += 1
+            continue
+
+        if record.get("status") == "INTERFERED":
+            record["status"] = "FAIL"
+            record["error"] = (
+                f"INTERFERED after {max_retry} attempts: {record.get('error', '')}"
+            )
+        return record
+
+
+def run_scheduled_jobs(
+    workloads: list[dict],
+    roles: list[str],
+    rounds: int,
+    pool: GpuPool,
+    log_dir: Path,
+    *,
+    max_retry: int,
+    no_monitor: bool,
+    cpu_workers: int,
+) -> tuple[list[dict], list[tuple[str, str, str, int, list[int]]]]:
+    jobs = [(w, role, r) for w in workloads for role in roles for r in range(rounds)]
+    requeue_log: list[tuple[str, str, str, int, list[int]]] = []
+    records: list[dict] = []
+    n_jobs = len(jobs)
+    with ThreadPoolExecutor(
+        max_workers=min(cpu_workers, n_jobs) if n_jobs else 1,
+        thread_name_prefix="bench",
+    ) as ex:
+        futs = [
+            ex.submit(
+                run_job_with_retry,
+                w,
+                role,
+                r,
+                pool,
+                log_dir,
+                max_retry=max_retry,
+                no_monitor=no_monitor,
+                requeue_log=requeue_log,
+            )
+            for w, role, r in jobs
+        ]
+        for fut in as_completed(futs):
+            records.append(fut.result())
+    return records, requeue_log
+
+
+def aggregate_impl_times(values: list[float], method: str) -> float:
+    """Combine per-round impl times for one workload."""
     import statistics
 
+    if method == "mean":
+        return statistics.mean(values)
+    if method == "median":
+        return statistics.median(values)
+    if method == "trimmed_mean":
+        # Drop fastest + slowest round; with 5 rounds this is the middle 3.
+        if len(values) < 3:
+            return statistics.mean(values)
+        ranked = sorted(values)
+        return statistics.mean(ranked[1:-1])
+    raise ValueError(
+        f"aggregate must be mean, median, or trimmed_mean, got {method!r}"
+    )
+
+
+def aggregate_rounds(
+    job_records: list[dict],
+    workloads: list[dict],
+    *,
+    rounds: int,
+    min_ok_rounds: int,
+    aggregate: str,
+    max_retry: int,
+) -> list[dict]:
+    """Merge per-role round job records into one row per workload."""
+    if aggregate not in ("mean", "median", "trimmed_mean"):
+        raise ValueError(f"aggregate must be mean, median, or trimmed_mean, got {aggregate!r}")
+
     samples: dict[tuple[str, str], dict[str, list[float]]] = {}
-    n_jobs = len(workloads) * reps
+    ok_round_counts: dict[tuple[str, str], dict[str, int]] = {}
 
-    with ThreadPoolExecutor(
-        max_workers=min(cpu_workers or pool.total_visible(), n_jobs),
-        thread_name_prefix="restable",
-    ) as ex:
-        futs = []
-        for w in workloads:
-            for _ in range(reps):
-                futs.append(ex.submit(run_one, w, pool, log_dir, no_monitor=no_monitor))
-        for fut in as_completed(futs):
-            rec = fut.result()
-            if rec.get("status") != "ok":
+    for rec in job_records:
+        if rec.get("status") != "ok":
+            continue
+        key = (rec["kernel"], rec.get("label") or rec.get("config"))
+        for impl, ms in (rec.get("impls") or {}).items():
+            if ms is None or ms <= 0:
                 continue
-            key = (rec["kernel"], rec.get("label") or rec.get("config"))
-            for impl, ms in (rec.get("impls") or {}).items():
-                if ms is None or ms <= 0:
-                    continue
-                samples.setdefault(key, {}).setdefault(impl, []).append(ms)
+            samples.setdefault(key, {}).setdefault(impl, []).append(ms)
+            ok_round_counts.setdefault(key, {}).setdefault(impl, 0)
+            ok_round_counts[key][impl] += 1
 
-    medians: dict[tuple[str, str], dict[str, float]] = {}
-    for key, by_impl in samples.items():
-        medians[key] = {impl: statistics.median(vs) for impl, vs in by_impl.items() if vs}
-    return medians
+    records: list[dict] = []
+    for w in workloads:
+        key = (w["kernel"], w["config"])
+        impl_samples = samples.get(key, {})
+        ok_counts = ok_round_counts.get(key, {})
+
+        qualified = {
+            impl: aggregate_impl_times(vs, aggregate)
+            for impl, vs in impl_samples.items()
+            if ok_counts.get(impl, 0) >= min_ok_rounds
+        }
+
+        if qualified:
+            records.append(
+                {
+                    "kernel": w["kernel"],
+                    "config": w["config"],
+                    "label": w["config"],
+                    "status": "ok",
+                    "impls": qualified,
+                    "aggregated": {
+                        "rounds": rounds,
+                        "method": aggregate,
+                        "max_retry": max_retry,
+                        "min_ok_rounds": min_ok_rounds,
+                        "ok_rounds": ok_counts,
+                    },
+                }
+            )
+        else:
+            records.append(
+                {
+                    "kernel": w["kernel"],
+                    "config": w["config"],
+                    "label": w["config"],
+                    "status": "FAIL",
+                    "error": (
+                        f"no impl reached min_ok_rounds={min_ok_rounds} "
+                        f"in {rounds} round(s)"
+                    ),
+                }
+            )
+    return records
 
 
 def main() -> None:
@@ -1376,6 +1523,41 @@ def main() -> None:
         f"shared (default {DEFAULT_UTIL_THRESHOLD:g})",
     )
     ap.add_argument(
+        "--rounds",
+        type=int,
+        default=1,
+        help="Independent benchmark rounds per (workload, role) job before "
+        "aggregation (default 1). Each job is retried on INTERFERED up to "
+        "--max-retry times.",
+    )
+    ap.add_argument(
+        "--bench-reps",
+        type=int,
+        default=None,
+        help="Deprecated alias for --rounds.",
+    )
+    ap.add_argument(
+        "--bench-aggregate",
+        choices=("mean", "median", "trimmed_mean"),
+        default="mean",
+        help="How to combine --rounds samples per impl (default mean). "
+        "trimmed_mean drops the fastest and slowest ok round.",
+    )
+    ap.add_argument(
+        "--max-retry",
+        type=int,
+        default=MAX_INTERFERED_RETRIES,
+        help="Max attempts per job when INTERFERED (default "
+        f"{MAX_INTERFERED_RETRIES}). Real FAIL exits immediately.",
+    )
+    ap.add_argument(
+        "--min-ok-rounds",
+        type=int,
+        default=1,
+        help="Minimum ok rounds required per impl before aggregation "
+        "(default 1).",
+    )
+    ap.add_argument(
         "--restable-threshold",
         type=float,
         default=DEFAULT_RESTABLE_THRESHOLD,
@@ -1400,7 +1582,7 @@ def main() -> None:
     ap.add_argument(
         "--impls",
         choices=("all", "ours", "baseline"),
-        default="all",
+        default="ours",
         help="Which impls to bench. 'all' (default): our kernel + "
         "reference impls, ratio + restable reports (use to "
         "(re)populate tir.json + ref.json). 'ours': only our kernel — "
@@ -1419,9 +1601,19 @@ def main() -> None:
         "flock serializes the measurement phase to one per card.",
     )
     args = ap.parse_args()
-    # Propagate the impl-selection mode to every bench subprocess (run_one does
-    # env = os.environ.copy()). The tirx bench reads TIRX_BENCH_IMPLS.
-    os.environ["TIRX_BENCH_IMPLS"] = args.impls
+    rounds = args.bench_reps if args.bench_reps is not None else args.rounds
+    if rounds < 1:
+        print("[tir-bench] --rounds must be >= 1", file=sys.stderr)
+        sys.exit(2)
+    if args.max_retry < 1:
+        print("[tir-bench] --max-retry must be >= 1", file=sys.stderr)
+        sys.exit(2)
+    if args.min_ok_rounds < 1:
+        print("[tir-bench] --min-ok-rounds must be >= 1", file=sys.stderr)
+        sys.exit(2)
+    if args.min_ok_rounds > rounds:
+        print("[tir-bench] --min-ok-rounds cannot exceed --rounds", file=sys.stderr)
+        sys.exit(2)
 
     workloads = load_workloads(args.workloads)
     if args.filter:
@@ -1514,72 +1706,45 @@ def main() -> None:
 
     _repo_git = collect_repo_git()
     label = args.label or _repo_git.get("tirx-kernels") or _repo_git.get("tir") or "local"
+    roles = _roles_for_impls(args.impls)
+    agg_note = (
+        f", {rounds} round(s)/role, aggregate={args.bench_aggregate}, "
+        f"min_ok_rounds={args.min_ok_rounds}, max_retry={args.max_retry}"
+        if rounds > 1 or args.min_ok_rounds > 1
+        else f", max_retry={args.max_retry}"
+    )
     print(
         f"[tir-bench] {len(workloads)} workloads, {n_gpus} probe-OK GPU(s) in pool, "
-        f"{cpu_workers} CPU worker(s), label={label}",
+        f"{cpu_workers} CPU worker(s), roles={roles}, label={label}{agg_note}",
         flush=True,
     )
 
-    # Results keyed by (kernel, config) so a requeued workload overwrites
-    # its previous attempt — the regression report sees only the final run.
-    results_by_key: dict[tuple[str, str], dict] = {}
-    requeue_log: list[
-        tuple[str, str, int, list[int]]
-    ] = []  # (kernel, config, attempt, intruder_pids)
+    job_records, requeue_log = run_scheduled_jobs(
+        workloads,
+        roles,
+        rounds,
+        pool,
+        log_dir,
+        max_retry=args.max_retry,
+        no_monitor=args.no_monitor,
+        cpu_workers=cpu_workers,
+    )
+    results = aggregate_rounds(
+        job_records,
+        workloads,
+        rounds=rounds,
+        min_ok_rounds=args.min_ok_rounds,
+        aggregate=args.bench_aggregate,
+        max_retry=args.max_retry,
+    )
 
-    with ThreadPoolExecutor(max_workers=cpu_workers, thread_name_prefix="bench") as ex:
-        in_flight: dict = {}  # future -> (workload, attempt_no)
-        for w in workloads:
-            fut = ex.submit(run_one, w, pool, log_dir, no_monitor=args.no_monitor)
-            in_flight[fut] = (w, 1)
-
-        while in_flight:
-            done, _ = wait(list(in_flight), return_when=FIRST_COMPLETED)
-            for fut in done:
-                workload, attempt = in_flight.pop(fut)
-                record = fut.result()
-                record["attempt"] = attempt
-                key = (workload["kernel"], workload["config"])
-
-                if record.get("status") == "INTERFERED" and attempt < MAX_INTERFERED_RETRIES:
-                    # Requeue: any free worker will pick it up via acquire().
-                    intruders = record.get("intruder_pids") or []
-                    requeue_log.append((workload["kernel"], workload["config"], attempt, intruders))
-                    log(
-                        f"[tir-bench] >>> REQUEUE {workload['kernel']}/{workload['config']} — "
-                        f"attempt {attempt}/{MAX_INTERFERED_RETRIES} hit interference "
-                        f"(intruders {intruders}), retrying <<<"
-                    )
-                    # Hold the INTERFERED record so the final result reflects the
-                    # latest attempt; it'll get overwritten when the retry lands.
-                    results_by_key[key] = record
-                    new_fut = ex.submit(
-                        run_one, workload, pool, log_dir, no_monitor=args.no_monitor
-                    )
-                    in_flight[new_fut] = (workload, attempt + 1)
-                else:
-                    results_by_key[key] = record
-                    if record.get("status") == "INTERFERED":
-                        # Out of retries — promote to FAIL so the report flags it.
-                        record["status"] = "FAIL"
-                        record["error"] = (
-                            f"INTERFERED on all {attempt} attempts "
-                            f"(last intruders: {record.get('intruder_pids')})"
-                        )
-                        log(
-                            f"[tir-bench] !!! GIVE UP {workload['kernel']}/{workload['config']} — "
-                            f"all {attempt} attempts interfered, marking FAIL !!!"
-                        )
-
-    # End-of-run interference summary.
     if requeue_log:
         log(f"[tir-bench] interference summary: {len(requeue_log)} retry event(s)")
-        for k, c, att, intr in requeue_log:
-            log(f"[tir-bench]   - {k}/{c}: attempt {att} → intruders {intr}")
+        for k, c, role, att, intr in requeue_log:
+            log(f"[tir-bench]   - {k}/{c}/{role}: attempt {att} → intruders {intr}")
     else:
         log("[tir-bench] interference summary: none")
 
-    results = list(results_by_key.values())
     results.sort(key=lambda r: (r["kernel"], r.get("label") or r.get("config")))
     probe_meta = {
         "enabled": not args.no_probe,
@@ -1606,10 +1771,11 @@ def main() -> None:
     baseline = load_baseline(args.baseline)
     if baseline is None:
         print("[tir-bench] no baseline (tir.json / ref.json) — skipping regression report")
-        print(f"[tir-bench]   set the tir baseline: cp {run_path} {DEFAULT_TIR_BASELINE}")
+        print(
+            f"[tir-bench]   set baseline: promote_baseline.py {run_path} --tir/--ref"
+        )
         return
 
-    report_md, n_regress = diff_report(baseline, current, args.threshold)
     reports_dir = out_dir / "reports" / current["timestamp"]
     reports_dir.mkdir(parents=True, exist_ok=True)
     # keep reports/latest pointing at the most recent run's folder
@@ -1617,45 +1783,52 @@ def main() -> None:
     if reports_latest.exists() or reports_latest.is_symlink():
         reports_latest.unlink()
     reports_latest.symlink_to(current["timestamp"])
-    report_path = reports_dir / "diff.md"
-    report_path.write_text(report_md)
-    print(f"[tir-bench] wrote {report_path}\n")
-    print(report_md)
 
-    # Reduced-impl runs: the ratio diff (and restable, which keys off ratio
-    # drift) needs both our impl AND a reference present in the *current* run.
-    # tirx-only / refs-only runs don't have both, so the absolute-ms diff above
-    # (this run's impls vs the baseline's same impls) is the comparison; stop.
-    if args.impls != "all":
-        # A reduced-impl run IS already the matching baseline (an 'ours' run holds
-        # only tir/tirx → tir.json; a 'baseline' run only refs → ref.json), so you
-        # promote by cp-ing it directly — the other file is untouched, no merge.
-        # The ratio diff needs both ours+ref in the current run, so reduced runs
-        # use the absolute-ms diff above.
+    sys.path.insert(0, str(SCRIPT_DIR))
+    from ratio_diff import build_report as _build_bench_report
+    from ratio_diff import load_ratio_baseline
+
+    n_regress = 0
+    if args.impls == "all":
+        try:
+            bench_md, n_regress = _build_bench_report(
+                baseline,
+                current,
+                threshold_pct=args.threshold,
+                ratio_baseline=load_ratio_baseline(DEFAULT_RATIO_BASELINE),
+            )
+        except Exception as e:
+            print(f"[tir-bench] bench report failed: {e}", file=sys.stderr)
+            sys.exit(3)
+    else:
+        bench_md, n_regress = diff_report(baseline, current, args.threshold)
+        bench_md = bench_md.replace(
+            "# tir-bench regression report",
+            "# tir-bench bench report\n\n_Absolute-ms diff only "
+            f"(--impls {args.impls}; run with --impls all for ref+ours+ratio)._",
+            1,
+        )
         if args.impls == "baseline":
-            print(f"[tir-bench]   promote reference times: cp {run_path} {DEFAULT_REF_BASELINE}")
+            print(
+                f"[tir-bench]   promote reference times: "
+                f"promote_baseline.py {run_path} --ref"
+            )
         else:
             print(
                 "[tir-bench] --impls ours: absolute-ms diff only "
-                "(ratio diff needs current-run reference times)"
+                "(run --impls all for ref+ours+ratio vs ratio.json)"
             )
-            print(f"[tir-bench]   promote your kernel times: cp {run_path} {DEFAULT_TIR_BASELINE}")
-        if n_regress > 0:
-            sys.exit(3)
-        return
+            print(
+                f"[tir-bench]   promote your kernel times: "
+                f"promote_baseline.py {run_path} --tir"
+            )
 
-    # Ratio-based diff: normalises away GPU-contention noise by comparing
-    # ours/ref ratio across runs (ref = fastest non-ours impl in baseline).
-    try:
-        sys.path.insert(0, str(SCRIPT_DIR))
-        from ratio_diff import build_report as _build_ratio_report
+    bench_path = reports_dir / "bench.md"
+    bench_path.write_text(bench_md)
+    print(f"[tir-bench] wrote {bench_path}\n")
+    print(bench_md)
 
-        ratio_md, _ = _build_ratio_report(baseline, current, threshold_pct=args.threshold)
-        ratio_path = reports_dir / "ratio.md"
-        ratio_path.write_text(ratio_md)
-        print(f"[tir-bench] wrote {ratio_path}\n")
-    except Exception as e:
-        print(f"[tir-bench] ratio diff failed: {e}", file=sys.stderr)
+    if args.impls != "all":
         if n_regress > 0:
             sys.exit(3)
         return
@@ -1691,16 +1864,31 @@ def main() -> None:
 
     print(
         f"[tir-bench] restabilizing {len(retest_specs)} workload(s) over "
-        f"{args.restable_reps} reps each (|ratio Δ| > {args.restable_threshold:.1f}%) ..."
+        f"{args.restable_reps} round(s)/role (|ratio Δ| > {args.restable_threshold:.1f}%) ..."
     )
-    medians = _bench_median(
+    restable_jobs, _ = run_scheduled_jobs(
         retest_specs,
+        roles,
         args.restable_reps,
         pool,
         log_dir,
+        max_retry=args.max_retry,
         no_monitor=args.no_monitor,
         cpu_workers=cpu_workers,
     )
+    restable_records = aggregate_rounds(
+        restable_jobs,
+        retest_specs,
+        rounds=args.restable_reps,
+        min_ok_rounds=1,
+        aggregate="median",
+        max_retry=args.max_retry,
+    )
+    medians = {
+        (r["kernel"], r.get("label") or r.get("config")): r["impls"]
+        for r in restable_records
+        if r.get("status") == "ok"
+    }
 
     # Patch current results in-place with the stabilized per-impl medians.
     n_patched = 0
@@ -1710,7 +1898,7 @@ def main() -> None:
             old_impls = dict(r.get("impls") or {})
             r["impls"] = medians[key]
             r["restabilized"] = {
-                "reps": args.restable_reps,
+                "rounds": args.restable_reps,
                 "old_impls": old_impls,
             }
             n_patched += 1
@@ -1721,12 +1909,16 @@ def main() -> None:
     print(f"[tir-bench] wrote {stable_path}")
 
     try:
-        ratio_md, n_regress = _build_ratio_report(baseline, current, threshold_pct=args.threshold)
-        ratio_path = reports_dir / "stable-ratio.md"
-        ratio_path.write_text(ratio_md)
-        print(f"[tir-bench] wrote {ratio_path}\n")
+        bench_md, n_regress = _build_bench_report(
+            baseline,
+            current,
+            threshold_pct=args.threshold,
+            ratio_baseline=load_ratio_baseline(DEFAULT_RATIO_BASELINE),
+        )
+        bench_path.write_text(bench_md)
+        print(f"[tir-bench] rewrote {bench_path} (after restable)\n")
     except Exception as e:
-        print(f"[tir-bench] stable ratio diff failed: {e}", file=sys.stderr)
+        print(f"[tir-bench] restable bench report failed: {e}", file=sys.stderr)
 
     if n_regress > 0:
         sys.exit(3)
