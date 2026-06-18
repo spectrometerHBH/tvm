@@ -2,13 +2,13 @@
   "timestamp": "20",
   "label": "ours-x5-full",
   "git": {
-    "tir": "664d91fd-dirty",
-    "tirx-kernels": "0e5aa144-dirty",
+    "tir": "7bc0543d-dirty",
+    "tirx-kernels": "a6c9c52e",
     "tirx-bench-ci": null
   },
   "kernel_tree": {
     "tir:python/tvm/tirx": "a40833ee28bdea9f6c0adacda4be0d75e85fe0f2",
-    "tirx-kernels:tirx_kernels": "4dd5b51cf465010050db595b77d9f37e44b67f63"
+    "tirx-kernels:tirx_kernels": "0426270065b97a9e78012abeb0e898bf6d1c1a28"
   },
   "results": [
     {
@@ -2529,6 +2529,17 @@
       "ours_ms": 0.0948814,
       "ref_ms": 0.09682866666666666,
       "ratio": 1.0205231654114153
+    },
+    {
+      "kernel": "fp16_bf16_gemm",
+      "config": "fp16_8192x8192x8192",
+      "label": "fp16_8192x8192x8192",
+      "status": "ok",
+      "ref_impl": "torch-cublas",
+      "ours_impl": "tir",
+      "ours_ms": 0.6919136666666666,
+      "ref_ms": 0.8216553333333334,
+      "ratio": 1.1875113513680176
     },
     {
       "kernel": "fp8_blockwise_gemm",
