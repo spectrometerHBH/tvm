@@ -18,7 +18,7 @@
  */
 /*!
  * \file tvm/tirx/tirx_op.h
- * \brief TIRX statements.
+ * \brief TIRx statements.
  */
 #ifndef TVM_TIRX_TIRX_STMT_H_
 #define TVM_TIRX_TIRX_STMT_H_
@@ -30,11 +30,11 @@ namespace tvm {
 namespace tirx {
 
 /*!
- * \brief TIRX TilePrimitiveCall stmt.
+ * \brief TIRx TilePrimitiveCall stmt.
  */
 class TilePrimitiveCallNode : public StmtNode {
  public:
-  // tvm::Op which corresponds to the TIRX operator.
+  // tvm::Op which corresponds to the TIRx operator.
   tvm::Op op;
 
   // Arguments to the operator.

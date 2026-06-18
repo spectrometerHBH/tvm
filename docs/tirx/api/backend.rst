@@ -15,11 +15,46 @@
     specific language governing permissions and limitations
     under the License.
 
-tvm.tirx.backend
+tvm.backend.cuda
 ================
 
-tvm.tirx.backend
-*****************
-.. automodule:: tvm.tirx.backend
+The CUDA backend — the tile-primitive dispatch, intrinsic builders, the ``T.cuda``
+/ ``T.ptx`` script namespaces, and the shared/tensor-memory pools — lives under
+``tvm.backend.cuda``, separate from the TIRx frontend (``tvm.tirx``). Other
+backends sit alongside it (``tvm.backend.rocm`` and so on).
+
+tvm.backend.cuda
+****************
+.. automodule:: tvm.backend.cuda
+   :members:
+   :imported-members:
+
+tvm.backend.cuda.lang
+*********************
+.. automodule:: tvm.backend.cuda.lang
+   :members:
+   :imported-members:
+
+tvm.backend.cuda.op
+*******************
+.. automodule:: tvm.backend.cuda.op
+   :members:
+   :imported-members:
+
+tvm.backend.cuda.script
+***********************
+.. automodule:: tvm.backend.cuda.script
+   :members:
+   :imported-members:
+
+tvm.backend.cuda.operator
+*************************
+.. automodule:: tvm.backend.cuda.operator
+   :members:
+   :imported-members:
+
+tvm.backend.cuda.target_tags
+****************************
+.. automodule:: tvm.backend.cuda.target_tags
    :members:
    :imported-members:

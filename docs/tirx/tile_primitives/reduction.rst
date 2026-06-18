@@ -15,12 +15,34 @@
     specific language governing permissions and limitations
     under the License.
 
-Kernel Tutorials
-================
+reduction
+=========
 
-Step-by-step tutorials for writing kernels with TIRx.
+Covers ``sum``, ``max``, ``min`` (reduce over ``axes``). Three variants: ``local``
+and ``shared`` (priority 10, discriminated by operand storage scope) and
+``sm100_packed`` (priority 20, which pre-empts the others for the thread-scope
+float32 case on Blackwell).
+
+.. list-table::
+   :header-rows: 1
+   :widths: 26 14 60
+
+   * - Variant
+     - Prio
+     - Lowering
+   * - :doc:`reduction/local`
+     - 10
+     - register src/dst; sequential thread reduction (+ optional warp shuffle)
+   * - :doc:`reduction/shared`
+     - 10
+     - shared src/dst; adaptive group-size ``__shfl_xor`` tree
+   * - :doc:`reduction/sm100_packed`
+     - 20
+     - Blackwell thread-scope fp32 ≥8: packed ``add.f32x2`` / ``max3``/``min3``
 
 .. toctree::
    :maxdepth: 1
 
-   write_kernel
+   reduction/local
+   reduction/shared
+   reduction/sm100_packed

@@ -61,7 +61,7 @@ def default_tir_pipeline():
 
 
 def tirx_pipeline():
-    """The TIRX pipeline used in tvm.tirx.build"""
+    """The TIRx pipeline used in tvm.tirx.build"""
 
     @tvm.transform.module_pass(opt_level=0)
     def _pipeline(mod: tvm.ir.IRModule, _ctx: tvm.transform.PassContext) -> tvm.ir.IRModule:

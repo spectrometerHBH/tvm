@@ -139,7 +139,7 @@ def verify_well_formed(obj: PrimFunc | IRModule, assert_mode: bool = True) -> bo
 def verify_tirx_well_formed(
     obj: PrimFunc | IRModule, assert_mode: bool = True, device_func: bool = False
 ) -> bool:
-    """Verify if the given TIRX is well-formed.
+    """Verify if the given TIRx is well-formed.
 
     Parameters
     ----------
@@ -155,6 +155,6 @@ def verify_tirx_well_formed(
     Returns
     -------
     result: bool
-        Whether it is a well-formed TIRX function.
+        Whether it is a well-formed TIRx function.
     """
     return _ffi_api.VerifyTIRxWellFormed(obj, assert_mode, device_func)  # type: ignore # pylint: disable=no-member

@@ -18,7 +18,7 @@
  */
 /*!
  * \file tvm/tirx/tirx_op.h
- * \brief TIRX built-in operators.
+ * \brief TIRx built-in operators.
  */
 #ifndef TVM_TIRX_TIRX_OP_H_
 #define TVM_TIRX_TIRX_OP_H_
@@ -33,7 +33,7 @@ namespace tvm {
 namespace tirx {
 
 /*!
- * \brief The type of the function that sanitizes the arguments of a TIRX operator.
+ * \brief The type of the function that sanitizes the arguments of a TIRx operator.
  * \param op The operator.
  * \param args The arguments.
  */

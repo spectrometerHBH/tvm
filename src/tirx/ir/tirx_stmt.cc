@@ -19,7 +19,7 @@
 
 /*!
  * \file tir/tirx_stmt.cc
- * TIRX statement nodes.
+ * TIRx statement nodes.
  */
 
 #include <tvm/tirx/op.h>

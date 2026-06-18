@@ -19,7 +19,7 @@
 
 /*!
  * \file tir/op/tirx.cc
- * TIRX built-in operators.
+ * TIRx built-in operators.
  */
 
 #include <tvm/tirx/op.h>

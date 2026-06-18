@@ -14,9 +14,9 @@
 # KIND, either express or implied.  See the License for the
 # specific language governing permissions and limitations
 # under the License.
-"""TIRX-layer TVMScript pieces (parser, builder).
+"""TIRx-layer TVMScript pieces (parser, builder).
 
-After the per-dialect TVMScript restructure, the TIRX layer owns its own
+After the per-dialect TVMScript restructure, the TIRx layer owns its own
 ``script/{parser,builder}`` subpackages. ``tvm.script.tirx`` resolves to
 this module via the dialect registry, so the public parser surface
 (``prim_func``, ``Buffer``, ``Ptr``, etc.) is re-exported here.

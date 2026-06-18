@@ -19,7 +19,7 @@
 
 /*!
  * \file lower_tirx_opaque.cc
- * \brief Lower opaque constructs in TIRX programs. This is the tirx-specific
+ * \brief Lower opaque constructs in TIRx programs. This is the tirx-specific
  *        counterpart of s_tirx::LowerOpaqueBlock, handling only the non-SBlock
  *        parts: AllocBuffer lowering, For(thread_binding) → AttrStmt(thread_extent),
  *        unit loop elimination, and pragma annotation handling.
@@ -37,10 +37,10 @@ namespace tvm {
 namespace tirx {
 
 /*!
- * \brief Lower opaque constructs for TIRX: AllocBuffer, thread bindings, unit loops.
+ * \brief Lower opaque constructs for TIRx: AllocBuffer, thread bindings, unit loops.
  *
  * Unlike s_tirx::LowerOpaqueBlock, this pass does NOT handle SBlock/SBlockRealize,
- * since TIRX programs do not contain SBlock nodes.
+ * since TIRx programs do not contain SBlock nodes.
  */
 class TIRxOpaqueLower : public StmtExprMutator {
  public:

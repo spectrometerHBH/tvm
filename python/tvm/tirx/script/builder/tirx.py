@@ -14,7 +14,7 @@
 # KIND, either express or implied.  See the License for the
 # specific language governing permissions and limitations
 # under the License.
-"""Builtin ops in TIRX"""
+"""Builtin ops in TIRx"""
 
 import functools
 from collections.abc import Callable

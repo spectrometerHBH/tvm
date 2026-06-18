@@ -14,7 +14,7 @@
 # KIND, either express or implied.  See the License for the
 # specific language governing permissions and limitations
 # under the License.
-"""Trainium-specific TIRX transformations."""
+"""Trainium-specific TIRx transformations."""
 # pylint: disable=invalid-name
 
 from tvm_ffi import get_global_func

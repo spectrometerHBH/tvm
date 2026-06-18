@@ -513,7 +513,7 @@ def LowerTIRx():
 
 
 def LowerTIRxOpaque():
-    """Lower opaque constructs in TIRX programs.
+    """Lower opaque constructs in TIRx programs.
 
     Handles AllocBuffer lowering, For(thread_binding) to AttrStmt(thread_extent)
     conversion, unit loop elimination, and pragma annotation handling.

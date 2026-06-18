@@ -123,9 +123,9 @@ Putting it together
 ~~~~~~~~~~~~~~~~~~~~~
 
 Across a full kernel, orchestration stays in ordinary source code, and the
-recurring hardware operations appear as tile primitives. For a worked example —
-a complete FP16/BF16 GEMM with a TMA producer warp and ``tcgen05`` MMA consumer
-warps — see :doc:`how_to/write_kernel`.
+recurring hardware operations appear as tile primitives. For the building blocks —
+TMA loads, ``tcgen05`` async MMA, reductions, and the rest — see the per-dispatch
+walkthroughs in :doc:`tile_primitives`.
 
 What TIRx Enables
 -----------------
@@ -182,7 +182,6 @@ Next Steps
 ----------
 
 - :doc:`install` — install TIRx and the kernel library.
-- :doc:`how_to/index` — kernel tutorials, including writing a kernel.
 - :doc:`layout` — the tensor layout model with an interactive explorer.
 - :doc:`arch/index` — compiler internals (lowering pipeline, passes, codegen).
 - :doc:`api/index` — the ``tvm.tirx`` Python API.

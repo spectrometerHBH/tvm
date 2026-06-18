@@ -295,6 +295,8 @@ function recompute() {
   ST.shardTotal = product(ST.layout.shard.map((it) => it.extent));
   ST.mismatch = ST.shardTotal !== total;
   ST.swizzle = computeSwizzle();
+  // elements that share one 4-byte bank word (e.g. 2 fp16, 4 fp8, 1 fp32)
+  ST.elemsPerBank = ST.swizzle ? Math.max(1, Math.round(4 / ((ST.swizzle.bits || 32) / 8))) : 1;
 
   // 1) owners per element; in swizzle mode, also map the memory address through
   //    the swizzle and derive synthetic line/bank coordinates.
@@ -466,8 +468,11 @@ function drawPhysical(hovKeys) {
 
   if (ST.xAxis) {
     // 2D table: rows = yAxis values, cols = xAxis values.
-    const table = mk('div', 'phys-table');
-    table.style.gridTemplateColumns = '44px repeat(' + ST.xVals.length + ', 54px)';
+    const table = mk('div', 'phys-table' + (ST.swizzle ? ' bank-mode' : ''));
+    // In bank mode a cell is one 4-byte bank word holding elemsPerBank elements
+    // laid out horizontally; otherwise a fixed 54px cell.
+    const colW = ST.swizzle ? (ST.elemsPerBank * 48 + 8) : 54;
+    table.style.gridTemplateColumns = '44px repeat(' + ST.xVals.length + ', ' + colW + 'px)';
     table.appendChild(corner());
     for (const x of ST.xVals) table.appendChild(axHdr(String(x), false, `${ST.xAxis}=${x}`));
     for (const y of ST.yVals) {

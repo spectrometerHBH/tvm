@@ -1301,7 +1301,7 @@ class DocStringDoc : public StmtDoc {
 };
 
 /*!
- * \brief Doc that represents call to an TIRX operator
+ * \brief Doc that represents call to an TIRx operator
  *
  * \sa OpCallDoc
  */

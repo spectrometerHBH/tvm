@@ -19,7 +19,7 @@
 
 /*!
  * \file tir/analysis/verify_tirx_well_formed.cc
- * \brief Check if the TIRX program is well-formed.
+ * \brief Check if the TIRx program is well-formed.
  */
 
 #include <tvm/arith/analyzer.h>

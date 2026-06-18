@@ -79,6 +79,9 @@
     display:flex; flex-wrap:wrap; gap:2px; align-content:flex-start; justify-content:center; transition:all .15s; }
   .pcell.hov-cell { border-color:#222; box-shadow:0 0 7px rgba(59,130,246,.4); }
   .pcell.dm-cell { opacity:.16; }
+  /* bank mode: pack the elements of one bank word side by side (same size as
+     the logical-tensor cells), not stacked */
+  .phys-table.bank-mode .pcell { flex-wrap:nowrap; gap:2px; padding:2px; }
 
   .phys-1d { display:flex; flex-wrap:wrap; gap:8px; }
   .thread-tile { border:2px solid var(--border); border-radius:8px; padding:5px 6px 6px;

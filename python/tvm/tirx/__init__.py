@@ -84,7 +84,7 @@ from .op import dp4a
 from .op import ignore_loop_partition
 from .generic import add, subtract, multiply
 
-# TIRX-specific imports (must come before subpackage imports to avoid circular imports)
+# TIRx-specific imports (must come before subpackage imports to avoid circular imports)
 from .exec_scope import ExecScope, ScopeIdDef
 from .layout import TileLayout, Layout, SwizzleLayout, ComposeLayout
 from .predicate import Predicate
