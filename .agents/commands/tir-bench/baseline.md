@@ -2,8 +2,8 @@
 
 - Timestamp: `20`
 - Label:     `ours-x5-full`
-- Git:       `{'tir': '664d91fd-dirty', 'tirx-kernels': '0e5aa144-dirty', 'tirx-bench-ci': None}`
-- Workloads: 257 ok, 1 failed
+- Git:       `{'tir': '7bc0543d-dirty', 'tirx-kernels': 'a6c9c52e', 'tirx-bench-ci': None}`
+- Workloads: 258 ok, 0 failed
 
 Each row shows our impl's time (tir/tirx) and every reference impl, with ref/ours where ref = fastest non-ours impl. Higher ratio = ours is faster.
 
@@ -264,6 +264,7 @@ Each row shows our impl's time (tir/tirx) and every reference impl, with ref/our
 | `fp16_16384x16384x16384` | tir | 6.5621 | torch-cublas | 6.4814 | 0.988 | deepgemm-cublaslt=6.5096 |
 | `fp16_2048x2048x2048` | tir | 0.0161 | torch-cublas | 0.0177 | 1.095 | deepgemm-cublaslt=0.0179 |
 | `fp16_4096x4096x4096` | tir | 0.0949 | deepgemm-cublaslt | 0.0968 | 1.021 | torch-cublas=0.0969 |
+| `fp16_8192x8192x8192` | tir | 0.6919 | torch-cublas | 0.8217 | 1.188 | deepgemm-cublaslt=0.8291 |
 ## fp8_blockwise_gemm
 
 | config | ours impl | ours (ms) | ref impl | ref (ms) | ref/ours | other impls |
@@ -308,7 +309,3 @@ Each row shows our impl's time (tir/tirx) and every reference impl, with ref/our
 | `bench_dqk576_hq64_s4096_kv49152_topk512` | tirx | 0.3875 | flashmla | 0.4047 | 1.044 | — |
 | `bench_dqk576_hq64_s4096_kv65536_topk512` | tirx | 0.4050 | flashmla | 0.4181 | 1.032 | — |
 | `bench_dqk576_hq64_s4096_kv8192_topk512` | tirx | 0.3732 | flashmla | 0.3810 | 1.021 | — |
-
-## Failed (1)
-
-- `fp16_bf16_gemm/fp16_8192x8192x8192`: no impl reached min_ok_rounds=5 in 5 round(s)
