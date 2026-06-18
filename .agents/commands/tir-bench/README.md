@@ -14,6 +14,16 @@ export TIRX_KERNELS_STRICT=1
 # Do NOT set CUDA_VISIBLE_DEVICES — GPU selection is automatic.
 ```
 
+## Directory layout
+
+| Kind | Files |
+|------|--------|
+| **Run** | `run.py`, `workloads.yaml` |
+| **Pinned baseline (git)** | `tir.json`, `ref.json`, `ratio.json`, `baseline.md` |
+| **Promote / report** | `promote_baseline.py`, `reaggregate_from_logs.py`, `ratio_diff.py`, `baseline_view.py` |
+
+Run artifacts (logs, `runs/*.json`, `reports/*`) live under `.tir-bench/` and are not committed.
+
 ## Strategy (TL;DR)
 
 1. **Pinned baseline lives in git** under this directory (`tir.json`, `ref.json`,
