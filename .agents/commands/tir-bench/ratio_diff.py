@@ -61,9 +61,7 @@ def join_default_baseline() -> dict:
     here = Path(__file__).resolve().parent
     tir = json.loads((here / "tir.json").read_text()) if (here / "tir.json").exists() else {}
     ref = json.loads((here / "ref.json").read_text()) if (here / "ref.json").exists() else {}
-    ref_idx = {
-        _result_key(r): _refs_only(r.get("impls") or {}) for r in ref.get("results", [])
-    }
+    ref_idx = {_result_key(r): _refs_only(r.get("impls") or {}) for r in ref.get("results", [])}
     payload = {k: v for k, v in tir.items() if k != "results"}
     payload["results"] = [
         {
@@ -107,7 +105,9 @@ def pick_ours(impls: dict[str, float]) -> str | None:
 
 def build_ratio_payload(tir_payload: dict, ref_payload: dict) -> dict:
     """Build ratio.json contents from pinned tir + ref (no run JSON needed)."""
-    ref_idx = {_result_key(r): _refs_only(r.get("impls") or {}) for r in ref_payload.get("results", [])}
+    ref_idx = {
+        _result_key(r): _refs_only(r.get("impls") or {}) for r in ref_payload.get("results", [])
+    }
     out = {
         "timestamp": tir_payload.get("timestamp"),
         "label": tir_payload.get("label"),

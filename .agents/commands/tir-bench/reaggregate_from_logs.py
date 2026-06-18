@@ -69,9 +69,7 @@ def _collect_rounds(log_dir: Path, role: str) -> dict[tuple[str, str], dict[str,
         if impl_ms:
             staging[key][round_idx][attempt] = impl_ms
 
-    by: dict[tuple[str, str], dict[str, list[float]]] = defaultdict(
-        lambda: defaultdict(list)
-    )
+    by: dict[tuple[str, str], dict[str, list[float]]] = defaultdict(lambda: defaultdict(list))
     for key, rounds in staging.items():
         for round_idx in sorted(rounds):
             attempts = rounds[round_idx]
@@ -166,10 +164,7 @@ def main() -> None:
             max_retry=args.max_retry,
         )
         n, miss = _patch_baseline(HERE / "tir.json", patch)
-        print(
-            f"[reaggregate] tir.json: updated {n} row(s), "
-            f"{miss} without ours logs (unchanged)"
-        )
+        print(f"[reaggregate] tir.json: updated {n} row(s), {miss} without ours logs (unchanged)")
 
     if args.ref:
         refs = _collect_rounds(args.log_dir, "baseline")

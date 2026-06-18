@@ -51,7 +51,9 @@ def merge_ref_baseline(run_json: Path, ref_path: Path) -> int:
     if run.get("baselines"):
         ref["baselines"] = run["baselines"]
     ref_path.write_text(json.dumps(ref, indent=2))
-    print(f"[promote] merged {len(patch)} ok row(s) from {run_json} -> {ref_path.relative_to(HERE)}")
+    print(
+        f"[promote] merged {len(patch)} ok row(s) from {run_json} -> {ref_path.relative_to(HERE)}"
+    )
     return 0
 
 

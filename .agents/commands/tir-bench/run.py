@@ -1319,9 +1319,7 @@ def run_job_with_retry(
 
         if record.get("status") == "INTERFERED":
             record["status"] = "FAIL"
-            record["error"] = (
-                f"INTERFERED after {max_retry} attempts: {record.get('error', '')}"
-            )
+            record["error"] = f"INTERFERED after {max_retry} attempts: {record.get('error', '')}"
         return record
 
 
@@ -1377,9 +1375,7 @@ def aggregate_impl_times(values: list[float], method: str) -> float:
             return statistics.mean(values)
         ranked = sorted(values)
         return statistics.mean(ranked[1:-1])
-    raise ValueError(
-        f"aggregate must be mean, median, or trimmed_mean, got {method!r}"
-    )
+    raise ValueError(f"aggregate must be mean, median, or trimmed_mean, got {method!r}")
 
 
 def aggregate_rounds(
@@ -1446,8 +1442,7 @@ def aggregate_rounds(
                     "label": w["config"],
                     "status": "FAIL",
                     "error": (
-                        f"no impl reached min_ok_rounds={min_ok_rounds} "
-                        f"in {rounds} round(s)"
+                        f"no impl reached min_ok_rounds={min_ok_rounds} in {rounds} round(s)"
                     ),
                 }
             )
@@ -1554,8 +1549,7 @@ def main() -> None:
         "--min-ok-rounds",
         type=int,
         default=1,
-        help="Minimum ok rounds required per impl before aggregation "
-        "(default 1).",
+        help="Minimum ok rounds required per impl before aggregation (default 1).",
     )
     ap.add_argument(
         "--restable-threshold",
@@ -1771,9 +1765,7 @@ def main() -> None:
     baseline = load_baseline(args.baseline)
     if baseline is None:
         print("[tir-bench] no baseline (tir.json / ref.json) — skipping regression report")
-        print(
-            f"[tir-bench]   set baseline: promote_baseline.py {run_path} --tir/--ref"
-        )
+        print(f"[tir-bench]   set baseline: promote_baseline.py {run_path} --tir/--ref")
         return
 
     reports_dir = out_dir / "reports" / current["timestamp"]
@@ -1809,19 +1801,13 @@ def main() -> None:
             1,
         )
         if args.impls == "baseline":
-            print(
-                f"[tir-bench]   promote reference times: "
-                f"promote_baseline.py {run_path} --ref"
-            )
+            print(f"[tir-bench]   promote reference times: promote_baseline.py {run_path} --ref")
         else:
             print(
                 "[tir-bench] --impls ours: absolute-ms diff only "
                 "(run --impls all for ref+ours+ratio vs ratio.json)"
             )
-            print(
-                f"[tir-bench]   promote your kernel times: "
-                f"promote_baseline.py {run_path} --tir"
-            )
+            print(f"[tir-bench]   promote your kernel times: promote_baseline.py {run_path} --tir")
 
     bench_path = reports_dir / "bench.md"
     bench_path.write_text(bench_md)
