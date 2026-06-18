@@ -8,7 +8,6 @@ import re
 import statistics
 import subprocess
 import sys
-import tempfile
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -126,7 +125,12 @@ def main() -> int:
     ap.add_argument("--repeat", type=int, default=30)
     ap.add_argument("--min-abs-ratio-d", type=float, default=0.0)
     ap.add_argument("--limit", type=int, default=0)
-    ap.add_argument("-o", "--out", type=Path, default=ROOT / ".tir-bench/reports/suspicious-ratio-review-results.json")
+    ap.add_argument(
+        "-o",
+        "--out",
+        type=Path,
+        default=ROOT / ".tir-bench/reports/suspicious-ratio-review-results.json",
+    )
     args = ap.parse_args()
 
     rows = json.loads(SUSPICIOUS.read_text())
@@ -144,18 +148,28 @@ def main() -> int:
         tag = re.sub(r"[^A-Za-z0-9_.-]+", "_", f"{k}__{c}")[:120]
         log_dir = LOG_ROOT / tag
         log_dir.mkdir(parents=True, exist_ok=True)
-        print(f"[{i+1}/{len(rows)}] paired review {k}/{c} ({ref})", flush=True)
+        print(f"[{i + 1}/{len(rows)}] paired review {k}/{c} ({ref})", flush=True)
 
         base_impls = head.get(key, {})
         ours = "tir" if "tir" in base_impls else "tirx"
-        base_ratio = base_impls[ref] / base_impls[ours] if ours in base_impls and ref in base_impls else 0
+        base_ratio = (
+            base_impls[ref] / base_impls[ours] if ours in base_impls and ref in base_impls else 0
+        )
 
         try:
             by_impl = _run_paired(
-                k, c, rounds=args.rounds, warmup=args.warmup, repeat=args.repeat, gpu=args.gpu, log_dir=log_dir
+                k,
+                c,
+                rounds=args.rounds,
+                warmup=args.warmup,
+                repeat=args.repeat,
+                gpu=args.gpu,
+                log_dir=log_dir,
             )
         except subprocess.CalledProcessError as e:
-            results.append({**row, "status": "fail", "error": (e.stderr or e.stdout or str(e))[-500:]})
+            results.append(
+                {**row, "status": "fail", "error": (e.stderr or e.stdout or str(e))[-500:]}
+            )
             continue
 
         if ours not in by_impl or ref not in by_impl:
@@ -194,7 +208,9 @@ def main() -> int:
     args.out.write_text(json.dumps(results, indent=2) + "\n")
     counts: dict[str, int] = {}
     for r in results:
-        counts[r.get("verdict", r.get("status", "?"))] = counts.get(r.get("verdict", r.get("status", "?")), 0) + 1
+        counts[r.get("verdict", r.get("status", "?"))] = (
+            counts.get(r.get("verdict", r.get("status", "?")), 0) + 1
+        )
     print(f"written {args.out}")
     print("summary:", counts)
     return 0
