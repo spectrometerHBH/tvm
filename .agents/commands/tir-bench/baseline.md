@@ -2,7 +2,7 @@
 
 - Timestamp: `20`
 - Label:     `ours-x5-full`
-- Git:       `{'tir': '7bc0543d-dirty', 'tirx-kernels': 'a6c9c52e', 'tirx-bench-ci': None}`
+- Git:       `{'tir': 'ca00cdc7-dirty', 'tirx-kernels': 'a6c9c52e', 'tirx-bench-ci': None}`
 - Workloads: 258 ok, 0 failed
 
 Each row shows our impl's time (tir/tirx) and every reference impl, with ref/ours where ref = fastest non-ours impl. Higher ratio = ours is faster.
@@ -283,7 +283,7 @@ Each row shows our impl's time (tir/tirx) and every reference impl, with ref/our
 | config | ours impl | ours (ms) | ref impl | ref (ms) | ref/ours | other impls |
 |---|---|---:|---|---:|---:|---|
 | `1024x1024x1024` | tir | 0.0051 | cublaslt_nvfp4 | 0.0041 | 0.810 | flashinfer=0.0043 |
-| `16384x16384x16384` | tir | 1.7286 | flashinfer | 1.5329 | 0.887 | cublaslt_nvfp4=1.5469 |
+| `16384x16384x16384` | tir | 1.4669 | flashinfer | 1.3866 | 0.945 | cublaslt_nvfp4=1.3995 |
 | `2048x2048x2048` | tir | 0.0083 | cublaslt_nvfp4 | 0.0076 | 0.919 | flashinfer=0.0077 |
 | `4096x4096x4096` | tir | 0.0290 | cublaslt_nvfp4 | 0.0300 | 1.036 | — |
 | `8192x8192x8192` | tir | 0.1826 | flashinfer | 0.1813 | 0.993 | cublaslt_nvfp4=0.1819 |
