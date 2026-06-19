@@ -19,28 +19,29 @@ Run the full TIRX test suite.
    trap 'kill $MON_PID 2>/dev/null' EXIT
    ```
 
-3. Import gate — fail fast if any kernel no longer imports against the framework.
-   `pytest tests/python/tirx/` exercises the framework, not the kernel registry, so
-   a kernel that won't import is invisible to it. Force discovery of every kernel;
-   `--strict` exits non-zero on the first failed import:
+3. Import gate — bench workloads: fail fast if any kernel listed in `workloads.yaml` fails to import:
+   ```bash
+   python -m tirx_kernels.tir_bench --check-imports
+   ```
+   A non-zero exit means a pinned workload kernel failed to import — fix it before proceeding.
+
+4. Full kernel import gate (correctness test suite coverage):
    ```bash
    python -m tirx_kernels.registry --cc 10 --strict
    ```
-   A non-zero exit means a kernel failed to import — this is a real failure (triage
-   as category A/B below), fix it; never proceed or write it off as pre-existing.
 
-4. Run the full test suite with xdist parallelism:
+5. Run the full test suite with xdist parallelism:
    ```bash
    pytest tests/python/tirx/ -n 16
    ```
 
-5. Stop the monitor and check for foreign GPU usage during the run:
+6. Stop the monitor and check for foreign GPU usage during the run:
    ```bash
    kill $MON_PID 2>/dev/null; wait $MON_PID 2>/dev/null
    grep -E 'FOREIGN USER|\[FOREIGN\]' "$GPU_LOG" || echo "no foreign GPU usage observed"
    ```
 
-6. Report results: total passed, failed, skipped, errors — and the import-gate result from step 3. If any foreign-user events are present in step 5, mention them — flaky failures should be re-evaluated on a clean GPU before being attributed to code changes.
+7. Report results: total passed, failed, skipped, errors — and the import-gate results from steps 3–4. If any foreign-user events are present in step 6, mention them — flaky failures should be re-evaluated on a clean GPU before being attributed to code changes.
 
 ## Failure triage rules
 
