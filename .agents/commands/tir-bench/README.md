@@ -4,10 +4,11 @@ tir-bench now lives in **tirx-kernels** at `tirx_kernels/tir_bench/`.
 
 ```bash
 cd /path/to/tirx-kernels-staging
+pip install -e .
+
 export TVM_PATH=/path/to/tvm
-export PYTHONPATH="$(pwd):${TVM_PATH}/python"
+export PYTHONPATH="${TVM_PATH}/python"
 export TVM_LIBRARY_PATH="${TVM_PATH}/build/lib"
-export TIRX_KERNELS_STRICT=1
 
 python -m tirx_kernels.tir_bench --impls ours
 ```

@@ -4,7 +4,7 @@ Run the full TIRX test suite.
 
 1. Install the kernel package, select the least busy GPU, and enable strict kernel-import checking:
    ```bash
-   pip install -e /path/to/tirx-kernels-staging   # or sibling tirx-kernels clone
+   pip install -e /path/to/tirx-kernels-staging   # or sibling tirx-kernels checkout
    export CUDA_VISIBLE_DEVICES=$(nvidia-smi --query-gpu=index,memory.used --format=csv,noheader,nounits | sort -t',' -k2 -n | head -1 | cut -d',' -f1 | tr -d ' ')
    export TVM_PATH=/path/to/tvm
    export PYTHONPATH="${TVM_PATH}/python"
@@ -30,9 +30,12 @@ Run the full TIRX test suite.
    ```
    A non-zero exit means a pinned workload kernel failed to import — fix it before proceeding.
 
-4. Full kernel import gate (correctness test suite coverage):
+4. Full kernel import gate (correctness test suite coverage).
+   `pytest tests/python/tirx/` exercises the framework, not the kernel registry, so
+   a kernel that won't import is invisible to it. Force discovery of every kernel;
+   `--strict` exits non-zero on the first failed import:
    ```bash
-   TIRX_KERNELS_STRICT=1 python -m tirx_kernels.registry --cc 10
+   TIRX_KERNELS_STRICT=1 python -m tirx_kernels.registry --cc 10 --strict
    ```
    A non-zero exit means a kernel failed to import — this is a real failure (triage
    as category A/B below), fix it; never proceed or write it off as pre-existing.
