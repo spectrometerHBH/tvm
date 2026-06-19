@@ -2,13 +2,13 @@
   "timestamp": "16",
   "label": "ref-full-x5-test",
   "git": {
-    "tir": "664d91fd-dirty",
-    "tirx-kernels": "0e5aa144-dirty",
+    "tir": "ca00cdc7-dirty",
+    "tirx-kernels": "a6c9c52e",
     "tirx-bench-ci": null
   },
   "kernel_tree": {
     "tir:python/tvm/tirx": "a40833ee28bdea9f6c0adacda4be0d75e85fe0f2",
-    "tirx-kernels:tirx_kernels": "4dd5b51cf465010050db595b77d9f37e44b67f63"
+    "tirx-kernels:tirx_kernels": "0426270065b97a9e78012abeb0e898bf6d1c1a28"
   },
   "baselines": {
     "torch": {
@@ -4482,17 +4482,17 @@
       "label": "16384x16384x16384",
       "status": "ok",
       "impls": {
-        "cublaslt_nvfp4": 1.5468803333333332,
-        "flashinfer": 1.5329099999999998
+        "cublaslt_nvfp4": 1.3994718,
+        "flashinfer": 1.3865678
       },
       "aggregated": {
-        "rounds": 5,
+        "rounds": 7,
         "method": "trimmed_mean",
         "max_retry": 5,
-        "min_ok_rounds": 5,
+        "min_ok_rounds": 1,
         "ok_rounds": {
-          "cublaslt_nvfp4": 5,
-          "flashinfer": 5
+          "cublaslt_nvfp4": 7,
+          "flashinfer": 7
         }
       }
     },

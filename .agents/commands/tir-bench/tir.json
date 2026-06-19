@@ -2,7 +2,7 @@
   "timestamp": "20",
   "label": "ours-x5-full",
   "git": {
-    "tir": "7bc0543d-dirty",
+    "tir": "ca00cdc7-dirty",
     "tirx-kernels": "a6c9c52e",
     "tirx-bench-ci": null
   },
@@ -4386,15 +4386,15 @@
       "label": "16384x16384x16384",
       "status": "ok",
       "impls": {
-        "tir": 1.7286110000000001
+        "tir": 1.4668672
       },
       "aggregated": {
-        "rounds": 5,
-        "method": "mean",
+        "rounds": 7,
+        "method": "trimmed_mean",
         "max_retry": 5,
-        "min_ok_rounds": 5,
+        "min_ok_rounds": 1,
         "ok_rounds": {
-          "tir": 5
+          "tir": 7
         }
       }
     },
