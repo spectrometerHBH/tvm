@@ -2,7 +2,7 @@
   "timestamp": "20",
   "label": "ours-x5-full",
   "git": {
-    "tir": "7bc0543d-dirty",
+    "tir": "ca00cdc7-dirty",
     "tirx-kernels": "a6c9c52e",
     "tirx-bench-ci": null
   },
@@ -2658,9 +2658,9 @@
       "status": "ok",
       "ref_impl": "flashinfer",
       "ours_impl": "tir",
-      "ours_ms": 1.7286110000000001,
-      "ref_ms": 1.5329099999999998,
-      "ratio": 0.8867871371870245
+      "ours_ms": 1.4668672,
+      "ref_ms": 1.3865678,
+      "ratio": 0.945257893829789
     },
     {
       "kernel": "nvfp4_gemm",
