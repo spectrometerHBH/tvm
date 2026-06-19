@@ -85,8 +85,8 @@ the branch instead of the whole repository:
 pre-commit run --files <changed-file>...
 ```
 
-Use `.agents/skills/tir-build`, `.agents/skills/tir-test`, and
-`.agents/commands/tir-bench/` when their workflows apply.
+Use `python -m tirx_kernels.tir_bench` in the **tirx-kernels** repo
+(`tirx_kernels/tir_bench/`) when that workflow applies.
 
 ## Coding Conventions
 
