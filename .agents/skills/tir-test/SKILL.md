@@ -2,14 +2,13 @@ Run the full TIRX test suite.
 
 ## Steps
 
-1. Select the least busy GPU and enable strict kernel-import checking:
+1. Install the kernel package and select the least busy GPU:
    ```bash
+   pip install -e /path/to/tirx-kernels-staging   # or sibling tirx-kernels checkout
    export CUDA_VISIBLE_DEVICES=$(nvidia-smi --query-gpu=index,memory.used --format=csv,noheader,nounits | sort -t',' -k2 -n | head -1 | cut -d',' -f1 | tr -d ' ')
-   # MUST stay set for the whole run. Without it, the kernel registry silently
-   # drops any module that fails to import (warning + continue), so a framework
-   # change that breaks a kernel's imports passes the tests unnoticed. With it,
-   # discovery raises on the first failed import (see the import gate below).
-   export TIRX_KERNELS_STRICT=1
+   export TVM_PATH=/path/to/tvm
+   export PYTHONPATH="${TVM_PATH}/python"
+   export TVM_LIBRARY_PATH="${TVM_PATH}/build/lib"
    ```
 
 2. Start the GPU monitor in the background so we can detect if anyone else lands on the same GPU mid-run:
@@ -23,20 +22,16 @@ Run the full TIRX test suite.
 3. Import gate — fail fast if any kernel no longer imports against the framework.
    `pytest tests/python/tirx/` exercises the framework, not the kernel registry, so
    a kernel that won't import is invisible to it. Force discovery of every kernel;
-   under `TIRX_KERNELS_STRICT=1` (set in step 1) it exits non-zero on the first
-   failed import:
+   `--strict` exits non-zero on the first failed import:
    ```bash
-   TIRX_KERNELS_STRICT=1 python -m tirx_kernels.registry --cc 10
+   python -m tirx_kernels.registry --cc 10 --strict
    ```
    A non-zero exit means a kernel failed to import — this is a real failure (triage
    as category A/B below), fix it; never proceed or write it off as pre-existing.
-   (The env var is inlined here, not just exported in step 1, because each command
-   may run in a fresh shell where a prior `export` would not survive.)
 
-4. Run the full test suite with xdist parallelism — keep `TIRX_KERNELS_STRICT=1`
-   inlined so a kernel import error during collection is a hard failure here too:
+4. Run the full test suite with xdist parallelism:
    ```bash
-   TIRX_KERNELS_STRICT=1 pytest tests/python/tirx/ -n 16
+   pytest tests/python/tirx/ -n 16
    ```
 
 5. Stop the monitor and check for foreign GPU usage during the run:
