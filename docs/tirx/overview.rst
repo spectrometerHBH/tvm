@@ -60,7 +60,10 @@ native-level source code. At the same time, it exposes the recurring tile-level
 structure to the compiler through three constructs: *execution scope*, *tensor
 layout*, and *tile primitive dispatch*. Orchestration stays in native-level
 source code, while the recurring tile-level structure becomes visible to the
-compiler.
+compiler. Native-level control is powerful but costs engineering effort;
+exposing recurring operations as tile primitives relieves this, since authors
+reuse a dispatched implementation instead of re-writing the same operation for
+each kernel and backend.
 
 The result is a DSL that can **grow with the hardware**. A new feature can first
 be used directly as a native intrinsic, and later become a reusable primitive
@@ -97,8 +100,9 @@ Tensor layout
 Tensor layout, with an algebra-free user interface, describes how logical
 tensors map to physical resources. A tile may live in global memory, shared
 memory, registers, tensor memory, accelerator SRAM, or a combination of these.
-Users describe *where* tensor tiles live; tile primitive dispatch then consumes
-the attached storage contract.
+Users declare where each tile lives and how its elements are spread across
+lanes, warps, and registers; tile primitive dispatch reads those declarations to
+choose an implementation, so users never build or transform layouts by hand.
 
 .. seealso::
 
@@ -130,9 +134,9 @@ walkthroughs in :doc:`tile_primitives`.
 What TIRx Enables
 -----------------
 
-TIRx is immediately useful as a kernel DSL, but the same structure and compiler
-infrastructure also support directions that are becoming important for ML
-systems.
+TIRx is immediately useful as a kernel DSL. The same structure also helps with
+three things that are becoming important for ML systems: supporting new
+hardware, building megakernels, and agentic kernel programming.
 
 A stable extension boundary for future hardware
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -142,7 +146,7 @@ feature is first exposed as a backend intrinsic, then promoted into a tile
 primitive once the usage pattern repeats. Future hardware grows the backend
 library, not the core language.
 
-Mega-kernels and composable tile tasks
+Megakernels and composable tile tasks
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 Because TIRx tasks exist as compiler IR rather than separately compiled kernels,
