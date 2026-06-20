@@ -60,19 +60,24 @@ def setup():
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 
 
-def _parse_proton_tree(text, value_scale=1.0):
-    """Parse proton-viewer tree output into {impl: time_ms}.
+# proton-viewer -m avg_time/us prints average kernel time in microseconds (see
+# triton/profiler/viewer.py avg_time_factor_dict). Store microseconds as-is.
+PROTON_AVG_TIME_METRIC = "avg_time/us"
+
+
+def _parse_proton_tree(text, *, kernel: str = ""):
+    """Parse proton-viewer tree output into {impl: time_us}.
 
     Accepts ALL depth-1 nodes (no KNOWN_IMPLS filter). For each depth-1 impl,
     takes the slowest depth-2 child kernel time.
 
-    ``value_scale`` converts the displayed metric to milliseconds.  For
-    example, use ``1e-3`` when parsing ``avg_time/us`` output.
+    Tree numbers are microseconds when ProtonContext uses avg_time/us.
 
     Returns (impl_times, baseline_errors) where:
-      impl_times: {str: float} — impl name to avg time in ms
+      impl_times: {str: float} — impl name to avg time in microseconds
       baseline_errors: {str: str} — impl name to error message
     """
+    _ = kernel  # kept for callers; unit does not depend on workload
     impl = None
     results = {}
     baseline_errors = {}
@@ -104,7 +109,7 @@ def _parse_proton_tree(text, value_scale=1.0):
                 ):
                     continue
                 try:
-                    t = float(parts[0]) * value_scale
+                    t = float(parts[0])
                     results[impl] = max(results.get(impl, 0), t)
                 except ValueError:
                     pass
@@ -130,15 +135,15 @@ class ProtonContext:
         hook="triton",
         debug=False,
         nsight=False,
-        metric="avg_time/us",
-        metric_scale=1e-3,
+        metric=PROTON_AVG_TIME_METRIC,
+        kernel="",
     ):
         self.name = name
         self.hook = hook
         self.debug = debug
         self.nsight = nsight
         self.metric = metric
-        self.metric_scale = metric_scale
+        self.kernel = kernel
         self._impl_times = {}
         self._baseline_errors = {}
 
@@ -161,9 +166,10 @@ class ProtonContext:
             )
             if result.returncode == 0:
                 self._impl_times, self._baseline_errors = _parse_proton_tree(
-                    result.stdout, value_scale=self.metric_scale
+                    result.stdout, kernel=self.kernel
                 )
                 out = sys.stderr if os.environ.get("TIRX_BENCH_JSON") else sys.stdout
+                print(f"# proton {PROTON_AVG_TIME_METRIC} (microseconds)\n", file=out, end="")
                 print(result.stdout, file=out, end="")
             else:
                 print(
@@ -175,7 +181,7 @@ class ProtonContext:
                 os.remove(hatchet)
 
     def get_impl_times(self):
-        """Return {impl_name: avg_time_ms} parsed from proton-viewer output."""
+        """Return {impl_name: avg_time_us} parsed from proton-viewer output."""
         return dict(self._impl_times)
 
     def get_baseline_errors(self):
@@ -313,16 +319,18 @@ def _bench_event_groups(funcs, groups, warmup, repeat, cooldown_s):
         end_event.record()
 
         torch.cuda.synchronize()
-        results[name] = start_event.elapsed_time(end_event) / repeat
+        results[name] = start_event.elapsed_time(end_event) / repeat * 1000.0
 
         time.sleep(cooldown_s)
 
     return results
 
 
-def _bench_proton_groups(funcs, groups, warmup, repeat, cooldown_s, proton_name, debug, nsight):
+def _bench_proton_groups(
+    funcs, groups, warmup, repeat, cooldown_s, proton_name, debug, nsight, *, kernel=""
+):
     num_groups = len(groups)
-    with ProtonContext(proton_name, debug=debug, nsight=nsight) as ctx:
+    with ProtonContext(proton_name, debug=debug, nsight=nsight, kernel=kernel) as ctx:
         for idx, (name, func) in enumerate(funcs.items()):
             if idx > 0:
                 time.sleep(cooldown_s)
@@ -376,7 +384,7 @@ def _bench_legacy_callable(func, warmup, repeat, proton_name, debug, nsight, flu
         timed_loop()
     torch.cuda.synchronize()
 
-    return start_event.elapsed_time(end_event) / repeat
+    return start_event.elapsed_time(end_event) / repeat * 1000.0
 
 
 # Labels identifying our own kernel (vs external reference impls). Must match
@@ -477,8 +485,8 @@ def bench(
     Returns
     -------
     dict
-        ``{"impls": {name: sec}, "round_samples": {name: [sec, ...]}, ...}``.
-        Times are stored in seconds (same unit as pinned tir-bench baselines).
+        ``{"impls": {name: us}, "round_samples": {name: [us, ...]}, ...}``.
+        Times are stored in microseconds (same unit as pinned tir-bench baselines).
     """
     if repeat <= 0:
         raise ValueError("repeat must be positive")
@@ -588,7 +596,15 @@ def bench(
             proton_errors = {}
         else:
             impls, proton_errors = _bench_proton_groups(
-                funcs, inputs, warmup, repeat, cooldown_s, proton_name, debug, nsight
+                funcs,
+                inputs,
+                warmup,
+                repeat,
+                cooldown_s,
+                proton_name,
+                debug,
+                nsight,
+                kernel=proton_name,
             )
         errors.update(proton_errors)
         for impl, sec in impls.items():
