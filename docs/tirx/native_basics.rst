@@ -15,8 +15,16 @@
     specific language governing permissions and limitations
     under the License.
 
-TIRx Basics: Native Level
-=========================
+TIRx Basics: CUDA C++/PTX native level
+======================================
+
+.. note::
+
+   Native-level kernel authoring for the **CUDA backend** (the ``"cuda"``
+   target): the thread hierarchy, memory scopes, the ``T.cuda.*`` / ``T.ptx.*``
+   intrinsics, and the compile / run / inspect loop. The complete kernels in
+   these chapters (``scale``, ``add``, ``smem_demo``, ``block_sum``, and the
+   warp all-reduce) are tested end-to-end on a CUDA GPU.
 
 What "native level" means
 -------------------------
@@ -29,10 +37,8 @@ is what is emitted. This is the foundation the tile primitives
 ultimately lower to, so it is also where you go when a hardware feature does not
 have a primitive yet.
 
-The shared model
-----------------
-
-The authoring model is the same across backends:
+The authoring model
+-------------------
 
 - ``@T.prim_func`` (or ``@T.jit`` for compile-time-specialized) kernels, written
   with ``from tvm.script import tirx as T``;
@@ -42,12 +48,22 @@ The authoring model is the same across backends:
 - ``tvm.compile(mod, target=..., tir_pipeline="tirx")`` to build, then call the
   result directly.
 
-What differs per backend is the concrete set of memory scopes, synchronization
-and device intrinsics, and the generated source. Pick your backend:
+All native authoring uses these imports. The ``__future__`` import lets ``@T.jit``
+kernels reference compile-time parameters inside type annotations (see
+:doc:`native_basics/cuda/functions`); it is harmless for ordinary kernels::
+
+    from __future__ import annotations
+    import tvm
+    from tvm.script import tirx as T
 
 .. toctree::
    :maxdepth: 1
 
-   native_basics/cuda
-
-(Support for additional backends, e.g. ROCm, will appear here as it lands.)
+   native_basics/cuda/first_kernel
+   native_basics/cuda/functions
+   native_basics/cuda/parser_utils
+   native_basics/cuda/data_types
+   native_basics/cuda/buffers
+   native_basics/cuda/control_flow
+   native_basics/cuda/threads_sync
+   native_basics/cuda/compiling
