@@ -353,13 +353,8 @@ def _flush_l2_legacy(flush_l2_size):
 
 
 def _bench_legacy_callable(func, warmup, repeat, proton_name, debug, nsight, flush_l2_size):
-    for _ in range(warmup):
-        _flush_l2_legacy(flush_l2_size)
-        func()
-
     start_event = torch.cuda.Event(enable_timing=True)
     end_event = torch.cuda.Event(enable_timing=True)
-    torch.cuda.synchronize()
 
     def timed_loop():
         start_event.record()
@@ -368,6 +363,10 @@ def _bench_legacy_callable(func, warmup, repeat, proton_name, debug, nsight, flu
             func()
         end_event.record()
 
+    for _ in range(warmup):
+        _flush_l2_legacy(flush_l2_size)
+        func()
+    torch.cuda.synchronize()
     if not is_running_under_pytest() and not debug and not nsight:
         proton.activate()
         with proton.scope(proton_name, metrics={}):
@@ -375,8 +374,8 @@ def _bench_legacy_callable(func, warmup, repeat, proton_name, debug, nsight, flu
         proton.deactivate()
     else:
         timed_loop()
-
     torch.cuda.synchronize()
+
     return start_event.elapsed_time(end_event) / repeat
 
 
@@ -431,6 +430,9 @@ def bench(
     nsight=False,
     flush_l2_size=int(8e8 // 4),
     references=None,
+    rounds=1,
+    round_cooldown_s=1.0,
+    validate_case=None,
 ):
     """Benchmark implementations with a factory-owned input footprint.
 
@@ -457,21 +459,35 @@ def bench(
     warmup : int
         Number of untimed warmup iterations per implementation.
     repeat : int
-        Number of timed iterations.
+        Number of timed iterations per round.
     cooldown_s : float
         Seconds to sleep between impls for thermal cooldown.
+    rounds : int
+        Independent benchmark rounds (compile + inputs once; each round runs
+        warmup + repeat for every selected impl).
+    round_cooldown_s : float
+        Seconds to sleep between rounds (ignored when ``rounds == 1``).
+    validate_case : callable, optional
+        Called once on the first prepared ``case`` (after ``prepare_input_groups``,
+        before warmup/repeat rounds). Under tir-bench, ``run_kernel_bench`` holds
+        the per-GPU lock for the whole ``run_bench()`` call.
     timer : {"event", "proton"}
         Timing backend.
 
     Returns
     -------
     dict
-        ``{"impls": {name: ms}, "errors": {}, "timer": ..., ...}``.
+        ``{"impls": {name: sec}, "round_samples": {name: [sec, ...]}, ...}``.
+        Times are stored in seconds (same unit as pinned tir-bench baselines).
     """
     if repeat <= 0:
         raise ValueError("repeat must be positive")
     if warmup < 0:
         raise ValueError("warmup must be non-negative")
+    if rounds < 1:
+        raise ValueError("rounds must be >= 1")
+    if round_cooldown_s < 0:
+        raise ValueError("round_cooldown_s must be non-negative")
     if timer not in {"event", "proton"}:
         raise ValueError(f"unsupported timer {timer!r}; expected event or proton")
 
@@ -527,12 +543,15 @@ def bench(
         # result so the workload is a no-op.
         return {
             "impls": {},
+            "round_samples": {},
             "errors": build_errors,
             "timer": timer,
             "benchmark_protocol": {
                 "warmup": warmup,
                 "repeat": repeat,
                 "cooldown_s": cooldown_s,
+                "rounds": rounds,
+                "round_cooldown_s": round_cooldown_s,
                 "order": [],
             },
         }
@@ -542,6 +561,7 @@ def bench(
     if num_groups == 0:
         return {
             "impls": {},
+            "round_samples": {},
             "errors": build_errors,
             "timer": timer,
             "benchmark_protocol": {
@@ -549,21 +569,41 @@ def bench(
                 "warmup": warmup,
                 "repeat": repeat,
                 "cooldown_s": cooldown_s,
+                "rounds": rounds,
+                "round_cooldown_s": round_cooldown_s,
                 "order": list(funcs.keys()),
             },
         }
 
+    if validate_case is not None:
+        validate_case(inputs[0])
+
     errors = dict(build_errors)
-    if timer == "event":
-        impls = _bench_event_groups(funcs, inputs, warmup, repeat, cooldown_s)
-    else:
-        impls, proton_errors = _bench_proton_groups(
-            funcs, inputs, warmup, repeat, cooldown_s, proton_name, debug, nsight
-        )
+    round_samples: dict[str, list[float]] = {}
+    for round_idx in range(rounds):
+        if round_idx > 0:
+            time.sleep(round_cooldown_s)
+        if timer == "event":
+            impls = _bench_event_groups(funcs, inputs, warmup, repeat, cooldown_s)
+            proton_errors = {}
+        else:
+            impls, proton_errors = _bench_proton_groups(
+                funcs, inputs, warmup, repeat, cooldown_s, proton_name, debug, nsight
+            )
         errors.update(proton_errors)
+        for impl, sec in impls.items():
+            round_samples.setdefault(impl, []).append(sec)
+
+    if not round_samples:
+        aggregated = {}
+    else:
+        import statistics
+
+        aggregated = {impl: statistics.mean(samples) for impl, samples in round_samples.items()}
 
     return {
-        "impls": impls,
+        "impls": aggregated,
+        "round_samples": round_samples,
         "errors": errors,
         "timer": timer,
         "benchmark_protocol": {
@@ -571,6 +611,8 @@ def bench(
             "warmup": warmup,
             "repeat": repeat,
             "cooldown_s": cooldown_s,
+            "rounds": rounds,
+            "round_cooldown_s": round_cooldown_s,
             "order": list(funcs.keys()),
         },
     }
