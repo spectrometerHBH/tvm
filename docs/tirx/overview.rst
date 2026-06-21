@@ -18,7 +18,7 @@
 Overview
 ========
 
-TIRx (pronounced *"tier-ex"*) is an open-source, native-level DSL and compiler
+TIRx (pronounced *"tier-ex"*) is an open-source, hardware-native DSL and compiler
 for machine-learning kernels. It targets the part of the AI software stack
 where fast-moving kernels meet fast-moving hardware: TIRx compiles to GPUs and
 specialized AI accelerators today and is designed to grow with the hardware
@@ -31,12 +31,12 @@ is built on top of the TVM compiler infrastructure.
 
 .. figure:: https://raw.githubusercontent.com/tlc-pack/web-data/main/images/tirx/tirx_overview_hero.png
    :align: center
-   :alt: A TIRx kernel keeps orchestration in native source while exposing tile
+   :alt: A TIRx kernel keeps orchestration in hardware-native source while exposing tile
          structure to the compiler; agentic, megakernel, and new-backend systems
          build on the same structure.
 
    A TIRx kernel keeps orchestration — pipeline state, roles, synchronization,
-   and backend intrinsics — in native-level source, while execution scope,
+   and backend intrinsics — in hardware-native source, while execution scope,
    tensor layout, and tile primitive dispatch expose the recurring tile
    structure to the compiler. Higher-level systems build on the same structure.
 
@@ -56,11 +56,11 @@ a compiler has enough built-in machinery to automate them well.
 TIRx chooses a **lower and more explicit boundary**. It keeps the parts of a
 kernel that frequently require expert control — pipeline structure,
 synchronization, role assignment, memory placement, and backend intrinsics — in
-native-level source code. At the same time, it exposes the recurring tile-level
+hardware-native source code. At the same time, it exposes the recurring tile-level
 structure to the compiler through three constructs: *execution scope*, *tensor
-layout*, and *tile primitive dispatch*. Orchestration stays in native-level
+layout*, and *tile primitive dispatch*. Orchestration stays in hardware-native
 source code, while the recurring tile-level structure becomes visible to the
-compiler. Native-level control is powerful but costs engineering effort;
+compiler. Hardware-native control is powerful but costs engineering effort;
 exposing recurring operations as tile primitives relieves this, since authors
 reuse a dispatched implementation instead of re-writing the same operation for
 each kernel and backend.
@@ -97,12 +97,14 @@ to thread-level invocation.
 Tensor layout
 ~~~~~~~~~~~~~~
 
-Tensor layout, with an algebra-free user interface, describes how logical
+Tensor layout, with a storage-first interface, describes how logical
 tensors map to physical resources. A tile may live in global memory, shared
-memory, registers, tensor memory, accelerator SRAM, or a combination of these.
+memory, registers, tensor memory, or accelerator SRAM.
 Users declare where each tile lives and how its elements are spread across
 lanes, warps, and registers; tile primitive dispatch reads those declarations to
-choose an implementation, so users never build or transform layouts by hand.
+choose an implementation. A layout is a storage description, not a
+loop-transformation utility: users may construct a tile's layout, but never use
+layouts to transform loops.
 
 .. seealso::
 
@@ -122,6 +124,9 @@ example:
   implementation.
 - A matrix-multiply primitive may dispatch to WGMMA, ``tcgen05``, a
   systolic-array instruction, or a backend-specific matmul engine.
+
+Once a variant is selected, dispatch generates the loops and addressing to
+apply that instruction across the whole tile.
 
 Putting it together
 ~~~~~~~~~~~~~~~~~~~~~
