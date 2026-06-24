@@ -328,5 +328,29 @@ def test_copy_tmem2reg_sliced_local(dtype, width_32b, local_offset_32b):
         np.testing.assert_allclose(B.numpy(), A_np)
 
 
+def test_can_prove_divisible_uint32_offset():
+    from tvm.backend.cuda.operator.tile_primitive.copy_async.tcgen05_ldst import (
+        _can_prove_divisible,
+    )
+
+    analyzer = tvm.arith.Analyzer()
+    u = T.Var("u", "uint32")
+    assert _can_prove_divisible(analyzer, u, 1) is True
+    assert _can_prove_divisible(analyzer, u * tvm.tirx.const(2, "uint32"), 2) is True
+    assert _can_prove_divisible(analyzer, u, 2) is False
+
+
+def test_can_prove_divisible_signed_unaffected():
+    from tvm.backend.cuda.operator.tile_primitive.copy_async.tcgen05_ldst import (
+        _can_prove_divisible,
+    )
+
+    analyzer = tvm.arith.Analyzer()
+    i = T.Var("i", "int32")
+    assert _can_prove_divisible(analyzer, i, 1) is True
+    assert _can_prove_divisible(analyzer, i * tvm.tirx.const(4, "int32"), 4) is True
+    assert _can_prove_divisible(analyzer, i, 4) is False
+
+
 if __name__ == "__main__":
     tvm.testing.main()
