@@ -553,4 +553,4 @@ def copy_ptx_form(num_bytes: int) -> tuple[str, str]:
 
 def copy_ptx_ld_return_type(ptx_type: str) -> str:
     """TVM dtype string for ``T.ptx.ld``'s ``return_type`` argument."""
-    return {"u32": "uint32", "u16": "uint16", "u8": "uint8"}[ptx_type]
+    return {"u32": "uint32", "u16": "uint16", "u8": "uint32"}[ptx_type]
