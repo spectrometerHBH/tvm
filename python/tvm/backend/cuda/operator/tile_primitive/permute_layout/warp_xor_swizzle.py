@@ -305,15 +305,7 @@ def _impl(op_call, sctx):
     tid_x = sctx.launch_params["threadIdx.x"]
     dtype = src_buf.dtype
 
-    # Address codegen. The generic path projects the iter index back onto buf
-    # coords and lets ``buf[coords]`` re-derive the byte offset through the
-    # layout — a flatten→re-decompose round trip that ptxas renders as per-lane
-    # IMAD address math. When src+dst are shared and the element is 32/64-bit
-    # (the SF UTCCP warp transpose), take the DIRECT path: hoist each slice
-    # start into a base pointer once, then add the affine iteration offset
-    # ``Σ iter_idx[d]·shard_stride[d]`` and ld/st through that pointer — the
-    # offset is built with LEA/add (matching a hand-rolled ld.shared transpose),
-    # dropping the IMAD round trip. Identical addresses, fewer address-ALU ops.
+    # Shared 32/64b: base ptr + stride offset avoids buf[] flatten IMAD path.
     direct = (
         dtype_bytes in (4, 8)
         and "shared" in str(src_buf.scope())

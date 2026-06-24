@@ -372,12 +372,7 @@ def _build_plan(op_call: TilePrimitiveCall, sctx: DispatchContext):
 # add_post_buffer_def_stmt.
 # -----------------------------------------------------------------------------
 def _get_or_create_desc(sctx, s_buf, ldo, sdo, swizzle):
-    # Encode the descriptor at SMEM address 0 and cache by (ldo, sdo, swizzle)
-    # ONLY (not the buffer) so distinct SF buffers with the same layout params
-    # share ONE descriptor (matching the hand-rolled deposit's single shared
-    # ``desc_sf``) — one fewer uint64 held live across the hot loop. The actual
-    # per-cp SMEM address is patched in at the call site (see ``_desc_set_addr``),
-    # exactly like the hand-rolled ``replace_smem_desc_addr``.
+    # Cache descriptor template at SMEM 0; patch addr per cp.
     cache_key = f"smem_tmem_desc:{int(ldo)}:{int(sdo)}:{int(swizzle)}"
     cached = sctx.cache_get(cache_key)
     if cached is not None:
@@ -421,12 +416,7 @@ def copy_smem_tmem_impl(op_call: TilePrimitiveCall, sctx: DispatchContext) -> Pr
     init_off_16B = plan["init_off_16B"]
     t_col0 = plan["t_col0"]
 
-    # cp 32x128b ignores LDO for data movement, but a non-zero LDO still gets
-    # encoded into the descriptor (ldo << 16), setting a low-dword bit that forces
-    # ptxas to emit the address patch as an OR-form ULOP3 + an extra UMOV on the
-    # cp's (MMA-warp) critical path. Encode LDO=0 (matching the hand-rolled
-    # ``make_sf_desc(ldo=0)``) so the per-cp patch collapses to a clean
-    # ``addr & 0x3ffc`` AND — byte-identical descriptor, one fewer insn per cp.
+    # cp ignores LDO for data; non-zero LDO bloats the addr-patch codegen.
     LDO_field = 0
 
     cta_group = op_call.config.get("cta_group", 1)
@@ -436,8 +426,6 @@ def copy_smem_tmem_impl(op_call: TilePrimitiveCall, sctx: DispatchContext) -> Pr
     s_rank = len(s_buf.shape)
 
     def _cp_desc(off_16B):
-        # descriptor (shared, encoded at 0) patched with the actual SMEM addr =
-        # buffer base + off_16B*16 bytes — matches the hand-rolled cp.
         addr = T.ptr_byte_offset(s_buf.ptr_to([0] * s_rank), off_16B * 16, s_buf.dtype)
         return _desc_set_addr(desc_buf[0], addr)
 

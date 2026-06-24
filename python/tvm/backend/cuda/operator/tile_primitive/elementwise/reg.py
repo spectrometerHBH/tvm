@@ -150,11 +150,7 @@ def _check_layout_operands_agree(plan) -> tuple[bool, str | None]:
     replica_sigs = []
     for br in layout_brs:
         st, ext = get_st_extent(br)
-        # Slice under a non-cuda (llvm) target so a split thread axis (the
-        # tcgen05 .16x*b atom's two-iter laneid) is not pre-fused into a form
-        # the following cuda-scope canonicalize rejects ("conflicting scopes
-        # for thread"); mirrors copy/reg.py::_align_layouts and the
-        # _align_layouts_no_post_canon slice in _common.py.
+        # Slice under llvm to avoid cuda scope pre-fusion on split laneid layouts.
         with tvm.target.Target("llvm"):
             sliced = get_sublayout_from_region(br.buffer.layout, br.buffer.shape, st, ext)
         canon = sliced.canonicalize() if hasattr(sliced, "canonicalize") else sliced

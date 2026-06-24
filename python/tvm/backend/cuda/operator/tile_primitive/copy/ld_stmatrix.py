@@ -95,17 +95,9 @@ def _emit(op_call: TilePrimitiveCall, sctx: DispatchContext) -> PrimFunc:
     s_shape = list(s_buf.shape)
     s_layout = s_buf.layout
 
-    # Step 2: slice + canonicalize. Slice geometrically with cuda scope-fusion
-    # DISABLED (a non-cuda llvm target), then canonicalize under the real
-    # target. Slicing under cuda pre-fuses a split-laneid tcgen05 register atom
-    # (e.g. the warpgroup ``.16x256b`` Layout-F atom the tf32 prenorm cast warp
-    # loads A into) into a form canonicalize then rejects with "conflicting
-    # scopes for thread (warpgroup vs warp)". The llvm override makes the slice
-    # scope-agnostic; the cuda canonicalize still runs the scope-aware fusers
-    # (laneid+wid_in_wg -> tid_in_wg for the warpgroup case). Same fix as the
-    # reg.py reg-copy dispatch (see B00011). No-op for contiguous lane layouts.
     r_region = [(r.min, r.min + r.extent) for r in r_br.region]
     s_region = [(r.min, r.min + r.extent) for r in s_br.region]
+    # Slice under llvm to avoid cuda scope pre-fusion on split laneid layouts.
     with tvm.target.Target("llvm"):
         r_sliced = r_layout.slice(r_shape, r_region)
         s_sliced = s_layout.slice(s_shape, s_region)

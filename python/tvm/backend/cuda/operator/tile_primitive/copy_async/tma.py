@@ -320,19 +320,7 @@ def _canonicalize_smem(s_buf: Buffer) -> TileLayout:
 
 
 def _group_gmem_by_buffer_shape(gmem_canon: TileLayout, gmem_raw: TileLayout, buffer_shape: list):
-    """Group the gmem layout by the buffer shape. Returns ``(grouped, seps)``.
-
-    Primary path is the canonicalized layout (legacy behaviour, unchanged for
-    every layout that already groups — i.e. every signed-shape kernel). It can
-    fail for an **unsigned (uint32)** shape extent: ``canonicalize()`` merges the
-    contiguous buffer dims into one ``prod``-extent iter (``n*64``), and
-    re-splitting that by the shape then needs ``(a*b) % a == 0`` — unsound, hence
-    unprovable, under unsigned wraparound. In that case fall back to grouping the
-    **raw per-dim** layout: a plain buffer already has one iter per dim, so the
-    grouping reduces to the overflow-free ``dim % dim == 0`` proof (provable for
-    uint32). Downstream ``_split_multi_iter_group`` handles multi-iter groups, so
-    the raw grouping needs no extra normalization here.
-    """
+    """Group gmem by buffer shape; fall back to raw layout for uint32 extents."""
     try:
         return gmem_canon.group(list(buffer_shape))
     except Exception:
@@ -411,15 +399,7 @@ def _slice_and_canonicalize_smem(
 
 
 def _regroup_smem_by_extgt1_shape(sliced_smem: TileLayout, extgt1_shape: list) -> tuple:
-    """Group the sliced smem layout by the ext>1 copy shape. Returns
-    ``(grouped, separators)`` or ``None`` on failure.
-
-    Copy extents are counts. An **unsigned** gmem slice base leaks its dtype into
-    the extent (e.g. ``uint32(128)``), which the grouping's floormod/floordiv
-    proofs reject. Re-view any unsigned extent as signed for the grouping — the
-    value is unchanged (extents are non-negative), only the dtype used for the
-    structural proof, so the gmem slice base can stay unsigned.
-    """
+    """Group sliced smem by ext>1 copy shape; cast unsigned extents to signed for proofs."""
     norm_shape = []
     for e in extgt1_shape:
         dt = getattr(e, "dtype", None)

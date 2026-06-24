@@ -226,23 +226,15 @@ def _align_layouts_no_post_canon(r_layout, r_shape, r_region, s_layout, s_shape,
     1-to-1 correspondence. Copy's tests don't hit this because R is
     typically 1D and doesn't fuse further after permute.
 
-    The two ``.slice`` calls run under a non-cuda (``llvm``) target so the cuda
-    scope-aware fuser does NOT pre-fuse a split thread axis (e.g. the tcgen05
-    ``.16x*b`` atom's ``laneid``, which spans two iters) into a partially-fused
-    form whose subsequent ``canonicalize`` rejects with "conflicting scopes for
-    thread". The ``canonicalize`` then re-runs under the caller's cuda target
-    (the caller enters ``with sctx.target:``) so ``laneid`` + ``wid_in_wg`` →
-    ``tid_in_wg`` still fuses — cleanly this time. Mirrors the copy reg path's
-    ``_align_layouts`` (copy/reg.py). No-op for already-unsplit layouts.
+    Slice under llvm so cuda scope pre-fusion does not reject split thread axes;
+    the caller canonicalizes under cuda afterward.
     """
     import tvm as _tvm
 
     with _tvm.target.Target("llvm"):
         r_sliced = r_layout.slice(list(r_shape), r_region)
         s_sliced = s_layout.slice(list(s_shape), s_region)
-    # Fall back to a target-default slice if the geometric (llvm) slice can't
-    # handle this layout/region (returns None) — keeps the original behaviour
-    # for everything the split-laneid override doesn't apply to.
+    # Fall back if llvm geometric slice is unsupported for this layout.
     if r_sliced is None:
         r_sliced = r_layout.slice(list(r_shape), r_region)
     if s_sliced is None:
