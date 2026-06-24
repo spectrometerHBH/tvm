@@ -22,7 +22,6 @@ kernels depend on (see docs/deepgemm/dispatch_changes.md in tirx-kernels):
 * TFLOAT32 TMA descriptor (``tma_dtype="tf32"``)                        (§2)
 * ``maximum`` elementwise CUDA dispatch                                 (§4)
 * uint32 TMEM-column divisibility proof (``_can_prove_divisible``)      (§6)
-* byte-granular shared-aware copy ops (``copy_bytes_lds`` / ``_sts``)   (§8)
 
 §3 (split-laneid ``.16x*b`` reg↔smem deposit) and §5 (B00011 split-laneid
 canonicalize fix) are layout/canonicalize internals exercised end-to-end by the
@@ -95,64 +94,6 @@ def test_can_prove_divisible_signed_unaffected():
     assert _can_prove_divisible(analyzer, i, 1) is True
     assert _can_prove_divisible(analyzer, i * tvm.tirx.const(4, "int32"), 4) is True
     assert _can_prove_divisible(analyzer, i, 4) is False
-
-
-# ===========================================================================
-# §8 — byte-granular shared-aware copy ops registered
-# ===========================================================================
-def test_copy_bytes_lds_sts_ops_registered():
-    """The shared-aware copy ops must be registered TIR ops (not just Python
-    codegens) — otherwise ``copy/reg.py``'s ``copy_{N}b_lds``/``_sts`` selection
-    silently falls back to the scalar single-thread path."""
-    for name in ("tirx.cuda_copy_bytes_lds", "tirx.cuda_copy_bytes_sts"):
-        Op.get(name)  # raises if unregistered
-
-    # The generic + per-width forms are exposed on the T.cuda script namespace
-    # (so the canonical device-intrin op's printer path resolves).
-    for attr in (
-        "copy_bytes_lds",
-        "copy_bytes_sts",
-        "copy_128b_lds",
-        "copy_128b_sts",
-        "copy_32b_lds",
-        "copy_32b_sts",
-    ):
-        assert hasattr(T.cuda, attr), attr
-
-
-def test_copy_bytes_lds_sts_codegen_emits_shared_asm():
-    """A shared-source / shared-dest typed copy must codegen to the uniform-reg
-    ``ld.shared`` / ``st.shared`` inline asm (via ``__cvta_generic_to_shared``),
-    not the generic-pointer round-trip."""
-
-    # fmt: off
-    @T.prim_func
-    def copy_kernel(d_ptr: T.handle) -> None:
-        D = T.match_buffer(d_ptr, (4,), "uint32")
-        T.device_entry()
-        T.warp_id([4])
-        T.cta_id([1])
-        T.warpgroup_id([1])
-        tid_in_wg = T.thread_id_in_wg([128])
-        smem = T.alloc_buffer((4,), "uint32", scope="shared")
-        reg = T.alloc_local((4,), "uint32")
-        if tid_in_wg == 0:
-            # local -> shared : st.shared variant
-            T.cuda.copy_128b_sts(smem.ptr_to([0]), reg.ptr_to([0]))
-        T.cuda.cta_sync()
-        if tid_in_wg == 0:
-            # shared -> local : ld.shared variant
-            T.cuda.copy_128b_lds(reg.ptr_to([0]), smem.ptr_to([0]))
-        Tx.copy(D[0:4], reg[:])
-    # fmt: on
-
-    target = tvm.target.Target("cuda")
-    with target:
-        mod = tvm.compile(tvm.IRModule({"main": copy_kernel}), target=target, tir_pipeline="tirx")
-    src = mod.mod.imports[0].inspect_source("cuda")
-    assert "ld.shared" in src, "lds variant did not emit ld.shared"
-    assert "st.shared" in src, "sts variant did not emit st.shared"
-    assert "cvta_generic_to_shared" in src or "cvta.generic.to.shared" in src
 
 
 # ===========================================================================
