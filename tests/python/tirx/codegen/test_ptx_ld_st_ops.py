@@ -32,14 +32,13 @@ from tvm.tirx.cuda.operator.tile_primitive.copy._common import (
 DEV = tvm.cuda(0)
 TARGET = tvm.target.Target("cuda")
 
-# num_bytes → kernel layout. All smem uses uint32 words; sub-word PTX types
-# occupy the low bits. ``fill_offset`` fills lane i with ``i + fill_offset``.
+# num_bytes → kernel layout. ``fill_offset`` fills lane i with ``i + fill_offset``.
 _SHARED_COPY_CASES = {
-    16: {"nelems": 4, "fill_offset": 1},
-    8: {"nelems": 2, "fill_offset": 10},
-    4: {"nelems": 1, "fill_value": 42},
-    2: {"nelems": 1, "fill_fp16": 7.0},
-    1: {"nelems": 1, "fill_u8": 255},
+    16: {"nelems": 4, "smem_dtype": "uint32", "tmp_dtype": "uint32", "fill_offset": 1},
+    8: {"nelems": 2, "smem_dtype": "uint32", "tmp_dtype": "uint32", "fill_offset": 10},
+    4: {"nelems": 1, "smem_dtype": "uint32", "tmp_dtype": "uint32", "fill_value": 42},
+    2: {"nelems": 1, "smem_dtype": "float16", "tmp_dtype": "uint16", "fill_fp16": 7.0},
+    1: {"nelems": 1, "smem_dtype": "uint8", "tmp_dtype": "uint32", "fill_u8": 255},
 }
 
 
@@ -65,102 +64,35 @@ def _expected_values(num_bytes: int) -> np.ndarray:
 def _shared_scratch_copy_kernel(num_bytes: int):
     """Build shared → local scratch → shared copy kernel for ``num_bytes`` width."""
     spec = _SHARED_COPY_CASES[num_bytes]
-    vec, ptx_type = copy_ptx_form(num_bytes)
-    return_type = copy_ptx_ld_return_type(ptx_type)
+    smem_dtype = spec["smem_dtype"]
+    tmp_dtype = spec["tmp_dtype"]
     nelems = spec["nelems"]
     fill_offset = spec.get("fill_offset")
     fill_value = spec.get("fill_value")
     fill_fp16 = spec.get("fill_fp16")
     fill_u8 = spec.get("fill_u8")
-
-    # u16/u8 scalar PTX types need scratch dtypes TVMScript cannot branch on in-body.
-    if num_bytes == 2:
-
-        @T.prim_func
-        def func(out_ptr: T.handle):
-            out = T.match_buffer(out_ptr, (1,), "float16")
-            T.device_entry()
-            T.cta_id([1])
-            T.warp_id([1])
-            lane = T.lane_id([32])
-            src_buf = T.alloc_buffer((1,), "float16", scope="shared")
-            dst_buf = T.alloc_buffer((1,), "float16", scope="shared")
-            tmp = T.alloc_local((1,), "uint16")
-            if lane == 0:
-                src_buf[0] = T.float16(fill_fp16)
-            T.cuda.cta_sync()
-            if lane == 0:
-                T.ptx.ld(
-                    src_buf.ptr_to([0]),
-                    return_type,
-                    ptx_type,
-                    dst=tmp.ptr_to([0]),
-                    space="shared",
-                    vec=vec,
-                )
-                T.ptx.st(
-                    dst_buf.ptr_to([0]),
-                    src=tmp.ptr_to([0]),
-                    space="shared",
-                    vec=vec,
-                    ptx_type=ptx_type,
-                )
-            T.cuda.cta_sync()
-            if lane == 0:
-                out[0] = dst_buf[0]
-
-        return func
-
-    if num_bytes == 1:
-
-        @T.prim_func
-        def func(out_ptr: T.handle):
-            out = T.match_buffer(out_ptr, (1,), "uint8")
-            T.device_entry()
-            T.cta_id([1])
-            T.warp_id([1])
-            lane = T.lane_id([32])
-            src_buf = T.alloc_buffer((1,), "uint8", scope="shared")
-            dst_buf = T.alloc_buffer((1,), "uint8", scope="shared")
-            tmp = T.alloc_local((1,), "uint32")
-            if lane == 0:
-                src_buf[0] = T.uint8(fill_u8)
-            T.cuda.cta_sync()
-            if lane == 0:
-                T.ptx.ld(
-                    src_buf.ptr_to([0]),
-                    return_type,
-                    ptx_type,
-                    dst=tmp.ptr_to([0]),
-                    space="shared",
-                    vec=vec,
-                )
-                T.ptx.st(
-                    dst_buf.ptr_to([0]),
-                    src=tmp.ptr_to([0]),
-                    space="shared",
-                    vec=vec,
-                    ptx_type=ptx_type,
-                )
-            T.cuda.cta_sync()
-            if lane == 0:
-                out[0] = dst_buf[0]
-
-        return func
+    vec, ptx_type = copy_ptx_form(num_bytes)
+    return_type = copy_ptx_ld_return_type(ptx_type)
 
     @T.prim_func
     def func(out_ptr: T.handle):
-        out = T.match_buffer(out_ptr, (nelems,), "uint32")
+        out = T.match_buffer(out_ptr, (nelems,), smem_dtype)
         T.device_entry()
         T.cta_id([1])
         T.warp_id([1])
         lane = T.lane_id([32])
-        src_buf = T.alloc_buffer((nelems,), "uint32", scope="shared")
-        dst_buf = T.alloc_buffer((nelems,), "uint32", scope="shared")
-        tmp = T.alloc_local((nelems,), "uint32")
+        src_buf = T.alloc_buffer((nelems,), smem_dtype, scope="shared")
+        dst_buf = T.alloc_buffer((nelems,), smem_dtype, scope="shared")
+        tmp = T.alloc_local((nelems,), tmp_dtype)
         if fill_offset is not None:
             if lane < nelems:
                 src_buf[lane] = T.uint32(lane + fill_offset)
+        elif fill_fp16 is not None:
+            if lane == 0:
+                src_buf[0] = T.float16(fill_fp16)
+        elif fill_u8 is not None:
+            if lane == 0:
+                src_buf[0] = T.uint8(fill_u8)
         elif lane == 0:
             src_buf[0] = T.uint32(fill_value)
         T.cuda.cta_sync()
