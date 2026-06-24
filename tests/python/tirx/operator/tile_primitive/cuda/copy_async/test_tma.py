@@ -1621,7 +1621,7 @@ def test_copy_tma_uint32_slice_base():
         T.ptx.fence.proxy_async("shared::cta")
         T.cuda.cta_sync()
         if tid == 0:
-            Tx.copy_async(sm[:, :], A[off:off + 128, 0:BK], dispatch="tma", mbar=mb.ptr_to([0]))
+            Tx.copy_async(sm[:, :], A[off : off + 128, 0:BK], dispatch="tma", mbar=mb.ptr_to([0]))
             T.ptx.mbarrier.arrive.expect_tx(mb.ptr_to([0]), 128 * BK * 2)
         T.ptx.mbarrier.try_wait(mb.ptr_to([0]), 0)
         T.cuda.cta_sync()
