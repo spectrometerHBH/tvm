@@ -292,18 +292,18 @@ def test_device_intrinsic_printer_roundtrips_canonical_namespaces():
     def device_namespaces(dst: T.handle, src: T.handle):
         A = T.match_buffer(src, (1,), "float32")
         R = T.alloc_buffer((1,), "float32", scope="local")
-        T.cuda.copy_bytes(dst, src, 16)
+        T.cuda.cta_sync()
         T.ptx.ldg32(R[0], 1, A[0], 0)
         T.metal.simd_shuffle(A[0], 0)
 
     calls = _expr_calls(device_namespaces)
     assert [call.op.name for call in calls] == [
-        "tirx.cuda.copy_bytes",
+        "tirx.cuda.cta_sync",
         "tirx.ptx.ldg32",
         "tirx.metal.simd_shuffle",
     ]
     for op_name, namespace in [
-        ("tirx.cuda.copy_bytes", "cuda"),
+        ("tirx.cuda.cta_sync", "cuda"),
         ("tirx.ptx.ldg32", "ptx"),
         ("tirx.metal.simd_shuffle", "metal"),
     ]:
@@ -312,7 +312,7 @@ def test_device_intrinsic_printer_roundtrips_canonical_namespaces():
         assert _op_attr(op_name, "TCallEffectKind") in (1, 3)
 
     code = device_namespaces.script()
-    assert "T.cuda.copy_bytes(" in code
+    assert "T.cuda.cta_sync(" in code
     assert "T.ptx.ldg32(" in code
     assert "T.metal.simd_shuffle(" in code
     assert "T.tirx." not in code
