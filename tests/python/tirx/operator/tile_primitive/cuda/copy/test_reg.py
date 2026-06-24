@@ -411,5 +411,22 @@ def test_reg_copy_wg_local_to_swizzled_shared_uses_swizzle_fastpath():
     )
 
 
+def test_reg_warpgroup_shared_compile_uses_ptx_ld_st():
+    """Warpgroup reg<->shared dispatch must compile to PTX ld/st, not copy_xxb/fallback."""
+    import warnings
+
+    kernel = _build_roundtrip_kernel("warpgroup", 128, 32, "float32", "shared")
+    target = tvm.target.Target("cuda")
+    with target, warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        mod = tvm.compile(tvm.IRModule({"main": kernel}), target=target, tir_pipeline="tirx")
+    fallback = [w.message for w in caught if "copy/fallback" in str(w.message)]
+    src = mod.mod.imports[0].inspect_source("cuda")
+    assert not fallback, fallback
+    assert "tvm_builtin_ptx_ld" in src
+    assert "tvm_builtin_ptx_st" in src
+    assert "tvm_builtin_copy_" not in src
+
+
 if __name__ == "__main__":
     tvm.testing.main()
