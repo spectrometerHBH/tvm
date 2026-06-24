@@ -388,14 +388,14 @@ def _bench_legacy_callable(func, warmup, repeat, proton_name, debug, nsight, flu
 
 
 # Labels identifying our own kernel (vs external reference impls). Must match
-# OUR_IMPLS in bench_suite's ratio_diff.py. Used by the TIRX_BENCH_IMPLS filter.
+# OUR_IMPLS in tir-bench's ratio_diff.py. Used by the TIRX_BENCH_IMPLS filter.
 OURS_IMPLS = frozenset({"tir", "tirx"})
 
 
 def bench_impls_mode():
     """Current impl-selection mode: 'all' (default), 'ours', or 'baseline'.
 
-    Set via the ``TIRX_BENCH_IMPLS`` env var (by bench_suite ``run.py --impls``).
+    Set via the ``TIRX_BENCH_IMPLS`` env var (by tir-bench ``run.py --impls``).
     A kernel's ``run_bench`` can use this to skip *building/warming* reference
     impls (e.g. flashinfer autotune, deepgemm/cublas ext setup) that ``bench``'s
     filter alone cannot avoid, since that setup runs before ``bench`` is called.
@@ -477,7 +477,7 @@ def bench(
         Seconds to sleep between rounds (ignored when ``rounds == 1``).
     validate_case : callable, optional
         Called once on the first prepared ``case`` (after ``prepare_input_groups``,
-        before warmup/repeat rounds). Under bench_suite, ``run_kernel_bench`` holds
+        before warmup/repeat rounds). Under tir-bench, ``run_kernel_bench`` holds
         the per-GPU lock for the whole ``run_bench()`` call.
     timer : {"event", "proton"}
         Timing backend.
@@ -486,7 +486,7 @@ def bench(
     -------
     dict
         ``{"impls": {name: us}, "round_samples": {name: [us, ...]}, ...}``.
-        Times are stored in microseconds (same unit as pinned bench_suite baselines).
+        Times are stored in microseconds (same unit as pinned tir-bench baselines).
     """
     if repeat <= 0:
         raise ValueError("repeat must be positive")
@@ -719,7 +719,7 @@ class CudaProfiler:
     Stores repeated arguments used by timer_init/start/end/finalize so users can
     call concise methods in kernels. Intended to mirror Pipeline/TileScheduler helpers.
 
-    When ``profiler_enabled`` is False (or a false-y Expr), calls to
+    When ``profiler_enabled`` is False (or a false-y PrimExpr), calls to
     ``init/start/end/finalize`` become no-ops. This allows constructing a
     profiler unconditionally and eliminating external ``if PROFILER_ON:`` guards.
     """
@@ -729,25 +729,25 @@ class CudaProfiler:
         profiler_buffer: T.Buffer,
         write_stride: int,
         num_groups: int,
-        default_leader: None | tvm.tirx.Expr | bool = None,
-        profiler_enabled: bool | tvm.tirx.Expr = True,
+        default_leader: None | tvm.tirx.PrimExpr | bool = None,
+        profiler_enabled: bool | tvm.tirx.PrimExpr = True,
     ):
         self.buffer = profiler_buffer
         self.write_stride = write_stride
         self.num_groups = num_groups
         self.default_leader = default_leader
-        # Accept either a Python bool or a Expr; normalize simple bools to T.bool
+        # Accept either a Python bool or a PrimExpr; normalize simple bools to T.bool
         # so we can use it uniformly inside macros for conditional emission.
         if isinstance(profiler_enabled, bool | np.bool_):
             self.profiler_enabled = T.bool(bool(profiler_enabled))
         else:
-            # Assume Expr-like input; use as-is
+            # Assume PrimExpr-like input; use as-is
             self.profiler_enabled = profiler_enabled  # type: ignore[assignment]
 
         self.profiler_tag = T.alloc_buffer([1], "uint64", scope="local", align=8)
         self.profiler_write_offset = T.alloc_buffer([1], "uint32", scope="local", align=8)
 
-    def _leader(self, leader: None | tvm.tirx.Expr | bool):
+    def _leader(self, leader: None | tvm.tirx.PrimExpr | bool):
         if leader is not None:
             if isinstance(leader, bool | np.bool_):
                 return T.bool(bool(leader))
@@ -757,7 +757,7 @@ class CudaProfiler:
         return T.bool(True)
 
     @T.inline
-    def init(self, group_id: tvm.tirx.Expr):
+    def init(self, group_id: tvm.tirx.PrimExpr):
         if self.profiler_enabled:
             T.cuda.timer_init(
                 self.buffer.data,
@@ -768,7 +768,7 @@ class CudaProfiler:
             )
 
     @T.inline
-    def start(self, event_type: Enum, leader: None | tvm.tirx.Expr | bool = None):
+    def start(self, event_type: Enum, leader: None | tvm.tirx.PrimExpr | bool = None):
         if self.profiler_enabled:
             T.cuda.timer_start(
                 event_type,
@@ -780,7 +780,7 @@ class CudaProfiler:
             )
 
     @T.inline
-    def end(self, event_type: Enum, leader: None | tvm.tirx.Expr | bool = None):
+    def end(self, event_type: Enum, leader: None | tvm.tirx.PrimExpr | bool = None):
         if self.profiler_enabled:
             T.cuda.timer_end(
                 event_type,
@@ -792,7 +792,7 @@ class CudaProfiler:
             )
 
     @T.inline
-    def finalize(self, leader: None | tvm.tirx.Expr | bool = None):
+    def finalize(self, leader: None | tvm.tirx.PrimExpr | bool = None):
         if self.profiler_enabled:
             T.cuda.timer_finalize(
                 self.buffer.data,
