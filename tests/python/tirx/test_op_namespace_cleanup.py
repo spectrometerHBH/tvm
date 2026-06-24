@@ -292,7 +292,6 @@ def test_device_intrinsic_printer_roundtrips_canonical_namespaces():
     def device_namespaces(dst: T.handle, src: T.handle):
         A = T.match_buffer(src, (1,), "float32")
         R = T.alloc_buffer((1,), "float32", scope="local")
-        # copy_bytes was removed with copy_xxb; keep a cuda device_intrin for namespace coverage.
         T.cuda.cta_sync()
         T.ptx.ldg32(R[0], 1, A[0], 0)
         T.metal.simd_shuffle(A[0], 0)
