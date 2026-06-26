@@ -97,11 +97,9 @@ def _emit(op_call: TilePrimitiveCall, sctx: DispatchContext) -> PrimFunc:
 
     r_region = [(r.min, r.min + r.extent) for r in r_br.region]
     s_region = [(r.min, r.min + r.extent) for r in s_br.region]
-    # Slice under llvm to avoid cuda scope pre-fusion on split laneid layouts.
-    with tvm.target.Target("llvm"):
+    with sctx.target:
         r_sliced = r_layout.slice(r_shape, r_region)
         s_sliced = s_layout.slice(s_shape, s_region)
-    with sctx.target:
         r = r_sliced.canonicalize()
         s = s_sliced.canonicalize()
 

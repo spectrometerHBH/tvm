@@ -225,20 +225,9 @@ def _align_layouts_no_post_canon(r_layout, r_shape, r_region, s_layout, s_shape,
     Dropping the final canonicalize keeps ``r_p.shard`` and ``s_seps`` in
     1-to-1 correspondence. Copy's tests don't hit this because R is
     typically 1D and doesn't fuse further after permute.
-
-    Slice under llvm so cuda scope pre-fusion does not reject split thread axes;
-    the caller canonicalizes under cuda afterward.
     """
-    import tvm as _tvm
-
-    with _tvm.target.Target("llvm"):
-        r_sliced = r_layout.slice(list(r_shape), r_region)
-        s_sliced = s_layout.slice(list(s_shape), s_region)
-    # Fall back if llvm geometric slice is unsupported for this layout.
-    if r_sliced is None:
-        r_sliced = r_layout.slice(list(r_shape), r_region)
-    if s_sliced is None:
-        s_sliced = s_layout.slice(list(s_shape), s_region)
+    r_sliced = r_layout.slice(list(r_shape), r_region)
+    s_sliced = s_layout.slice(list(s_shape), s_region)
     r = r_sliced.canonicalize()
     s = s_sliced.canonicalize()
     s = _extract_tile(s, s_region)
