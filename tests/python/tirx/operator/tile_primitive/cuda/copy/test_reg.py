@@ -476,13 +476,17 @@ def test_reg_copy_tcgen05_d_epilogue_deposit_layout_pairing():
         _split_thread_loop,
         align_layouts_raw,
     )
+    from tvm.tirx.exec_scope import ExecScope
+    from tvm.tirx.operator.tile_primitive import DispatchContext
 
     m, n, reg_layout, smem_layout = _tcgen05_d_epilogue_layouts()
     region = [(0, m), (0, n)]
-    with tvm.target.Target("llvm"):
+    sctx = DispatchContext(
+        tvm.target.Target("cuda"), ExecScope("warpgroup"), {}, {}, scope_kind="warpgroup"
+    )
+    with sctx.target:
         r_sliced = reg_layout.slice([m, n], region)
         s_sliced = smem_layout.slice([m, n], region)
-    with tvm.target.Target("cuda"):
         r_p, s_p, s_seps, r_perm = align_layouts_raw(r_sliced, s_sliced, region)
 
     r_iters, s_groups = _split_thread_loop(r_perm, s_p, s_seps)

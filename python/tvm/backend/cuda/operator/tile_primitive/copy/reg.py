@@ -195,9 +195,7 @@ def _compute_perm_r(r):
 def align_layouts_raw(r_sliced, s_sliced, s_region):
     """Returns (r_p, s_p, s_seps, r_perm).
 
-    Slice outside the dispatch target (see ``_align_layouts``), canonicalize here.
-    ``r_p`` is canonicalized for ``_s_thread_offset``; ``r_perm`` skips that so
-    split-laneid atom ``m`` iters stay 1:1 with ``s_seps`` in ``_split_thread_loop``.
+    ``r_p`` for ``_s_thread_offset``; ``r_perm`` for ``_split_thread_loop`` pairing.
     """
     r = r_sliced.canonicalize()
     s = s_sliced.canonicalize()
@@ -296,11 +294,9 @@ def _align_layouts(op_call: TilePrimitiveCall, sctx: DispatchContext):
     s_buf = s_br.buffer
     r_region = [(r.min, r.min + r.extent) for r in r_br.region]
     s_region = [(r.min, r.min + r.extent) for r in s_br.region]
-    # Slice under llvm; canonicalize under cuda in align_layouts_raw.
-    with tvm.target.Target("llvm"):
+    with sctx.target:
         r_sliced = r_buf.layout.slice(list(r_buf.shape), r_region)
         s_sliced = s_buf.layout.slice(list(s_buf.shape), s_region)
-    with sctx.target:
         return align_layouts_raw(r_sliced, s_sliced, s_region)
 
 
