@@ -411,5 +411,76 @@ def test_reg_copy_wg_local_to_swizzled_shared_uses_swizzle_fastpath():
     )
 
 
+@pytest.mark.gpu
+@pytest.mark.skipif(not env.has_cuda_compute(9), reason="need cuda compute >= 9.0")
+def test_reg_copy_tcgen05_atom_rperm_pairs_all_s_groups():
+    """Split-laneid reg copy must iterate ``r_perm``, not canonicalized ``r_p``.
+
+    The ``.16x256b`` tcgen05 atom fuses its multi-group register ``m`` axis when
+    canonicalized; zipping ``s_seps`` against ``r_p`` then drops S groups and
+    permutes the deposit. This is a layout-only regression (no GPU copy run).
+    """
+    from tvm.backend.cuda.operator.tile_primitive.copy.reg import (
+        _split_thread_loop,
+        align_layouts_raw,
+    )
+    from tvm.tirx.cuda.operator.tile_primitive.tma_utils import mma_shared_layout
+    from tvm.tirx.layout import tcgen05_atom_layout
+
+    M, N = 64, 64
+    r_layout = tcgen05_atom_layout("16x256b", (M, N), "float32")
+    s_layout = mma_shared_layout("float32", 3, (M, N))
+    region = [(0, M), (0, N)]
+    with tvm.target.Target("llvm"):
+        r_sliced = r_layout.slice([M, N], region)
+        s_sliced = s_layout.slice([M, N], region)
+    with tvm.target.Target("cuda"):
+        r_p, s_p, s_seps, r_perm = align_layouts_raw(r_sliced, s_sliced, region)
+
+    r_iters, s_groups = _split_thread_loop(r_perm, s_p, s_seps)
+    r_iters_canon, _ = _split_thread_loop(r_p, s_p, s_seps)
+    mem_iters = [it for it in r_perm.shard if not it.axis.is_thread()]
+
+    assert len(r_iters) == len(mem_iters) == len(s_groups)
+    assert len(r_iters) > 1
+    assert len(r_iters_canon) < len(r_iters)
+
+
+@pytest.mark.gpu
+@pytest.mark.skipif(not env.has_cuda_compute(9), reason="need cuda compute >= 9.0")
+def test_reg_copy_tcgen05_atom_to_swizzled_smem_compiles():
+    """Regression: ``tcgen05_atom_layout`` reg→128B-swizzled SMEM lowers via reg dispatch.
+
+    Models the tf32 D epilogue deposit (``Tx.wg.copy(smem, reg_view)``). Without
+    the split-laneid ``reg.py`` fix this either fails to lower or falls back to
+    scalar copy.
+    """
+    from tvm.tirx.cuda.operator.tile_primitive.tma_utils import mma_shared_layout
+    from tvm.tirx.layout import tcgen05_atom_layout
+
+    M, N = 64, 64
+    smem_layout = mma_shared_layout("float32", 3, (M, N))
+    reg_layout = tcgen05_atom_layout("16x256b", (M, N), "float32")
+
+    @T.prim_func
+    def deposit(reg_view: T.Buffer((M, N), "float32", scope="local", layout=reg_layout)) -> None:
+        smem = T.alloc_buffer((M, N), "float32", scope="shared", layout=smem_layout)
+        T.device_entry()
+        T.cta_id([1])
+        T.warpgroup_id([1])
+        T.warp_id_in_wg([4])
+        T.lane_id([32])
+        T.thread_id_in_wg([128])
+        Tx.wg.copy(smem[:, :], reg_view[:, :])
+
+    target = tvm.target.Target("cuda")
+    with target:
+        mod = tvm.compile(tvm.IRModule({"main": deposit}), target=target, tir_pipeline="tirx")
+        src = mod.mod.imports[0].inspect_source()
+
+    assert "tvm_builtin_ptx_st" in src
+    assert "copy/fallback" not in src
+
+
 if __name__ == "__main__":
     tvm.testing.main()
