@@ -226,10 +226,8 @@ def _align_layouts_no_post_canon(r_layout, r_shape, r_region, s_layout, s_shape,
     1-to-1 correspondence. Copy's tests don't hit this because R is
     typically 1D and doesn't fuse further after permute.
     """
-    r_sliced = r_layout.slice(list(r_shape), r_region)
-    s_sliced = s_layout.slice(list(s_shape), s_region)
-    r = r_sliced.canonicalize()
-    s = s_sliced.canonicalize()
+    r = r_layout.slice(list(r_shape), r_region).canonicalize()
+    s = s_layout.slice(list(s_shape), s_region).canonicalize()
     s = _extract_tile(s, s_region)
     # Broadcast lift: when op's post-slice tensor shape != anchor's, expand
     # s via stride-0 iters so group() below can partition along anchor's
