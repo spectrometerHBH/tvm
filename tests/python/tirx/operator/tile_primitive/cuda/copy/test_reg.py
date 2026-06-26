@@ -411,75 +411,118 @@ def test_reg_copy_wg_local_to_swizzled_shared_uses_swizzle_fastpath():
     )
 
 
-@pytest.mark.gpu
-@pytest.mark.skipif(not env.has_cuda_compute(9), reason="need cuda compute >= 9.0")
-def test_reg_copy_tcgen05_atom_rperm_pairs_all_s_groups():
-    """Split-laneid reg copy must iterate ``r_perm``, not canonicalized ``r_p``.
+# --- tcgen05 D epilogue deposit (tf32_hc_prenorm_gemm) -----------------------
+# Production op: ``Tx.warpgroup.copy(smem_cd_mma, d_reg)`` after ``tcgen05.ld``
+# pulls the M=64 accumulator fragment from TMEM into ``d_reg``, then deposits it
+# into 128B-swizzled MMA SMEM for the subsequent TMA store to gmem D.
+_TCGEN05_D_ATOM = "16x256b"
+_TCGEN05_D_SHAPE = (64, 64)
+_TCGEN05_D_DTYPE = "float32"
+_TCGEN05_D_SWIZZLE = 3  # SwizzleMode 128B → mma_shared_layout(..., 3, shape)
+_TCGEN05_D_SLICE = (slice(0, 64), slice(0, 64))
 
-    The ``.16x256b`` tcgen05 atom fuses its multi-group register ``m`` axis when
-    canonicalized; zipping ``s_seps`` against ``r_p`` then drops S groups and
-    permutes the deposit. This is a layout-only regression (no GPU copy run).
-    """
-    from tvm.backend.cuda.operator.tile_primitive.copy.reg import (
-        _split_thread_loop,
-        align_layouts_raw,
-    )
+
+def _tcgen05_d_epilogue_layouts():
     from tvm.tirx.cuda.operator.tile_primitive.tma_utils import mma_shared_layout
     from tvm.tirx.layout import tcgen05_atom_layout
 
-    M, N = 64, 64
-    r_layout = tcgen05_atom_layout("16x256b", (M, N), "float32")
-    s_layout = mma_shared_layout("float32", 3, (M, N))
-    region = [(0, M), (0, N)]
-    with tvm.target.Target("llvm"):
-        r_sliced = r_layout.slice([M, N], region)
-        s_sliced = s_layout.slice([M, N], region)
-    with tvm.target.Target("cuda"):
-        r_p, s_p, s_seps, r_perm = align_layouts_raw(r_sliced, s_sliced, region)
-
-    r_iters, s_groups = _split_thread_loop(r_perm, s_p, s_seps)
-    r_iters_canon, _ = _split_thread_loop(r_p, s_p, s_seps)
-    mem_iters = [it for it in r_perm.shard if not it.axis.is_thread()]
-
-    assert len(r_iters) == len(mem_iters) == len(s_groups)
-    assert len(r_iters) > 1
-    assert len(r_iters_canon) < len(r_iters)
+    m, n = _TCGEN05_D_SHAPE
+    reg_layout = tcgen05_atom_layout(_TCGEN05_D_ATOM, (m, n), _TCGEN05_D_DTYPE)
+    smem_layout = mma_shared_layout(_TCGEN05_D_DTYPE, _TCGEN05_D_SWIZZLE, (m, n))
+    return m, n, reg_layout, smem_layout
 
 
-@pytest.mark.gpu
-@pytest.mark.skipif(not env.has_cuda_compute(9), reason="need cuda compute >= 9.0")
-def test_reg_copy_tcgen05_atom_to_swizzled_smem_compiles():
-    """Regression: ``tcgen05_atom_layout`` reg→128B-swizzled SMEM lowers via reg dispatch.
-
-    Models the tf32 D epilogue deposit (``Tx.wg.copy(smem, reg_view)``). Without
-    the split-laneid ``reg.py`` fix this either fails to lower or falls back to
-    scalar copy.
-    """
+def _build_tcgen05_d_epilogue_deposit():
+    """``Tx.wg.copy(smem[slice], d_reg[slice])``: R (tcgen05 atom) → S (128B swizzle)."""
     from tvm.tirx.cuda.operator.tile_primitive.tma_utils import mma_shared_layout
     from tvm.tirx.layout import tcgen05_atom_layout
 
-    M, N = 64, 64
-    smem_layout = mma_shared_layout("float32", 3, (M, N))
-    reg_layout = tcgen05_atom_layout("16x256b", (M, N), "float32")
+    m, n = _TCGEN05_D_SHAPE
+    smem_layout = mma_shared_layout(_TCGEN05_D_DTYPE, _TCGEN05_D_SWIZZLE, (m, n))
+    reg_layout = tcgen05_atom_layout(_TCGEN05_D_ATOM, (m, n), _TCGEN05_D_DTYPE)
+    sl_m, sl_n = _TCGEN05_D_SLICE
 
     @T.prim_func
-    def deposit(reg_view: T.Buffer((M, N), "float32", scope="local", layout=reg_layout)) -> None:
-        smem = T.alloc_buffer((M, N), "float32", scope="shared", layout=smem_layout)
+    def deposit(
+        d_reg: T.Buffer((m, n), _TCGEN05_D_DTYPE, scope="local", layout=reg_layout),
+    ) -> None:
+        smem_cd_mma = T.alloc_buffer((m, n), _TCGEN05_D_DTYPE, scope="shared", layout=smem_layout)
         T.device_entry()
         T.cta_id([1])
         T.warpgroup_id([1])
         T.warp_id_in_wg([4])
         T.lane_id([32])
         T.thread_id_in_wg([128])
-        Tx.wg.copy(smem[:, :], reg_view[:, :])
+        Tx.wg.copy(smem_cd_mma[sl_m, sl_n], d_reg[sl_m, sl_n])
 
+    return deposit
+
+
+def _compile_tcgen05_d_epilogue_deposit():
     target = tvm.target.Target("cuda")
     with target:
-        mod = tvm.compile(tvm.IRModule({"main": deposit}), target=target, tir_pipeline="tirx")
-        src = mod.mod.imports[0].inspect_source()
+        mod = tvm.IRModule({"main": _build_tcgen05_d_epilogue_deposit()})
+        return tvm.compile(mod, target=target, tir_pipeline="tirx")
 
+
+def test_reg_copy_tcgen05_d_epilogue_deposit_layout_pairing():
+    """Pre-fix bug: canonical ``r_p`` collapses atom ``m`` groups and drops S pairings.
+
+    Copy: ``Tx.wg.copy(smem_cd_mma[0:64,0:64], d_reg[0:64,0:64])`` (R→S).
+    ``d_reg``: ``(64,64)`` fp32 ``tcgen05_atom_layout("16x256b", ...)``.
+    ``smem_cd_mma``: ``(64,64)`` fp32 ``mma_shared_layout(..., swizzle=128B)``.
+    """
+    from tvm.backend.cuda.operator.tile_primitive.copy.reg import (
+        _split_thread_loop,
+        align_layouts_raw,
+    )
+
+    m, n, reg_layout, smem_layout = _tcgen05_d_epilogue_layouts()
+    region = [(0, m), (0, n)]
+    with tvm.target.Target("llvm"):
+        r_sliced = reg_layout.slice([m, n], region)
+        s_sliced = smem_layout.slice([m, n], region)
+    with tvm.target.Target("cuda"):
+        r_p, s_p, s_seps, r_perm = align_layouts_raw(r_sliced, s_sliced, region)
+
+    r_iters, s_groups = _split_thread_loop(r_perm, s_p, s_seps)
+    r_iters_bug, s_groups_bug = _split_thread_loop(r_p, s_p, s_seps)
+    mem_extents = [int(it.extent) for it in r_iters]
+    bug_extents = [int(it.extent) for it in r_iters_bug]
+
+    # Fixed path: 3 register m-groups stay 1:1 with 3 S-side groups.
+    assert mem_extents == [8, 2, 2]
+    assert len(r_iters) == len(s_groups) == 3
+    # Pre-fix path (what _split_thread_loop used to take): 1 fused m-iter, only
+    # the first S group is paired — the other two are silently dropped.
+    assert bug_extents == [32]
+    assert len(r_iters_bug) == len(s_groups_bug) == 1
+
+
+@pytest.mark.gpu
+@pytest.mark.skipif(not env.has_cuda_compute(9), reason="need cuda compute >= 9.0")
+def test_reg_copy_tcgen05_d_epilogue_deposit_codegen():
+    """``reg`` dispatch lowers the D epilogue deposit; pre-fix loop only covered half.
+
+    Without the ``r_perm`` fix the emitted outer loop ran ``f < 8`` (one fused
+    register group) instead of ``f < 16`` (three atom m-groups x vec tail), and
+    the swizzled SMEM stores landed in the wrong (row, col) slots.
+    """
+    import re
+
+    ex = _compile_tcgen05_d_epilogue_deposit()
+    src = ex.mod.imports[0].inspect_source()
+
+    assert "copy/fallback" not in src, "reg dispatch must not fall back to scalar copy"
+    assert "tvm_builtin_copy_" not in src, "reg dispatch should emit PTX ld/st only"
     assert "tvm_builtin_ptx_st" in src
-    assert "copy/fallback" not in src
+    assert "st.shared.v2.u32" in src, "fp32 vec=2 → 8B shared store per outer iter"
+
+    loop = re.search(r"for \(int f = 0; f < (\d+)", src)
+    assert loop is not None, "expected reg copy outer loop in generated CUDA"
+    assert loop.group(1) == "16", (
+        f"fixed pairing emits 16 outer stores (pre-fix bug collapsed to 8); got f < {loop.group(1)}"
+    )
 
 
 if __name__ == "__main__":
