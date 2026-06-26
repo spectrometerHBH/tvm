@@ -195,28 +195,9 @@ def _compute_perm_r(r):
 def align_layouts_raw(r_sliced, s_sliced, s_region):
     """Returns (r_p, s_p, s_seps, r_perm).
 
-    ``r_sliced`` / ``s_sliced`` are the R/S layouts already sliced to the copy
-    region — sliced OUTSIDE the dispatch target (see ``_align_layouts``); this
-    function canonicalizes them INSIDE it so the scope-aware fusers still run.
-    Slicing under the target pre-fuses split thread axes (e.g. the tcgen05.ld
-    ``16x*b`` atom's ``laneid``, split across two iters) into a partially-fused
-    form that canonicalize then rejects with "conflicting scopes for thread".
-
-    Two views of the permuted R layout are returned:
-
-    - ``r_p`` — the *canonicalized* permuted layout. Its thread axes are fused
-      back to a single per-axis iter (``laneid`` + ``wid_in_wg`` → ``tid_in_wg``),
-      which ``_s_thread_offset`` needs so the per-thread S base offset is one
-      ``apply_to_shape`` over a clean thread iter.
-    - ``r_perm`` — the permuted layout *without* the final canonicalize. Its
-      memory (``m``) iters stay one-per-S-group, so ``_split_thread_loop`` can
-      pair each R ``m``-iter 1:1 with its ``s_seps`` S group. Canonicalizing
-      would fuse a multi-group ``m``-axis (e.g. the ``.16x*b`` atom register
-      axis, which decomposes into several non-contiguous (row, col) groups)
-      into one dense iter, after which the 1:1 pairing breaks and every S group
-      past the first is silently dropped (the m-row-doubling / column-parity
-      bug). For the already-contiguous cases (``.32x32b``, ``wg_local_layout``)
-      the ``m``-axis is a single group, so ``r_perm`` and ``r_p`` agree.
+    Slice outside the dispatch target (see ``_align_layouts``), canonicalize here.
+    ``r_p`` is canonicalized for ``_s_thread_offset``; ``r_perm`` skips that so
+    split-laneid atom ``m`` iters stay 1:1 with ``s_seps`` in ``_split_thread_loop``.
     """
     r = r_sliced.canonicalize()
     s = s_sliced.canonicalize()
