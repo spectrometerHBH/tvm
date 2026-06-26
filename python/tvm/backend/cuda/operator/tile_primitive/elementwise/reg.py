@@ -34,7 +34,6 @@ from __future__ import annotations
 import functools
 import operator
 
-import tvm
 from tvm.arith import Analyzer
 from tvm.script import tirx as T
 from tvm.tirx import PrimFunc, TilePrimitiveCall

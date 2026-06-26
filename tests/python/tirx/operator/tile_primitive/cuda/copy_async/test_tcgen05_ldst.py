@@ -18,10 +18,10 @@
 """Unit tests for tcgen05.ld/st copy_async dispatch helpers."""
 
 import tvm
-from tvm.script import tirx as T
 from tvm.backend.cuda.operator.tile_primitive.copy_async.tcgen05_ldst import (
     _can_prove_divisible,
 )
+from tvm.script import tirx as T
 
 
 def test_can_prove_divisible_uint32_offset():
