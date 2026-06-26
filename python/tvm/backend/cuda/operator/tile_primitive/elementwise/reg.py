@@ -88,7 +88,7 @@ def _validate_scope_level_anchor(anchor_br, sctx: DispatchContext) -> tuple[bool
     st, ext = get_st_extent(anchor_br)
     sliced = get_sublayout_from_region(anchor_br.buffer.layout, anchor_br.buffer.shape, st, ext)
     with sctx.target:
-        canon = sliced.canonicalize() if hasattr(sliced, "canonicalize") else sliced
+        canon = sliced.canonicalize()
     shard = getattr(canon, "shard", None)
     if shard is None:
         return False, f"{scope}-scope op operand layout is not a TileLayout after slicing"
@@ -151,7 +151,7 @@ def _check_layout_operands_agree(plan, sctx) -> tuple[bool, str | None]:
         st, ext = get_st_extent(br)
         with sctx.target:
             sliced = get_sublayout_from_region(br.buffer.layout, br.buffer.shape, st, ext)
-            canon = sliced.canonicalize() if hasattr(sliced, "canonicalize") else sliced
+            canon = sliced.canonicalize()
         sig = layout_signature(canon)
         if sig is None:
             return False, "layout has no signature (not a TileLayout?)"
