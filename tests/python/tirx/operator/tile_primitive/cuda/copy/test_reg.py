@@ -525,5 +525,90 @@ def test_reg_copy_tcgen05_d_epilogue_deposit_codegen():
     )
 
 
+def _tcgen05_16x256b_row_col(tid_wg: T.int32, lane: T.int32, reg_idx: T.int32):
+    """Map ``(tid_in_wg, reg)`` → logical ``(row, col)`` for ``.16x256b`` fp32 atom."""
+    t0 = lane & T.int32(3)
+    t1 = lane >> 2
+    v0p = reg_idx & T.int32(1)
+    va = (reg_idx >> 1) & T.int32(1)
+    vb = reg_idx >> 2
+    wid = tid_wg >> 5
+    row = t1 + T.int32(8) * va + T.int32(16) * wid
+    col = v0p + T.int32(2) * t0 + T.int32(8) * vb
+    return row, col
+
+
+def _build_tcgen05_d_epilogue_deposit_roundtrip():
+    """Fill ``d_reg``, R→S deposit, S→R reload, dump via ``.local()`` to gmem."""
+    from tvm.tirx.cuda.operator.tile_primitive.tma_utils import mma_shared_layout
+    from tvm.tirx.layout import tcgen05_atom_layout
+
+    m, n = _TCGEN05_D_SHAPE
+    regs_per_thread = 32  # ``.16x256b.x8`` fp32: 4 regs/slot x rep=8
+    smem_layout = mma_shared_layout(_TCGEN05_D_DTYPE, _TCGEN05_D_SWIZZLE, (m, n))
+    reg_layout = tcgen05_atom_layout(_TCGEN05_D_ATOM, (m, n), _TCGEN05_D_DTYPE)
+    sl_m, sl_n = _TCGEN05_D_SLICE
+
+    @T.prim_func
+    def kernel(A_ptr: T.handle, B_ptr: T.handle) -> None:
+        A = T.match_buffer(A_ptr, (m, n), _TCGEN05_D_DTYPE)
+        B = T.match_buffer(B_ptr, (m, n), _TCGEN05_D_DTYPE)
+        T.device_entry()
+        T.cta_id([1])
+        T.warpgroup_id([1])
+        T.warp_id_in_wg([4])
+        T.lane_id([32])
+        tid_wg = T.thread_id_in_wg([128])
+        lane = T.lane_id([32])
+        d_reg = T.alloc_buffer((m, n), _TCGEN05_D_DTYPE, scope="local", layout=reg_layout)
+        d_reg_out = T.alloc_buffer((m, n), _TCGEN05_D_DTYPE, scope="local", layout=reg_layout)
+        smem_cd_mma = T.alloc_buffer((m, n), _TCGEN05_D_DTYPE, scope="shared", layout=smem_layout)
+        reg_in = d_reg.local(regs_per_thread)
+        reg_out = d_reg_out.local(regs_per_thread)
+        for r in T.serial(regs_per_thread):
+            row, col = _tcgen05_16x256b_row_col(tid_wg, lane, T.cast(r, "int32"))
+            reg_in[r] = A[row, col]
+        Tx.wg.copy(smem_cd_mma[sl_m, sl_n], d_reg[sl_m, sl_n])
+        T.cuda.cta_sync()
+        Tx.wg.copy(d_reg_out[sl_m, sl_n], smem_cd_mma[sl_m, sl_n])
+        for r in T.serial(regs_per_thread):
+            row, col = _tcgen05_16x256b_row_col(tid_wg, lane, T.cast(r, "int32"))
+            B[row, col] = reg_out[r]
+
+    return kernel
+
+
+@pytest.mark.gpu
+@pytest.mark.skipif(not env.has_cuda_compute(9), reason="need cuda compute >= 9.0")
+def test_reg_copy_tcgen05_d_epilogue_deposit_gpu():
+    """GPU: R→S deposit + S→R reload must preserve the Layout-F register tile.
+
+    Host fills gmem ``A[row,col]=row*100+col``; each thread scatters into ``d_reg``
+    via the ``.16x256b`` (tid,reg)→(row,col) map, runs production
+    ``Tx.wg.copy(smem_cd_mma, d_reg)`` then the inverse
+    ``Tx.wg.copy(d_reg_out, smem_cd_mma)``, and dumps ``d_reg_out`` back to gmem
+    ``B`` through ``.local()``. Pre-fix pairing dropped 2/3 of the S groups —
+    ``max|B-A|`` was hundreds, not 0.
+    """
+    m, n = _TCGEN05_D_SHAPE
+    target = tvm.target.Target("cuda")
+    with target:
+        mod = tvm.compile(
+            tvm.IRModule({"main": _build_tcgen05_d_epilogue_deposit_roundtrip()}),
+            target=target,
+            tir_pipeline="tirx",
+        )
+
+    dev = tvm.cuda(0)
+    rows = np.arange(m, dtype=np.int32)[:, None]
+    cols = np.arange(n, dtype=np.int32)[None, :]
+    a_np = (rows * 100 + cols).astype(np.float32)
+    b_np = np.zeros((m, n), dtype=np.float32)
+    a = tvm.runtime.tensor(a_np, dev)
+    b = tvm.runtime.tensor(b_np, dev)
+    mod(a, b)
+    np.testing.assert_allclose(b.numpy(), a_np, rtol=0, atol=0)
+
+
 if __name__ == "__main__":
     tvm.testing.main()
