@@ -397,21 +397,9 @@ def _slice_and_canonicalize_smem(
 
 
 def _regroup_smem_by_extgt1_shape(sliced_smem: TileLayout, extgt1_shape: list) -> tuple:
-    """Group sliced smem by ext>1 copy shape; cast unsigned extents to signed for proofs.
-
-    An unsigned gmem slice base leaks its dtype into the copy extent (e.g.
-    ``uint32(128)``), which the grouping's floormod/floordiv proofs reject. The
-    extent value is non-negative, so a signed view is value-preserving and only
-    used for the structural proof — the gmem slice base can stay unsigned.
-    """
-    norm_shape = []
-    for e in extgt1_shape:
-        dt = getattr(e, "dtype", None)
-        if dt is not None and str(dt).startswith("uint"):
-            e = tvm.tirx.Cast(str(dt).replace("uint", "int", 1), e)
-        norm_shape.append(e)
+    """Group the sliced smem layout by the ext>1 copy shape."""
     try:
-        return sliced_smem.group(list(norm_shape))
+        return sliced_smem.group(list(extgt1_shape))
     except Exception:
         return None
 
