@@ -307,23 +307,30 @@ class L1Result:
     smem_groups: list  # list[SmemGroup]
 
 
-def _canonicalize_gmem(g_buf: Buffer) -> TileLayout:
+def _gmem_layout(g_buf: Buffer) -> TileLayout:
     layout = g_buf.layout
     if not isinstance(layout, TileLayout):
         # cuTensorMap requires a plain memory layout on gmem side.
         raise ValueError(f"TMA gmem layout must be a TileLayout; got {type(layout).__name__}")
-    return layout.canonicalize()
+    # Do NOT canonicalize: a plain gmem buffer already has one iter per dim, so
+    # grouping by the buffer shape only needs the overflow-free ``dim % dim``
+    # proof. canonicalize() would fuse contiguous dims into one ``prod``-extent
+    # iter, and re-splitting that then needs ``(a*b) % a`` — unprovable for an
+    # unsigned (uint32) shape extent under wraparound. The grouped result is
+    # identical either way (group re-splits to the buffer dims), so skipping the
+    # fuse is a pure proof simplification that also unlocks uint32 shapes.
+    return layout
 
 
 def _canonicalize_smem(s_buf: Buffer) -> TileLayout:
     return _to_tile_layout(s_buf.layout, s_buf.shape).canonicalize()
 
 
-def _group_gmem_by_buffer_shape(gmem_canon: TileLayout, buffer_shape: list):
-    """Group gmem canonicalized layout by the buffer shape. Returns
+def _group_gmem_by_buffer_shape(gmem: TileLayout, buffer_shape: list):
+    """Group the (uncanonicalized) gmem layout by the buffer shape. Returns
     ``(grouped, separators)`` or raises on failure."""
     try:
-        grouped, seps = gmem_canon.group(list(buffer_shape))
+        grouped, seps = gmem.group(list(buffer_shape))
     except Exception as err:
         raise ValueError(f"Cannot group gmem layout by buffer shape: {err}") from err
     return grouped, seps
@@ -397,10 +404,21 @@ def _slice_and_canonicalize_smem(
 
 
 def _regroup_smem_by_extgt1_shape(sliced_smem: TileLayout, extgt1_shape: list) -> tuple:
-    """Group the sliced smem layout by the ext>1 copy shape. Returns
-    ``(grouped, separators)`` or ``None`` on failure."""
+    """Group sliced smem by ext>1 copy shape; cast unsigned extents to signed for proofs.
+
+    An unsigned gmem slice base leaks its dtype into the copy extent (e.g.
+    ``uint32(128)``), which the grouping's floormod/floordiv proofs reject. The
+    extent value is non-negative, so a signed view is value-preserving and only
+    used for the structural proof — the gmem slice base can stay unsigned.
+    """
+    norm_shape = []
+    for e in extgt1_shape:
+        dt = getattr(e, "dtype", None)
+        if dt is not None and str(dt).startswith("uint"):
+            e = tvm.tirx.Cast(str(dt).replace("uint", "int", 1), e)
+        norm_shape.append(e)
     try:
-        return sliced_smem.group(list(extgt1_shape))
+        return sliced_smem.group(list(norm_shape))
     except Exception:
         return None
 
@@ -419,11 +437,11 @@ def _build_l1_result(
 
     smem_canon = _canonicalize_smem(s_buf)
     _assert_memory_only(smem_canon, "shared")
-    gmem_canon = _canonicalize_gmem(g_buf)
-    _assert_memory_only(gmem_canon, "global")
+    gmem = _gmem_layout(g_buf)
+    _assert_memory_only(gmem, "global")
 
     # --- gmem: group by buffer shape, then split each group ---
-    grouped_g, sep_g = _group_gmem_by_buffer_shape(gmem_canon, g_buf.shape)
+    grouped_g, sep_g = _group_gmem_by_buffer_shape(gmem, g_buf.shape)
 
     gmem_iters: list = []
     # Track which gmem_iters correspond to each original buffer dim to
