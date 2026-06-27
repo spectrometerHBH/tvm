@@ -49,6 +49,31 @@ from ..exec_scope_utils import exec_scope_ok
 _TCGEN05_COL_FACTOR_FP32 = {"16x64b": 2, "16x128b": 4, "16x256b": 8}
 
 
+def _can_prove_divisible(analyzer, value, divisor):
+    """Robustly prove ``value`` is a multiple of ``divisor`` (a small positive
+    compile-time constant), including when ``value`` is an *unsigned* index.
+
+    ``Analyzer`` rewrites ``y % 1 -> 0`` and ``y % c`` (constant ``c``) for
+    *signed* operands, but leaves ``x % uint32(1)`` symbolic — so the natural
+    ``floormod(col_start, elem_per_32b) == 0`` proof spuriously fails for a
+    ``uint32`` column start even though it is trivially true. The divisor here
+    is ``elem_per_32b`` ∈ {1, 2, 4} (32 // dtype-bits): ``elem_per_32b == 1``
+    is *always* divisible; otherwise we re-run the proof on a signed view of
+    ``value`` (value-preserving for these non-negative TMEM/local indices, and
+    only used for the divisibility check — the emitted arithmetic keeps the
+    original ``value``).
+    """
+    if divisor == 1:
+        return True
+    if analyzer.can_prove_equal(tvm.tirx.floormod(value, divisor), 0):
+        return True
+    dtype = getattr(value, "dtype", None)
+    if dtype is not None and str(dtype).startswith("uint"):
+        signed = tvm.tirx.Cast(str(dtype).replace("uint", "int", 1), value)
+        return analyzer.can_prove_equal(tvm.tirx.floormod(signed, divisor), 0)
+    return False
+
+
 def _match_tcgen05_atom_layout(buf):
     """Return ``(instr_shape, rep, frag_rows)`` if ``buf.layout`` matches a
     tcgen05 ``.16x*b`` atom layout for some supported ``instr_shape``.
@@ -243,7 +268,7 @@ def _emit_32x32b_path(
     width = local_region.region[1].extent
     candidates = [1, 2, 4, 8, 16, 32, 64, 128]
 
-    if not analyzer.can_prove_equal(tvm.tirx.floormod(width, elem_per_32b), 0):
+    if not _can_prove_divisible(analyzer, width, elem_per_32b):
         raise ValueError(f"Width {width} is not valid for tcgen05.ld/st with shape 32x32b")
 
     num = None
@@ -270,7 +295,7 @@ def _emit_32x32b_path(
     assert analyzer.can_prove_equal(local_extent[0], 128)
 
     offset = tmem_st[1]
-    assert analyzer.can_prove_equal(tvm.tirx.floormod(offset, elem_per_32b), 0)
+    assert _can_prove_divisible(analyzer, offset, elem_per_32b)
     offset_32b = tvm.tirx.floordiv(offset, elem_per_32b)
     assert analyzer.can_prove_equal(tmem_extent[1], width), (
         f"tmem_extent[1]: {tmem_extent[1]}, width: {width}"
@@ -390,10 +415,10 @@ def _emit_16xnb_path(
     del tmem_rows  # only used for the structural check above
 
     col_off = tmem_st[1]
-    assert analyzer.can_prove_equal(tvm.tirx.floormod(col_off, elem_per_32b), 0)
+    assert _can_prove_divisible(analyzer, col_off, elem_per_32b)
     col_off_32b = tvm.tirx.floordiv(col_off, elem_per_32b)
     local_col_off = local_st[1]
-    assert analyzer.can_prove_equal(tvm.tirx.floormod(local_col_off, elem_per_32b), 0)
+    assert _can_prove_divisible(analyzer, local_col_off, elem_per_32b)
     local_col_off_elems = local_col_off
 
     is_load = direction == "tmem2local"
