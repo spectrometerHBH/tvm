@@ -22,7 +22,7 @@ from collections.abc import Callable
 from typing import Any
 
 from tvm.backend.cuda import op as _cuda_op
-from tvm.tirx import Buffer
+from tvm.tirx import Buffer, PrimExpr
 from tvm.tirx import op as _tir_op
 from tvm.tirx.script.builder.ir import _dtype_forward, _op_wrapper
 
@@ -89,15 +89,19 @@ class PTXNamespace:
         # add/sub/mul/fma DPS form: (d_addr, a, b[, c], *, rounding, ftz[, sat])
         self.add_f32 = _op_wrapper(_cuda_op.ptx_add_f32)
         self.add_f32x2 = _op_wrapper(_cuda_op.ptx_add_f32x2)
+        self.add_f32x2_val = _op_wrapper(_cuda_op.ptx_add_f32x2_val)
         self.add_f64 = _op_wrapper(_cuda_op.ptx_add_f64)
         self.sub_f32 = _op_wrapper(_cuda_op.ptx_sub_f32)
         self.sub_f32x2 = _op_wrapper(_cuda_op.ptx_sub_f32x2)
+        self.sub_f32x2_val = _op_wrapper(_cuda_op.ptx_sub_f32x2_val)
         self.sub_f64 = _op_wrapper(_cuda_op.ptx_sub_f64)
         self.mul_f32 = _op_wrapper(_cuda_op.ptx_mul_f32)
         self.mul_f32x2 = _op_wrapper(_cuda_op.ptx_mul_f32x2)
+        self.mul_f32x2_val = _op_wrapper(_cuda_op.ptx_mul_f32x2_val)
         self.mul_f64 = _op_wrapper(_cuda_op.ptx_mul_f64)
         self.fma_f32 = _op_wrapper(_cuda_op.ptx_fma_f32)
         self.fma_f32x2 = _op_wrapper(_cuda_op.ptx_fma_f32x2)
+        self.fma_f32x2_val = _op_wrapper(_cuda_op.ptx_fma_f32x2_val)
         self.fma_f64 = _op_wrapper(_cuda_op.ptx_fma_f64)
         self.max_f32 = _op_wrapper(_cuda_op.ptx_max_f32)
         self.mma = MmaNamespace()
@@ -204,6 +208,22 @@ class CpAsyncBulkTensorNamespace:
         cache_policy=None,
     ):
         _cuda_op._choice("cta_group", cta_group, _cuda_op._TCGEN05_CTA_GROUP)
+        if isinstance(cache_hint, PrimExpr):
+            has_cache_policy, *coords = coords
+            return _tir_op.call_intrin(
+                "",
+                "tirx.ptx.cp_async_bulk_tensor_global_to_cluster",
+                dim,
+                dst_ptr,
+                bar_addr,
+                tensormap_addr,
+                cta_mask,
+                cta_group,
+                cache_hint,
+                has_cache_policy,
+                1,
+                *coords,
+            )
         cache_policy, has_cache_policy = _cuda_op._resolve_cache_policy(cache_hint, cache_policy)
         return _tir_op.call_intrin(
             "",
@@ -233,6 +253,22 @@ class CpAsyncBulkTensorNamespace:
         cache_policy=None,
     ):
         _cuda_op._choice("cta_group", cta_group, _cuda_op._TCGEN05_CTA_GROUP)
+        if isinstance(cache_hint, PrimExpr):
+            has_cache_policy, *coords = coords
+            return _tir_op.call_intrin(
+                "",
+                "tirx.ptx.cp_async_bulk_tensor_tile_gather4_global_to_cluster",
+                dim,
+                dst_ptr,
+                bar_addr,
+                tensormap_addr,
+                cta_mask,
+                cta_group,
+                cache_hint,
+                has_cache_policy,
+                1,
+                *coords,
+            )
         cache_policy, has_cache_policy = _cuda_op._resolve_cache_policy(cache_hint, cache_policy)
         return _tir_op.call_intrin(
             "",
@@ -254,7 +290,21 @@ class CpAsyncMbarrierNamespace:
     """The CpAsyncMbarrier instruction submodule."""
 
     def __init__(self):
-        self.arrive = _op_wrapper(_cuda_op.ptx_cp_async_mbarrier_arrive)
+        self.arrive = CpAsyncMbarrierArriveNamespace()
+
+
+class CpAsyncMbarrierArriveNamespace:
+    """The CpAsyncMbarrier Arrive instruction submodule."""
+
+    @staticmethod
+    def noinc(*args, **kwds):
+        return _cuda_op.ptx_cp_async_mbarrier_arrive_noinc(*args, **kwds)
+
+    def __call__(self, *args, **kwds):
+        return _op_wrapper(_cuda_op.ptx_cp_async_mbarrier_arrive)(*args, **kwds)
+
+    # __call__ corresponds to ptx_cp_async_mbarrier_arrive
+    __tir_call_op_name__ = "ptx_cp_async_mbarrier_arrive"
 
 
 class WgmmaNamespace:
@@ -282,6 +332,7 @@ class MbarrierNamespace:
 
     def __init__(self):
         self.init = _op_wrapper(_cuda_op.ptx_mbarrier_init)
+        self.complete_tx = _op_wrapper(_cuda_op.ptx_mbarrier_complete_tx)
         self.try_wait = _op_wrapper(_cuda_op.ptx_mbarrier_try_wait)
         self.try_wait_once = _op_wrapper(_cuda_op.ptx_mbarrier_try_wait_once)
         self.try_wait_acquire_cluster = _op_wrapper(_cuda_op.ptx_mbarrier_try_wait_acquire_cluster)
@@ -445,6 +496,7 @@ class CUDANamespace:
         self.func_call = _op_wrapper(_cuda_op.cuda_func_call)
         self.printf = _op_wrapper(_cuda_op.cuda_printf)
         self.ldg = _op_wrapper(_cuda_op.cuda_ldg)
+        self.fdividef = _op_wrapper(_cuda_op.cuda_fdividef)
         self.get_tmem_addr = _op_wrapper(_cuda_op.cuda_get_tmem_addr)
         self.cvta_generic_to_shared = _op_wrapper(_cuda_op.cuda_cvta_generic_to_shared)
         self.smem_addr_from_uint64 = _op_wrapper(_cuda_op.cuda_smem_addr_from_uint64)

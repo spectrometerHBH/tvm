@@ -171,6 +171,117 @@ def test_ptx_ld_st_codegen_emits_shared_asm():
     assert "tvm_builtin_ptx_st" in src
 
 
+def test_ptx_ld_global_nc_v8_codegen():
+    """FlashMLA index loads need ``ld.global.nc`` with a 256B prefetch."""
+
+    @T.prim_func
+    def copy_kernel(src_ptr: T.handle, out_ptr: T.handle) -> None:
+        src = T.match_buffer(src_ptr, (8,), "int32")
+        out = T.match_buffer(out_ptr, (8,), "int32")
+        T.device_entry()
+        tx = T.thread_id([32])
+        tmp = T.alloc_local((8,), "int32")
+        if tx == 0:
+            T.ptx.ld(
+                src.data,
+                "int32",
+                "s32",
+                dst=tmp.ptr_to([0]),
+                space="global",
+                cop="nc",
+                vec="v8",
+                l1_evict="L1::no_allocate",
+                l2_evict="L2::evict_first",
+                prefetch_size="L2::256B",
+            )
+            for i in T.unroll(8):
+                out[i] = tmp[i]
+
+    target = tvm.target.Target("cuda")
+    with target:
+        mod = tvm.compile(tvm.IRModule({"main": copy_kernel}), target=target, tir_pipeline="tirx")
+    src = mod.mod.imports[0].inspect_source("cuda")
+    assert "ld.global.nc.L1::no_allocate.L2::evict_first.L2::256B.v8.s32" in src
+    assert "dst[7] = r7" in src
+
+
+def test_ptx_ld_global_nc_v4_u64_256b_codegen():
+    """FlashMLA 32-byte index loads may use four 64-bit PTX outputs."""
+
+    @T.prim_func
+    def copy_kernel(src_ptr: T.handle, out_ptr: T.handle) -> None:
+        src = T.match_buffer(src_ptr, (4,), "uint64")
+        out = T.match_buffer(out_ptr, (4,), "uint64")
+        T.device_entry()
+        tx = T.thread_id([32])
+        tmp = T.alloc_local((4,), "uint64")
+        if tx == 0:
+            T.ptx.ld(
+                src.data,
+                "uint64",
+                "u64",
+                dst=tmp.ptr_to([0]),
+                space="global",
+                cop="nc",
+                vec="v4",
+                l1_evict="L1::no_allocate",
+                l2_evict="L2::evict_normal",
+                prefetch_size="L2::256B",
+            )
+            for i in T.unroll(4):
+                out[i] = tmp[i]
+
+    target = tvm.target.Target("cuda")
+    with target:
+        mod = tvm.compile(tvm.IRModule({"main": copy_kernel}), target=target, tir_pipeline="tirx")
+    src = mod.mod.imports[0].inspect_source("cuda")
+    assert "ld.global.nc.L1::no_allocate.L2::evict_normal.L2::256B.v4.u64" in src
+    assert "unsigned long long r3" in src
+
+
+def test_ptx_ld_vector_scatter_dst_codegen():
+    """Vector loads may write independent destination pointers."""
+
+    @T.prim_func
+    def copy_kernel(src_ptr: T.handle, out_ptr: T.handle) -> None:
+        src = T.match_buffer(src_ptr, (4,), "int32")
+        out = T.match_buffer(out_ptr, (4,), "int32")
+        T.device_entry()
+        tx = T.thread_id([32])
+        tmp0 = T.alloc_local((1,), "int32")
+        tmp1 = T.alloc_local((1,), "int32")
+        tmp2 = T.alloc_local((1,), "int32")
+        tmp3 = T.alloc_local((1,), "int32")
+        if tx == 0:
+            T.ptx.ld(
+                src.data,
+                "int32",
+                "s32",
+                dst=(
+                    tmp0.ptr_to([0]),
+                    tmp1.ptr_to([0]),
+                    tmp2.ptr_to([0]),
+                    tmp3.ptr_to([0]),
+                ),
+                space="global",
+                cop="nc",
+                vec="v4",
+            )
+            out[0] = tmp0[0]
+            out[1] = tmp1[0]
+            out[2] = tmp2[0]
+            out[3] = tmp3[0]
+
+    target = tvm.target.Target("cuda")
+    with target:
+        mod = tvm.compile(tvm.IRModule({"main": copy_kernel}), target=target, tir_pipeline="tirx")
+    src = mod.mod.imports[0].inspect_source("cuda")
+    assert "ld.global.nc.v4.s32" in src
+    assert "tvm_builtin_ptx_ld_plain_None_global_nc_v4_s32_to_dst4" in src
+    assert "void* dst0, void* dst1, void* dst2, void* dst3, void* src_ptr" in src
+    assert "*reinterpret_cast<int*>(dst3) = r3" in src
+
+
 @pytest.mark.gpu
 @pytest.mark.skipif(not env.has_cuda(), reason="need cuda")
 @pytest.mark.parametrize(

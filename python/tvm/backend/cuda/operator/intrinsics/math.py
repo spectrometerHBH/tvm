@@ -64,16 +64,23 @@ _DTYPE_INFO = {
 }
 
 
-def _ptx_arith_modifier_string(dtype, rounding, ftz, sat):
+def _ptx_arith_modifier_string(dtype, rounding, ftz, sat, op=None):
     """Build the `.rnd.ftz.sat` modifier substring + name suffix."""
     rnd = parse_str(rounding)
-    assert rnd in _PACKED_ROUNDING, f"invalid rounding {rnd!r}, expected one of {_PACKED_ROUNDING}"
     ftz_b = bool(int(ftz)) if hasattr(ftz, "value") else bool(ftz)
     sat_b = bool(int(sat)) if hasattr(sat, "value") else bool(sat)
     if dtype == "f64" and (ftz_b or sat_b):
         raise ValueError("PTX <op>.f64 does not accept .ftz or .sat")
     if dtype == "f32x2" and sat_b:
         raise ValueError("PTX <op>.f32x2 does not accept .sat")
+    if dtype == "f32x2" and op == "mul" and rnd in ("", "none"):
+        mod = ""
+        name_suffix = ""
+        if ftz_b:
+            mod += ".ftz"
+            name_suffix += "_ftz"
+        return mod, name_suffix
+    assert rnd in _PACKED_ROUNDING, f"invalid rounding {rnd!r}, expected one of {_PACKED_ROUNDING}"
     mod = f".{rnd}"
     if ftz_b:
         mod += ".ftz"
@@ -95,7 +102,7 @@ def _ptx_binary_arith_parts(op, dtype):
     sig = f"(void* d, {info['c_in']} a, {info['c_in']} b)"
 
     def _name(d, a, b, rounding, ftz, sat):
-        _, suf = _ptx_arith_modifier_string(dtype, rounding, ftz, sat)
+        _, suf = _ptx_arith_modifier_string(dtype, rounding, ftz, sat, op=op)
         return f"tvm_builtin_ptx_{op}_{dtype}{suf}"
 
     out_c = info["out_cstr"]
@@ -103,7 +110,7 @@ def _ptx_binary_arith_parts(op, dtype):
     out_cast = info["out_cast"]
 
     def _body(d, a, b, rounding, ftz, sat):
-        mod, _ = _ptx_arith_modifier_string(dtype, rounding, ftz, sat)
+        mod, _ = _ptx_arith_modifier_string(dtype, rounding, ftz, sat, op=op)
         return (
             f'    asm volatile("{op}{mod}.{dtype} %0, %1, %2;"\n'
             f'        : "={out_c}"(*reinterpret_cast<{out_cast}>(d))\n'
@@ -119,7 +126,7 @@ def _ptx_fma_parts(dtype):
     sig = f"(void* d, {info['c_in']} a, {info['c_in']} b, {info['c_in']} c)"
 
     def _name(d, a, b, c, rounding, ftz, sat):
-        _, suf = _ptx_arith_modifier_string(dtype, rounding, ftz, sat)
+        _, suf = _ptx_arith_modifier_string(dtype, rounding, ftz, sat, op="fma")
         return f"tvm_builtin_ptx_fma_{dtype}{suf}"
 
     out_c = info["out_cstr"]
@@ -127,7 +134,7 @@ def _ptx_fma_parts(dtype):
     out_cast = info["out_cast"]
 
     def _body(d, a, b, c, rounding, ftz, sat):
-        mod, _ = _ptx_arith_modifier_string(dtype, rounding, ftz, sat)
+        mod, _ = _ptx_arith_modifier_string(dtype, rounding, ftz, sat, op="fma")
         return (
             f'    asm volatile("fma{mod}.{dtype} %0, %1, %2, %3;"\n'
             f'        : "={out_c}"(*reinterpret_cast<{out_cast}>(d))\n'
@@ -159,6 +166,68 @@ for _dtype in ("f32", "f32x2", "f64"):
 del _dtype, _op, _name_fn, _sig, _body_fn
 
 
+def _ptx_binary_f32x2_value_parts(op):
+    """Return helper pieces for packed f32x2 register-result binary forms."""
+
+    def _name(a, b, rounding, ftz):
+        _, suf = _ptx_arith_modifier_string("f32x2", rounding, ftz, False, op=op)
+        return f"tvm_builtin_ptx_{op}_f32x2_val{suf}"
+
+    def _body(a, b, rounding, ftz):
+        mod, _ = _ptx_arith_modifier_string("f32x2", rounding, ftz, False, op=op)
+        return (
+            "    unsigned long long result;\n"
+            f'    asm volatile("{op}{mod}.f32x2 %0, %1, %2;"\n'
+            '        : "=l"(result)\n'
+            '        : "l"(a), "l"(b));\n'
+            "    return result;"
+        )
+
+    return _name, _body
+
+
+def _ptx_fma_f32x2_value_parts():
+    """Return helper pieces for packed f32x2 register-result fma form."""
+
+    def _name(a, b, c, rounding, ftz):
+        _, suf = _ptx_arith_modifier_string("f32x2", rounding, ftz, False, op="fma")
+        return f"tvm_builtin_ptx_fma_f32x2_val{suf}"
+
+    def _body(a, b, c, rounding, ftz):
+        mod, _ = _ptx_arith_modifier_string("f32x2", rounding, ftz, False, op="fma")
+        return (
+            "    unsigned long long result;\n"
+            f'    asm volatile("fma{mod}.f32x2 %0, %1, %2, %3;"\n'
+            '        : "=l"(result)\n'
+            '        : "l"(a), "l"(b), "l"(c));\n'
+            "    return result;"
+        )
+
+    return _name, _body
+
+
+for _op in ("add", "sub", "mul"):
+    _name_fn, _body_fn = _ptx_binary_f32x2_value_parts(_op)
+    device_intrinsic(
+        f"ptx_{_op}_f32x2_val",
+        n_attrs=2,
+        helper_name=_name_fn,
+        c_signature="(unsigned long long a, unsigned long long b)",
+        body=_body_fn,
+        return_type="unsigned long long",
+    )
+_name_fn, _body_fn = _ptx_fma_f32x2_value_parts()
+device_intrinsic(
+    "ptx_fma_f32x2_val",
+    n_attrs=2,
+    helper_name=_name_fn,
+    c_signature="(unsigned long long a, unsigned long long b, unsigned long long c)",
+    body=_body_fn,
+    return_type="unsigned long long",
+)
+del _op, _name_fn, _body_fn
+
+
 # =============================================================================
 # ex2.approx.ftz.f32 / rcp.approx.ftz.f32 — 1 form each.
 # =============================================================================
@@ -181,6 +250,15 @@ device_intrinsic(
         '    asm volatile("rcp.approx.ftz.f32 %0, %1;" : "=f"(result) : "f"(x));\n'
         "    return result;"
     ),
+)
+
+device_intrinsic(
+    "cuda_fdividef",
+    helper_name="tvm_builtin_cuda_fdividef",
+    c_signature="(float x, float y)",
+    return_type="float",
+    tvm_return_type="float32",
+    body="    return __fdividef(x, y);",
 )
 
 

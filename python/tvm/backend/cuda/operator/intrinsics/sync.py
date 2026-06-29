@@ -32,6 +32,7 @@ CUDA-side helpers:
 * warpgroup sync (``bar.sync``)
 """
 
+import tvm
 from tvm.tirx.operator.intrinsics._common import (
     CLUSTER_BARRIER_SEM,
     FENCE_PROXY_ASYNC_SPACE,
@@ -191,19 +192,20 @@ device_intrinsic(
 )
 
 
-device_intrinsic(
-    "ptx_clc_query_cancel",
-    c_signature="(void* handle)",
-    return_type="uint32_t",
-    tvm_return_type="uint32",
-    body=(
+def _ptx_clc_query_cancel_parts(use_ld_acquire):
+    use_ld_acquire = (
+        bool(int(use_ld_acquire)) if hasattr(use_ld_acquire, "value") else bool(use_ld_acquire)
+    )
+    name = f"tvm_builtin_ptx_clc_query_cancel{'_ld_acquire' if use_ld_acquire else ''}"
+    load_instr = "ld.acquire.cta.shared.b128" if use_ld_acquire else "ld.shared.b128"
+    body = (
         "    unsigned int addr = (unsigned int)__cvta_generic_to_shared(handle);\n"
         "    unsigned int first_ctaid_x;\n"
         "    asm volatile(\n"
         '        "{\\n"\n'
         '        ".reg .pred canceled;\\n"\n'
         '        ".reg .b128 response;\\n"\n'
-        '        "ld.shared.b128 response, [%1];\\n"\n'
+        f'        "{load_instr} response, [%1];\\n"\n'
         '        "clusterlaunchcontrol.query_cancel.is_canceled.pred.b128 canceled, response;\\n"\n'
         '        "mov.u32 %0, 0xffffffff;\\n"\n'
         '        "@canceled clusterlaunchcontrol.query_cancel.get_first_ctaid::x.b32.b128"\n'
@@ -212,7 +214,18 @@ device_intrinsic(
         '        : "=r"(first_ctaid_x) : "r"(addr) : "memory");\n'
         '    asm volatile("fence.proxy.async.shared::cta;\\n" ::: "memory");\n'
         "    return first_ctaid_x;"
-    ),
+    )
+    return name, body
+
+
+device_intrinsic(
+    "ptx_clc_query_cancel",
+    n_attrs=1,
+    helper_name=lambda *args: _ptx_clc_query_cancel_parts(args[-1])[0],
+    c_signature="(void* handle)",
+    return_type="uint32_t",
+    tvm_return_type="uint32",
+    body=lambda *args: _ptx_clc_query_cancel_parts(args[-1])[1],
 )
 
 
@@ -231,11 +244,18 @@ device_intrinsic(
 
 
 # =============================================================================
-# mbarrier.arrive — local + remote (cluster-mapped) forms. 2 PTX forms.
+# mbarrier.arrive — local + remote (cluster-mapped) forms.
 #   Form local:  mbarrier.arrive.shared.b64 _, [bar];
+#   Form remote unpredicated: { mapa.shared::cluster.u32 + mbarrier.arrive.shared::cluster.b64 }
 #   Form remote: { setp+@p mapa.shared::cluster.u32 + @p mbarrier.arrive.shared::cluster.b64 }
 # Dispatcher picks by arg count (1 vs 3).
 # =============================================================================
+def _is_const_true(value) -> bool:
+    if isinstance(value, tvm.tirx.IntImm):
+        return bool(int(value))
+    return value is True
+
+
 device_intrinsic(
     "_ptx_mbarrier_arrive_local",
     helper_name="tvm_builtin_ptx_mbarrier_arrive",
@@ -244,6 +264,21 @@ device_intrinsic(
         "    unsigned int barrier_addr = __cvta_generic_to_shared(barrier);\n"
         '    asm volatile("mbarrier.arrive.shared.b64 _, [%0];"\n'
         '                 :: "r"(barrier_addr) : "memory");'
+    ),
+)
+device_intrinsic(
+    "_ptx_mbarrier_arrive_remote_unpred",
+    helper_name="tvm_builtin_ptx_mbarrier_arrive_remote_unpred",
+    c_signature="(void* barrier, int cta_id)",
+    body=(
+        "    unsigned int barrier_addr = __cvta_generic_to_shared(barrier);\n"
+        "    asm volatile(\n"
+        '        "{\\n"\n'
+        '        ".reg .b32 remAddr32;\\n"\n'
+        '        "mapa.shared::cluster.u32  remAddr32, %0, %1;\\n"\n'
+        '        "mbarrier.arrive.shared::cluster.b64  _, [remAddr32];\\n"\n'
+        '        "}\\n"\n'
+        '        :: "r"(barrier_addr), "r"(cta_id) : "memory");'
     ),
 )
 device_intrinsic(
@@ -267,6 +302,21 @@ device_intrinsic(
 
 # Same cross-CTA arrive, but with an explicit arrival-count operand
 # (``..., [remAddr32], count``). Matches the ``tma::cluster::arrive`` spelling.
+device_intrinsic(
+    "_ptx_mbarrier_arrive_remote_count_unpred",
+    helper_name="tvm_builtin_ptx_mbarrier_arrive_remote_count_unpred",
+    c_signature="(void* barrier, int cta_id, int count)",
+    body=(
+        "    unsigned int barrier_addr = __cvta_generic_to_shared(barrier);\n"
+        "    asm volatile(\n"
+        '        "{\\n"\n'
+        '        ".reg .b32 remAddr32;\\n"\n'
+        '        "mapa.shared::cluster.u32  remAddr32, %0, %1;\\n"\n'
+        '        "mbarrier.arrive.shared::cluster.b64  _, [remAddr32], %2;\\n"\n'
+        '        "}\\n"\n'
+        '        :: "r"(barrier_addr), "r"(cta_id), "r"(count) : "memory");'
+    ),
+)
 device_intrinsic(
     "_ptx_mbarrier_arrive_remote_count",
     helper_name="tvm_builtin_ptx_mbarrier_arrive_remote_count",
@@ -292,11 +342,72 @@ def _codegen_mbarrier_arrive(*args):
     if len(args) == 1:
         result = CODEGEN_REGISTRY["tirx._ptx_mbarrier_arrive_local"](list(args))
     elif len(args) == 3:
-        result = CODEGEN_REGISTRY["tirx._ptx_mbarrier_arrive_remote"](list(args))
+        if _is_const_true(args[2]):
+            result = CODEGEN_REGISTRY["tirx._ptx_mbarrier_arrive_remote_unpred"]([args[0], args[1]])
+        else:
+            result = CODEGEN_REGISTRY["tirx._ptx_mbarrier_arrive_remote"](list(args))
     elif len(args) == 4:
-        result = CODEGEN_REGISTRY["tirx._ptx_mbarrier_arrive_remote_count"](list(args))
+        if _is_const_true(args[2]):
+            result = CODEGEN_REGISTRY["tirx._ptx_mbarrier_arrive_remote_count_unpred"](
+                [args[0], args[1], args[3]]
+            )
+        else:
+            result = CODEGEN_REGISTRY["tirx._ptx_mbarrier_arrive_remote_count"](list(args))
     else:
         raise ValueError(f"ptx_mbarrier_arrive expects 1, 3, or 4 args, got {len(args)}")
+    return result[0] if isinstance(result, tuple) else result
+
+
+# =============================================================================
+# mbarrier.complete_tx — local cluster-scope + remote mapped forms.
+# =============================================================================
+device_intrinsic(
+    "_ptx_mbarrier_complete_tx_local",
+    helper_name="tvm_builtin_ptx_mbarrier_complete_tx",
+    c_signature="(void* barrier, int byte_count)",
+    body=(
+        "    unsigned int barrier_addr = __cvta_generic_to_shared(barrier);\n"
+        '    asm volatile("mbarrier.complete_tx.shared::cluster.relaxed.cluster.b64 [%0], %1;"\n'
+        '                 :: "r"(barrier_addr), "r"(byte_count) : "memory");'
+    ),
+)
+
+device_intrinsic(
+    "_ptx_mbarrier_complete_tx_remote",
+    helper_name="tvm_builtin_ptx_mbarrier_complete_tx_remote",
+    c_signature="(void* barrier, int cta_id, int pred, int byte_count)",
+    body=(
+        "    unsigned int barrier_addr = __cvta_generic_to_shared(barrier);\n"
+        "    unsigned int remote_addr;\n"
+        '    asm volatile("mapa.shared::cluster.u32 %0, %1, %2;"\n'
+        '                 : "=r"(remote_addr) : "r"(barrier_addr), "r"(cta_id));\n'
+        "    asm volatile(\n"
+        '        "{\\n"\n'
+        '        ".reg .pred p;\\n"\n'
+        '        "setp.eq.u32 p, %2, 1;\\n"\n'
+        '        "@p mbarrier.complete_tx.shared::cluster.relaxed.cluster.b64 [%1], %0;\\n"\n'
+        '        "}\\n"\n'
+        '        :: "r"(byte_count), "r"(remote_addr), "r"(pred) : "memory");'
+    ),
+)
+
+
+@register_codegen("ptx_mbarrier_complete_tx")
+def _codegen_mbarrier_complete_tx(*args):
+    """Dispatch by arg count: 2 -> local, 4 -> remote.
+
+    Remote user args are ``(bar, byte_count, cta_id, pred)``; reorder to match
+    the helper signature ``(bar, cta_id, pred, byte_count)``.
+    """
+    if len(args) == 2:
+        result = CODEGEN_REGISTRY["tirx._ptx_mbarrier_complete_tx_local"](list(args))
+    elif len(args) == 4:
+        bar, byte_count, cta_id, pred = args
+        result = CODEGEN_REGISTRY["tirx._ptx_mbarrier_complete_tx_remote"](
+            [bar, cta_id, pred, byte_count]
+        )
+    else:
+        raise ValueError(f"ptx_mbarrier_complete_tx expects 2 or 4 args, got {len(args)}")
     return result[0] if isinstance(result, tuple) else result
 
 

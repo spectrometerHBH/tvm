@@ -59,6 +59,35 @@ device_intrinsic(
     body=lambda n: f'    asm volatile("cp.async.wait_group {int(n)};");',
 )
 
+_CP_ASYNC_MBARRIER_ARRIVE_SPACES = ("shared", "shared::cta")
+
+
+def _cp_async_mbarrier_arrive_parts(*args):
+    noinc = _bool_attr(args[-2])
+    space = parse_str(args[-1])
+    assert space in _CP_ASYNC_MBARRIER_ARRIVE_SPACES, (
+        f"invalid cp.async.mbarrier.arrive space {space!r}, "
+        f"expected one of {_CP_ASYNC_MBARRIER_ARRIVE_SPACES}"
+    )
+    noinc_suffix = ".noinc" if noinc else ""
+    noinc_name = "_noinc" if noinc else ""
+    space_name = "_" + _safe(space)
+    return (
+        f"tvm_builtin_ptx_cp_async_mbarrier_arrive{noinc_name}{space_name}",
+        "    unsigned int barrier_addr = __cvta_generic_to_shared(barrier);\n"
+        f'    asm volatile("cp.async.mbarrier.arrive{noinc_suffix}.{space}.b64 [%0];"\n'
+        '                 :: "r"(barrier_addr) : "memory");',
+    )
+
+
+device_intrinsic(
+    "ptx_cp_async_mbarrier_arrive",
+    n_attrs=2,
+    helper_name=lambda *a: _cp_async_mbarrier_arrive_parts(*a)[0],
+    c_signature="(void* barrier)",
+    body=lambda *a: _cp_async_mbarrier_arrive_parts(*a)[1],
+)
+
 
 # cp.async non-bulk copy forms:
 #   Form 1: cp.async.ca.shared.global ... [dst], [src], cp-size{, src-size}{, cache-policy}
@@ -421,18 +450,103 @@ def _coord_sig(n):
     return ", ".join(f"int coord{i}" for i in range(n))
 
 
-# PTX cp.async.bulk.tensor global -> shared::cluster form:
+# tile::gather4 with cta_group::2 and no multicast uses the PTX shared::cta
+# spelling. It also drops the ctaMask operand, so its asm operand order differs
+# from the shared::cluster path.
+def _is_gather4_cta_unicast(tile_mode, multicast, cta_group):
+    return tile_mode == "tile_gather4" and not multicast and cta_group == 2
+
+
+def _ptx_shared_u32_addr_decl(var_name, ptr_name, ptx_reg_name):
+    return (
+        f"    unsigned int {var_name};\n"
+        "    asm volatile(\n"
+        '        "{\\n\\t"\n'
+        f'        ".reg .u64 {ptx_reg_name};\\n\\t"\n'
+        f'        "cvta.to.shared.u64 {ptx_reg_name}, %1;\\n\\t"\n'
+        f'        "cvt.u32.u64 %0, {ptx_reg_name};\\n\\t"\n'
+        '        "}\\n"\n'
+        f'        : "=r"({var_name}) : "l"({ptr_name}));\n'
+    )
+
+
+def _g2cluster_dst_addr_decl(gather4_cta_unicast):
+    if gather4_cta_unicast:
+        return _ptx_shared_u32_addr_decl("dst_addr", "dst", "smem_addr64")
+    return "    unsigned int dst_addr = __cvta_generic_to_shared(dst);\n"
+
+
+def _g2cluster_bar_addr_decl(bar_is_addr, gather4_cta_unicast):
+    if bar_is_addr:
+        # The caller passed the final uint32 mbarrier operand and owns any
+        # architecture-specific address masking before this helper is called.
+        return ""
+    if not gather4_cta_unicast:
+        return "    unsigned int bar_addr = __cvta_generic_to_shared(bar);\n"
+    return _ptx_shared_u32_addr_decl("bar_addr", "bar", "mbar_addr64") + (
+        "    bar_addr &= 0xFEFFFFFFu;\n"
+    )
+
+
+def _g2cluster_gather4_cta_body(instr, coord_count, has_cache, bar_is_addr):
+    """Emit tile::gather4 cta_group::2 unicast.
+
+    This PTX form has no ctaMask operand. The asm operands are:
+    dst, tensormap, gather coords..., mbarrier, optional cache-policy.
+    """
+    coord_tpl = _coord_template(coord_count, 2)
+    bar_slot = 2 + coord_count
+    cache_slot = f", %{bar_slot + 1}" if has_cache else ""
+    cache_arg = ',\n          "l"(cache_policy)' if has_cache else ""
+    return (
+        f"{_g2cluster_dst_addr_decl(True)}"
+        f"{_g2cluster_bar_addr_decl(bar_is_addr, True)}"
+        "    asm volatile(\n"
+        f'        "{instr} [%0], [%1, {coord_tpl}], [%{bar_slot}]{cache_slot};"\n'
+        "        :\n"
+        '        : "r"(dst_addr), "l"(tensormap_addr),\n'
+        f"          {_coord_constraints(coord_count)},\n"
+        f'          "r"(bar_addr){cache_arg}\n'
+        '        : "memory"\n'
+        "    );"
+    )
+
+
+def _g2cluster_body(
+    instr,
+    coord_count,
+    coord_tpl,
+    bar_is_addr,
+    mask_arg,
+    mask_slot,
+    cache_arg,
+    cache_slot,
+):
+    return (
+        f"{_g2cluster_dst_addr_decl(False)}"
+        f"{_g2cluster_bar_addr_decl(bar_is_addr, False)}"
+        "    asm volatile(\n"
+        f'        "{instr} [%0], [%1, {coord_tpl}], [%2]{mask_slot}{cache_slot};"\n'
+        "        :\n"
+        f'        : "r"(dst_addr), "l"(tensormap_addr), "r"(bar_addr){mask_arg}{cache_arg},\n'
+        f"          {_coord_constraints(coord_count)}\n"
+        '        : "memory"\n'
+        "    );"
+    )
+
+
+# PTX cp.async.bulk.tensor global -> shared form:
 #   cp.async.bulk.tensor.dim.dst.src{.load_mode}.completion_mechanism
 #       {.multicast}{.cta_group}{.level::cache_hint}
 #       [dstMem], [tensorMap, tensorCoords], [mbar]{, im2colInfo}
 #       {, ctaMask} {, cache-policy}
-#   .dst = {.shared::cluster}; .src = {.global}
+#   .dst = {.shared::cluster, .shared::cta}; .src = {.global}
 #   .completion_mechanism = {.mbarrier::complete_tx::bytes}
 #   .multicast = {.multicast::cluster}
 #   .cta_group = {.cta_group::1, .cta_group::2}
 #   .load_mode = {.tile, .tile::gather4, .im2col, .im2col::w, .im2col::w::128}
 #   .level::cache_hint = {.L2::cache_hint}
-# This registration supports tile/tile::gather4 modes; ctaMask is only used
+# This registration supports tile/tile::gather4 modes. ctaMask is only used
 # when the optional ``.multicast::cluster`` modifier is enabled.
 def _g2cluster_parts(*args):
     attrs = args[-6:]
@@ -465,25 +579,26 @@ def _g2cluster_parts(*args):
     cache_slot = ", %4" if multicast and has_cache else ", %3" if has_cache else ""
     coord_start = 5 if multicast and has_cache else 4 if multicast or has_cache else 3
     coord_tpl = _coord_template(coord_count, coord_start)
+    gather4_cta_unicast = _is_gather4_cta_unicast(tile_mode, multicast, cta_group)
+    shared_scope = "cta" if gather4_cta_unicast else "cluster"
     instr = (
-        f"cp.async.bulk.tensor.{dim}d.shared::cluster.global{tile_modifier}"
+        f"cp.async.bulk.tensor.{dim}d.shared::{shared_scope}.global{tile_modifier}"
         f".mbarrier::complete_tx::bytes{multicast_inst}"
         f"{cta_group_str}{cache_inst}"
     )
-    bar_addr_decl = (
-        "" if bar_is_addr else "    unsigned int bar_addr = __cvta_generic_to_shared(bar);\n"
-    )
-    body = (
-        "    unsigned int dst_addr = __cvta_generic_to_shared(dst);\n"
-        f"{bar_addr_decl}"
-        "    asm volatile(\n"
-        f'        "{instr} [%0], [%1, {coord_tpl}], [%2]{mask_slot}{cache_slot};"\n'
-        "        :\n"
-        f'        : "r"(dst_addr), "l"(tensormap_addr), "r"(bar_addr){mask_arg}{cache_arg},\n'
-        f"          {_coord_constraints(coord_count)}\n"
-        '        : "memory"\n'
-        "    );"
-    )
+    if gather4_cta_unicast:
+        body = _g2cluster_gather4_cta_body(instr, coord_count, has_cache, bar_is_addr)
+    else:
+        body = _g2cluster_body(
+            instr,
+            coord_count,
+            coord_tpl,
+            bar_is_addr,
+            mask_arg,
+            mask_slot,
+            cache_arg,
+            cache_slot,
+        )
     return name, sig, body
 
 

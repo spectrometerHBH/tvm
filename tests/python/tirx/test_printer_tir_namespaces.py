@@ -82,7 +82,14 @@ def test_printer_ptx_more():
         cuda_op.ptx_cp_async_bulk_wait_group(0, True),
         "T.ptx.cp_async.bulk.wait_group(0, T.bool(True))",
     )
-    _assert_print(cuda_op.ptx_cp_async_mbarrier_arrive(0), "T.ptx.cp_async.mbarrier.arrive(0)")
+    _assert_print(
+        cuda_op.ptx_cp_async_mbarrier_arrive(r),
+        'r = T.handle()\nT.ptx.cp_async.mbarrier.arrive(r, T.bool(False), "shared")',
+    )
+    _assert_print(
+        cuda_op.ptx_cp_async_mbarrier_arrive_noinc(r),
+        'r = T.handle()\nT.ptx.cp_async.mbarrier.arrive(r, T.bool(True), "shared::cta")',
+    )
     _assert_print(cuda_op.ptx_fence("acq_rel", "gpu"), 'T.ptx.fence("acq_rel", "gpu")')
     _assert_print(cuda_op.ptx_fence("sc", "cta"), 'T.ptx.fence("sc", "cta")')
     _assert_print(
@@ -99,6 +106,10 @@ def test_printer_ptx_more():
     _assert_print(
         cuda_op.ptx_ld_global_acquire(r, s),
         "r = T.handle()\ns = T.handle()\nT.ptx.ld_global_acquire(r, s)",
+    )
+    _assert_print(
+        cuda_op.cuda_fdividef(1.0, 2.0),
+        "T.cuda.fdividef(T.float32(1.0), T.float32(2.0))",
     )
     _assert_print(
         cuda_op.ptx_map_shared_rank(r, 2), 'r = T.handle()\nT.ptx.mapa(r, 2, "", "u64", "uint64")'
@@ -196,6 +207,10 @@ def test_printer_ptx_mbarrier():
     _assert_print(
         cuda_op.ptx_mbarrier_arrive_expect_tx(bar, 128),
         "bar = T.handle()\nT.ptx.mbarrier.arrive.expect_tx(bar, 128)",
+    )
+    _assert_print(
+        cuda_op.ptx_mbarrier_complete_tx(bar, 128),
+        "bar = T.handle()\nT.ptx.mbarrier.complete_tx(bar, 128)",
     )
     _assert_print(
         cuda_op.ptx_mbarrier_try_wait(bar, 1), "bar = T.handle()\nT.ptx.mbarrier.try_wait(bar, 1)"
