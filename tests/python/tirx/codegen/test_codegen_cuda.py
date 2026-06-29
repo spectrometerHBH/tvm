@@ -163,6 +163,28 @@ def test_ptx_ld_acquire_and_volatile_codegen():
     assert "ld.volatile.global.u64" in src
 
 
+def test_ptx_f32x2_value_codegen():
+    @T.prim_func
+    def main(A: T.Buffer((1,), "uint64"), B: T.Buffer((2,), "float32")):
+        T.device_entry()
+        tx = T.thread_id([32])
+        if tx == 0:
+            lhs: T.let = T.cuda.make_float2(B[0], B[1])
+            rhs: T.let = T.cuda.make_float2(B[1], B[0])
+            prod: T.let = T.ptx.mul_f32x2_val(lhs, rhs)
+            A[0] = T.ptx.fma_f32x2_val(lhs, rhs, prod)
+
+    src, _ = _get_source(main)
+    assert "tvm_builtin_ptx_mul_f32x2_val" in src
+    assert "tvm_builtin_ptx_fma_f32x2_val_rn" in src
+    assert src.count("tvm_builtin_ptx_mul_f32x2_val") == 2
+    assert src.count("tvm_builtin_ptx_fma_f32x2_val_rn") == 2
+    assert "A_ptr[0] = tvm_builtin_ptx_fma_f32x2_val_rn(lhs, rhs, prod);" in src
+    assert "mul.f32x2 %0, %1, %2;" in src
+    assert "mul.rn.f32x2 %0, %1, %2;" not in src
+    assert "fma.rn.f32x2 %0, %1, %2, %3;" in src
+
+
 def test_megamoe_extracted_intrinsics_codegen():
     @T.prim_func
     def main(
@@ -232,6 +254,8 @@ def test_megamoe_extracted_intrinsics_codegen():
 
             F32[1] = T.cuda.uint_as_float(U32[0])
             F32[2] = T.ptx.ld(F32.data, "float32", "f32", space="global")
+            F32[2] = T.cuda.ldg(T.handle_add_byte_offset(F32.data, 4), "float32")
+            F32[3] = T.cuda.fdividef(F32[0], F32[1])
             U32[3] = T.cuda.float_as_uint(F32[1])
             F32[0] = T.ptx.add_rn_f32_bf16(F32[0], T.cast(U32[0], "uint16"))
             U64[0] = T.reinterpret("uint64", U32.data)
@@ -255,6 +279,9 @@ def test_megamoe_extracted_intrinsics_codegen():
         "fns.b32",
         "stmatrix.sync.aligned.m16n8.x1.trans.shared.b8",
         "ld.global.f32",
+        "tvm_builtin_cuda_ldg_f32",
+        "reinterpret_cast<const float*>",
+        "__fdividef",
         "add.rn.f32.bf16",
         "__uint_as_float",
         "__float_as_uint",
@@ -292,6 +319,91 @@ def test_ptx_cp_async_bulk_non_tma_form_codegen():
     assert "cp.async.bulk.shared::cluster.global.mbarrier::complete_tx::bytes.L2::cache_hint" in src
     assert "cp.async.bulk.global.shared::cta.bulk_group.L2::cache_hint" in src
     assert "unsigned long long cache_policy" in src
+
+
+def test_ptx_sync_and_clc_codegen():
+    @T.prim_func
+    def main(A: T.Buffer((1,), "uint32")):
+        T.device_entry()
+        tx = T.thread_id([32])
+        if tx == 0:
+            bar = T.alloc_buffer((2,), "uint64", scope="shared", align=16)
+            response = T.alloc_buffer((4,), "uint32", scope="shared", align=16)
+            T.ptx.cp_async.mbarrier.arrive(bar.ptr_to([0]))
+            T.ptx.cp_async.mbarrier.arrive.noinc(bar.ptr_to([0]))
+            T.ptx.mbarrier.complete_tx(bar.ptr_to([0]), T.uint32(16))
+            T.ptx.mbarrier.complete_tx(bar.ptr_to([1]), T.uint32(32), T.int32(1), T.uint32(1))
+            T.ptx.clc_try_cancel(response.ptr_to([0]), bar.ptr_to([0]))
+            A[0] = T.ptx.clc_query_cancel(response.ptr_to([0]))
+            A[0] = T.ptx.clc_query_cancel(response.ptr_to([0]), use_ld_acquire=False)
+            T.ptx.griddepcontrol.launch_dependents()
+
+    target = tvm.target.Target({"kind": "cuda", "arch": "sm_100a"})
+    with target:
+        mod = tvm.compile(tvm.IRModule({"main": main}), target=target, tir_pipeline="tirx")
+    src = mod.mod.imports[0].inspect_source()
+    assert "cp.async.mbarrier.arrive.shared.b64" in src
+    assert "cp.async.mbarrier.arrive.noinc.shared::cta.b64" in src
+    assert "tirx.ptx.cp_async_mbarrier_arrive_noinc" not in src
+    assert "mbarrier.complete_tx.shared::cluster.relaxed.cluster.b64" in src
+    assert "mapa.shared::cluster.u32" in src
+    assert "clusterlaunchcontrol.try_cancel.async.shared::cta" in src
+    assert "ld.acquire.cta.shared.b128" in src
+    assert "ld.shared.b128" in src
+    assert "clusterlaunchcontrol.query_cancel.get_first_ctaid::x.b32.b128" in src
+    assert "griddepcontrol.launch_dependents" in src
+
+
+def test_ptx_mbarrier_arrive_const_true_remote_codegen():
+    @T.prim_func
+    def main(Pred: T.Buffer((1,), "int32")):
+        T.device_entry()
+        tx = T.thread_id([32])
+        if tx == 0:
+            bar = T.alloc_buffer((2,), "uint64", scope="shared", align=16)
+            T.ptx.mbarrier.arrive(bar.ptr_to([0]), cta_id=T.int32(0), pred=True)
+            T.ptx.mbarrier.arrive(bar.ptr_to([1]), cta_id=T.int32(0), pred=Pred[0])
+
+    target = tvm.target.Target({"kind": "cuda", "arch": "sm_100a"})
+    with target:
+        mod = tvm.compile(tvm.IRModule({"main": main}), target=target, tir_pipeline="tirx")
+    src = mod.mod.imports[0].inspect_source()
+    assert "tvm_builtin_ptx_mbarrier_arrive_remote_unpred" in src
+    assert "mbarrier.arrive.shared::cluster.b64  _, [remAddr32];" in src
+    assert "tvm_builtin_ptx_mbarrier_arrive_remote(" in src
+    assert "@p mbarrier.arrive.shared::cluster.b64  _, [remAddr32];" in src
+
+
+def test_cuda_ldg_vector_scatter_codegen():
+    @T.prim_func
+    def main(src: T.Buffer((4,), "int32"), out: T.Buffer((4,), "int32")):
+        T.device_entry()
+        tx = T.thread_id([32])
+        tmp0 = T.alloc_local((1,), "int32")
+        tmp1 = T.alloc_local((1,), "int32")
+        tmp2 = T.alloc_local((1,), "int32")
+        tmp3 = T.alloc_local((1,), "int32")
+        if tx == 0:
+            T.cuda.ldg(
+                src.data,
+                "int32",
+                dst=(
+                    tmp0.ptr_to([0]),
+                    tmp1.ptr_to([0]),
+                    tmp2.ptr_to([0]),
+                    tmp3.ptr_to([0]),
+                ),
+                vec="v4",
+            )
+            out[0] = tmp0[0]
+            out[1] = tmp1[0]
+            out[2] = tmp2[0]
+            out[3] = tmp3[0]
+
+    src, _ = _get_source(main)
+    assert "int4 v = __ldg(reinterpret_cast<const int4*>(src));" in src
+    assert "tvm_builtin_cuda_ldg_i32_v4_to_dst4" in src
+    assert "*reinterpret_cast<int*>(dst3) = v.w" in src
 
 
 def test_tensor_map_param_codegen():
@@ -345,6 +457,21 @@ def test_tma_cache_policy_operand_codegen():
             T.ptx.cp_async.bulk.tensor.s2g(
                 2, smem.data, T.address_of(A_map), "", 0, 0, cache_policy=Cache[0]
             )
+            T.ptx.cp_async.bulk.tensor.g2c_tile_gather4(
+                2,
+                smem.data,
+                T.address_of(bar),
+                T.address_of(A_map),
+                1,
+                2,
+                "",
+                0,
+                1,
+                2,
+                3,
+                4,
+                cache_policy=Cache[0],
+            )
             masked_bar = T.cuda.sm100_tma_2sm_mbarrier_addr(T.address_of(bar))
             T.ptx.cp_async.bulk.tensor.g2c_bar_addr(
                 2,
@@ -387,8 +514,10 @@ def test_tma_cache_policy_operand_codegen():
 
     src, _ = _get_source(main)
     assert "ptx_cp_async_bulk_tensor_g2cluster_tile_2d_cache_hint" in src
+    assert "ptx_cp_async_bulk_tensor_g2cluster_tile_gather4_2d_cache_hint" in src
     assert "ptx_cp_async_bulk_tensor_g2cluster_tile_2d_multicast_cache_hint" in src
     assert "g2cluster_unicast" not in src
+    assert "cta_group2_unicast" not in src
     assert "ptx_cp_async_bulk_tensor_g2cta" not in src
     assert (
         "cp.async.bulk.tensor.2d.shared::cluster.global"
@@ -398,6 +527,10 @@ def test_tma_cache_policy_operand_codegen():
         "cp.async.bulk.tensor.2d.shared::cluster.global"
         ".mbarrier::complete_tx::bytes.multicast::cluster"
         ".cta_group::2.L2::cache_hint"
+    ) in src
+    assert (
+        "cp.async.bulk.tensor.2d.shared::cta.global.tile::gather4"
+        ".mbarrier::complete_tx::bytes.cta_group::2.L2::cache_hint"
     ) in src
     assert "cp.async.bulk.tensor.2d.global.shared::cta.tile.bulk_group.L2::cache_hint" in src
     assert "tvm_builtin_cp_async_bulk_tensor_2d_g2c_cta_group2" not in src

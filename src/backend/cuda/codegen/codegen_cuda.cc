@@ -978,7 +978,6 @@ void CodeGenCUDA::VisitExpr_(const CallNode* op, std::ostream& os) {
   static const Op& mma_store_legacy_op = Op::Get("tirx.mma_store_legacy");
   static const Op& mma_fill_legacy_op = Op::Get("tirx.mma_fill_legacy");
   static const Op& ptx_cp_async_bulk_op = Op::Get("tirx.ptx.cp_async_bulk");
-  static const Op& ptx_cp_async_mbarrier_arrive_op = Op::Get("tirx.ptx.cp_async_mbarrier_arrive");
   static const Op& ptx_ldg32_op = Op::Get("tirx.ptx.ldg32");
   static const Op& cuda_func_call_op = Op::Get("tirx.cuda.func_call");
 
@@ -1286,16 +1285,6 @@ void CodeGenCUDA::VisitExpr_(const CallNode* op, std::ostream& os) {
     std::string barrier_arr = barrier_name_ + "_" + std::to_string(barrier_arr_id);
     std::string barrier = barrier_arr + "[" + std::to_string(barrier_id) + "]";
     this->stream << PrintCpAsyncBulkAsm(dst, dst_offset, src, src_offset, size, barrier);
-  } else if (IsOp(op, ptx_cp_async_mbarrier_arrive_op, "tirx.ptx.cp_async_mbarrier_arrive")) {
-    codegen_tags_.insert("cast_smem_ptr_to_int");
-    int barrier_arr_id = op->args[0].as_or_throw<IntImm>()->value;
-    int barrier_id = op->args[1].as_or_throw<IntImm>()->value;
-    auto it = barrier_count_.find(barrier_arr_id);
-    TVM_FFI_ICHECK(it != barrier_count_.end()) << "Barrier array does not exist";
-    TVM_FFI_ICHECK(barrier_id < it->second) << "Barrier id out of bounds";
-    std::string barrier_arr = barrier_name_ + "_" + std::to_string(barrier_arr_id);
-    std::string barrier = barrier_arr + "[" + std::to_string(barrier_id) + "]";
-    this->stream << PrintCpAsyncBarrierAsm(barrier);
   } else if (IsOp(op, ptx_ldg32_op, "tirx.ptx.ldg32")) {
     /*
     asm volatile (

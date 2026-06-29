@@ -524,21 +524,41 @@ def ptx_cp_async_bulk_shared_to_cluster(dst_ptr, src_ptr, size, mbar):
     return call_intrin("", "tirx.ptx.cp_async_bulk_shared_to_cluster", dst_ptr, src_ptr, size, mbar)
 
 
-def ptx_cp_async_mbarrier_arrive(barrier_id):
+def ptx_cp_async_mbarrier_arrive(bar, noinc=False, space="shared"):
     """TVM intrinsic for ptx async copy barrier using cp.async.mbarrier.arrive
     https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#parallel-synchronization-and-communication-instructions-cp-async-mbarrier-arrive
 
     Parameters
     ----------
-    barrier_id : int
-        The ID of the barrier shared memory pointer.
+    bar : PrimExpr
+        Pointer to the shared-memory mbarrier object.
+
+    noinc : bool
+        Whether to emit the ``.noinc`` modifier.
+
+    space : str
+        Address-space modifier, either ``"shared"`` or ``"shared::cta"``.
 
     Returns
     -------
     call : PrimExpr
         The call expression.
     """
-    return call_intrin("", "tirx.ptx.cp_async_mbarrier_arrive", barrier_id)
+    return call_intrin("", "tirx.ptx.cp_async_mbarrier_arrive", bar, noinc, space)
+
+
+def ptx_cp_async_mbarrier_arrive_noinc(bar, space="shared::cta"):
+    """TVM intrinsic for ``cp.async.mbarrier.arrive.noinc.shared::cta.b64``.
+
+    Parameters
+    ----------
+    bar : PrimExpr
+        Pointer to the shared-memory mbarrier object.
+
+    space : str
+        Address-space modifier, either ``"shared"`` or ``"shared::cta"``.
+    """
+    return ptx_cp_async_mbarrier_arrive(bar, True, space)
 
 
 def ptx_fence(sem: str, scope: str):
@@ -641,6 +661,21 @@ def ptx_mbarrier_arrive_cluster_count(bar, cta_id, count):
     [addr], count`` with the guard defaulted to 1.
     """
     return call_intrin("", "tirx.ptx.mbarrier_arrive", bar, cta_id, True, count)
+
+
+def ptx_mbarrier_complete_tx(bar, byte_count, cta_id=None, pred=None):
+    """Complete outstanding async transaction bytes on an mbarrier.
+
+    Emits the local cluster-scope form when ``cta_id`` is omitted, or maps the
+    mbarrier pointer to ``cta_id`` and predicates the remote form when ``cta_id``
+    is provided.
+    """
+    if cta_id is None and pred is None:
+        return call_intrin("", "tirx.ptx.mbarrier_complete_tx", bar, byte_count)
+    assert cta_id is not None
+    if pred is None:
+        pred = True
+    return call_intrin("", "tirx.ptx.mbarrier_complete_tx", bar, byte_count, cta_id, pred)
 
 
 def ptx_mbarrier_arrive_expect_tx(bar, byte_count, cta_id=None, pred=None):
@@ -1267,7 +1302,7 @@ def ptx_clc_try_cancel(handle, mbar):
     return call_intrin("", "tirx.ptx.clc_try_cancel", handle, mbar)
 
 
-def ptx_clc_query_cancel(handle):
+def ptx_clc_query_cancel(handle, *, use_ld_acquire=True):
     """TVM intrinsic to call clusterlaunchcontrol.query_cancel.
 
     Decodes the response handle written by :func:`ptx_clc_try_cancel`. Returns the
@@ -1277,8 +1312,12 @@ def ptx_clc_query_cancel(handle):
     ----------
     handle : PrimExpr
         Pointer to the 16B (uint4) smem response handle.
+
+    use_ld_acquire : bool
+        Whether to load the 16-byte response with ``ld.acquire.cta.shared.b128``.
+
     """
-    return call_intrin("uint32", "tirx.ptx.clc_query_cancel", handle)
+    return call_intrin("uint32", "tirx.ptx.clc_query_cancel", handle, int(bool(use_ld_acquire)))
 
 
 def ptx_elect_sync():
@@ -2284,6 +2323,7 @@ def ptx_tcgen05_mma(
     cta_group,
     enable_input_d=1,
     scale_input_d=0,
+    weight_stationary=False,
     pred=None,
 ):
     """TVM intrinsic to call tcgen05.mma.cta_group.kind without block scaling.
@@ -2326,6 +2366,11 @@ def ptx_tcgen05_mma(
         The optional scaling factor to scale input matrix D.
         D = A*B+D * (2 ^ - scale-input-d)
 
+    weight_stationary : bool
+        Whether to emit the ``tcgen05.mma.ws`` weight-stationary form. This is
+        required by kernels whose TMEM layout and MMA issue sequence follow the
+        PTX ``.ws`` form, such as FlashMLA head64 phase1.
+
     disable_output_lane : list
         The lanes that should not be updated in the resultant matrix D.
 
@@ -2353,6 +2398,7 @@ def ptx_tcgen05_mma(
         cta_group,
         enable_input_d,
         scale_input_d,
+        int(weight_stationary),
         *disable_output_lane,
     ]
     if pred is not None:
@@ -3151,8 +3197,8 @@ def cuda_printf(fmt, *args):
     return call_intrin("", "tirx.cuda.printf", fmt, *args)
 
 
-def cuda_ldg(addr, dtype):
-    """TVM intrinsic to call CUDA C++ __ldg() function
+def cuda_ldg(addr, dtype, *, dst=None, vec=""):
+    """TVM intrinsic to call CUDA C++ ``__ldg()``.
 
     Parameters
     ----------
@@ -3162,9 +3208,32 @@ def cuda_ldg(addr, dtype):
     dtype : str
         The data type of the loaded value.
 
+    dst : PrimExpr or tuple[PrimExpr], optional
+        Destination pointers for vector loads.
+
+    vec : str
+        CUDA vector width. Use ``"v2"`` or ``"v4"`` together with tuple/list
+        ``dst``.
+
     Returns
     """
-    return call_intrin(dtype, "tirx.cuda.ldg", addr, dtype)
+    if dst is None:
+        if vec:
+            raise ValueError("vector cuda.ldg requires dst")
+        return call_intrin(dtype, "tirx.cuda.ldg", addr, dtype)
+    if vec not in ("v2", "v4"):
+        raise ValueError(f"vector cuda.ldg expects vec in {{'v2', 'v4'}}, got {vec!r}")
+    if not isinstance(dst, list | tuple):
+        raise ValueError("vector cuda.ldg requires tuple/list dst")
+    vec_len = int(vec[1:])
+    if len(dst) != vec_len:
+        raise ValueError(f"cuda.ldg dst length must match {vec}: got {len(dst)}")
+    return call_intrin("", "tirx.cuda.ldg", *dst, addr, dtype, vec, vec_len)
+
+
+def cuda_fdividef(x, y):
+    """TVM intrinsic to call CUDA C++ ``__fdividef`` fast float division."""
+    return call_intrin("float32", "tirx.cuda.fdividef", x, y)
 
 
 def cuda_get_tmem_addr(addr, row_offset, col_offset):
@@ -3372,9 +3441,30 @@ def ptx_mul_f32(d_addr, a, b, *, rounding="rn", ftz=False, sat=False):
     return _ptx_binary_arith("mul", "f32", d_addr, a, b, rounding=rounding, ftz=ftz, sat=sat)
 
 
-def ptx_mul_f32x2(d_addr, a, b, *, rounding="rn", ftz=False):
+def ptx_mul_f32x2(d_addr, a, b, *, rounding="", ftz=False):
     """PTX ``mul{.rnd}{.ftz}.f32x2 [d_addr], a, b`` — DPS form."""
     return _ptx_binary_arith("mul", "f32x2", d_addr, a, b, rounding=rounding, ftz=ftz)
+
+
+def _ptx_binary_f32x2_val(op_name, a, b, *, rounding="rn", ftz=False):
+    """Shared helper for packed f32x2 register-result binary forms."""
+    _choice("rounding", rounding, _F32X2_ROUND)
+    return call_intrin("uint64", f"tirx.ptx.{op_name}_f32x2_val", a, b, rounding, int(ftz))
+
+
+def ptx_add_f32x2_val(a, b, *, rounding="rn", ftz=False):
+    """PTX ``add{.rnd}{.ftz}.f32x2 d, a, b`` returning packed uint64."""
+    return _ptx_binary_f32x2_val("add", a, b, rounding=rounding, ftz=ftz)
+
+
+def ptx_sub_f32x2_val(a, b, *, rounding="rn", ftz=False):
+    """PTX ``sub{.rnd}{.ftz}.f32x2 d, a, b`` returning packed uint64."""
+    return _ptx_binary_f32x2_val("sub", a, b, rounding=rounding, ftz=ftz)
+
+
+def ptx_mul_f32x2_val(a, b, *, rounding="", ftz=False):
+    """PTX ``mul{.rnd}{.ftz}.f32x2 d, a, b`` returning packed uint64."""
+    return _ptx_binary_f32x2_val("mul", a, b, rounding=rounding, ftz=ftz)
 
 
 def ptx_mul_f64(d_addr, a, b, *, rounding="rn"):
@@ -3393,6 +3483,12 @@ def ptx_fma_f32x2(d_addr, a, b, c, *, rounding="rn", ftz=False):
     a, b, c are packed-as-uint64 register operands.
     """
     return _ptx_fma("f32x2", d_addr, a, b, c, rounding=rounding, ftz=ftz)
+
+
+def ptx_fma_f32x2_val(a, b, c, *, rounding="rn", ftz=False):
+    """PTX ``fma{.rnd}{.ftz}.f32x2 d, a, b, c`` returning packed uint64."""
+    _choice("rounding", rounding, _F32X2_ROUND)
+    return call_intrin("uint64", "tirx.ptx.fma_f32x2_val", a, b, c, rounding, int(ftz))
 
 
 def ptx_fma_f64(d_addr, a, b, c, *, rounding="rn"):
@@ -3458,7 +3554,7 @@ _PTX_SCALAR_TYPE = {
     "f64",
 }
 _PTX_LD_TYPE = set(_PTX_SCALAR_TYPE)
-_PTX_LD_COP = {"", "ca", "cg", "cs", "lu", "cv"}
+_PTX_LD_COP = {"", "ca", "cg", "cs", "lu", "cv", "nc"}
 _PTX_LD_VEC = {"", "v2", "v4", "v8"}
 _PTX_L1_EVICT = {
     "",
@@ -3507,6 +3603,25 @@ def _resolve_cache_policy(cache_hint, cache_policy, choices=_CP_ASYNC_BULK_CACHE
     return const(0, dtype="uint64"), False
 
 
+def _ptx_vec_len(vec):
+    return int(vec[1:]) if vec else 1
+
+
+def _normalize_ptx_ld_dst(dst, vec, op_name):
+    if dst is None:
+        if vec:
+            raise ValueError(f"vec {op_name} requires dst")
+        return [], 0
+    if isinstance(dst, list | tuple):
+        if not vec:
+            raise ValueError(f"{op_name} scatter dst requires vec")
+        vec_len = _ptx_vec_len(vec)
+        if len(dst) != vec_len:
+            raise ValueError(f"{op_name} scatter dst length must match {vec}: got {len(dst)}")
+        return list(dst), vec_len
+    return [dst], 1
+
+
 def ptx_ld_acquire(
     addr,
     return_type,
@@ -3528,14 +3643,12 @@ def ptx_ld_acquire(
     _choice("ptx_type", ptx_type, _PTX_LD_TYPE)
     _choice("vec", vec, _PTX_LD_VEC)
     cache_policy, has_cache_policy = _resolve_cache_policy(cache_hint, cache_policy)
-    to_dst = int(dst is not None)
-    if vec and dst is None:
-        raise ValueError("vec ld.acquire requires dst")
+    dst_args, to_dst = _normalize_ptx_ld_dst(dst, vec, "ld.acquire")
     if to_dst:
         return call_intrin(
             "",
             "tirx.ptx.ld_acquire",
-            dst,
+            *dst_args,
             addr,
             cache_policy,
             return_type,
@@ -3588,14 +3701,12 @@ def ptx_ld(
     _choice("ptx_type", ptx_type, _PTX_LD_TYPE)
     _choice("vec", vec, _PTX_LD_VEC)
     cache_policy, has_cache_policy = _resolve_cache_policy(cache_hint, cache_policy)
-    to_dst = int(dst is not None)
-    if vec and dst is None:
-        raise ValueError("vec ld requires dst")
+    dst_args, to_dst = _normalize_ptx_ld_dst(dst, vec, "ld")
     if to_dst:
         return call_intrin(
             "",
             "tirx.ptx.ld",
-            dst,
+            *dst_args,
             addr,
             cache_policy,
             return_type,
@@ -3649,14 +3760,12 @@ def ptx_ld_relaxed(
     _choice("ptx_type", ptx_type, _PTX_LD_TYPE)
     _choice("vec", vec, _PTX_LD_VEC)
     cache_policy, has_cache_policy = _resolve_cache_policy(cache_hint, cache_policy)
-    to_dst = int(dst is not None)
-    if vec and dst is None:
-        raise ValueError("vec ld.relaxed requires dst")
+    dst_args, to_dst = _normalize_ptx_ld_dst(dst, vec, "ld.relaxed")
     if to_dst:
         return call_intrin(
             "",
             "tirx.ptx.ld_relaxed",
-            dst,
+            *dst_args,
             addr,
             cache_policy,
             return_type,
@@ -3702,14 +3811,12 @@ def ptx_ld_volatile(
     _choice("space", space, _PTX_LD_VOLATILE_SPACE)
     _choice("ptx_type", ptx_type, _PTX_LD_TYPE)
     _choice("vec", vec, _PTX_LD_VEC)
-    to_dst = int(dst is not None)
-    if vec and dst is None:
-        raise ValueError("vec ld.volatile requires dst")
+    dst_args, to_dst = _normalize_ptx_ld_dst(dst, vec, "ld.volatile")
     if to_dst:
         return call_intrin(
             "",
             "tirx.ptx.ld_volatile",
-            dst,
+            *dst_args,
             addr,
             return_type,
             space,
