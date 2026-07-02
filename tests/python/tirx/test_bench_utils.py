@@ -178,6 +178,24 @@ def test_bench_event_pure_launch():
 
 @pytest.mark.gpu
 @pytest.mark.skipif(not env.has_cuda(), reason="need cuda")
+def test_bench_default_timer_is_proton():
+    """Omitting timer resolves to the proton default (recorded as timer='proton').
+
+    Under pytest _do_bench_proton falls back to event timing, but bench() still
+    records the resolved timer name, so this pins the timer=None -> 'proton' default.
+    """
+    M, N = 256, 256
+    A = torch.randn(M, N, device="cuda", dtype=torch.float16)
+    B = torch.randn(M, N, device="cuda", dtype=torch.float16)
+
+    funcs = {"mm": lambda: torch.mm(A, B)}
+    results = bench(funcs, warmup=5, repeat=10)
+    assert results["timer"] == "proton"
+    assert results["impls"]["mm"] > 0
+
+
+@pytest.mark.gpu
+@pytest.mark.skipif(not env.has_cuda(), reason="need cuda")
 def test_bench_cudagraph_proton_pure_launch():
     """New Triton-standard bench(): cudagraph_proton timer.
 

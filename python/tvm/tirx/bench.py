@@ -869,17 +869,23 @@ def _do_bench_proton(fn, warmup=25, rep=100, grad_to_none=None, quantiles=None, 
                 return_mode=return_mode,
             )
         scope_prefix = f"proton.{uuid.uuid4().hex}."
-        for i in range(n_repeat):
-            if grad_to_none is not None:
-                for x in grad_to_none:
-                    x.grad = None
-            # Flush L2 OUTSIDE the scope so it is excluded from the measured time --
-            # identical cold-cache behavior to _do_bench_event.
-            cache.zero_()
-            with proton.scope(f"{scope_prefix}{i:08d}"):
-                fn()
-        torch.cuda.synchronize()
-        proton.finalize(session)
+        # finalize() MUST run even if fn() raises mid-loop; otherwise the global
+        # Proton profiler stays active and the next session in this process starts
+        # dirty (corrupted attribution). Mirrors triton.testing._proton_bench_session
+        # (finalize in a finally), adapted to read the .hatchet finalize writes.
+        try:
+            for i in range(n_repeat):
+                if grad_to_none is not None:
+                    for x in grad_to_none:
+                        x.grad = None
+                # Flush L2 OUTSIDE the scope so it is excluded from the measured time
+                # -- identical cold-cache behavior to _do_bench_event.
+                cache.zero_()
+                with proton.scope(f"{scope_prefix}{i:08d}"):
+                    fn()
+            torch.cuda.synchronize()
+        finally:
+            proton.finalize(session)
         with open(profile_path + ".hatchet") as f:
             database = json.load(f)
         times = _collect_proton_scope_times(database, scope_prefix)
@@ -952,22 +958,26 @@ def _do_bench_cudagraph_proton(fn, rep=20, grad_to_none=None, quantiles=None, re
             cache = _empty_cache_for_benchmark()
             scope_prefix = f"proton.{uuid.uuid4().hex}."
             g = torch.cuda.CUDAGraph()
-            with _cuda_graph_without_gc(g):
-                for i in range(n_repeat):
-                    if grad_to_none is not None:
-                        for x in grad_to_none:
-                            x.grad = None
-                    # Flush L2 OUTSIDE the scope so it is excluded from the timed span.
-                    cache.zero_()
-                    with proton.scope(f"{scope_prefix}{i:08d}"):
-                        fn()
-            torch.cuda.synchronize()
             n_retries = 10
-            for _ in range(n_retries):
-                g.replay()
-            torch.cuda.synchronize()
-            # finalize flushes the replay data and writes <profile>.hatchet.
-            proton.finalize(session)
+            # finalize() MUST run even if capture/replay raises, or the global Proton
+            # profiler stays active and poisons the next session (see _do_bench_proton).
+            try:
+                with _cuda_graph_without_gc(g):
+                    for i in range(n_repeat):
+                        if grad_to_none is not None:
+                            for x in grad_to_none:
+                                x.grad = None
+                        # Flush L2 OUTSIDE the scope so it is excluded from the timed span.
+                        cache.zero_()
+                        with proton.scope(f"{scope_prefix}{i:08d}"):
+                            fn()
+                torch.cuda.synchronize()
+                for _ in range(n_retries):
+                    g.replay()
+                torch.cuda.synchronize()
+            finally:
+                # finalize flushes the replay data and writes <profile>.hatchet.
+                proton.finalize(session)
             with open(profile_path + ".hatchet") as f:
                 database = json.load(f)
             times = [t / n_retries for t in _collect_proton_scope_times(database, scope_prefix)]
@@ -976,7 +986,7 @@ def _do_bench_cudagraph_proton(fn, rep=20, grad_to_none=None, quantiles=None, re
         raise RuntimeError(
             "cudagraph_proton: Proton attributed no kernel time to the captured scopes "
             "(CUDA-graph replay scope attribution may be unsupported in this "
-            "environment). Use timer='cudagraph' or 'event' instead."
+            "environment). Use timer='event' or 'proton' instead."
         )
     return _summarize_statistics(times, quantiles, return_mode)
 
