@@ -34,7 +34,7 @@ from tvm.tirx.cuda.operator.tile_primitive.tma_utils import (
     mma_shared_layout,
 )
 from tvm.tirx.exec_scope import ExecScope
-from tvm.tirx.layout import S, TileLayout
+from tvm.tirx.layout import ComposeLayout, Iter, S, SwizzleLayout, TileLayout
 from tvm.tirx.operator.tile_primitive.ops import CopyAsync
 from tvm.tirx.stmt import DeclBuffer
 from tvm.tirx.stmt_functor import StmtExprVisitor
@@ -67,6 +67,7 @@ class TMACounter(StmtExprVisitor):
         if isinstance(op.value, tvm.tirx.Call):
             if op.value.op.name in (
                 "tirx.ptx.cp_async_bulk_tensor_global_to_cluster",
+                "tirx.ptx.cp_async_bulk_tensor_tile_gather4_global_to_cluster",
                 "tirx.ptx.cp_async_bulk_tensor_shared_to_global",
                 "tirx.ptx.cp_async_bulk_tensor_shared_to_global_reduce",
             ):
@@ -75,6 +76,91 @@ class TMACounter(StmtExprVisitor):
                 for ext in self.loop_extents:
                     iters *= ext
                 self.total_tma_ops += iters
+
+
+class TMABarAddrCounter(StmtExprVisitor):
+    """Count TMA calls whose mbarrier operand is already a shared address."""
+
+    def __init__(self):
+        super().__init__()
+        self.total_bar_addr_ops = 0
+
+    def visit_evaluate_(self, op):
+        if (
+            isinstance(op.value, tvm.tirx.Call)
+            and op.value.op.name == "tirx.ptx.cp_async_bulk_tensor_tile_gather4_global_to_cluster"
+            and len(op.value.args) >= 9
+        ):
+            bar_is_addr = op.value.args[8]
+            if isinstance(bar_is_addr, tvm.tirx.IntImm) and int(bar_is_addr) == 1:
+                self.total_bar_addr_ops += 1
+        super().visit_evaluate_(op)
+
+
+class AddressOfVarCollector(StmtExprVisitor):
+    """Collect variable names passed directly to address_of()."""
+
+    def __init__(self):
+        super().__init__()
+        self.var_names = set()
+
+    def visit_call_(self, op):
+        if (
+            isinstance(op.op, tvm.ir.Op)
+            and op.op.name == "tirx.address_of"
+            and len(op.args) == 1
+            and isinstance(op.args[0], tvm.tirx.Var)
+        ):
+            self.var_names.add(op.args[0].name)
+        super().visit_call_(op)
+
+
+class TensorMapEncodeCollector(StmtExprVisitor):
+    """Collect integer args passed to runtime.cuTensorMapEncodeTiled."""
+
+    def __init__(self):
+        super().__init__()
+        self.int_args = []
+
+    def visit_call_(self, op):
+        if (
+            isinstance(op.op, tvm.ir.Op)
+            and op.op.name == "tirx.tvm_call_packed"
+            and len(op.args) >= 5
+            and isinstance(op.args[0], StringImm)
+            and op.args[0].value == "runtime.cuTensorMapEncodeTiled"
+        ):
+            self.int_args.append([int(arg) for arg in op.args[5:] if isinstance(arg, IntImm)])
+        super().visit_call_(op)
+
+
+class Gather4CallCollector(StmtExprVisitor):
+    """Collect gather4 TMA calls in visitation order."""
+
+    def __init__(self):
+        super().__init__()
+        self.calls = []
+
+    def visit_evaluate_(self, op):
+        if (
+            isinstance(op.value, tvm.tirx.Call)
+            and op.value.op.name == "tirx.ptx.cp_async_bulk_tensor_tile_gather4_global_to_cluster"
+        ):
+            self.calls.append(op.value)
+        super().visit_evaluate_(op)
+
+
+class CallOpCounter(StmtExprVisitor):
+    """Count TIR call op occurrences by op name."""
+
+    def __init__(self):
+        super().__init__()
+        self.counts = {}
+
+    def visit_call_(self, op):
+        if isinstance(op.op, tvm.ir.Op):
+            self.counts[op.op.name] = self.counts.get(op.op.name, 0) + 1
+        super().visit_call_(op)
 
 
 def _make_tma_call(
@@ -1043,6 +1129,260 @@ def test_copy_tma_codegen(case):
         tvm.ir.assert_structural_equal(host_init_stmts[0], expected_host, map_free_vars=True)
 
 
+def test_copy_tma_external_tensor_map_skips_host_init():
+    external_tensor_map = Var("external_tensormap", PointerType(TensorMapType(), "global"))
+    impl, host_init_stmts = _make_tma_call(
+        g_shape=(8, 256),
+        g_region=((0, 8), (0, 256)),
+        s_shape=(8, 256),
+        s_region=((0, 8), (0, 256)),
+        gmem_layout=TileLayout(S[8, 256]),
+        smem_layout=mma_shared_layout("float16", 3, (8, 256)),
+        config={"tensor_map": external_tensor_map},
+    )
+
+    assert host_init_stmts == []
+    assert _count_tma_ops(impl) == 1
+    collector = AddressOfVarCollector()
+    collector.visit_stmt(impl.body)
+    assert "external_tensormap" in collector.var_names
+
+
+def test_copy_tma_tensormap_l2_promotion_config():
+    def l2_promotion_from_host(config):
+        _, host_init_stmts = _make_tma_call(
+            g_shape=(8, 256),
+            g_region=((0, 8), (0, 256)),
+            s_shape=(8, 256),
+            s_region=((0, 8), (0, 256)),
+            gmem_layout=TileLayout(S[8, 256]),
+            smem_layout=mma_shared_layout("float16", 3, (8, 256)),
+            config=config,
+        )
+        assert len(host_init_stmts) == 1
+        collector = TensorMapEncodeCollector()
+        collector.visit_stmt(host_init_stmts[0])
+        assert len(collector.int_args) == 1
+        return collector.int_args[0][-2]
+
+    assert l2_promotion_from_host({}) == 2
+    assert l2_promotion_from_host({"tensormap_l2_promotion": "L2::256B"}) == 3
+    assert l2_promotion_from_host({"tensormap_l2_promotion": 0}) == 0
+
+
+def _build_tma_gather4_indexer_kernel(
+    dtype="float16", cta_group=2, mbarrier_addr=False, prefetch_tensormap=False
+):
+    rows = 256
+    copy_rows = 16
+    cols = 64
+    thread_cnt = 128
+    shared_layout = mma_shared_layout(dtype, 3, (copy_rows, cols))
+    smem_bytes = copy_rows * cols * tvm.DataType(dtype).bits // 8
+
+    # fmt: off
+    @T.prim_func
+    def tma_gather4_indexer(A_ptr: T.handle, I_ptr: T.handle, B_ptr: T.handle) -> None:
+        A = T.match_buffer(A_ptr, (rows, cols), dtype)
+        Idx = T.match_buffer(I_ptr, (copy_rows,), "int32")
+        B = T.match_buffer(B_ptr, (copy_rows, cols), dtype)
+
+        T.device_entry()
+        T.cta_id([1])
+        tid = T.thread_id([thread_cnt])
+        dyn = T.alloc_buffer([smem_bytes + 64], "uint8", scope="shared.dyn")
+        A_smem = T.decl_buffer(
+            (copy_rows, cols), dtype, dyn.data, elem_offset=0, layout=shared_layout
+        )
+        mbarrier = T.decl_buffer([1], "uint64", dyn.data, elem_offset=smem_bytes // 8)
+        mbar_ptr = T.meta_var(mbarrier.ptr_to([0]))
+
+        if tid == 0:
+            T.ptx.mbarrier.init(mbar_ptr, 1)
+        T.ptx.fence.proxy_async("shared::cta")
+        T.cuda.cta_sync()
+
+        if tid == 0:
+            Tx.copy_async(
+                A_smem[:, :],
+                A[:, :],
+                dispatch="tma",
+                mbar=mbar_ptr,
+                cta_group=cta_group,
+                cache_hint=T.uint64(0x14F0000000000000),
+                mbarrier_addr=mbarrier_addr,
+                gather_axis=0,
+                indexer=[Idx[i] for i in range(copy_rows)],
+                prefetch_tensormap=prefetch_tensormap,
+            )
+            T.ptx.mbarrier.arrive.expect_tx(mbar_ptr, smem_bytes)
+        T.ptx.mbarrier.try_wait(mbar_ptr, 0)
+        T.ptx.fence.proxy_async("shared::cta")
+        T.cuda.cta_sync()
+        Tx.cta.copy(B[:, :], A_smem[:, :])
+        # fmt: on
+
+    return tma_gather4_indexer
+
+
+def _build_tma_gather4_rank3_dst_kernel(dtype="float16"):
+    rows = 256
+    copy_rows = 16
+    cols = 64
+    stages = 2
+    thread_cnt = 128
+    shared_layout = mma_shared_layout(dtype, 3, (stages, copy_rows, cols))
+    smem_bytes = stages * copy_rows * cols * tvm.DataType(dtype).bits // 8
+
+    # fmt: off
+    @T.prim_func
+    def tma_gather4_rank3_dst(A_ptr: T.handle, I_ptr: T.handle) -> None:
+        A = T.match_buffer(A_ptr, (rows, cols), dtype)
+        Idx = T.match_buffer(I_ptr, (copy_rows,), "int32")
+
+        T.device_entry()
+        T.cta_id([1])
+        tid = T.thread_id([thread_cnt])
+        dyn = T.alloc_buffer([smem_bytes + 64], "uint8", scope="shared.dyn")
+        A_smem = T.decl_buffer(
+            (stages, copy_rows, cols), dtype, dyn.data, elem_offset=0, layout=shared_layout
+        )
+        mbarrier = T.decl_buffer([1], "uint64", dyn.data, elem_offset=smem_bytes // 8)
+        mbar_ptr = T.meta_var(mbarrier.ptr_to([0]))
+
+        if tid == 0:
+            Tx.copy_async(
+                A_smem[1:2, :, :],
+                A[:, :],
+                dispatch="tma",
+                mbar=mbar_ptr,
+                cta_group=2,
+                cache_hint=T.uint64(0x14F0000000000000),
+                gather_axis=0,
+                indexer=[Idx[i] for i in range(copy_rows)],
+            )
+        # fmt: on
+
+    return tma_gather4_rank3_dst
+
+
+def test_copy_tma_gather4_indexer_lowers_to_four_ptx_calls():
+    mod = tvm.IRModule({"main": _build_tma_gather4_indexer_kernel()})
+    target = tvm.target.Target({"kind": "cuda", "arch": "sm_100a"})
+    with target:
+        lowered = tvm.tirx.transform.LowerTIRx()(mod)
+
+    counter = TMACounter()
+    counter.visit_stmt(lowered["main"].body)
+    assert counter.total_tma_ops == 4
+
+
+def test_copy_tma_gather4_indexer_rank3_dst_lowers_to_four_ptx_calls():
+    mod = tvm.IRModule({"main": _build_tma_gather4_rank3_dst_kernel()})
+    target = tvm.target.Target({"kind": "cuda", "arch": "sm_100a"})
+    with target:
+        lowered = tvm.tirx.transform.LowerTIRx()(mod)
+
+    counter = TMACounter()
+    counter.visit_stmt(lowered["main"].body)
+    assert counter.total_tma_ops == 4
+
+
+def test_copy_tma_gather4_indexer_issue_axes_emit_chunks_outermost():
+    impl, _ = _make_tma_call(
+        g_shape=(8192, 512),
+        g_region=((0, 16), (0, 256)),
+        s_shape=(16, 256),
+        s_region=((0, 16), (0, 256)),
+        gmem_layout=TileLayout(S[(8192, 512) : (512, 1)]),
+        smem_layout=ComposeLayout(
+            SwizzleLayout(3, 3, 3, swizzle_inner=True),
+            TileLayout.from_iters(
+                [
+                    Iter(4, 16 * 64, "m"),
+                    Iter(4, 64, "m"),
+                    Iter(4, 64 * 64, "m"),
+                    Iter(64, 1, "m"),
+                ]
+            ),
+        ),
+        config={
+            "gather_axis": 0,
+            "indexer": [IntImm("int32", i) for i in range(16)],
+            "cache_hint": IntImm("uint64", 0),
+        },
+    )
+
+    assert _count_tma_ops(impl) == 16
+    assert isinstance(impl.body, tvm.tirx.SeqStmt)
+    assert len(impl.body.seq) == 4
+    for chunk_idx, stmt in enumerate(impl.body.seq):
+        assert isinstance(stmt, tvm.tirx.For)
+        assert isinstance(stmt.extent, IntImm)
+        assert int(stmt.extent) == 4
+        collector = Gather4CallCollector()
+        collector.visit_stmt(stmt)
+        assert len(collector.calls) == 1
+        gather_coords = collector.calls[0].args[-4:]
+        assert [int(coord) for coord in gather_coords] == list(
+            range(chunk_idx * 4, chunk_idx * 4 + 4)
+        )
+
+
+def test_copy_tma_gather4_indexer_mbarrier_addr_lowers_to_bar_addr():
+    mod = tvm.IRModule({"main": _build_tma_gather4_indexer_kernel(cta_group=1, mbarrier_addr=True)})
+    target = tvm.target.Target({"kind": "cuda", "arch": "sm_100a"})
+    with target:
+        lowered = tvm.tirx.transform.LowerTIRx()(mod)
+
+    counter = TMABarAddrCounter()
+    counter.visit_stmt(lowered["main"].body)
+    assert counter.total_bar_addr_ops == 4
+
+
+def test_copy_tma_prefetch_tensormap_uses_elected_lane():
+    mod = tvm.IRModule(
+        {"main": _build_tma_gather4_indexer_kernel(cta_group=1, prefetch_tensormap=True)}
+    )
+    target = tvm.target.Target({"kind": "cuda", "arch": "sm_100a"})
+    with target:
+        lowered = tvm.tirx.transform.LowerTIRx()(mod)
+
+    counter = CallOpCounter()
+    counter.visit_stmt(lowered["main"].body)
+    assert counter.counts.get("tirx.ptx.prefetch_tensormap", 0) == 1
+    assert counter.counts.get("tirx.ptx.elect_sync", 0) >= 1
+
+
+@pytest.mark.gpu
+@pytest.mark.skipif(not env.has_cuda_compute(10), reason="need cuda compute >= 10.0")
+def test_copy_tma_gather4_indexer_gpu_smoke():
+    dtype = "float16"
+    rows = 256
+    copy_rows = 16
+    cols = 64
+    dev = tvm.cuda(0)
+    target = tvm.target.Target({"kind": "cuda", "arch": "sm_100a"})
+    with target:
+        mod = tvm.compile(
+            tvm.IRModule({"main": _build_tma_gather4_indexer_kernel(dtype, cta_group=1)}),
+            target=target,
+            tir_pipeline="tirx",
+        )
+
+    np.random.seed(0)
+    A_np = tvm.testing.generate_random_array(dtype, (rows, cols))
+    I_np = np.array([7, 3, 19, 5, 31, 11, 2, 23, 43, 13, 47, 17, 59, 29, 61, 37], dtype="int32")
+    B_np = np.zeros((copy_rows, cols), dtype=tvm.testing.np_dtype_from_str(dtype))
+
+    A = tvm.runtime.tensor(A_np, dev)
+    Idx = tvm.runtime.tensor(I_np, dev)
+    B = tvm.runtime.tensor(B_np, dev)
+    mod(A, Idx, B)
+
+    np.testing.assert_allclose(A_np[I_np], B.numpy())
+
+
 # Section 3: TMA special cases (symbolic dimension, buffer view)
 # ===========================================================================
 
@@ -1632,6 +1972,264 @@ def test_copy_tma_uint32_slice_base():
     target = tvm.target.Target("cuda")
     with target:
         tvm.compile(tvm.IRModule({"main": tma_off}), target=target, tir_pipeline="tirx")
+
+
+def test_copy_tma_dynamic_cache_hint_g2s_keeps_rank_coords():
+    dtype = "float16"
+    M, H, K = 64, 4, 64
+    smem_shape = (M, H, K)
+    A_layout = T.ComposeLayout(
+        T.SwizzleLayout(3, 3, 3, swizzle_inner=True),
+        T.TileLayout(T.S[smem_shape : (H * K, K, 1)]),
+    )
+
+    @T.prim_func
+    def tma_dynamic_cache_hint(a_ptr: T.handle) -> None:
+        A = T.match_buffer(a_ptr, (8, M, H, K), dtype)
+        T.device_entry()
+        T.cta_id([1])
+        T.warp_id([4])
+        T.warpgroup_id([1])
+        tid = T.thread_id_in_wg([128])
+        sm = T.alloc_buffer(smem_shape, dtype, scope="shared", layout=A_layout)
+        mb = T.alloc_shared([1], "uint64")
+        if tid == 0:
+            T.ptx.mbarrier.init(mb.ptr_to([0]), 1)
+        T.ptx.fence.proxy_async("shared::cta")
+        T.cuda.cta_sync()
+        if tid == 0:
+            Tx.copy_async(
+                sm[:, :, :],
+                A[1:2, 0:M, 0:H, 0:K],
+                dispatch="tma",
+                mbar=mb.ptr_to([0]),
+                cta_group=2,
+                cache_hint=T.uint64(0x12F0000000000000),
+            )
+            T.ptx.mbarrier.arrive.expect_tx(mb.ptr_to([0]), M * H * K * 2)
+        T.ptx.mbarrier.try_wait(mb.ptr_to([0]), 0)
+
+    target = tvm.target.Target({"kind": "cuda", "arch": "sm_100a"})
+    with target:
+        mod = tvm.compile(
+            tvm.IRModule({"main": tma_dynamic_cache_hint}), target=target, tir_pipeline="tirx"
+        )
+
+    src = mod.mod.imports[0].inspect_source()
+    assert "ptx_cp_async_bulk_tensor_g2cluster_tile_4d_cache_hint_bar_addr" in src
+    assert "tvm_builtin_cuda_cvta_generic_to_shared" in src
+    assert "4278190079" in src
+    assert (
+        "cp.async.bulk.tensor.4d.shared::cluster.global"
+        ".mbarrier::complete_tx::bytes.cta_group::2.L2::cache_hint"
+    ) in src
+
+
+def test_copy_tma_gather4_bar_addr_dynamic_cache_hint_codegen():
+    @T.prim_func
+    def tma_gather4(A_map: T.TensorMap()) -> None:
+        T.device_entry()
+        tid = T.thread_id([128])
+        sm = T.alloc_buffer((64, 4), "bfloat16", scope="shared")
+        mb = T.alloc_shared([1], "uint64")
+        if tid == 0:
+            T.ptx.mbarrier.init(mb.ptr_to([0]), 1)
+            T.ptx.cp_async.bulk.tensor.g2c_tile_gather4_bar_addr(
+                2,
+                sm.ptr_to([0, 0]),
+                T.cuda.sm100_tma_2sm_mbarrier_addr(mb.ptr_to([0])),
+                T.address_of(A_map),
+                0,
+                2,
+                T.uint64(0x14F0000000000000),
+                1,
+                0,
+                1,
+                2,
+                3,
+                4,
+            )
+
+    target = tvm.target.Target({"kind": "cuda", "arch": "sm_100a"})
+    with target:
+        mod = tvm.compile(tvm.IRModule({"main": tma_gather4}), target=target, tir_pipeline="tirx")
+
+    src = mod.mod.imports[0].inspect_source()
+    helper_name = "ptx_cp_async_bulk_tensor_g2cluster_tile_gather4_2d_cache_hint_bar_addr"
+    assert helper_name in src
+    assert (
+        f"{helper_name}(void* dst, unsigned int bar_addr, "
+        "unsigned long long tensormap_addr, uint16_t cta_mask, unsigned long long cache_policy"
+    ) in src
+    assert "cta_group2_unicast" not in src
+    assert (
+        "cp.async.bulk.tensor.2d.shared::cta.global.tile::gather4"
+        ".mbarrier::complete_tx::bytes.cta_group::2.L2::cache_hint"
+    ) in src
+    assert "4278190079" in src
+
+
+def test_copy_tma_gather4_cta_group2_pointer_masks_mbarrier_codegen():
+    @T.prim_func
+    def tma_gather4(A_map: T.TensorMap()) -> None:
+        T.device_entry()
+        tid = T.thread_id([128])
+        sm = T.alloc_buffer((64, 4), "bfloat16", scope="shared")
+        mb = T.alloc_shared([1], "uint64")
+        if tid == 0:
+            T.ptx.mbarrier.init(mb.ptr_to([0]), 1)
+            T.ptx.cp_async.bulk.tensor.g2c_tile_gather4(
+                2,
+                sm.ptr_to([0, 0]),
+                mb.ptr_to([0]),
+                T.address_of(A_map),
+                0,
+                2,
+                T.uint64(0x14F0000000000000),
+                1,
+                0,
+                1,
+                2,
+                3,
+                4,
+            )
+
+    target = tvm.target.Target({"kind": "cuda", "arch": "sm_100a"})
+    with target:
+        mod = tvm.compile(tvm.IRModule({"main": tma_gather4}), target=target, tir_pipeline="tirx")
+
+    src = mod.mod.imports[0].inspect_source()
+    helper_name = "ptx_cp_async_bulk_tensor_g2cluster_tile_gather4_2d_cache_hint"
+    assert helper_name in src
+    assert (
+        f"{helper_name}(void* dst, void* bar, unsigned long long tensormap_addr, "
+        "uint16_t cta_mask, unsigned long long cache_policy"
+    ) in src
+    assert "cta_group2_unicast" not in src
+    assert (
+        "cp.async.bulk.tensor.2d.shared::cta.global.tile::gather4"
+        ".mbarrier::complete_tx::bytes.cta_group::2.L2::cache_hint"
+    ) in src
+    assert "bar_addr &= 0xFEFFFFFFu" in src
+
+
+def test_copy_tma_dispatch_accepts_permuted_non_square_extents():
+    """Regression: TMA dispatch accepts FlashMLA RoPE's 32x64 -> 64x32 copy."""
+
+    dtype = "bfloat16"
+    D_QK, D_V, H, S_Q = 576, 512, 64, 4
+    q_rope_layout = ComposeLayout(
+        SwizzleLayout(3, 2, 3, swizzle_inner=True),
+        TileLayout(S[(64, 2, 32) : (32, 2048, 1)]),
+    )
+
+    @T.prim_func
+    def tma_permuted_extents(a_ptr: T.handle) -> None:
+        A = T.match_buffer(a_ptr, (D_QK, H, S_Q), dtype)
+        T.device_entry()
+        T.cta_id([1])
+        T.warp_id([4])
+        T.warpgroup_id([1])
+        tid = T.thread_id_in_wg([128])
+
+        A_tma = A.view(
+            D_QK,
+            H,
+            S_Q,
+            layout=TileLayout(S[(D_QK, H, S_Q) : (1, D_QK, H * D_QK)]),
+        )
+        sm = T.alloc_buffer((64, 64), dtype, scope="shared", layout=q_rope_layout)
+        mb = T.alloc_shared([1], "uint64")
+        if tid == 0:
+            T.ptx.mbarrier.init(mb.ptr_to([0]), 1)
+            T.ptx.fence.mbarrier_init()
+            Tx.copy_async(
+                sm[:, 0:32],
+                A_tma[D_V : D_V + 32, :, 1:2],
+                dispatch="tma",
+                mbar=mb.ptr_to([0]),
+                cta_group=1,
+                tensor_map_dim_order="natural",
+            )
+
+    target = tvm.target.Target({"kind": "cuda", "arch": "sm_100a"})
+    with target:
+        mod = tvm.compile(
+            tvm.IRModule({"main": tma_permuted_extents}), target=target, tir_pipeline="tirx"
+        )
+
+    src = mod.mod.imports[0].inspect_source()
+    assert "cp.async.bulk.tensor.3d.shared::cluster.global" in src
+
+
+def test_copy_tma_natural_dim_order_keeps_flashmla_q_descriptor():
+    """Natural dim order matches the FlashMLA 5D Q tensor-map ABI."""
+
+    smem_layout = ComposeLayout(
+        SwizzleLayout(3, 3, 3, swizzle_inner=True),
+        TileLayout(S[(64, 64, 2, 4) : (1, 64, 16384, 4096)]),
+    )
+    impl, host_init_stmts = _make_tma_call(
+        g_shape=(64, 128, 2, 4, 3),
+        g_region=((0, 64), (64, 128), (0, 2), (0, 4), (1, 2)),
+        s_shape=(64, 64, 2, 4),
+        s_region=((0, 64), (0, 64), (0, 2), (0, 4)),
+        gmem_layout=TileLayout(S[(64, 128, 2, 4, 3) : (1, 512, 256, 64, 65536)]),
+        smem_layout=smem_layout,
+        dtype="bfloat16",
+        config={"tensor_map_dim_order": "natural"},
+    )
+
+    expected_impl = _build_expected_impl(
+        "g2s",
+        "bfloat16",
+        (64, 64, 2, 4),
+        smem_layout,
+        dict(
+            loop_extents=[1],
+            dim=5,
+            coord_fn=lambda lv: [
+                IntImm("int32", 0),
+                IntImm("int32", 64),
+                IntImm("int32", 0),
+                IntImm("int32", 0),
+                IntImm("int32", 1),
+            ],
+        ),
+    )
+    tvm.ir.assert_structural_equal(impl, expected_impl, map_free_vars=True)
+
+    expected_host = _build_expected_host_init(
+        "bfloat16",
+        [
+            5,
+            64,
+            128,
+            2,
+            4,
+            3,
+            1024,
+            512,
+            128,
+            131072,
+            64,
+            64,
+            2,
+            4,
+            1,
+            1,
+            1,
+            1,
+            1,
+            1,
+            0,
+            3,
+            2,
+            0,
+        ],
+    )
+    assert len(host_init_stmts) == 1
+    tvm.ir.assert_structural_equal(host_init_stmts[0], expected_host, map_free_vars=True)
 
 
 if __name__ == "__main__":

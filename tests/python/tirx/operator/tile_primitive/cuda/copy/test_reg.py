@@ -411,6 +411,98 @@ def test_reg_copy_wg_local_to_swizzled_shared_uses_swizzle_fastpath():
     )
 
 
+@pytest.mark.gpu
+@pytest.mark.skipif(not env.has_cuda_compute(9), reason="need cuda compute >= 9.0")
+def test_thread_copy_local_to_dynamic_swizzled_shared_uses_vector_ptx():
+    """Thread-scope local↔shared copies with dynamic swizzled shared offsets
+    should still lower through a vector PTX path.
+
+    Sparse FlashMLA epilogues already compute the exact per-thread shared
+    address and only need to move a 4-register vector. The layout-oriented
+    ``reg`` path cannot slice this dynamic swizzled region, so the thread
+    pointer path must keep ``Tx.copy`` from falling back to scalar copy.
+    """
+
+    from tvm.tirx.layout import ComposeLayout, SwizzleLayout
+
+    smem_layout = ComposeLayout(
+        SwizzleLayout(2, 3, 3, swizzle_inner=True),
+        TileLayout(S[(64, 8, 32) : (32, 2048, 1)]),
+    )
+
+    @T.prim_func
+    def kernel(B_ptr: T.handle) -> None:
+        B = T.match_buffer(B_ptr, (128, 4), "float32")
+        T.device_entry()
+        T.cta_id([1])
+        tid = T.thread_id([128])
+        smem = T.alloc_buffer((64, 256), "float32", scope="shared", layout=smem_layout)
+        reg = T.alloc_local((4,), "float32")
+        out = T.alloc_local((4,), "float32")
+        for i in range(4):
+            reg[i] = T.cast(tid * 16 + i + 1, "float32")
+        row: T.let = tid % 64
+        col: T.let = (tid // 64) * 4
+        Tx.copy(smem[row, col : col + 4], reg[:])
+        T.cuda.cta_sync()
+        Tx.copy(out[:], smem[row, col : col + 4])
+        for i in range(4):
+            B[tid, i] = out[i]
+
+    target = tvm.target.Target("cuda")
+    with target:
+        mod = tvm.IRModule({"main": kernel})
+        ex = tvm.compile(mod, target=target, tir_pipeline="tirx")
+        src = ex.mod.imports[0].inspect_source()
+
+    assert "copy/fallback" not in src
+    assert "from_src" not in src
+    assert "st.shared.v4.f32" in src
+    assert "ld.shared.v4.f32" in src
+
+    dev = tvm.cuda(0)
+    out = tvm.runtime.tensor(np.zeros((128, 4), dtype="float32"), dev)
+    ex(out)
+    expected = np.array([[tid * 16 + i + 1 for i in range(4)] for tid in range(128)], "float32")
+    np.testing.assert_equal(out.numpy(), expected)
+
+
+@pytest.mark.gpu
+@pytest.mark.skipif(not env.has_cuda_compute(9), reason="need cuda compute >= 9.0")
+def test_ptx_st_from_src_f32_vector_preserves_values():
+    """The generic ``T.ptx.st(src=...)`` helper must preserve f32 values."""
+
+    @T.prim_func
+    def kernel(B_ptr: T.handle) -> None:
+        B = T.match_buffer(B_ptr, (4,), "float32")
+        T.device_entry()
+        T.cta_id([1])
+        T.thread_id([1])
+        smem = T.alloc_buffer((4,), "float32", scope="shared")
+        reg = T.alloc_local((4,), "float32")
+        out = T.alloc_local((4,), "float32")
+        for i in range(4):
+            reg[i] = T.cast(i + 1, "float32")
+        T.ptx.st(smem.ptr_to([0]), src=reg.ptr_to([0]), space="shared", vec="v4", ptx_type="f32")
+        T.ptx.ld(smem.ptr_to([0]), "float32", "f32", dst=out.ptr_to([0]), space="shared", vec="v4")
+        for i in range(4):
+            B[i] = out[i]
+
+    target = tvm.target.Target("cuda")
+    with target:
+        mod = tvm.IRModule({"main": kernel})
+        ex = tvm.compile(mod, target=target, tir_pipeline="tirx")
+        src = ex.mod.imports[0].inspect_source()
+
+    assert "float4 src_" in src
+    assert "st.shared.v4.f32" in src
+
+    dev = tvm.cuda(0)
+    out = tvm.runtime.tensor(np.zeros((4,), dtype="float32"), dev)
+    ex(out)
+    np.testing.assert_equal(out.numpy(), np.array([1, 2, 3, 4], dtype="float32"))
+
+
 # --- tcgen05 D epilogue deposit (tf32_hc_prenorm_gemm) -----------------------
 # Production op: ``Tx.warpgroup.copy(smem_cd_mma, d_reg)`` after ``tcgen05.ld``
 # pulls the M=64 accumulator fragment from TMEM into ``d_reg``, then deposits it

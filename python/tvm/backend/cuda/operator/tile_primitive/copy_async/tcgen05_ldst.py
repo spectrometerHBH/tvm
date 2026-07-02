@@ -281,13 +281,25 @@ def _emit_32x32b_path(
 
     op = T.ptx.tcgen05.ld if direction == "tmem2local" else T.ptx.tcgen05.st
 
-    # fmt: off
-    @T.prim_func(check_well_formed=False)
-    def impl():
-        local_storage = local_buf.view(local_buf.shape[1] * elem_per_32b, layout=TileLayout(S[num * elem_per_32b]))  # noqa: E501
-        local_32b = local_storage.view("uint32")
-        op(tmem_buf.allocated_addr[0], *[local_32b[local_st[1] // elem_per_32b+i] for i in range(num)], shape="32x32b", num=num, row=0, col=offset_32b)  # noqa: E501
-    # fmt: on
+    if elem_per_32b == 1:
+        # Keep 32-bit fragments in their source dtype. The PTX helper treats
+        # operands as b32 internally, and avoiding a call-site ``uint32`` view
+        # keeps generated CUDA identical to handwritten ``T.ptx.tcgen05`` calls.
+        # fmt: off
+        @T.prim_func(check_well_formed=False)
+        def impl():
+            local_storage = local_buf.view(local_buf.shape[1], layout=TileLayout(S[num]))
+            op(T.uint32(tmem_buf.allocated_addr[0]), *[local_storage[local_st[1]+i] for i in range(num)], shape="32x32b", num=num, row=0, col=offset_32b)  # noqa: E501
+        # fmt: on
+    else:
+        # 16-bit fragments are packed two elements per b32 register operand.
+        # fmt: off
+        @T.prim_func(check_well_formed=False)
+        def impl():
+            local_storage = local_buf.view(local_buf.shape[1] * elem_per_32b, layout=TileLayout(S[num * elem_per_32b]))  # noqa: E501
+            local_32b = local_storage.view("uint32")
+            op(T.uint32(tmem_buf.allocated_addr[0]), *[local_32b[local_st[1] // elem_per_32b+i] for i in range(num)], shape="32x32b", num=num, row=0, col=offset_32b)  # noqa: E501
+        # fmt: on
     return impl
 
 
@@ -423,7 +435,7 @@ def _emit_16xnb_path(
         for slab in range(n_slabs):
             reg_base = slab * regs_per_thread_per_slab
             op(
-                tmem_buf.allocated_addr[0],
+                T.uint32(tmem_buf.allocated_addr[0]),
                 *[local_32b[local_reg_base + reg_base + i] for i in range(regs_eff)],
                 shape=shape, num=num_eff, row=slab * 16, col=col_off_32b,
             )

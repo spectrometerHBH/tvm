@@ -471,5 +471,53 @@ def test_multi_cp_encodes_descriptor_once_and_patches_addr():
     )
 
 
+def test_copy_smem_tmem_explicit_128x256b_codegen():
+    """Explicit tcgen05.cp mode covers FlashMLA q->tmem prologue copies."""
+
+    dtype = "bfloat16"
+    s_shape = (64, 64)
+    t_shape = (64, 64)
+    s_layout = mma_shared_layout(dtype, SwizzleMode.SWIZZLE_128B_ATOM, s_shape)
+    t_layout = TileLayout(S[(64, 64) : (1 @ TLane, 1 @ TCol)])
+
+    @T.prim_func(check_well_formed=False)
+    def kernel() -> None:
+        T.device_entry()
+        tid = T.thread_id([128])
+        A_smem = T.alloc_buffer(s_shape, dtype, scope="shared", layout=s_layout, align=1024)
+        tmem_addr = T.alloc_shared([1], "uint32")
+        if tid == 0:
+            T.ptx.tcgen05.alloc(T.address_of(tmem_addr[0]), n_cols=128, cta_group=1)
+            tmem = T.decl_buffer(
+                t_shape,
+                dtype,
+                scope="tmem",
+                allocated_addr=tmem_addr[0],
+                layout=t_layout,
+            )
+            Tx.copy_async(
+                tmem[:, :],
+                A_smem[:, :],
+                shape="128x256b",
+                cta_group=1,
+                desc_ldo=1,
+                desc_sdo=64,
+                desc_swizzle=3,
+                tile_count=1,
+                subtile_count=4,
+                tmem_subtile_stride_32b=8,
+                desc_subtile_stride_16b=2,
+            )
+
+    target = tvm.target.Target("cuda")
+    with target:
+        mod = tvm.compile(tvm.IRModule({"main": kernel}), target=target, tir_pipeline="tirx")
+    src = mod.mod.imports[0].inspect_source()
+    assert "tcgen05.cp.cta_group::1.128x256b" in src
+    assert "tvm_builtin_ptx_tcgen05_encode_matrix_descriptor" in src
+    assert "t_col_ptr" not in src
+    assert "desc_off_ptr" not in src
+
+
 if __name__ == "__main__":
     tvm.testing.main()

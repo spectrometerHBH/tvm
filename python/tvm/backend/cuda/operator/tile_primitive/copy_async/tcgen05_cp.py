@@ -402,12 +402,110 @@ def _desc_set_addr(desc_val, addr_ptr):
     return T.bitwise_or(T.bitwise_and(desc_val, T.bitwise_not(T.uint64(0x3FFF))), start_addr)
 
 
+def _get_config_int(op_call, name, default=None):
+    value = op_call.config.get(name, default)
+    if value is None:
+        raise ValueError(f"explicit tcgen05.cp requires config {name!r}")
+    return int(value)
+
+
+def _copy_smem_tmem_explicit_impl(
+    op_call: TilePrimitiveCall, sctx: DispatchContext
+) -> PrimFunc | None:
+    """Emit explicit tcgen05.cp shapes not covered by the warpx4 planner.
+
+    This is intentionally an explicit mode: callers must provide the PTX
+    shape/multicast and SMEM descriptor fields.  It covers FlashMLA q->tmem
+    prologue copies while keeping the existing inferred ``32x128b.warpx4``
+    planner unchanged.
+    """
+    del sctx  # Descriptor placement is local to this explicit copy.
+    op_call = TilePrimitiveCall.downcast(op_call)
+    dst_region, src_region = op_call.args[:2]
+    s_buf: Buffer = src_region.buffer
+    t_buf: Buffer = dst_region.buffer
+    dtype_bits = DataType(s_buf.dtype).bits
+    elem_per_32b = 32 // dtype_bits
+
+    if not (s_buf.scope().startswith("shared") and t_buf.scope() == "tmem"):
+        raise ValueError(f"expected shared->tmem, got {s_buf.scope()}->{t_buf.scope()}")
+    if t_buf.allocated_addr is None:
+        raise ValueError("explicit tcgen05.cp requires allocated_addr on tmem buffer")
+
+    shape = op_call.config["shape"]
+    cta_group = op_call.config.get("cta_group", 1)
+    multicast = op_call.config.get("multicast", "")
+    decompress = op_call.config.get("decompress", "")
+    ldo = _get_config_int(op_call, "desc_ldo")
+    sdo = _get_config_int(op_call, "desc_sdo")
+    swizzle = _get_config_int(op_call, "desc_swizzle")
+    tile_count = _get_config_int(op_call, "tile_count", 1)
+    subtile_count = _get_config_int(op_call, "subtile_count", 1)
+    tmem_tile_stride_32b = _get_config_int(op_call, "tmem_tile_stride_32b", 0)
+    tmem_subtile_stride_32b = _get_config_int(op_call, "tmem_subtile_stride_32b", 0)
+    desc_tile_stride_16b = _get_config_int(op_call, "desc_tile_stride_16b", 0)
+    desc_subtile_stride_16b = _get_config_int(op_call, "desc_subtile_stride_16b", 0)
+
+    t_region = [(r.min, r.min + r.extent) for r in dst_region.region]
+    t_slice = t_buf.layout.slice(list(t_buf.shape), t_region).canonicalize()
+    t_col_offset_expr = 0
+    for ax, val in t_slice.offset.items():
+        if ax == TCol:
+            t_col_offset_expr = val
+            break
+    analyzer = Analyzer()
+    if not analyzer.can_prove_equal(t_col_offset_expr % elem_per_32b, 0):
+        raise ValueError(f"t TCol offset {t_col_offset_expr} not provably 32b-aligned")
+    t_col0 = t_col_offset_expr // elem_per_32b
+
+    s_start = [r.min for r in src_region.region]
+    t_addr = t_buf.allocated_addr
+
+    # fmt: off
+    @T.prim_func(check_well_formed=False)
+    def impl():
+        cp_desc = T.local_scalar("uint64")
+        T.ptx.tcgen05.encode_matrix_descriptor(
+            T.address_of(cp_desc),
+            s_buf.ptr_to(s_start),
+            ldo=ldo,
+            sdo=sdo,
+            swizzle=swizzle,
+        )
+        for tile_idx in T.unroll(tile_count):
+            for subtile_idx in T.unroll(subtile_count):
+                t_col: T.let = (
+                    t_addr[0]
+                    + t_col0
+                    + tile_idx * tmem_tile_stride_32b
+                    + subtile_idx * tmem_subtile_stride_32b
+                )
+                desc_off: T.let = T.uint64(
+                    tile_idx * desc_tile_stride_16b
+                    + subtile_idx * desc_subtile_stride_16b
+                )
+                T.ptx.tcgen05.cp(
+                    t_col,
+                    cp_desc + desc_off,
+                    shape=shape,
+                    cta_group=cta_group,
+                    multicast=multicast,
+                    decompress=decompress,
+                )
+    # fmt: on
+
+    return impl
+
+
 # -----------------------------------------------------------------------------
 # Core impl: emits the cp loop given a plan + cp config. Async only — caller
 # is responsible for issuing ``tcgen05.commit`` against a barrier if they
 # need synchronization.
 # -----------------------------------------------------------------------------
 def copy_smem_tmem_impl(op_call: TilePrimitiveCall, sctx: DispatchContext) -> PrimFunc | None:
+    if "shape" in op_call.config and op_call.config.get("shape") != "32x128b":
+        return _copy_smem_tmem_explicit_impl(op_call, sctx)
+
     plan = _build_plan(op_call, sctx)
     s_buf = plan["s_buf"]
     t_buf = plan["t_buf"]

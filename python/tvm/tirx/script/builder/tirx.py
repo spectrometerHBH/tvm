@@ -27,7 +27,7 @@ from tvm.tirx.expr import FloatImm
 from tvm.tirx.lang.alloc_pool import SMEMPool, TMEMPool, TMEMStages
 
 from . import _ffi_api, frame
-from .ir import decl_buffer, meta_class
+from .ir import address_of, decl_buffer, meta_class
 
 
 def _normalize_scope(scope) -> ExecScope:
@@ -628,6 +628,50 @@ def gemm_async(
             dispatch=dispatch,
             scope=scope,
         )
+    )
+
+
+def tcgen05_instr_desc(
+    desc: PrimExpr,
+    *,
+    d_dtype: str,
+    a_dtype: str,
+    b_dtype: str,
+    M: PrimExpr,
+    N: PrimExpr,
+    K: PrimExpr,
+    trans_a: bool,
+    trans_b: bool,
+    n_cta_groups: int = 1,
+    neg_a: bool = False,
+    neg_b: bool = False,
+    sat_d: bool = False,
+    is_sparse: bool = False,
+):
+    """Encode a dense tcgen05 MMA instruction descriptor.
+
+    This helper keeps descriptor setup in the ``Tx`` surface so kernels can
+    declare one descriptor outside a loop and pass it to
+    ``Tx.gemm_async(..., descI=...)`` without spelling the raw PTX intrinsic at
+    each call site.
+    """
+    from tvm.backend.cuda import op as _cuda_op  # pylint: disable=import-outside-toplevel
+
+    return _cuda_op.ptx_tcgen05_encode_instr_descriptor(
+        address_of(desc),
+        d_dtype=d_dtype,
+        a_dtype=a_dtype,
+        b_dtype=b_dtype,
+        M=M,
+        N=N,
+        K=K,
+        trans_a=trans_a,
+        trans_b=trans_b,
+        n_cta_groups=n_cta_groups,
+        neg_a=neg_a,
+        neg_b=neg_b,
+        sat_d=sat_d,
+        is_sparse=is_sparse,
     )
 
 
@@ -1664,6 +1708,7 @@ __all__ = [
     "sqrt",
     "sub",
     "sum",
+    "tcgen05_instr_desc",
     "thread",
     "unary_reduce",
     "warp",

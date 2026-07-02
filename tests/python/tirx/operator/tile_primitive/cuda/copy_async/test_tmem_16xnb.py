@@ -866,6 +866,113 @@ def test_alloc_tcgen05_frag_wrapper_compiles(shape, frag_rows, K_cols):
     )
 
 
+def test_tcgen05_32x32b_float32_keeps_typed_register_operands():
+    """The .32x32b float32 lowering should pass the local fragment's typed
+    registers to the PTX helper. The helper reinterprets operands as b32, so a
+    call-site uint32 view is unnecessary and makes generated CUDA diverge from
+    handwritten ``T.ptx.tcgen05`` calls."""
+
+    K_cols = 32
+
+    @T.prim_func
+    def kernel(A_ptr: T.handle) -> None:
+        T.match_buffer(A_ptr, (128, K_cols), "float32")
+        T.device_entry()
+        warp_id = T.warp_id([4])
+        T.cta_id([2])
+        wg_id = T.warpgroup_id([1])
+        T.warp_id_in_wg([4])
+        T.lane_id([32])
+        T.thread_id([128])
+
+        tmem_addr = T.alloc_shared([1], "uint32")
+        if wg_id == 0:
+            if warp_id == 0:
+                T.ptx.tcgen05.alloc(T.address_of(tmem_addr), n_cols=K_cols, cta_group=1)
+            T.tvm_storage_sync("shared")
+            tmem = T.decl_buffer(
+                (128, K_cols),
+                "float32",
+                scope="tmem",
+                allocated_addr=tmem_addr[0],
+                layout=TileLayout(S[(128, K_cols) : (1 @ TLane, 1 @ TCol)]),
+            )
+            frag = T.alloc_tcgen05_ldst_frag("32x32b", (128, K_cols), "float32")
+            Tx.wg.copy_async(frag[:, :], tmem[:, :])
+            T.ptx.tcgen05.wait.ld()
+            if warp_id == 0:
+                T.ptx.tcgen05.relinquish_alloc_permit(cta_group=1)
+                T.ptx.tcgen05.dealloc(tmem_addr[0], n_cols=K_cols, cta_group=1)
+
+    target = tvm.target.Target("cuda")
+    with target:
+        mod = tvm.IRModule({"main": kernel})
+        mod = tvm.compile(mod, target=target, tir_pipeline="tirx")
+    src = mod.mod.imports[0].inspect_source()
+    call_lines = [
+        line
+        for line in src.splitlines()
+        if "tvm_builtin_ptx_tcgen05_ld_32x32b_x32((" in line and "__forceinline__" not in line
+    ]
+    assert call_lines
+    assert "((uint*)" not in call_lines[0]
+
+
+def test_tcgen05_ldst_constant_tmem_address_is_uint32():
+    """A constant TMEM base address must still be passed as uint32.
+
+    Sparse FlashMLA uses pool-relative constant TMEM columns. Handwritten
+    ``T.ptx.tcgen05`` calls pass ``T.uint32(0)`` for the base address; the tile
+    primitive should emit the same ABI shape instead of a bare integer literal.
+    """
+
+    K_cols = 32
+
+    @T.prim_func
+    def kernel() -> None:
+        T.device_entry()
+        T.warp_id([4])
+        T.cta_id([1])
+        wg_id = T.warpgroup_id([1])
+        T.warp_id_in_wg([4])
+        T.lane_id([32])
+        T.thread_id([128])
+
+        if wg_id == 0:
+            tmem = T.decl_buffer(
+                (128, K_cols),
+                "float32",
+                scope="tmem",
+                allocated_addr=0,
+                layout=TileLayout(S[(128, K_cols) : (1 @ TLane, 1 @ TCol)]),
+            )
+            frag = T.alloc_tcgen05_ldst_frag("32x32b", (128, K_cols), "float32")
+            Tx.wg.copy_async(frag[:, :], tmem[:, :])
+            T.ptx.tcgen05.wait.ld()
+            Tx.wg.copy_async(tmem[:, :], frag[:, :])
+            T.ptx.tcgen05.wait.st()
+
+    target = tvm.target.Target("cuda")
+    with target:
+        mod = tvm.IRModule({"main": kernel})
+        mod = tvm.compile(mod, target=target, tir_pipeline="tirx")
+    src = mod.mod.imports[0].inspect_source()
+    ld_lines = [
+        line
+        for line in src.splitlines()
+        if "tvm_builtin_ptx_tcgen05_ld_32x32b_x32((" in line and "__forceinline__" not in line
+    ]
+    st_lines = [
+        line
+        for line in src.splitlines()
+        if "tvm_builtin_ptx_tcgen05_st_32x32b_x32(" in line and "__forceinline__" not in line
+    ]
+    assert ld_lines
+    assert st_lines
+    assert "(uint)0" in ld_lines[0]
+    assert "(uint)0" in st_lines[0]
+
+
 # --------------------------------------------------------------------------
 # Test 3: column-slice loads of a wider frag
 #

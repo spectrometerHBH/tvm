@@ -98,6 +98,12 @@ _SCOPED_TILE_OP_NAMES = [
 for _op_name in _SCOPED_TILE_OP_NAMES:
     globals()[_op_name] = _tile_scoped_op(_op_name)
 
+
+def tcgen05_instr_desc(*args, **kwargs):
+    """Encode a dense tcgen05 MMA instruction descriptor for ``Tx.gemm_async``."""
+    return _builder.tcgen05_instr_desc(*args, **kwargs)
+
+
 cluster = _builder.ScopeNamespace("cluster", "cluster")
 cta = _builder.ScopeNamespace("cta", "cta")
 wg = _builder.ScopeNamespace("warpgroup", "wg")
@@ -112,6 +118,7 @@ __all__ = [
     "cluster",
     "compose_op",
     "cta",
+    "tcgen05_instr_desc",
     "thread",
     "warp",
     "warpgroup",

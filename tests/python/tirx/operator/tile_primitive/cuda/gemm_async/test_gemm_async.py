@@ -35,6 +35,7 @@ from tvm.script.tirx import tile as Tx
 from tvm.testing import env
 from tvm.tirx.cuda.operator.tile_primitive.gemm_async import sf_tmem_layout
 from tvm.tirx.cuda.operator.tile_primitive.tma_utils import (
+    SwizzleMode,
     mma_atom_layout,
     mma_atom_shape,
     mma_shared_layout,
@@ -1981,6 +1982,61 @@ def test_gemm_tcgen05_arbitrary_tiles(task):
         np.testing.assert_allclose(C_tvm.numpy(), C_ref, atol=1e-3, rtol=1e-3)
 
 
+@pytest.mark.parametrize("a_layout_kind", ["column_major", "packed_16b"])
+def test_gemm_tcgen05_no_swizzle_smem_descriptor_codegen(a_layout_kind):
+    M, K, N = 64, 64, 256
+    B_N = N // 2
+    dtype = "bfloat16"
+    if a_layout_kind == "column_major":
+        A_layout = _col_major_layout((M, K))
+    else:
+        A_layout = TileLayout(S[(M, K // 8, 8) : (8, M * 8, 1)])
+    B_layout = _mn_major_layout(dtype, SwizzleMode.SWIZZLE_128B_ATOM, (K, B_N))
+    C_layout = TileLayout(S[(M, 2, N // 2) : (1 @ TLane, 64 @ TLane, 1 @ TCol)])
+
+    @T.prim_func
+    def gemm_async_no_swizzle(A_ptr: T.handle, B_ptr: T.handle) -> None:
+        A = T.match_buffer(A_ptr, (M, K), dtype, layout=A_layout)
+        B = T.match_buffer(B_ptr, (K, B_N), dtype, layout=B_layout)
+        T.device_entry()
+        warp_id = T.warp_id([4])
+        T.thread_id([128])
+        tid_in_wg = T.thread_id_in_wg([128])
+        A_smem = T.alloc_buffer((M, K), dtype, scope="shared", layout=A_layout)
+        B_smem = T.alloc_buffer((K, B_N), dtype, scope="shared", layout=B_layout)
+        tmem_addr = T.alloc_shared([1], "uint32")
+        if warp_id == 0:
+            T.ptx.tcgen05.alloc(T.address_of(tmem_addr[0]), n_cols=256, cta_group=2)
+        T.cuda.cta_sync()
+        tmem = T.decl_buffer(
+            (M, N),
+            "float32",
+            scope="tmem",
+            allocated_addr=tmem_addr[0],
+            layout=C_layout,
+        )
+        if tid_in_wg == 0:
+            Tx.gemm_async(
+                tmem[:, :],
+                A_smem[:, :],
+                B_smem[:, :],
+                transB=True,
+                dispatch="tcgen05",
+                cta_group=2,
+            )
+
+    target = tvm.target.Target({"kind": "cuda", "arch": "sm_100a"})
+    with target:
+        mod = tvm.compile(
+            tvm.IRModule({"main": gemm_async_no_swizzle}), target=target, tir_pipeline="tirx"
+        )
+
+    src = mod.mod.imports[0].inspect_source()
+    assert "descA" in src
+    assert ", 64, 8, 0)" in src
+    assert "encode_instr_descriptor" not in src
+
+
 @pytest.mark.gpu
 @pytest.mark.skipif(not env.has_cuda_compute(10), reason="need cuda compute >= 10.0")
 @pytest.mark.parametrize("k_lo,k_hi", [(0, 16), (0, 32), (16, 32), (16, 48), (32, 64)])
@@ -2183,7 +2239,7 @@ def test_gemm_tf32_with_tfloat32_tma():
     )
 
 
-def _build_smem_desc_kernel(smem_desc):
+def _build_smem_desc_kernel(smem_desc, weight_stationary=False, use_tx_instr_desc=False):
     """Minimal cta_group=1 fp16 gemm_async kernel parametrized on ``smem_desc``."""
     C_shape, C_dtype, C_region = (128, 512), "float32", [(0, 128), (256, 384)]
     A_shape, A_dtype, A_sw = (3, 128, 64), "float16", 3
@@ -2234,7 +2290,23 @@ def _build_smem_desc_kernel(smem_desc):
         T.ptx.mbarrier.try_wait(tma_mbar.ptr_to([0]), 0)
         T.cuda.cta_sync()
         if tid_in_wg == 0:
-            Tx.gemm_async(tmem[tuple(r_tmem_C)], A_smem[tuple(r_smem_A)], B_smem[tuple(r_smem_B)], dispatch="tcgen05", smem_desc=smem_desc)  # noqa: E501
+            if use_tx_instr_desc:
+                desc_i: T.uint32
+                Tx.tcgen05_instr_desc(
+                    desc_i,  # noqa: F821
+                    d_dtype=C_dtype,
+                    a_dtype=A_dtype,
+                    b_dtype=B_dtype,
+                    M=128,
+                    N=width,
+                    K=16,
+                    trans_a=False,
+                    trans_b=False,
+                    n_cta_groups=1,
+                )
+                Tx.gemm_async(tmem[tuple(r_tmem_C)], A_smem[tuple(r_smem_A)], B_smem[tuple(r_smem_B)], dispatch="tcgen05", smem_desc=smem_desc, weight_stationary=weight_stationary, descI=desc_i)  # noqa: E501, F821
+            else:
+                Tx.gemm_async(tmem[tuple(r_tmem_C)], A_smem[tuple(r_smem_A)], B_smem[tuple(r_smem_B)], dispatch="tcgen05", smem_desc=smem_desc, weight_stationary=weight_stationary)  # noqa: E501
             T.ptx.tcgen05.commit(mma_mbar.ptr_to([0]), cta_group=1)
         T.ptx.mbarrier.try_wait(mma_mbar.ptr_to([0]), 0)
         T.cuda.cta_sync()
@@ -2254,8 +2326,8 @@ def _build_smem_desc_kernel(smem_desc):
     return gemm_async
 
 
-@pytest.mark.parametrize("smem_desc", ["hoist", "recompute"])
-def test_gemm_smem_desc_hoist_vs_recompute(smem_desc):
+@pytest.mark.parametrize("smem_desc", ["hoist", "local_hoist", "encode", "recompute"])
+def test_gemm_smem_desc_modes_codegen(smem_desc):
     """Compile-only: the SMEM matrix descriptor is built per-MMA from the buffer
     base address, selected by the ``smem_desc`` config.
 
@@ -2265,6 +2337,11 @@ def test_gemm_smem_desc_hoist_vs_recompute(smem_desc):
     - ``recompute``: build the full descriptor inline per MMA (``_uniform_desc``)
       with no allocated/encoded descriptor cell — trades a few ALU ops for one
       fewer live register on the hot path.
+    - ``local_hoist``: encode the descriptor at the ``gemm_async`` call site,
+      inside the caller's elected-thread control flow, then use 16B-offset adds
+      like hoist mode without an extra warp shuffle.
+    - ``encode``: encode an exact shared pointer for every MMA, then pass the
+      resulting descriptor directly to the instruction.
 
     Both must emit the MMA; the descriptor-construction fingerprints differ.
     """
@@ -2281,10 +2358,116 @@ def test_gemm_smem_desc_hoist_vs_recompute(smem_desc):
     if smem_desc == "hoist":
         assert "smem_desc_make_lo_uniform" in src, "hoist mode must encode a uniform descriptor"
         assert "smem_desc_add_16B_offset" in src, "hoist mode must add the per-MMA 16B offset"
+    elif smem_desc == "local_hoist":
+        assert "descA_local" in src and "descB_local" in src
+        assert "smem_desc_add_16B_offset" in src
+        assert "encode_matrix_descriptor" in src
+    elif smem_desc == "encode":
+        assert "encode_matrix_descriptor" in src
+        assert "smem_desc_add_16B_offset" not in src
     else:
         assert "smem_desc_make_lo_uniform" not in src, "recompute mode must not hoist a descriptor"
         assert "smem_desc_add_16B_offset" not in src, "recompute mode must not add a 16B offset"
         assert "encode_matrix_descriptor" not in src, "recompute mode must not encode a descriptor"
+
+
+def test_gemm_tcgen05_weight_stationary_codegen():
+    """FlashMLA head64 requires the tcgen05.mma.ws PTX form."""
+
+    target = tvm.target.Target("cuda")
+    with target:
+        mod = tvm.compile(
+            tvm.IRModule({"main": _build_smem_desc_kernel("hoist", weight_stationary=True)}),
+            target=target,
+            tir_pipeline="tirx",
+        )
+    src = mod.mod.imports[0].inspect_source()
+    assert "tcgen05.mma.ws.cta_group::1.kind::f16" in src
+    assert "tvm_builtin_cuda_get_tmem_addr" not in src
+
+
+def test_gemm_tcgen05_tx_instr_desc_codegen():
+    """Dense descI can be encoded once through Tx and reused by gemm_async.
+
+    FlashMLA head64 is sensitive to passing the instruction descriptor through
+    a local encoded value instead of an immediate.  The Tx helper should provide
+    that codegen shape without requiring kernels to hand-write
+    ``T.ptx.tcgen05.encode_instr_descriptor``.
+    """
+
+    target = tvm.target.Target("cuda")
+    with target:
+        mod = tvm.compile(
+            tvm.IRModule(
+                {
+                    "main": _build_smem_desc_kernel(
+                        "local_hoist", weight_stationary=True, use_tx_instr_desc=True
+                    )
+                }
+            ),
+            target=target,
+            tir_pipeline="tirx",
+        )
+    src = mod.mod.imports[0].inspect_source()
+    assert src.count("ptx_tcgen05_encode_instr_descriptor((&") == 1
+    assert "desc_i_ptr[0]" in src
+    assert "tcgen05.mma.ws.cta_group::1.kind::f16" in src
+
+
+def test_gemm_tcgen05_cta1_m64_accepts_packed_c_layout():
+    """FlashMLA head64 stores logical N=128 in 64 physical TMEM columns."""
+
+    M, N, K = 64, 128, 16
+    A_dtype = B_dtype = "bfloat16"
+    C_dtype = "float32"
+    B_layout = mma_shared_layout(B_dtype, SwizzleMode.SWIZZLE_32B_ATOM, (N, K))
+    C_layout = TileLayout(S[(M, 2, N // 2) : (1 @ TLane, 64 @ TLane, 1 @ TCol)])
+
+    @T.prim_func
+    def gemm_packed_c(B_ptr: T.handle) -> None:
+        B = T.match_buffer(B_ptr, (N, K), B_dtype)
+        T.device_entry()
+        warp_id = T.warp_id([4])
+        T.thread_id([128])
+        tid = T.thread_id_in_wg([128])
+        B_smem = T.alloc_buffer((N, K), B_dtype, scope="shared", layout=B_layout)
+        tmem_addr = T.alloc_shared([1], "uint32")
+        if warp_id == 0:
+            T.ptx.tcgen05.alloc(T.address_of(tmem_addr[0]), n_cols=512, cta_group=1)
+        T.cuda.cta_sync()
+        A_tmem = T.decl_buffer(
+            (M, K),
+            A_dtype,
+            scope="tmem",
+            allocated_addr=256,
+            layout=TileLayout(S[(M, K) : (1 @ TLane, 1 @ TCol)]),
+        )
+        C_tmem = T.decl_buffer(
+            (M, N),
+            C_dtype,
+            scope="tmem",
+            allocated_addr=400,
+            layout=C_layout,
+        )
+        if tid == 0:
+            Tx.copy(B_smem[:, :], B[:, :])
+            Tx.gemm_async(
+                C_tmem[:, :],
+                A_tmem[:, :],
+                B_smem[:, :],
+                dispatch="tcgen05",
+                cta_group=1,
+            )
+
+    target = tvm.target.Target("cuda")
+    with target:
+        mod = tvm.compile(tvm.IRModule({"main": gemm_packed_c}), target=target, tir_pipeline="tirx")
+
+    src = mod.mod.imports[0].inspect_source()
+    assert "tcgen05.mma" in src
+    assert "ptx_tcgen05_mma_cta_1_kind_f16_TS(400," in src
+    assert "get_tmem_addr(400, 0, 0)" not in src
+    assert "get_tmem_addr(400, 0, 64)" not in src
 
 
 if __name__ == "__main__":
