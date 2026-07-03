@@ -203,10 +203,13 @@ def test_printer_ptx_mbarrier():
     _assert_print(
         cuda_op.ptx_mbarrier_init(bar, 32), "bar = T.handle()\nT.ptx.mbarrier.init(bar, 32)"
     )
-    _assert_print(cuda_op.ptx_mbarrier_arrive(bar), "bar = T.handle()\nT.ptx.mbarrier.arrive(bar)")
+    _assert_print(
+        cuda_op.ptx_mbarrier_arrive(bar),
+        'bar = T.handle()\nT.ptx.mbarrier.arrive(bar, "", "", "shared", 0, 0, 0)',
+    )
     _assert_print(
         cuda_op.ptx_mbarrier_arrive_expect_tx(bar, 128),
-        "bar = T.handle()\nT.ptx.mbarrier.arrive.expect_tx(bar, 128)",
+        'bar = T.handle()\nT.ptx.mbarrier.arrive.expect_tx(bar, 128, "", "", "shared", 0, 0)',
     )
     _assert_print(
         cuda_op.ptx_mbarrier_arrive_no_complete(bar, 2),
