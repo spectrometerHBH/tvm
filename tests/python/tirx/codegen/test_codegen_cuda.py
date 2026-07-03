@@ -25,6 +25,27 @@ from tvm.testing import env
 
 DEV = tvm.device("cuda")
 
+_CUDA_LDG_SCALAR_CASES = [
+    ("int8", "i8", "signed char"),
+    ("uint8", "u8", "unsigned char"),
+    ("int16", "i16", "short"),
+    ("uint16", "u16", "unsigned short"),
+    ("int32", "i32", "int"),
+    ("uint32", "u32", "unsigned int"),
+    ("int64", "i64", "long long"),
+    ("uint64", "u64", "unsigned long long"),
+    ("float16", "f16", "half"),
+    ("bfloat16", "bf16", "nv_bfloat16"),
+    ("float32", "f32", "float"),
+    ("float64", "f64", "double"),
+]
+
+_CUDA_LDG_VECTOR_CASES = [
+    ("int32", "i32", "int", "int"),
+    ("uint32", "u32", "unsigned int", "uint"),
+    ("float32", "f32", "float", "float"),
+]
+
 
 def _get_source(func: tvm.tirx.PrimFunc) -> str:
     target = tvm.target.Target("cuda")
@@ -40,6 +61,63 @@ def _helper_source(src: str, helper_name: str) -> str:
     if next_helper == -1:
         return src[start:]
     return src[start:next_helper]
+
+
+def _cuda_ldg_scalar_kernel(dtype: str):
+    @T.prim_func
+    def main(src: T.Buffer((1,), dtype), out: T.Buffer((1,), dtype)):
+        T.device_entry()
+        tx = T.thread_id([32])
+        if tx == 0:
+            out[0] = T.cuda.ldg(src.data, dtype)
+
+    return main
+
+
+def _cuda_ldg_vector_kernel(dtype: str, vec: str):
+    vec_len = int(vec[1:])
+
+    if vec_len == 2:
+
+        @T.prim_func
+        def main(src: T.Buffer((2,), dtype), out: T.Buffer((2,), dtype)):
+            T.device_entry()
+            tx = T.thread_id([32])
+            tmp0 = T.alloc_local((1,), dtype)
+            tmp1 = T.alloc_local((1,), dtype)
+            if tx == 0:
+                T.cuda.ldg(src.data, dtype, dst=(tmp0.ptr_to([0]), tmp1.ptr_to([0])), vec=vec)
+                out[0] = tmp0[0]
+                out[1] = tmp1[0]
+
+        return main
+
+    @T.prim_func
+    def main(src: T.Buffer((4,), dtype), out: T.Buffer((4,), dtype)):
+        T.device_entry()
+        tx = T.thread_id([32])
+        tmp0 = T.alloc_local((1,), dtype)
+        tmp1 = T.alloc_local((1,), dtype)
+        tmp2 = T.alloc_local((1,), dtype)
+        tmp3 = T.alloc_local((1,), dtype)
+        if tx == 0:
+            T.cuda.ldg(
+                src.data,
+                dtype,
+                dst=(
+                    tmp0.ptr_to([0]),
+                    tmp1.ptr_to([0]),
+                    tmp2.ptr_to([0]),
+                    tmp3.ptr_to([0]),
+                ),
+                vec=vec,
+            )
+            out[0] = tmp0[0]
+            out[1] = tmp1[0]
+            out[2] = tmp2[0]
+            out[3] = tmp3[0]
+
+    return main
 
 
 def test_tirx_launch_bounds_omits_min_blocks_without_persistent_schedule():
@@ -301,6 +379,34 @@ def test_megamoe_extracted_intrinsics_codegen():
         "__float22bfloat162_rn",
     ]:
         assert snippet in src
+
+
+@pytest.mark.parametrize(("dtype", "suffix", "c_type"), _CUDA_LDG_SCALAR_CASES)
+def test_cuda_ldg_scalar_dtype_codegen(dtype, suffix, c_type):
+    src, _ = _get_source(_cuda_ldg_scalar_kernel(dtype))
+    helper = f"tvm_builtin_cuda_ldg_{suffix}"
+    helper_src = _helper_source(src, helper)
+    assert f"__forceinline__ __device__ {c_type} {helper}(void* src)" in src
+    assert f"__ldg(reinterpret_cast<const {c_type}*>(src))" in helper_src
+
+
+@pytest.mark.parametrize(("dtype", "suffix", "c_type", "vec_base"), _CUDA_LDG_VECTOR_CASES)
+@pytest.mark.parametrize("vec", ["v2", "v4"])
+def test_cuda_ldg_vector_dtype_codegen(dtype, suffix, c_type, vec_base, vec):
+    vec_len = int(vec[1:])
+    src, _ = _get_source(_cuda_ldg_vector_kernel(dtype, vec))
+    helper = f"tvm_builtin_cuda_ldg_{suffix}_{vec}_to_dst{vec_len}"
+    helper_src = _helper_source(src, helper)
+    assert (
+        f"{vec_base}{vec_len} v = __ldg(reinterpret_cast<const {vec_base}{vec_len}*>(src));"
+        in helper_src
+    )
+    assert f"*reinterpret_cast<{c_type}*>(dst{vec_len - 1}) = v." in helper_src
+
+
+def test_cuda_ldg_vector_rejects_unsupported_dtype():
+    with pytest.raises((ValueError, tvm.error.DiagnosticError), match="Unsupported vector CUDA"):
+        _get_source(_cuda_ldg_vector_kernel("float16", "v2"))
 
 
 def test_ptx_cp_async_bulk_non_tma_form_codegen():

@@ -41,6 +41,18 @@ _SHARED_COPY_CASES = {
     1: {"nelems": 1, "smem_dtype": "uint8", "tmp_dtype": "uint32", "fill_u8": 255},
 }
 
+_PTX_ST_SRC_VECTOR_CASES = [
+    ("uint8", "u8", "v4", "uchar4 src_", "unsigned int r3 = static_cast<unsigned int>(src_.w)"),
+    ("int8", "s8", "v4", "char4 src_", "int r3 = static_cast<int>(src_.w)"),
+    ("uint16", "u16", "v4", "ushort4 src_", "unsigned short r3 = src_.w"),
+    ("int16", "s16", "v4", "short4 src_", "short r3 = src_.w"),
+    ("uint32", "b32", "v4", "uint4 src_", "unsigned int r3 = src_.w"),
+    ("uint32", "u32", "v4", "uint4 src_", "unsigned int r3 = src_.w"),
+    ("int32", "s32", "v4", "int4 src_", "int r3 = src_.w"),
+    ("float32", "f32", "v4", "float4 src_", "float r3 = src_.w"),
+    ("float64", "f64", "v2", "double2 src_", "double r1 = src_.y"),
+]
+
 
 def _build_and_run(func, *np_args):
     mod = tvm.compile(tvm.IRModule({"main": func}), target=TARGET, tir_pipeline="tirx")
@@ -115,6 +127,26 @@ def _shared_scratch_copy_kernel(num_bytes: int):
         T.cuda.cta_sync()
         if lane < nelems:
             out[lane] = dst_buf[lane]
+
+    return func
+
+
+def _ptx_st_src_vector_kernel(dtype: str, ptx_type: str, vec: str):
+    vec_len = int(vec[1:])
+
+    @T.prim_func
+    def func(out_ptr: T.handle) -> None:
+        out = T.match_buffer(out_ptr, (1,), "uint32")
+        T.device_entry()
+        T.cta_id([1])
+        tx = T.thread_id([32])
+        smem = T.alloc_buffer((vec_len,), dtype, scope="shared")
+        reg = T.alloc_local((vec_len,), dtype)
+        if tx == 0:
+            T.ptx.st(
+                smem.ptr_to([0]), src=reg.ptr_to([0]), space="shared", vec=vec, ptx_type=ptx_type
+            )
+            out[0] = T.uint32(0)
 
     return func
 
@@ -240,6 +272,34 @@ def test_ptx_ld_global_nc_v4_u64_256b_codegen():
     assert "unsigned long long r3" in src
 
 
+def test_ptx_ld_global_nc_scalar_cop_cache_hint_codegen():
+    """The ``ld.global{.cop}.nc`` syntax form supports scalar cache-policy operands."""
+
+    @T.prim_func
+    def copy_kernel(src_ptr: T.handle, out_ptr: T.handle) -> None:
+        src = T.match_buffer(src_ptr, (1,), "int32")
+        out = T.match_buffer(out_ptr, (1,), "int32")
+        T.device_entry()
+        tx = T.thread_id([32])
+        if tx == 0:
+            out[0] = T.ptx.ld_global_nc(
+                src.data,
+                "int32",
+                "s32",
+                cop="ca",
+                cache_hint="evict_last",
+                prefetch_size="L2::128B",
+            )
+
+    target = tvm.target.Target("cuda")
+    with target:
+        mod = tvm.compile(tvm.IRModule({"main": copy_kernel}), target=target, tir_pipeline="tirx")
+    src = mod.mod.imports[0].inspect_source("cuda")
+    assert "ld.global.ca.nc.L2::cache_hint.L2::128B.s32" in src
+    assert "tvm_builtin_ptx_ld_global_nc_ca_s32_int32_cache_hint_L2_128B" in src
+    assert "unsigned long long cache_policy" in src
+
+
 def test_ptx_ld_rejects_legacy_global_nc_cop():
     """``ld.global.nc`` must use the dedicated ``T.ptx.ld_global_nc`` wrapper."""
 
@@ -273,6 +333,21 @@ def test_ptx_ld_global_nc_rejects_cop_with_eviction():
                     cop="ca",
                     l1_evict="L1::evict_first",
                 )
+                T.evaluate(value)
+
+
+def test_ptx_ld_global_nc_rejects_non_nc_cop():
+    """``ld.global.nc`` has a narrower ``.cop`` set than generic ``ld.global``."""
+
+    with pytest.raises((ValueError, tvm.error.DiagnosticError), match="cop"):
+
+        @T.prim_func
+        def copy_kernel(src_ptr: T.handle) -> None:
+            src = T.match_buffer(src_ptr, (1,), "int32")
+            T.device_entry()
+            tx = T.thread_id([32])
+            if tx == 0:
+                value: T.int32 = T.ptx.ld_global_nc(src.data, "int32", "s32", cop="lu")
                 T.evaluate(value)
 
 
@@ -316,6 +391,26 @@ def test_ptx_ld_vector_scatter_dst_codegen():
     assert "tvm_builtin_ptx_ld_plain_global_nc" not in src
     assert "void* dst0, void* dst1, void* dst2, void* dst3, void* src_ptr" in src
     assert "*reinterpret_cast<int*>(dst3) = r3" in src
+
+
+@pytest.mark.parametrize(
+    ("dtype", "ptx_type", "vec", "vector_decl", "last_load"),
+    _PTX_ST_SRC_VECTOR_CASES,
+)
+def test_ptx_st_from_src_vector_typed_load_codegen(dtype, ptx_type, vec, vector_decl, last_load):
+    """``T.ptx.st(src=...)`` loads vector source pointers with the PTX element type."""
+
+    target = tvm.target.Target("cuda")
+    with target:
+        mod = tvm.compile(
+            tvm.IRModule({"main": _ptx_st_src_vector_kernel(dtype, ptx_type, vec)}),
+            target=target,
+            tir_pipeline="tirx",
+        )
+    src = mod.mod.imports[0].inspect_source("cuda")
+    assert vector_decl in src
+    assert last_load in src
+    assert f"st.shared.{vec}.{ptx_type}" in src
 
 
 @pytest.mark.gpu
