@@ -568,7 +568,7 @@ def _g2s_cta_parts(*args):
 
 
 device_intrinsic(
-    "ptx_cp_async_bulk_tensor_g2s_cta_impl",
+    "_ptx_cp_async_bulk_tensor_g2s_cta",
     n_attrs=5,
     helper_name=lambda *a: _g2s_cta_parts(*a)[0],
     c_signature=lambda *a: _g2s_cta_parts(*a)[1],
@@ -641,7 +641,7 @@ def _g2s_cluster_parts(*args):
 
 
 device_intrinsic(
-    "ptx_cp_async_bulk_tensor_g2s_cluster_impl",
+    "_ptx_cp_async_bulk_tensor_g2s_cluster",
     n_attrs=6,
     helper_name=lambda *a: _g2s_cluster_parts(*a)[0],
     c_signature=lambda *a: _g2s_cluster_parts(*a)[1],
@@ -797,7 +797,7 @@ device_intrinsic(
 @register_codegen("ptx_cp_async_bulk_tensor_g2s_cta")
 def codegen_g2s_cta(dim, dst_ptr, mbar, tensormap, *args):
     cta_group, cache_policy, has_cache, tile_mode, mbar_is_shared_addr, *coords = args
-    result = CODEGEN_REGISTRY["tirx.ptx_cp_async_bulk_tensor_g2s_cta_impl"](
+    result = CODEGEN_REGISTRY["tirx._ptx_cp_async_bulk_tensor_g2s_cta"](
         [
             dst_ptr,
             mbar,
@@ -826,7 +826,7 @@ def codegen_g2s_cluster(dim, dst_ptr, mbar, tensormap, *args):
         multicast,
         *coords,
     ) = args
-    result = CODEGEN_REGISTRY["tirx.ptx_cp_async_bulk_tensor_g2s_cluster_impl"](
+    result = CODEGEN_REGISTRY["tirx._ptx_cp_async_bulk_tensor_g2s_cluster"](
         [
             dst_ptr,
             mbar,
