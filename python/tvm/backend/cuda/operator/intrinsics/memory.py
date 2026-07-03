@@ -203,6 +203,8 @@ def _type_info(ptx_type):
 # PTX ld forms (ISA table entries registered via ``ptx_ld`` and siblings):
 #   ld{.weak}{.ss}{.cop}{.level::cache_hint}{.level::prefetch_size}{.vec}.type  d, [a]{, cache-policy};
 #   ld{.weak}{.ss}{.level1::eviction_priority}{.level2::eviction_priority}{.level::cache_hint}{.level::prefetch_size}{.vec}.type  d, [a]{, cache-policy};
+#   ld.global{.cop}.nc{.level::cache_hint}{.level::prefetch_size}{.vec}.type  d, [a]{, cache-policy};
+#   ld.global.nc{.level1::eviction_priority}{.level2::eviction_priority}{.level::cache_hint}{.level::prefetch_size}{.vec}.type  d, [a]{, cache-policy};
 #   ld.volatile{.ss}{.level::prefetch_size}{.vec}.type  d, [a];
 #   ld.relaxed.scope{.ss}{.level1::eviction_priority}{.level2::eviction_priority}{.level::cache_hint}{.level::prefetch_size}{.vec}.type  d, [a]{, cache-policy};
 #   ld.acquire.scope{.ss}{.level1::eviction_priority}{.level2::eviction_priority}{.level::cache_hint}{.level::prefetch_size}{.vec}.type  d, [a]{, cache-policy};
@@ -212,7 +214,8 @@ _PTX_LD_SCOPES = {"cta", "cluster", "gpu", "sys"}
 _PTX_LD_SPACES = {"global", "shared", "shared::cta", "shared::cluster", "local"}
 _PTX_LD_VOLATILE_SPACES = _PTX_LD_SPACES | {"const"}
 _PTX_LD_WEAK_SPACES = _PTX_LD_SPACES | {"const", "param::entry", "param::func"}
-_PTX_LD_COPS = {"", "ca", "cg", "cs", "lu", "cv", "nc"}
+_PTX_LD_COPS = {"", "ca", "cg", "cs", "lu", "cv"}
+_PTX_LD_GLOBAL_NC_COPS = {"", "ca", "cg", "cs"}
 _PTX_VEC = {"", "v2", "v4", "v8"}
 _PTX_L1_EVICT = {
     "",
@@ -278,6 +281,21 @@ def _ptx_level_suffix(has_cache, l1_evict, l2_evict, prefetch_size):
         suffix += f".{l1_evict}"
     if l2_evict:
         suffix += f".{l2_evict}"
+    if prefetch_size:
+        suffix += f".{prefetch_size}"
+    return suffix
+
+
+def _ptx_global_nc_level_suffix(has_cache, l1_evict, l2_evict, prefetch_size):
+    suffix = ""
+    l1_evict = parse_str(l1_evict)
+    l2_evict = parse_str(l2_evict)
+    prefetch_size = parse_str(prefetch_size)
+    if l1_evict:
+        suffix += f".{l1_evict}"
+    if l2_evict:
+        suffix += f".{l2_evict}"
+    suffix += _cache_suffix("cache" if has_cache else "")
     if prefetch_size:
         suffix += f".{prefetch_size}"
     return suffix
@@ -367,6 +385,19 @@ def _ptx_ld_form_parts(form, attr_args):
         return_dtype, sem, scope, space, ptx_type, to_dst = attr_args
         weak, cop, vec = False, "", ""
         has_cache_hint, l1_evict, l2_evict, prefetch_size = False, "", "", ""
+    elif form == "global_nc":
+        (
+            return_dtype,
+            cop,
+            vec,
+            ptx_type,
+            has_cache_hint,
+            to_dst,
+            l1_evict,
+            l2_evict,
+            prefetch_size,
+        ) = attr_args
+        sem, scope, weak, space = "", "", False, "global"
     else:
         raise ValueError(f"unknown ld form {form!r}")
 
@@ -384,7 +415,10 @@ def _ptx_ld_form_parts(form, attr_args):
     weak = _bool_attr(weak)
     has_cache = _bool_attr(has_cache_hint)
     to_dst = _int_attr(to_dst)
-    if cop and cop not in _PTX_LD_COPS:
+    if form == "global_nc":
+        if cop and cop not in _PTX_LD_GLOBAL_NC_COPS:
+            raise ValueError(f"Unsupported PTX ld.global.nc cache operation {cop!r}")
+    elif cop and cop not in _PTX_LD_COPS:
         raise ValueError(f"Unsupported PTX ld cache operation {cop!r}")
     if vec and vec not in _PTX_VEC:
         raise ValueError(f"Unsupported PTX ld vector modifier {vec!r}")
@@ -398,6 +432,10 @@ def _ptx_ld_form_parts(form, attr_args):
         if sem not in ("acquire", "relaxed") or scope != "sys" or space != "global":
             raise ValueError("ld.mmio requires sem in {acquire, relaxed}, scope=sys, space=global")
         prefix = f"ld.mmio.{sem}.{scope}"
+    elif form == "global_nc":
+        if cop and (l1_evict or l2_evict):
+            raise ValueError("ld.global.nc with cop cannot use l1_evict or l2_evict")
+        prefix = f"ld.global{_dot(cop)}.nc"
     elif form == "relaxed":
         if not scope:
             raise ValueError("ld.relaxed requires scope")
@@ -414,7 +452,11 @@ def _ptx_ld_form_parts(form, attr_args):
     else:
         _validate_ld_space(space, _PTX_LD_WEAK_SPACES)
         prefix = f"ld{'.weak' if weak else ''}{_dot(space)}{_dot(cop)}"
-    level = _ptx_level_suffix(has_cache, l1_evict, l2_evict, prefetch_size)
+    level = (
+        _ptx_global_nc_level_suffix(has_cache, l1_evict, l2_evict, prefetch_size)
+        if form == "global_nc"
+        else _ptx_level_suffix(has_cache, l1_evict, l2_evict, prefetch_size)
+    )
     vec_len = int(vec[1:]) if vec else 1
     if vec and not to_dst:
         raise ValueError("vector ld requires to_dst")
@@ -428,23 +470,32 @@ def _ptx_ld_form_parts(form, attr_args):
         else 4
     )
     num_bytes = vec_len * elem_bytes if vec else elem_bytes
-    name_parts = [
-        "tvm_builtin_ptx_ld",
-        form if form != "weak" else ("weak" if weak else "plain"),
-    ]
-    if sem:
-        name_parts.append(_safe_attr(sem))
-    if scope:
-        name_parts.append(_safe_attr(scope))
-    name_parts.extend(
-        [
-            _safe_attr(space),
+    if form == "global_nc":
+        name_parts = [
+            "tvm_builtin_ptx_ld_global_nc",
             _safe_attr(cop) if cop else "",
             _safe_attr(vec) if vec else "",
             ptx_type,
             return_dtype if not to_dst else ("to_dst" if to_dst == 1 else f"to_dst{to_dst}"),
         ]
-    )
+    else:
+        name_parts = [
+            "tvm_builtin_ptx_ld",
+            form if form != "weak" else ("weak" if weak else "plain"),
+        ]
+        if sem:
+            name_parts.append(_safe_attr(sem))
+        if scope:
+            name_parts.append(_safe_attr(scope))
+        name_parts.extend(
+            [
+                _safe_attr(space),
+                _safe_attr(cop) if cop else "",
+                _safe_attr(vec) if vec else "",
+                ptx_type,
+                return_dtype if not to_dst else ("to_dst" if to_dst == 1 else f"to_dst{to_dst}"),
+            ]
+        )
     if has_cache:
         name_parts.append("cache_hint")
     if l1_evict:
@@ -495,7 +546,9 @@ def _ptx_ld_form_parts(form, attr_args):
         "    return ret;"
     )
     sig = (
-        "(void* address, unsigned long long cache_policy)" if form == "weak" else "(void* address)"
+        "(void* address, unsigned long long cache_policy)"
+        if form in ("weak", "global_nc")
+        else "(void* address)"
     )
     return name, sig, c_type, return_dtype, body
 
@@ -518,6 +571,7 @@ def _register_ptx_ld(op_name, form, n_attrs):
 
 
 _register_ptx_ld("ptx_ld", "weak", 11)
+_register_ptx_ld("ptx_ld_global_nc", "global_nc", 9)
 _register_ptx_ld("ptx_ld_relaxed", "relaxed", 10)
 _register_ptx_ld("ptx_ld_acquire", "acquire", 10)
 _register_ptx_ld("ptx_ld_volatile", "volatile", 6)

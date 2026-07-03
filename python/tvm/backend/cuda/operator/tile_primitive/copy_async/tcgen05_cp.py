@@ -409,17 +409,44 @@ def _get_config_int(op_call, name, default=None):
     return int(value)
 
 
+def _has_explicit_tcgen05_cp_config(op_call: TilePrimitiveCall) -> bool:
+    return "shape" in op_call.config and op_call.config.get("shape") != "32x128b"
+
+
+def _is_valid_smem_tmem_or_explicit_copy(op_call: TilePrimitiveCall, sctx: DispatchContext) -> bool:
+    if not _has_explicit_tcgen05_cp_config(op_call):
+        return _is_valid_smem_tmem_copy(op_call, sctx)
+
+    dst_region, src_region = op_call.args[:2]
+    src: Buffer = src_region.buffer
+    dst: Buffer = dst_region.buffer
+    required = [
+        "desc_ldo",
+        "desc_sdo",
+        "desc_swizzle",
+        "tile_count",
+        "subtile_count",
+        "tmem_tile_stride_32b",
+        "tmem_subtile_stride_32b",
+        "desc_tile_stride_16b",
+        "desc_subtile_stride_16b",
+    ]
+    return (
+        src.scope().startswith("shared")
+        and dst.scope() == "tmem"
+        and src.layout is not None
+        and dst.layout is not None
+        and src.dtype == dst.dtype
+        and dst.allocated_addr is not None
+        and all(name in op_call.config for name in required)
+    )
+
+
 def _copy_smem_tmem_explicit_impl(
     op_call: TilePrimitiveCall, sctx: DispatchContext
 ) -> PrimFunc | None:
-    """Emit explicit tcgen05.cp shapes not covered by the warpx4 planner.
-
-    This is intentionally an explicit mode: callers must provide the PTX
-    shape/multicast and SMEM descriptor fields.  It covers FlashMLA q->tmem
-    prologue copies while keeping the existing inferred ``32x128b.warpx4``
-    planner unchanged.
-    """
-    del sctx  # Descriptor placement is local to this explicit copy.
+    """Emit explicit tcgen05.cp shapes not covered by the warpx4 planner."""
+    del sctx
     op_call = TilePrimitiveCall.downcast(op_call)
     dst_region, src_region = op_call.args[:2]
     s_buf: Buffer = src_region.buffer
@@ -503,7 +530,7 @@ def _copy_smem_tmem_explicit_impl(
 # need synchronization.
 # -----------------------------------------------------------------------------
 def copy_smem_tmem_impl(op_call: TilePrimitiveCall, sctx: DispatchContext) -> PrimFunc | None:
-    if "shape" in op_call.config and op_call.config.get("shape") != "32x128b":
+    if _has_explicit_tcgen05_cp_config(op_call):
         return _copy_smem_tmem_explicit_impl(op_call, sctx)
 
     plan = _build_plan(op_call, sctx)
@@ -576,7 +603,7 @@ def copy_smem_tmem_impl(op_call: TilePrimitiveCall, sctx: DispatchContext) -> Pr
     variant="smem->tmem",
     priority=10,
     when=[
-        predicate("validate_smem_tmem_copy", _is_valid_smem_tmem_copy),
+        predicate("validate_smem_tmem_copy", _is_valid_smem_tmem_or_explicit_copy),
         predicate("exec_scope", _single_thread_exec),
     ],
 )

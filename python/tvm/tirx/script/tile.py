@@ -113,6 +113,14 @@ thread = _builder.ScopeNamespace("thread", "thread")
 
 compose_op = _builder.compose_op
 
+
+def tcgen05_instr_desc(desc, **kwargs):
+    """Encode a tcgen05 MMA instruction descriptor for tile kernels."""
+    from tvm.script import tirx as T  # pylint: disable=import-outside-toplevel
+
+    return T.ptx.tcgen05.encode_instr_descriptor(T.address_of(desc), **kwargs)
+
+
 __all__ = [
     *_SCOPED_TILE_OP_NAMES,
     "cluster",

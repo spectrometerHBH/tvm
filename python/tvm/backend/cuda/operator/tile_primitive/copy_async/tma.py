@@ -288,6 +288,14 @@ def _normalize_l2_promotion(l2_promotion) -> int:
     )
 
 
+def _normalize_cache_config(cache_hint):
+    if cache_hint is None:
+        return "", None
+    if isinstance(cache_hint, str):
+        return cache_hint, None
+    return "", cache_hint
+
+
 def _swizzle_inner_box_fits(dtype: str, swizzle_mode: SwizzleMode, inner_box) -> bool:
     """Hardware check: innermost ``boxDim[0] * elementSize`` fits swizzle atom."""
     if swizzle_mode == SwizzleMode.SWIZZLE_NONE:
@@ -1313,12 +1321,7 @@ def copy_tma_impl(op_call: TilePrimitiveCall, sctx: DispatchContext) -> PrimFunc
     element_strides = [1] * plan.rank
 
     flat_total_extent = plan.flatten_total_extent()
-    cache_hint = op_call.config.get("cache_hint", "")
-    # The public PTX wrappers use a compact convention for runtime cache policies:
-    # when ``cache_hint`` is already a PrimExpr, the next operand is the
-    # has-cache-policy flag.  Keep it explicit here so the first TMA coordinate
-    # is not accidentally consumed by the wrapper.
-    cache_args = (cache_hint, 1) if isinstance(cache_hint, tvm.tirx.PrimExpr) else (cache_hint,)
+    cache_hint, cache_policy = _normalize_cache_config(op_call.config.get("cache_hint", ""))
     has_gather_indexer = bool(gather_indexer)
     num_gather4_chunks = len(gather_indexer) // 4
 
@@ -1346,85 +1349,41 @@ def copy_tma_impl(op_call: TilePrimitiveCall, sctx: DispatchContext) -> PrimFunc
             fail("copy_async(tma) gather4 expected two dense TMA coordinates")
         return [coords[0], *gather_indexer[chunk_idx * 4 : (chunk_idx + 1) * 4]]
 
+    def compute_mbarrier_operand(force_shared_addr: bool):
+        if cta_group == 2:
+            return T.cuda.sm100_2sm_leader_smem_addr(mbar), True
+        if force_shared_addr:
+            return T.cuda.cvta_generic_to_shared(mbar), True
+        return mbar, False
+
+    def emit_g2s(s_buf_w_offset, tma_coords, gather_chunk=None, force_shared_addr=False):
+        if gather_chunk is None:
+            ptr = s_buf_w_offset.ptr_to(s_st)
+            coords = tma_coords
+            load_mode = "tile"
+        else:
+            ptr = s_buf_w_offset.ptr_to(compute_gather4_chunk_s_start(gather_chunk))
+            coords = compute_gather4_coords(tma_coords, gather_chunk)
+            load_mode = "tile_gather4"
+        mbar_operand, mbar_is_shared_addr = compute_mbarrier_operand(force_shared_addr)
+        T.evaluate(
+            T.ptx.cp_async.bulk.tensor.g2s_cluster(
+                plan.rank,
+                ptr,
+                mbar_operand,
+                T.address_of(tensor_map),
+                cta_mask,
+                cta_group,
+                cache_hint,
+                *coords,
+                cache_policy=cache_policy,
+                load_mode=load_mode,
+                mbar_is_shared_addr=mbar_is_shared_addr,
+            )
+        )
+
     def val_key(value) -> str:
         return str(value)
-
-    def emit_gather4_bar_addr_chunk(s_buf_w_offset, tma_coords, gather_chunk):
-        gather_s_start = compute_gather4_chunk_s_start(gather_chunk)
-        gather_tma_coords = compute_gather4_coords(tma_coords, gather_chunk)
-        T.evaluate(
-            T.ptx.cp_async.bulk.tensor.g2c_tile_gather4_bar_addr(
-                plan.rank,
-                s_buf_w_offset.ptr_to(gather_s_start),
-                compute_mbarrier_addr(),
-                T.address_of(tensor_map),
-                cta_mask,
-                cta_group,
-                *cache_args,
-                *gather_tma_coords,
-            )
-        )
-
-    def compute_mbarrier_addr():
-        if cta_group == 2:
-            return T.cuda.sm100_tma_2sm_mbarrier_addr(mbar)
-        return T.cuda.cvta_generic_to_shared(mbar)
-
-    def emit_gather4_chunk(s_buf_w_offset, tma_coords, gather_chunk):
-        gather_s_start = compute_gather4_chunk_s_start(gather_chunk)
-        gather_tma_coords = compute_gather4_coords(tma_coords, gather_chunk)
-        T.evaluate(
-            T.ptx.cp_async.bulk.tensor.g2c_tile_gather4(
-                plan.rank,
-                s_buf_w_offset.ptr_to(gather_s_start),
-                mbar,
-                T.address_of(tensor_map),
-                cta_mask,
-                cta_group,
-                *cache_args,
-                *gather_tma_coords,
-            )
-        )
-
-    def emit_g2c_bar_addr(s_buf_w_offset, tma_coords):
-        T.evaluate(
-            T.ptx.cp_async.bulk.tensor.g2c_bar_addr(
-                plan.rank,
-                s_buf_w_offset.ptr_to(s_st),
-                compute_mbarrier_addr(),
-                T.address_of(tensor_map),
-                cta_mask,
-                cta_group,
-                *cache_args,
-                *tma_coords,
-            )
-        )
-
-    def emit_g2c(s_buf_w_offset, tma_coords):
-        T.evaluate(
-            T.ptx.cp_async.bulk.tensor.g2c(
-                plan.rank,
-                s_buf_w_offset.ptr_to(s_st),
-                mbar,
-                T.address_of(tensor_map),
-                cta_mask,
-                cta_group,
-                *cache_args,
-                *tma_coords,
-            )
-        )
-
-    def emit_bar_addr_or_g2c(s_buf_w_offset, tma_coords, gather_chunk):
-        if gather_chunk is not None:
-            emit_gather4_bar_addr_chunk(s_buf_w_offset, tma_coords, gather_chunk)
-        else:
-            emit_g2c_bar_addr(s_buf_w_offset, tma_coords)
-
-    def emit_normal_g2c(s_buf_w_offset, tma_coords, gather_chunk):
-        if gather_chunk is not None:
-            emit_gather4_chunk(s_buf_w_offset, tma_coords, gather_chunk)
-        else:
-            emit_g2c(s_buf_w_offset, tma_coords)
 
     external_tensor_map = op_call.config.get("tensor_map", None)
     tensormap_cache_key = (
@@ -1454,21 +1413,15 @@ def copy_tma_impl(op_call: TilePrimitiveCall, sctx: DispatchContext) -> PrimFunc
 
     def emit_tma_for_buffer(s_buf_w_offset, tma_coords, gather_chunk=None):
         if direction == "g2s":
-            if cta_group == 2:
-                # SM100 cta_group::2 TMA expects the mbarrier operand as a
-                # masked 32-bit shared address.  The low-level
-                # ``g2c_bar_addr`` wrapper marks this operand as already
-                # converted so codegen does not run ``cvta`` a second time.
-                emit_bar_addr_or_g2c(s_buf_w_offset, tma_coords, gather_chunk)
-            elif mbarrier_addr_static:
-                emit_bar_addr_or_g2c(s_buf_w_offset, tma_coords, gather_chunk)
+            if cta_group == 2 or mbarrier_addr_static:
+                emit_g2s(s_buf_w_offset, tma_coords, gather_chunk, force_shared_addr=True)
             elif mbarrier_addr_pred is not None:
                 with T.If(mbarrier_addr_pred):
-                    emit_bar_addr_or_g2c(s_buf_w_offset, tma_coords, gather_chunk)
+                    emit_g2s(s_buf_w_offset, tma_coords, gather_chunk, force_shared_addr=True)
                 with T.Else():
-                    emit_normal_g2c(s_buf_w_offset, tma_coords, gather_chunk)
+                    emit_g2s(s_buf_w_offset, tma_coords, gather_chunk, force_shared_addr=False)
             else:
-                emit_normal_g2c(s_buf_w_offset, tma_coords, gather_chunk)
+                emit_g2s(s_buf_w_offset, tma_coords, gather_chunk, force_shared_addr=False)
         else:
             if use_tma_reduce is None:
                 T.evaluate(
@@ -1476,8 +1429,9 @@ def copy_tma_impl(op_call: TilePrimitiveCall, sctx: DispatchContext) -> PrimFunc
                         plan.rank,
                         s_buf_w_offset.ptr_to(s_st),
                         T.address_of(tensor_map),
-                        *cache_args,
+                        cache_hint,
                         *tma_coords,
+                        cache_policy=cache_policy,
                     )
                 )
             else:
@@ -1486,9 +1440,10 @@ def copy_tma_impl(op_call: TilePrimitiveCall, sctx: DispatchContext) -> PrimFunc
                         plan.rank,
                         s_buf_w_offset.ptr_to(s_st),
                         T.address_of(tensor_map),
-                        *cache_args,
+                        cache_hint,
                         use_tma_reduce,
                         *tma_coords,
+                        cache_policy=cache_policy,
                     )
                 )
 

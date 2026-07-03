@@ -19,11 +19,13 @@ copy_async → tcgen05_cp
 =======================
 
 The ``tcgen05_cp`` variant lowers a ``copy_async`` from **shared memory to tensor
-memory** (Blackwell ``tmem``). One elected thread issues
+memory** (Blackwell ``tmem``). The default planner issues
 ``tcgen05.cp.32x128b.warpx4``: a shared **matrix descriptor** names the source tile,
 and the ``warpx4`` multicast routes 32 lanes × 128 bits into the tensor-memory lanes
-owned by all four warps. The dispatch issues only the copy; the caller signals
-completion with ``tcgen05.commit``. Source:
+owned by all four warps. The dispatch also has an explicit-shape path for kernels
+that already know the descriptor strides and need other ``tcgen05.cp`` shapes such
+as ``128x256b``. The dispatch issues only the copy; the caller signals completion
+with ``tcgen05.commit``. Source:
 ``python/tvm/backend/cuda/operator/tile_primitive/copy_async/tcgen05_cp.py``.
 
 What it accepts
@@ -67,6 +69,12 @@ Two predicates — a valid shared→tmem copy and a single-thread scope:
    * - dtype
      - sets ``elem_per_128b = 128 / dtype_bits`` (uint8 → 16) and the descriptor
        swizzle mode
+   * - explicit shape
+     - optional ``shape != "32x128b"`` config bypasses the warpx4 planner and
+       requires explicit descriptor/tmem strides: ``desc_ldo``, ``desc_sdo``,
+       ``desc_swizzle``, ``tile_count``, ``subtile_count``,
+       ``tmem_tile_stride_32b``, ``tmem_subtile_stride_32b``,
+       ``desc_tile_stride_16b``, and ``desc_subtile_stride_16b``
 
 Demonstration program
 ----------------------
@@ -100,13 +108,18 @@ shared and the destination is the ``R[4:32@TLane]`` tmem buffer.)
 Algorithm
 ---------
 
-**1. Verify the warpx4 router and re-order.** After slicing both layouts to the
-region, the dispatch confirms the tmem replica is ``R[4:32@TLane]``, permutes to
-TLane-first / TCol-stride-descending, isolates the broadcast, and groups the
-remaining iters into ``(32, middle, elem_per_128b)`` — the 32×128-bit atom plus a
-list of *middle* tiles to loop over.
+**1. Choose planner vs explicit shape.** Without an explicit ``shape`` config, the
+dispatch uses the warpx4 planner below.  With ``shape != "32x128b"``, the caller
+provides the descriptor strides and the nested tile/subtile iteration counts, and
+the lowering emits exactly that ``tcgen05.cp`` issue sequence.
 
-**2. Encode the matrix descriptor once.** A 64-bit shared descriptor (leading-dim
+**2. Verify the warpx4 router and re-order.** For the default planner, after
+slicing both layouts to the region, the dispatch confirms the tmem replica is
+``R[4:32@TLane]``, permutes to TLane-first / TCol-stride-descending, isolates the
+broadcast, and groups the remaining iters into ``(32, middle, elem_per_128b)`` —
+the 32×128-bit atom plus a list of *middle* tiles to loop over.
+
+**3. Encode the matrix descriptor once.** A 64-bit shared descriptor (leading-dim
 offset ``ldo``, stride-dim offset ``sdo``, swizzle mode) is encoded right after the
 shared buffer is allocated, cached per ``(smem_buf, ldo, sdo, swizzle)``:
 
@@ -115,7 +128,7 @@ shared buffer is allocated, cached per ``(smem_buf, ldo, sdo, swizzle)``:
     desc_buf = decl_buffer((1,), "uint64", scope="local")
     T.ptx.tcgen05.encode_matrix_descriptor(desc_buf.data, s_buf.ptr_to([0, 0]), ldo, sdo, swizzle)
 
-**3. Issue the copy** — one ``tcgen05.cp`` for a single atom, or an unrolled loop
+**4. Issue the copy** — one ``tcgen05.cp`` for a single atom, or an unrolled loop
 that bumps the tmem column offset and the descriptor's 16-byte shared offset per
 middle tile:
 
@@ -131,6 +144,25 @@ middle tile:
             T.ptx.tcgen05.cp(t_addr[0] + t_col0 + t_off,
                              smem_desc_add_16B_offset(desc_buf[0], init_off_16B + s_off),
                              shape="32x128b", cta_group=cta_group, multicast="warpx4")
+
+For the explicit path, the descriptor is encoded at the source slice pointer and
+the requested tile/subtile loops are emitted directly:
+
+.. code-block:: python
+
+    T.ptx.tcgen05.encode_matrix_descriptor(T.address_of(cp_desc),
+                                           s_buf.ptr_to(s_start),
+                                           ldo=desc_ldo, sdo=desc_sdo,
+                                           swizzle=desc_swizzle)
+    for tile_idx in T.unroll(tile_count):
+        for subtile_idx in T.unroll(subtile_count):
+            T.ptx.tcgen05.cp(t_addr[0] + t_col0
+                             + tile_idx * tmem_tile_stride_32b
+                             + subtile_idx * tmem_subtile_stride_32b,
+                             cp_desc
+                             + tile_idx * desc_tile_stride_16b
+                             + subtile_idx * desc_subtile_stride_16b,
+                             shape=shape, cta_group=cta_group)
 
 The dispatch emits **no** ``tcgen05.commit`` / ``wait`` — the caller commits against
 an mbarrier (as in the demo).
@@ -180,4 +212,6 @@ How inputs change the algorithm
      - the permutation order sets per-tile column steps; ``cta_group`` selects the
        multicast routing (``cta_group::1`` vs ``::2``)
    * - atom shape
-     - fixed at ``32x128b`` ``warpx4`` — a different atom would need a new variant
+     - default planner uses ``32x128b`` ``warpx4``; explicit config can request
+       another ``tcgen05.cp`` shape such as ``128x256b`` when the caller supplies
+       descriptor and tmem strides

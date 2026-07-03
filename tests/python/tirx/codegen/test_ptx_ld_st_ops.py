@@ -14,7 +14,7 @@
 # KIND, either express or implied.  See the License for the
 # specific language governing permissions and limitations
 # under the License.
-"""Unit tests for generic PTX ``T.ptx.ld`` / ``T.ptx.st`` vector copy ops."""
+"""Unit tests for PTX ``T.ptx.ld`` / ``T.ptx.ld_global_nc`` / ``T.ptx.st`` ops."""
 
 import numpy as np
 import pytest
@@ -121,11 +121,12 @@ def _shared_scratch_copy_kernel(num_bytes: int):
 
 def test_ptx_ld_st_ops_registered():
     """PTX ld/st must be registered TIR ops and exposed on the T.ptx namespace."""
-    for name in ("tirx.ptx.ld", "tirx.ptx.st"):
+    for name in ("tirx.ptx.ld", "tirx.ptx.ld_global_nc", "tirx.ptx.st"):
         Op.get(name)  # raises if unregistered
 
     for attr in (
         "ld",
+        "ld_global_nc",
         "st",
         "ld_acquire",
         "st_release",
@@ -182,13 +183,11 @@ def test_ptx_ld_global_nc_v8_codegen():
         tx = T.thread_id([32])
         tmp = T.alloc_local((8,), "int32")
         if tx == 0:
-            T.ptx.ld(
+            T.ptx.ld_global_nc(
                 src.data,
                 "int32",
                 "s32",
                 dst=tmp.ptr_to([0]),
-                space="global",
-                cop="nc",
                 vec="v8",
                 l1_evict="L1::no_allocate",
                 l2_evict="L2::evict_first",
@@ -202,6 +201,8 @@ def test_ptx_ld_global_nc_v8_codegen():
         mod = tvm.compile(tvm.IRModule({"main": copy_kernel}), target=target, tir_pipeline="tirx")
     src = mod.mod.imports[0].inspect_source("cuda")
     assert "ld.global.nc.L1::no_allocate.L2::evict_first.L2::256B.v8.s32" in src
+    assert "tvm_builtin_ptx_ld_global_nc_v8_s32_to_dst" in src
+    assert "tvm_builtin_ptx_ld_plain_global_nc" not in src
     assert "dst[7] = r7" in src
 
 
@@ -216,13 +217,11 @@ def test_ptx_ld_global_nc_v4_u64_256b_codegen():
         tx = T.thread_id([32])
         tmp = T.alloc_local((4,), "uint64")
         if tx == 0:
-            T.ptx.ld(
+            T.ptx.ld_global_nc(
                 src.data,
                 "uint64",
                 "u64",
                 dst=tmp.ptr_to([0]),
-                space="global",
-                cop="nc",
                 vec="v4",
                 l1_evict="L1::no_allocate",
                 l2_evict="L2::evict_normal",
@@ -236,7 +235,45 @@ def test_ptx_ld_global_nc_v4_u64_256b_codegen():
         mod = tvm.compile(tvm.IRModule({"main": copy_kernel}), target=target, tir_pipeline="tirx")
     src = mod.mod.imports[0].inspect_source("cuda")
     assert "ld.global.nc.L1::no_allocate.L2::evict_normal.L2::256B.v4.u64" in src
+    assert "tvm_builtin_ptx_ld_global_nc_v4_u64_to_dst" in src
+    assert "tvm_builtin_ptx_ld_plain_global_nc" not in src
     assert "unsigned long long r3" in src
+
+
+def test_ptx_ld_rejects_legacy_global_nc_cop():
+    """``ld.global.nc`` must use the dedicated ``T.ptx.ld_global_nc`` wrapper."""
+
+    with pytest.raises((ValueError, tvm.error.DiagnosticError), match="ld_global_nc"):
+
+        @T.prim_func
+        def copy_kernel(src_ptr: T.handle) -> None:
+            src = T.match_buffer(src_ptr, (1,), "int32")
+            T.device_entry()
+            tx = T.thread_id([32])
+            if tx == 0:
+                value: T.int32 = T.ptx.ld(src.data, "int32", "s32", cop="nc")
+                T.evaluate(value)
+
+
+def test_ptx_ld_global_nc_rejects_cop_with_eviction():
+    """The ``.cop`` syntax form cannot mix with L1/L2 eviction modifiers."""
+
+    with pytest.raises((ValueError, tvm.error.DiagnosticError), match="l1_evict"):
+
+        @T.prim_func
+        def copy_kernel(src_ptr: T.handle) -> None:
+            src = T.match_buffer(src_ptr, (1,), "int32")
+            T.device_entry()
+            tx = T.thread_id([32])
+            if tx == 0:
+                value: T.int32 = T.ptx.ld_global_nc(
+                    src.data,
+                    "int32",
+                    "s32",
+                    cop="ca",
+                    l1_evict="L1::evict_first",
+                )
+                T.evaluate(value)
 
 
 def test_ptx_ld_vector_scatter_dst_codegen():
@@ -253,7 +290,7 @@ def test_ptx_ld_vector_scatter_dst_codegen():
         tmp2 = T.alloc_local((1,), "int32")
         tmp3 = T.alloc_local((1,), "int32")
         if tx == 0:
-            T.ptx.ld(
+            T.ptx.ld_global_nc(
                 src.data,
                 "int32",
                 "s32",
@@ -263,8 +300,6 @@ def test_ptx_ld_vector_scatter_dst_codegen():
                     tmp2.ptr_to([0]),
                     tmp3.ptr_to([0]),
                 ),
-                space="global",
-                cop="nc",
                 vec="v4",
             )
             out[0] = tmp0[0]
@@ -277,7 +312,8 @@ def test_ptx_ld_vector_scatter_dst_codegen():
         mod = tvm.compile(tvm.IRModule({"main": copy_kernel}), target=target, tir_pipeline="tirx")
     src = mod.mod.imports[0].inspect_source("cuda")
     assert "ld.global.nc.v4.s32" in src
-    assert "tvm_builtin_ptx_ld_plain_None_global_nc_v4_s32_to_dst4" in src
+    assert "tvm_builtin_ptx_ld_global_nc_v4_s32_to_dst4" in src
+    assert "tvm_builtin_ptx_ld_plain_global_nc" not in src
     assert "void* dst0, void* dst1, void* dst2, void* dst3, void* src_ptr" in src
     assert "*reinterpret_cast<int*>(dst3) = r3" in src
 

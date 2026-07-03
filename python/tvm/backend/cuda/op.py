@@ -3682,7 +3682,8 @@ _PTX_SCALAR_TYPE = {
     "f64",
 }
 _PTX_LD_TYPE = set(_PTX_SCALAR_TYPE)
-_PTX_LD_COP = {"", "ca", "cg", "cs", "lu", "cv", "nc"}
+_PTX_LD_COP = {"", "ca", "cg", "cs", "lu", "cv"}
+_PTX_LD_GLOBAL_NC_COP = {"", "ca", "cg", "cs"}
 _PTX_LD_VEC = {"", "v2", "v4", "v8"}
 _PTX_L1_EVICT = {
     "",
@@ -3825,6 +3826,12 @@ def ptx_ld(
 ):
     """TVM intrinsic for PTX ``ld{.weak}{.ss}{.cop}...`` loads."""
     _choice("space", space, _PTX_LD_SPACE | {"const", "param::entry", "param::func"})
+    if isinstance(cop, str) and cop not in _PTX_LD_COP:
+        if cop == "nc":
+            raise ValueError(
+                'T.ptx.ld(..., cop="nc") is no longer supported; use T.ptx.ld_global_nc'
+            )
+        raise ValueError(f"invalid cop={cop!r}; expected one of {tuple(_PTX_LD_COP)}")
     _choice("cop", cop, _PTX_LD_COP)
     _choice("ptx_type", ptx_type, _PTX_LD_TYPE)
     _choice("vec", vec, _PTX_LD_VEC)
@@ -3857,6 +3864,66 @@ def ptx_ld(
         return_type,
         int(bool(weak)),
         space,
+        cop,
+        "",
+        ptx_type,
+        int(has_cache_policy),
+        0,
+        l1_evict,
+        l2_evict,
+        prefetch_size,
+    )
+
+
+def ptx_ld_global_nc(
+    addr,
+    return_type,
+    ptx_type,
+    *,
+    dst=None,
+    cop="",
+    vec="",
+    cache_hint="",
+    cache_policy=None,
+    l1_evict="",
+    l2_evict="",
+    prefetch_size="",
+):
+    """TVM intrinsic for PTX ``ld.global{.cop}.nc...`` loads."""
+    if isinstance(cop, str) and cop not in _PTX_LD_GLOBAL_NC_COP:
+        raise ValueError(
+            f"invalid ld.global.nc cop={cop!r}; expected one of {tuple(_PTX_LD_GLOBAL_NC_COP)}"
+        )
+    if isinstance(cop, str) and cop and (l1_evict or l2_evict):
+        raise ValueError("ld.global.nc with cop cannot use l1_evict or l2_evict")
+    _choice("cop", cop, _PTX_LD_GLOBAL_NC_COP)
+    _choice("ptx_type", ptx_type, _PTX_LD_TYPE)
+    _choice("vec", vec, _PTX_LD_VEC)
+    cache_policy, has_cache_policy = _resolve_cache_policy(cache_hint, cache_policy)
+    dst_args, to_dst = _normalize_ptx_ld_dst(dst, vec, "ld.global.nc")
+    if to_dst:
+        return call_intrin(
+            "",
+            "tirx.ptx.ld_global_nc",
+            *dst_args,
+            addr,
+            cache_policy,
+            return_type,
+            cop,
+            vec,
+            ptx_type,
+            int(has_cache_policy),
+            to_dst,
+            l1_evict,
+            l2_evict,
+            prefetch_size,
+        )
+    return call_intrin(
+        return_type,
+        "tirx.ptx.ld_global_nc",
+        addr,
+        cache_policy,
+        return_type,
         cop,
         "",
         ptx_type,

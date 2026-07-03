@@ -35,7 +35,7 @@ The dispatch registers two predicates — a valid copy and a **single-thread** s
 .. code-block:: python
 
     # register_dispatch(..., priority=10, when=[
-    predicate("validate_copy_op", lambda op, sctx: (validate_copy_op(op, sctx), "not a valid copy op")),
+    predicate("validate_tma_copy_op", lambda op, sctx: (validate_tma_copy_op(op, sctx), "not a valid copy op")),
     predicate("single_thread",    lambda op, sctx: (single_thread(op, sctx),    "expected single thread")),
     # ])
 
@@ -57,11 +57,20 @@ The dispatch registers two predicates — a valid copy and a **single-thread** s
      - ``global → shared`` (g2s) or ``shared → global`` (s2g), inferred from the
        buffer scopes at lowering
    * - dtype / shape
-     - ``validate_copy_op``: both sides have layouts, equal dtype, equal non-unit
-       extents
+     - ``validate_tma_copy_op``: both sides have layouts, equal dtype, and equal
+       selected element count.  For gather4, the source gather axis contributes
+       ``len(indexer)`` elements rather than its sliced extent.
    * - layout
      - must form a legal descriptor: rank ≤ 5, innermost stride 1, innermost box
        fits the shared swizzle atom (else the plan search shrinks / declines)
+   * - gather4
+     - optional ``gather_axis=0`` and ``indexer=[...]`` on ``global → shared``.
+       ``len(indexer)`` must be a multiple of four; lowering splits it into one
+       ``tile::gather4`` TMA issue per group of four coordinates.
+   * - cache policy
+     - ``cache_hint`` may be a named string such as ``"evict_first"`` or a
+       ``PrimExpr`` policy value.  Non-string values are forwarded as the PTX
+       ``cache_policy`` operand and enable ``.L2::cache_hint``.
 
 Demonstration program
 ----------------------
@@ -118,6 +127,39 @@ stride 1, innermost box fits the shared swizzle atom — shrinking the chain pre
 and retrying if a constraint fails (L3). Adjacent fully-boxed contiguous dims are
 merged, and an over-256 box may trigger element-type promotion.
 
+When ``tensor_map_dim_order="natural"`` is set, the planner additionally moves the
+physical unit-stride global dimension to the descriptor's innermost slot before
+validation. This is needed for layouts such as ``(D, H, S):(1, D, D*H)`` where the
+logical slice order is not the same as the physical innermost memory order. The
+default path keeps the historical descriptor ordering.
+
+For sparse gathers, ``indexer`` describes absolute source coordinates along the
+source gather axis.  Hardware supports only four gathered coordinates per
+instruction (``tile::gather4``), so a longer indexer is lowered by slicing the
+destination along the matching destination axis:
+
+.. code-block:: python
+
+    Tx.copy_async(
+        k_smem[0:16, col:col + 64],
+        kv[:, col:col + 64],
+        dispatch="tma",
+        mbar=bar.ptr_to([buf]),
+        cta_group=2,
+        gather_axis=0,
+        indexer=[idx0, idx1, idx2, idx3, idx4, idx5, idx6, idx7,
+                 idx8, idx9, idx10, idx11, idx12, idx13, idx14, idx15],
+    )
+
+lowers to four issue calls:
+
+.. code-block:: text
+
+    gather4 dst=k_smem[0:4,   col:col+64], coords=(idx0,  idx1,  idx2,  idx3)
+    gather4 dst=k_smem[4:8,   col:col+64], coords=(idx4,  idx5,  idx6,  idx7)
+    gather4 dst=k_smem[8:12,  col:col+64], coords=(idx8,  idx9,  idx10, idx11)
+    gather4 dst=k_smem[12:16, col:col+64], coords=(idx12, idx13, idx14, idx15)
+
 **3. Emit the host descriptor once,** keyed by a cache so a repeated copy reuses it:
 
 .. code-block:: python
@@ -132,15 +174,22 @@ merged, and an over-256 box may trigger element-type promotion.
 .. code-block:: python
 
     if direction == "g2s":
-        T.ptx.cp_async.bulk.tensor.g2c(plan.rank, s_buf.ptr_to(s_st), mbar,
-                                       T.address_of(tensor_map), cta_mask, cta_group,
-                                       cache_hint, *tma_coords)
+        T.ptx.cp_async.bulk.tensor.g2s_cluster(plan.rank, s_buf.ptr_to(s_st), mbar,
+                                               T.address_of(tensor_map), cta_mask,
+                                               cta_group, cache_hint, *tma_coords)
     else:
         T.ptx.cp_async.bulk.tensor.s2g(plan.rank, s_buf.ptr_to(s_st),
                                        T.address_of(tensor_map), cache_hint, *tma_coords)
 
 Like all ``copy_async`` variants the dispatch emits no completion — the caller's
 mbarrier ``arrive.expect_tx`` / ``try_wait`` (g2s) close the loop.
+
+For ``global → shared`` with ``cta_group=2``, the PTX mbarrier operand must be the
+leader CTA's 32-bit shared-address operand.  The dispatch converts a generic
+shared pointer with ``T.cuda.sm100_2sm_leader_smem_addr`` and passes
+``mbar_is_shared_addr=True`` to the PTX wrapper.  If a caller already passes a
+shared-address operand through the lower-level PTX wrapper, that conversion is
+the caller's responsibility.
 
 Generated TIRx IR
 -----------------
@@ -154,9 +203,9 @@ The ``8×256`` swizzled tile produces a **rank-3** descriptor and a single issue
                   A.data, 64, 8, 4, 512, 128, 64, 8, 4, 1, 1, 1, 0, 3, 2, 0)
     # device:
     for loop_vars in T.unroll(1):
-        T.ptx.cp_async.bulk.tensor.g2c(3, T.address_of(s_buf_w_offset[0]),
-                                       T.address_of(mbarrier[0]),
-                                       T.address_of(A_ptr_tensormap), 0, 1, ..., 0, 0, 0)
+        T.ptx.cp_async.bulk.tensor.g2s_cluster(3, T.address_of(s_buf_w_offset[0]),
+                                               T.address_of(mbarrier[0]),
+                                               T.address_of(A_ptr_tensormap), 0, 1, ..., 0, 0, 0)
 
 Generated CUDA
 --------------
@@ -166,7 +215,7 @@ Generated CUDA
     // one TMA instruction copies the whole rank-3 tile, async, into shared
     "cp.async.bulk.tensor.3d.shared::cluster.global.mbarrier::complete_tx::bytes"
     ".cta_group::1 [%0], [%1, {%3, %4, %5}], [%2];"
-    // call: ptx_cp_async_bulk_tensor_g2cluster_tile_3d(smem, mbar, tensormap, coords...)
+    // call: ptx_cp_async_bulk_tensor_g2s_cluster_tile_3d(smem, mbar, tensormap, coords...)
 
 The three ``{%3, %4, %5}`` are the descriptor coordinates; ``[%1]`` is the
 tensor-map address, ``[%2]`` the mbarrier. One thread launches the entire 8×256
@@ -194,6 +243,19 @@ How inputs change the algorithm
        contiguous full-box dims; box > 256 triggers dtype promotion (1→2→4→8 B)
    * - dtype
      - sets element size and the descriptor's element strides / box byte width
+   * - ``tensor_map_dim_order="natural"``
+     - keeps the descriptor legal when the physical unit-stride global dimension is
+       not already the TensorMap innermost dimension; the planner remaps descriptor
+       dims and issue-axis coordinates together before hardware validation
+   * - ``gather_axis`` / ``indexer``
+     - selects ``tile::gather4`` load mode and changes issue coordinates from one
+       dense coordinate on the gather axis to four explicit absolute coordinates.
+       Longer indexers generate multiple issue calls, each advancing the
+       destination gather-axis slice by four rows.
+   * - ``cta_group=2`` mbarrier
+     - converts a generic shared pointer to the SM100 2SM leader CTA shared
+       address before calling the PTX wrapper, so the generated instruction uses
+       the correct mbarrier operand for 2SM TMA.
 
 A copy whose layout cannot form a legal descriptor (rank > 5 after shrinking, or no
 swizzle-atom-aligned innermost box) makes the plan search fail and the variant

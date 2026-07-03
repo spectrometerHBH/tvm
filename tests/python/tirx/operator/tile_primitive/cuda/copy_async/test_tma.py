@@ -66,8 +66,7 @@ class TMACounter(StmtExprVisitor):
     def visit_evaluate_(self, op):
         if isinstance(op.value, tvm.tirx.Call):
             if op.value.op.name in (
-                "tirx.ptx.cp_async_bulk_tensor_global_to_cluster",
-                "tirx.ptx.cp_async_bulk_tensor_tile_gather4_global_to_cluster",
+                "tirx.ptx.cp_async_bulk_tensor_g2s_cluster",
                 "tirx.ptx.cp_async_bulk_tensor_shared_to_global",
                 "tirx.ptx.cp_async_bulk_tensor_shared_to_global_reduce",
             ):
@@ -88,10 +87,10 @@ class TMABarAddrCounter(StmtExprVisitor):
     def visit_evaluate_(self, op):
         if (
             isinstance(op.value, tvm.tirx.Call)
-            and op.value.op.name == "tirx.ptx.cp_async_bulk_tensor_tile_gather4_global_to_cluster"
-            and len(op.value.args) >= 9
+            and op.value.op.name == "tirx.ptx.cp_async_bulk_tensor_g2s_cluster"
+            and len(op.value.args) >= 10
         ):
-            bar_is_addr = op.value.args[8]
+            bar_is_addr = op.value.args[9]
             if isinstance(bar_is_addr, tvm.tirx.IntImm) and int(bar_is_addr) == 1:
                 self.total_bar_addr_ops += 1
         super().visit_evaluate_(op)
@@ -144,7 +143,10 @@ class Gather4CallCollector(StmtExprVisitor):
     def visit_evaluate_(self, op):
         if (
             isinstance(op.value, tvm.tirx.Call)
-            and op.value.op.name == "tirx.ptx.cp_async_bulk_tensor_tile_gather4_global_to_cluster"
+            and op.value.op.name == "tirx.ptx.cp_async_bulk_tensor_g2s_cluster"
+            and len(op.value.args) >= 9
+            and isinstance(op.value.args[8], StringImm)
+            and op.value.args[8].value == "tile_gather4"
         ):
             self.calls.append(op.value)
         super().visit_evaluate_(op)
@@ -320,9 +322,10 @@ def _build_expected_impl(direction, dtype, s_shape, s_layout, impl_spec):
 
     # Build PTX call based on direction
     if direction == "g2s":
-        # g2c(dim, addr, mbar, tensormap, cta_mask, cta_group,
-        #     cache_policy, has_cache_policy, *coords)
-        ptx_op = tvm.ir.Op.get("tirx.ptx.cp_async_bulk_tensor_global_to_cluster")
+        # g2s_cluster(dim, addr, mbar, tensormap, cta_mask, cta_group,
+        #             cache_policy, has_cache_policy, load_mode,
+        #             mbar_is_shared_addr, multicast, *coords)
+        ptx_op = tvm.ir.Op.get("tirx.ptx.cp_async_bulk_tensor_g2s_cluster")
         ptx_args = [
             IntImm("int32", dim),
             addr_of,
@@ -331,6 +334,9 @@ def _build_expected_impl(direction, dtype, s_shape, s_layout, impl_spec):
             IntImm("int32", 0),
             IntImm("int32", 1),
             IntImm("uint64", 0),
+            IntImm("int32", 0),
+            StringImm("tile"),
+            IntImm("int32", 0),
             IntImm("int32", 0),
             *coords,
         ]
@@ -2016,7 +2022,7 @@ def test_copy_tma_dynamic_cache_hint_g2s_keeps_rank_coords():
         )
 
     src = mod.mod.imports[0].inspect_source()
-    assert "ptx_cp_async_bulk_tensor_g2cluster_tile_4d_cache_hint_bar_addr" in src
+    assert "ptx_cp_async_bulk_tensor_g2s_cluster_tile_4d_cache_hint_mbar_addr" in src
     assert "tvm_builtin_cuda_cvta_generic_to_shared" in src
     assert "4278190079" in src
     assert (
@@ -2034,20 +2040,22 @@ def test_copy_tma_gather4_bar_addr_dynamic_cache_hint_codegen():
         mb = T.alloc_shared([1], "uint64")
         if tid == 0:
             T.ptx.mbarrier.init(mb.ptr_to([0]), 1)
-            T.ptx.cp_async.bulk.tensor.g2c_tile_gather4_bar_addr(
+            T.ptx.cp_async.bulk.tensor.g2s_cluster(
                 2,
                 sm.ptr_to([0, 0]),
-                T.cuda.sm100_tma_2sm_mbarrier_addr(mb.ptr_to([0])),
+                T.cuda.sm100_2sm_leader_smem_addr(mb.ptr_to([0])),
                 T.address_of(A_map),
                 0,
                 2,
-                T.uint64(0x14F0000000000000),
-                1,
+                "",
                 0,
                 1,
                 2,
                 3,
                 4,
+                cache_policy=T.uint64(0x14F0000000000000),
+                load_mode="tile_gather4",
+                mbar_is_shared_addr=True,
             )
 
     target = tvm.target.Target({"kind": "cuda", "arch": "sm_100a"})
@@ -2055,15 +2063,15 @@ def test_copy_tma_gather4_bar_addr_dynamic_cache_hint_codegen():
         mod = tvm.compile(tvm.IRModule({"main": tma_gather4}), target=target, tir_pipeline="tirx")
 
     src = mod.mod.imports[0].inspect_source()
-    helper_name = "ptx_cp_async_bulk_tensor_g2cluster_tile_gather4_2d_cache_hint_bar_addr"
+    helper_name = "ptx_cp_async_bulk_tensor_g2s_cluster_tile_gather4_2d_cache_hint_mbar_addr"
     assert helper_name in src
     assert (
-        f"{helper_name}(void* dst, unsigned int bar_addr, "
+        f"{helper_name}(void* dst, unsigned int mbar_addr, "
         "unsigned long long tensormap_addr, uint16_t cta_mask, unsigned long long cache_policy"
     ) in src
     assert "cta_group2_unicast" not in src
     assert (
-        "cp.async.bulk.tensor.2d.shared::cta.global.tile::gather4"
+        "cp.async.bulk.tensor.2d.shared::cluster.global.tile::gather4"
         ".mbarrier::complete_tx::bytes.cta_group::2.L2::cache_hint"
     ) in src
     assert "4278190079" in src
@@ -2078,20 +2086,22 @@ def test_copy_tma_gather4_cta_group2_pointer_masks_mbarrier_codegen():
         mb = T.alloc_shared([1], "uint64")
         if tid == 0:
             T.ptx.mbarrier.init(mb.ptr_to([0]), 1)
-            T.ptx.cp_async.bulk.tensor.g2c_tile_gather4(
+            T.ptx.cp_async.bulk.tensor.g2s_cluster(
                 2,
                 sm.ptr_to([0, 0]),
-                mb.ptr_to([0]),
+                T.cuda.sm100_2sm_leader_smem_addr(mb.ptr_to([0])),
                 T.address_of(A_map),
                 0,
                 2,
-                T.uint64(0x14F0000000000000),
-                1,
+                "",
                 0,
                 1,
                 2,
                 3,
                 4,
+                cache_policy=T.uint64(0x14F0000000000000),
+                load_mode="tile_gather4",
+                mbar_is_shared_addr=True,
             )
 
     target = tvm.target.Target({"kind": "cuda", "arch": "sm_100a"})
@@ -2099,18 +2109,18 @@ def test_copy_tma_gather4_cta_group2_pointer_masks_mbarrier_codegen():
         mod = tvm.compile(tvm.IRModule({"main": tma_gather4}), target=target, tir_pipeline="tirx")
 
     src = mod.mod.imports[0].inspect_source()
-    helper_name = "ptx_cp_async_bulk_tensor_g2cluster_tile_gather4_2d_cache_hint"
+    helper_name = "ptx_cp_async_bulk_tensor_g2s_cluster_tile_gather4_2d_cache_hint_mbar_addr"
     assert helper_name in src
     assert (
-        f"{helper_name}(void* dst, void* bar, unsigned long long tensormap_addr, "
+        f"{helper_name}(void* dst, unsigned int mbar_addr, unsigned long long tensormap_addr, "
         "uint16_t cta_mask, unsigned long long cache_policy"
     ) in src
     assert "cta_group2_unicast" not in src
     assert (
-        "cp.async.bulk.tensor.2d.shared::cta.global.tile::gather4"
+        "cp.async.bulk.tensor.2d.shared::cluster.global.tile::gather4"
         ".mbarrier::complete_tx::bytes.cta_group::2.L2::cache_hint"
     ) in src
-    assert "bar_addr &= 0xFEFFFFFFu" in src
+    assert "4278190079" in src
 
 
 def test_copy_tma_dispatch_accepts_permuted_non_square_extents():
