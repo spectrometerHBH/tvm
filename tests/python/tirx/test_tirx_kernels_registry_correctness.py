@@ -19,10 +19,15 @@
 from __future__ import annotations
 
 import os
+import sys
 from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
+
+_WORKSPACE_TIRX_KERNELS = Path(__file__).resolve().parents[4] / "tirx-kernels"
+if _WORKSPACE_TIRX_KERNELS.exists():
+    sys.path.insert(0, str(_WORKSPACE_TIRX_KERNELS))
 
 kernel_registry = pytest.importorskip("tirx_kernels.registry")
 kernel_runner = pytest.importorskip("tirx_kernels.runner")
@@ -44,13 +49,25 @@ def _set_cuda_device_for_xdist_worker():
     try:
         import torch
     except ImportError:
-        return
+        return False
 
     if not torch.cuda.is_available():
-        return
+        return False
+
+    min_free_gb = float(os.environ.get("TIRX_KERNEL_TEST_MIN_FREE_GB", "32"))
+    min_free_bytes = int(min_free_gb * 1024**3)
+    eligible_devices = []
+    for device_id in range(torch.cuda.device_count()):
+        free_bytes, _ = torch.cuda.mem_get_info(device_id)
+        if free_bytes >= min_free_bytes:
+            eligible_devices.append(device_id)
+    if not eligible_devices:
+        pytest.skip(f"requires at least one CUDA device with {min_free_gb:g} GiB free memory")
+
     worker = os.environ.get("PYTEST_XDIST_WORKER", "gw0")
     worker_index = int(worker[2:]) if worker.startswith("gw") and worker[2:].isdigit() else 0
-    torch.cuda.set_device(worker_index % torch.cuda.device_count())
+    torch.cuda.set_device(eligible_devices[worker_index % len(eligible_devices)])
+    return True
 
 
 def _visible_cuda_device_count():

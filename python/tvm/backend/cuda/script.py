@@ -247,7 +247,7 @@ class MbarrierArriveNamespace:
 
     def __init__(self):
         self.expect_tx = _op_wrapper(_cuda_op.ptx_mbarrier_arrive_expect_tx)
-        self.cluster_count = _op_wrapper(_cuda_op.ptx_mbarrier_arrive_cluster_count)
+        self.no_complete = _op_wrapper(_cuda_op.ptx_mbarrier_arrive_no_complete)
 
     def __call__(self, *args, **kwds):
         return _op_wrapper(_cuda_op.ptx_mbarrier_arrive)(*args, **kwds)

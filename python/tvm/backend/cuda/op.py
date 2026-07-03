@@ -38,6 +38,9 @@ from tvm.tirx.operator.intrinsics._common import FENCE_SCOPE as _FENCE_SCOPE
 from tvm.tirx.operator.intrinsics._common import FENCE_SEM as _FENCE_SEM
 from tvm.tirx.operator.intrinsics._common import LDMATRIX_DTYPE as _LDMATRIX_DTYPE
 from tvm.tirx.operator.intrinsics._common import LDMATRIX_NUM as _LDMATRIX_NUM
+from tvm.tirx.operator.intrinsics._common import MBARRIER_ARRIVE_SCOPE as _MBARRIER_ARRIVE_SCOPE
+from tvm.tirx.operator.intrinsics._common import MBARRIER_ARRIVE_SEM as _MBARRIER_ARRIVE_SEM
+from tvm.tirx.operator.intrinsics._common import MBARRIER_ARRIVE_SPACE as _MBARRIER_ARRIVE_SPACE
 from tvm.tirx.operator.intrinsics._common import (
     MBARRIER_COMPLETE_TX_SCOPE as _MBARRIER_COMPLETE_TX_SCOPE,
 )
@@ -631,45 +634,66 @@ def ptx_mbarrier_init(bar, thread_count):
     return call_intrin("", "tirx.ptx.mbarrier_init", bar, thread_count)
 
 
-def ptx_mbarrier_arrive(bar, cta_id=None, pred=None, count=None):
-    """TVM intrinsic to call
-        mbarrier.arrive.shared::cta.b64
-    or
-        @p mapa.shared::cluster.u32
-        @p mbarrier.arrive.shared::cluster.b64 [, count]
+def _validate_mbarrier_arrive_attrs(sem, scope, space, remote):
+    if (sem == "") != (scope == ""):
+        raise ValueError("mbarrier.arrive sem and scope must be specified together")
+    if sem not in _MBARRIER_ARRIVE_SEM:
+        raise ValueError(f"invalid sem={sem!r}; expected one of {_MBARRIER_ARRIVE_SEM}")
+    if scope not in _MBARRIER_ARRIVE_SCOPE:
+        raise ValueError(f"invalid scope={scope!r}; expected one of {_MBARRIER_ARRIVE_SCOPE}")
+    if space not in _MBARRIER_ARRIVE_SPACE:
+        raise ValueError(f"invalid space={space!r}; expected one of {_MBARRIER_ARRIVE_SPACE}")
+    if remote is not None and space != "shared::cluster":
+        raise ValueError("remote mbarrier.arrive requires space='shared::cluster'")
 
-    Parameters
-    ----------
-    bar : Var
-        The pointer to barrier variable.
 
-    cta_id : Optional[PrimExpr]
-        The cta id.
+def ptx_mbarrier_arrive(
+    bar,
+    *,
+    count=None,
+    sem="",
+    scope="",
+    space=None,
+    remote=None,
+    pred=None,
+    **kwargs,
+):
+    """PTX ``mbarrier.arrive{.sem.scope}{.space}.b64 _, [bar]{, count}``.
 
-    pred : Optional[PrimExpr]
-        The predicate to guard the operation.
-
-    count : Optional[PrimExpr]
-        Explicit arrival count operand for the cross-CTA (cluster) form. When
-        ``None`` the implicit count-of-1 form is emitted; when given, emits
-        ``mbarrier.arrive.shared::cluster.b64 _, [addr], count``.
+    ``remote`` maps ``bar`` with ``mapa.shared::cluster.u32`` before the arrive
+    instruction. ``pred`` predicates the map and arrive instruction.
     """
-    if cta_id is None and pred is None:
-        return call_intrin("", "tirx.ptx.mbarrier_arrive", bar)
-    assert cta_id is not None and pred is not None
-    if count is None:
-        return call_intrin("", "tirx.ptx.mbarrier_arrive", bar, cta_id, pred)
-    return call_intrin("", "tirx.ptx.mbarrier_arrive", bar, cta_id, pred, count)
+    if "cta_id" in kwargs:
+        raise ValueError("T.ptx.mbarrier.arrive uses remote= instead of cta_id=")
+    if kwargs:
+        raise TypeError(f"unexpected keyword argument(s): {', '.join(kwargs)}")
 
+    if space is not None:
+        effective_space = space
+    elif remote is not None:
+        effective_space = "shared::cluster"
+    else:
+        effective_space = "shared"
+    _validate_mbarrier_arrive_attrs(sem, scope, effective_space, remote)
 
-def ptx_mbarrier_arrive_cluster_count(bar, cta_id, count):
-    """Cross-CTA ``mbarrier.arrive`` on CTA ``cta_id`` with an explicit count.
-
-    Convenience for an already-elected thread: emits
-    ``@p mapa.shared::cluster.u32`` + ``@p mbarrier.arrive.shared::cluster.b64 _,
-    [addr], count`` with the guard defaulted to 1.
-    """
-    return call_intrin("", "tirx.ptx.mbarrier_arrive", bar, cta_id, True, count)
+    args = [bar]
+    if count is not None:
+        args.append(count)
+    if remote is not None:
+        args.append(remote)
+    if pred is not None:
+        args.append(pred)
+    return call_intrin(
+        "",
+        "tirx.ptx.mbarrier_arrive",
+        *args,
+        sem,
+        scope,
+        effective_space,
+        int(count is not None),
+        int(remote is not None),
+        int(pred is not None),
+    )
 
 
 def ptx_mbarrier_complete_tx(
@@ -713,41 +737,67 @@ def ptx_mbarrier_complete_tx(
     )
 
 
-def ptx_mbarrier_arrive_expect_tx(bar, byte_count, cta_id=None, pred=None):
-    """TVM intrinsic to call
-        mbarrier.arrive_expect_tx.shared::cta.b64
-    or
-        @p mapa.shared::cluster.u32
-        @p mbarrier.arrive_expect_tx.shared::cluster.b64
+def ptx_mbarrier_arrive_expect_tx(
+    bar,
+    byte_count,
+    *,
+    sem="",
+    scope="",
+    space=None,
+    remote=None,
+    pred=None,
+    **kwargs,
+):
+    """PTX ``mbarrier.arrive.expect_tx{.sem.scope}{.space}.b64 _, [bar], txCount``."""
+    if "cta_id" in kwargs:
+        raise ValueError("T.ptx.mbarrier.arrive.expect_tx uses remote= instead of cta_id=")
+    if kwargs:
+        raise TypeError(f"unexpected keyword argument(s): {', '.join(kwargs)}")
 
-    Parameters
-    ----------
-    bar : Var
-        The pointer to barrier variable.
+    if space is not None:
+        effective_space = space
+    elif remote is not None:
+        effective_space = "shared::cluster"
+    else:
+        effective_space = "shared"
+    _validate_mbarrier_arrive_attrs(sem, scope, effective_space, remote)
 
-    byte_count : int
-        Increases the tx count of the mbarrier object to track completion of
-        addtional async transactions.
+    args = [bar, byte_count]
+    if remote is not None:
+        args.append(remote)
+    if pred is not None:
+        args.append(pred)
+    return call_intrin(
+        "",
+        "tirx.ptx.mbarrier_arrive_expect_tx",
+        *args,
+        sem,
+        scope,
+        effective_space,
+        int(remote is not None),
+        int(pred is not None),
+    )
 
-    cta_id : Optional[PrimExpr]
-        The cta id.
 
-    pred : Optional[PrimExpr]
-        The predicate to guard the operation.
+def ptx_mbarrier_arrive_no_complete(bar, count, *, space="shared", pred=None, **kwargs):
+    """PTX ``mbarrier.arrive.noComplete.release.cta.{space}.b64 _, [bar], count``."""
+    if "remote" in kwargs:
+        raise ValueError("mbarrier.arrive.no_complete does not support remote=")
+    if kwargs:
+        raise TypeError(f"unexpected keyword argument(s): {', '.join(kwargs)}")
+    if space not in ("shared", "shared::cta"):
+        raise ValueError("mbarrier.arrive.no_complete space must be 'shared' or 'shared::cta'")
 
-    Returns
-    -------
-    call : PrimExpr
-        The call expression.
-    """
-    if cta_id is None and pred is None:
-        return call_intrin("", "tirx.ptx.mbarrier_arrive_expect_tx", bar, byte_count)
-    assert cta_id is not None
-    # Cross-CTA expect_tx from an already-elected thread: default the guard to 1
-    # (the caller has elected a single lane), so callers can pass cta_id alone.
-    if pred is None:
-        pred = True
-    return call_intrin("", "tirx.ptx.mbarrier_arrive_expect_tx", bar, byte_count, cta_id, pred)
+    args = [bar, count]
+    if pred is not None:
+        args.append(pred)
+    return call_intrin(
+        "",
+        "tirx.ptx.mbarrier_arrive_no_complete",
+        *args,
+        space,
+        int(pred is not None),
+    )
 
 
 def ptx_mbarrier_try_wait(bar, phase):
