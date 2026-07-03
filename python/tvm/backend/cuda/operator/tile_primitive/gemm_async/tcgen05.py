@@ -1229,7 +1229,7 @@ def gemm_async_tcgen05_impl(op_call: TilePrimitiveCall, sctx: DispatchContext) -
             descI_local: T.uint32
             T.ptx.tcgen05.encode_instr_descriptor_block_scaled(T.address_of(descI_local), d_dtype=C_type, a_dtype=A_type, b_dtype=B_type, sfa_dtype=SFA_type, sfb_dtype=SFB_type,  # noqa: E501, F821
                                                                sfa_tmem_addr=SFA_init_addr, sfb_tmem_addr=SFB_init_addr,  # noqa: E501
-                                                               M=M_mma * cta_group, N=N_mma, K=MMA_K, trans_a=transA, trans_b=transB, n_cta_groups=cta_group)  # noqa: E501
+                                                               M=M_mma * cta_group, N=N_mma, K=MMA_K, trans_a=a_mn_major, trans_b=b_mn_major, n_cta_groups=cta_group)  # noqa: E501
             call_main(descI_local)  # noqa: F821
     else:
         # Pre-compute the dense instruction descriptor at dispatcher time so
@@ -1243,8 +1243,8 @@ def gemm_async_tcgen05_impl(op_call: TilePrimitiveCall, sctx: DispatchContext) -
             d_dtype="float32",
             a_dtype=A_sem,
             b_dtype=B_sem,
-            trans_a=transA,
-            trans_b=transB,
+            trans_a=a_mn_major,
+            trans_b=b_mn_major,
         )
         descI_const = tvm.tirx.const(descI_value, "uint32")
 
