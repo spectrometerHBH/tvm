@@ -31,10 +31,6 @@ from tvm.script import tirx as T
 from tvm.tirx import Buffer, PrimFunc
 from tvm.tirx import Var as _TirVar
 from tvm.tirx.expr import IntImm as _IntImm
-from tvm.tirx.operator.tile_primitive.dispatcher import (
-    predicate,
-    register_dispatch,
-)
 from tvm.tirx.operator.tile_primitive.registry import DispatchContext
 from tvm.tirx.tile_primitive import TilePrimitiveCall
 
@@ -51,8 +47,8 @@ from ._swizzle_iter import (
     get_swizzle,
     try_recognize,
 )
-from .reg import _all_threads_active, _axis_decl, _ptr_off
 from .utils import _is_valid_copy, _scope_allowed
+from .vec_auto_reg import _all_threads_active, _axis_decl, _ptr_off
 
 _GMEM_SMEM_PAIRS = [
     ("global", "shared*"),
@@ -277,7 +273,7 @@ def _emit_gmem_smem(op_call: TilePrimitiveCall, sctx: DispatchContext) -> PrimFu
         # misaligned vector ops.
         #
         # Use a serial TIR loop and let ptxas unroll downstream. Mirrors
-        # the reg.py rationale in commit ac7ecf70f0: explicit ``T.unroll``
+        # the vec_auto_reg.py rationale in commit ac7ecf70f0: explicit ``T.unroll``
         # materializes the per-iter scratch (s_lin/g_lin/s_off/s_ptr/g_ptr)
         # as N copies of each ``alignas(64)`` declaration. For large
         # ``total_outer`` (e.g. thread-scope fp32 swizzled copies of 32x256
@@ -315,14 +311,3 @@ def _emit_gmem_smem(op_call: TilePrimitiveCall, sctx: DispatchContext) -> PrimFu
                 )
     # fmt: on
     return impl
-
-
-@register_dispatch(
-    "copy",
-    "cuda",
-    variant="gmem_smem",
-    priority=10,
-    when=[predicate("gmem_smem_applicable", _is_gmem_smem)],
-)
-def copy_schedule_gmem_smem(op_call: TilePrimitiveCall, sctx: DispatchContext) -> PrimFunc:
-    return _emit_gmem_smem(op_call, sctx)

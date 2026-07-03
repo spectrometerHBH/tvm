@@ -39,8 +39,8 @@ from ._common import (  # noqa: F401  (_carve_tail reserved for future variants)
     _extract_tile,
 )
 from ._swizzle_iter import emit_init, emit_iter_offset, get_swizzle, try_recognize
-from .reg import _all_threads_active, _ptr_off
 from .utils import _is_valid_copy, _scope_allowed
+from .vec_auto_reg import _all_threads_active, _ptr_off
 
 _REG_SMEM_PAIRS = [
     ("local", "shared*"),

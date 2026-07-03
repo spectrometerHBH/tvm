@@ -19,7 +19,7 @@
 (SASS: ``LDGSTS``).
 
 Shares the partition / layout-alignment algorithm with
-``cuda/copy/gmem_smem.py`` (sync ``T.copy`` global ↔ shared); differs at
+``cuda/copy/vec_auto_gmem_smem.py`` (sync ``T.copy`` global ↔ shared); differs at
 emit time only:
 
 * direction: ``cp.async`` is global → shared only (hardware restriction).
@@ -63,8 +63,8 @@ from ..copy._swizzle_iter import (
     get_swizzle,
     try_recognize,
 )
-from ..copy.reg import _all_threads_active, _axis_decl, _ptr_off
 from ..copy.utils import _is_valid_copy, _scope_allowed
+from ..copy.vec_auto_reg import _all_threads_active, _axis_decl, _ptr_off
 
 # cp.async is unidirectional: global → shared.
 _LDGSTS_PAIRS = [("global", "shared*")]

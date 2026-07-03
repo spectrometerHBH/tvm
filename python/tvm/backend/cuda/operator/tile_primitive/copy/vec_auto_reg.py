@@ -35,7 +35,6 @@ from tvm.tirx import Buffer, PrimFunc
 from tvm.tirx import Var as _TirVar
 from tvm.tirx.expr import IntImm as _IntImm
 from tvm.tirx.layout import ComposeLayout, S, SwizzleLayout, TileLayout
-from tvm.tirx.operator.tile_primitive.dispatcher import predicate, register_dispatch
 from tvm.tirx.operator.tile_primitive.registry import DispatchContext
 from tvm.tirx.tile_primitive import TilePrimitiveCall
 
@@ -73,93 +72,8 @@ _REG_PAIRS = [
     ("local", "global"),
     ("global", "local"),
 ]
-_THREAD_PTR_PAIRS = [
-    ("local", "shared*"),
-    ("shared*", "local"),
-]
 _SCOPE_RANK = {"thread": 0, "warp": 1, "warpgroup": 2, "cta": 3}
 _VALID_R_SUBSCOPES = {"thread", "warp", "warpgroup"}
-
-
-def _region_st_extent(buffer_region):
-    region = buffer_region.region
-    return [r.min for r in region], [r.extent for r in region]
-
-
-def _extent_product(extents) -> int:
-    product = 1
-    for extent in extents:
-        try:
-            product *= int(extent)
-        except (TypeError, ValueError):
-            return -1
-    return product
-
-
-def _is_contiguous_vector_region(extents) -> bool:
-    try:
-        return all(int(extent) == 1 for extent in extents[:-1])
-    except (TypeError, ValueError):
-        return False
-
-
-def _copy_ptx_form_for_dtype(dtype: str, n_elements: int) -> tuple[str, str, str]:
-    dtype = str(dtype)
-    elem_bits = DataType(dtype).bits
-    num_bytes = n_elements * elem_bits // 8
-    vec, ptx_type = copy_ptx_form(num_bytes)
-    if dtype == "float32":
-        return vec, "f32", "float32"
-    return vec, ptx_type, copy_ptx_ld_return_type(ptx_type)
-
-
-def _buffer_vector_values(buf: Buffer, starts, n_elements: int):
-    values = []
-    for i in range(n_elements):
-        indices = list(starts)
-        indices[-1] = indices[-1] + i
-        values.append(buf[indices])
-    return values
-
-
-def _is_thread_ptr_copy(op_call: TilePrimitiveCall, sctx: DispatchContext):
-    if not sctx.is_target("cuda"):
-        return False, "non-cuda target"
-    if sctx.scope_kind != "thread":
-        return False, f"unsupported exec_scope {sctx.scope_kind}"
-    for check in (
-        lambda: _is_valid_copy(op_call, sctx),
-        lambda: _scope_allowed(op_call, sctx, allowed_pairs=_THREAD_PTR_PAIRS),
-    ):
-        ok, msg = check()
-        if not ok:
-            return False, msg
-
-    op_call = TilePrimitiveCall.downcast(op_call)
-    src_br = op_call.src
-    dst_br = op_call.dst
-    src = src_br.buffer
-    dst = dst_br.buffer
-    if src.dtype != dst.dtype:
-        return False, f"dtype mismatch: src={src.dtype}, dst={dst.dtype}"
-
-    local_br = src_br if src.scope() == "local" else dst_br
-    shared_br = dst_br if src.scope() == "local" else src_br
-    _, local_extent = _region_st_extent(local_br)
-    _, shared_extent = _region_st_extent(shared_br)
-    n_elements = _extent_product(local_extent)
-    if n_elements <= 0 or n_elements != _extent_product(shared_extent):
-        return False, f"extent mismatch: local={local_extent}, shared={shared_extent}"
-    if not _is_contiguous_vector_region(local_extent):
-        return False, f"local region is not a contiguous vector: {local_extent}"
-    if not _is_contiguous_vector_region(shared_extent):
-        return False, f"shared region is not a contiguous vector: {shared_extent}"
-    elem_bits = DataType(src.dtype).bits
-    if (n_elements * elem_bits) % 8 != 0:
-        return False, f"copy width is not byte aligned: {n_elements} x {elem_bits} bits"
-    if n_elements * elem_bits // 8 not in (1, 2, 4, 8, 16):
-        return False, f"unsupported thread pointer copy width: {n_elements} x {elem_bits} bits"
-    return True, None
 
 
 def _all_threads_active(sctx: DispatchContext) -> tuple[bool, str | None]:
@@ -668,66 +582,3 @@ def _emit_reg(op_call: TilePrimitiveCall, sctx: DispatchContext) -> PrimFunc:
         print("=== emitted impl ===")
         print(impl.script())
     return impl
-
-
-def _emit_thread_ptr_copy(op_call: TilePrimitiveCall, _sctx: DispatchContext) -> PrimFunc:
-    op_call = TilePrimitiveCall.downcast(op_call)
-    src: Buffer = op_call.src.buffer
-    dst: Buffer = op_call.dst.buffer
-    if src.scope() == "local":
-        r_buf, s_buf, r_is_src = src, dst, True
-        r_st, r_extent = _region_st_extent(op_call.src)
-        s_st, _ = _region_st_extent(op_call.dst)
-    else:
-        r_buf, s_buf, r_is_src = dst, src, False
-        r_st, r_extent = _region_st_extent(op_call.dst)
-        s_st, _ = _region_st_extent(op_call.src)
-
-    n_elements = _extent_product(r_extent)
-    vec, ptx_type, return_type = _copy_ptx_form_for_dtype(src.dtype, n_elements)
-    space = "shared"
-
-    # fmt: off
-    @T.prim_func(check_well_formed=False)
-    def impl():
-        if r_is_src:
-            T.ptx.st(
-                s_buf.ptr_to(s_st),
-                *_buffer_vector_values(r_buf, r_st, n_elements),
-                space=space,
-                vec=vec,
-                ptx_type=ptx_type,
-            )
-        else:
-            T.ptx.ld(
-                s_buf.ptr_to(s_st),
-                return_type,
-                ptx_type,
-                dst=r_buf.ptr_to(r_st),
-                space=space,
-                vec=vec,
-            )
-    # fmt: on
-    return impl
-
-
-@register_dispatch(
-    "copy",
-    "cuda",
-    variant="thread_ptr",
-    priority=11,
-    when=[predicate("thread_ptr_applicable", _is_thread_ptr_copy)],
-)
-def copy_schedule_thread_ptr(op_call: TilePrimitiveCall, sctx: DispatchContext) -> PrimFunc:
-    return _emit_thread_ptr_copy(op_call, sctx)
-
-
-@register_dispatch(
-    "copy",
-    "cuda",
-    variant="reg",
-    priority=10,
-    when=[predicate("reg_applicable", _is_reg_copy)],
-)
-def copy_schedule_reg(op_call: TilePrimitiveCall, sctx: DispatchContext) -> PrimFunc:
-    return _emit_reg(op_call, sctx)
