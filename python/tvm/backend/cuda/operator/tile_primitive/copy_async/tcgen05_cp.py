@@ -420,17 +420,7 @@ def _is_valid_smem_tmem_or_explicit_copy(op_call: TilePrimitiveCall, sctx: Dispa
     dst_region, src_region = op_call.args[:2]
     src: Buffer = src_region.buffer
     dst: Buffer = dst_region.buffer
-    required = [
-        "desc_ldo",
-        "desc_sdo",
-        "desc_swizzle",
-        "tile_count",
-        "subtile_count",
-        "tmem_tile_stride_32b",
-        "tmem_subtile_stride_32b",
-        "desc_tile_stride_16b",
-        "desc_subtile_stride_16b",
-    ]
+    required = ["desc_ldo", "desc_sdo", "desc_swizzle"]
     return (
         src.scope().startswith("shared")
         and dst.scope() == "tmem"

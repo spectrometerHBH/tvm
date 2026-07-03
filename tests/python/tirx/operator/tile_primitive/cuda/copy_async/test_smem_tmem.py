@@ -528,5 +528,58 @@ def test_explicit_tcgen05_cp_128x256b_lowers_multi_issue():
     assert cp_helper_refs - 1 == 8, f"expected 8 explicit cp helper calls; src=\n{src}"
 
 
+def test_explicit_tcgen05_cp_128x256b_accepts_default_tile_fields():
+    """FlashMLA q_rope copy uses one tile and two subtiles.
+
+    The explicit tcgen05.cp implementation has defaults for tile_count and
+    stride fields; the dispatch predicate must not reject calls that only
+    override the subtile fields they need.
+    """
+
+    @T.prim_func(check_well_formed=False)
+    def kernel(A_ptr: T.handle):
+        A = T.match_buffer(A_ptr, (64, 64), "bfloat16")
+        T.device_entry()
+        tid = T.thread_id([128])
+        A_smem = T.alloc_buffer(
+            (64, 64),
+            "bfloat16",
+            scope="shared",
+            layout=TileLayout(S[(64, 64) : (64, 1)]),
+            align=1024,
+        )
+        tmem_addr = T.alloc_shared([1], "uint32")
+        tmem = T.decl_buffer(
+            (64, 32),
+            "bfloat16",
+            scope="tmem",
+            allocated_addr=tmem_addr[0],
+            layout=TileLayout(S[(64, 32) : (1 @ TLane, 1 @ TCol)]),
+        )
+        Tx.cta.copy(A_smem[:, :], A[:, :])
+        if tid == 0:
+            Tx.copy_async(
+                tmem[:, :],
+                A_smem[:, :],
+                shape="128x256b",
+                cta_group=1,
+                desc_ldo=1,
+                desc_sdo=32,
+                desc_swizzle=2,
+                subtile_count=2,
+                tmem_subtile_stride_32b=8,
+                desc_subtile_stride_16b=2,
+            )
+
+    target = tvm.target.Target("cuda")
+    with target:
+        mod = tvm.compile(tvm.IRModule({"main": kernel}), target=target, tir_pipeline="tirx")
+    src = mod.mod.imports[0].inspect_source()
+
+    assert "tcgen05.cp.cta_group::1.128x256b" in src, f"cp asm missing; src=\n{src}"
+    cp_helper_refs = src.count("ptx_tcgen05_cp_cta_group_1_shape_128x256b")
+    assert cp_helper_refs - 1 == 2, f"expected 2 explicit cp helper calls; src=\n{src}"
+
+
 if __name__ == "__main__":
     tvm.testing.main()
