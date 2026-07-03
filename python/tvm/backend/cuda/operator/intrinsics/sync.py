@@ -38,11 +38,23 @@ from tvm.tirx.operator.intrinsics._common import (
     FENCE_PROXY_ASYNC_SPACE,
     FENCE_SCOPE,
     FENCE_SEM,
+    MBARRIER_COMPLETE_TX_SCOPE,
+    MBARRIER_COMPLETE_TX_SEM,
+    MBARRIER_COMPLETE_TX_SPACE,
 )
 
 from ._schema import device_intrinsic
 from .registry import CODEGEN_REGISTRY, register_codegen
 from .utils import parse_str
+
+
+def _safe_attr(value):
+    return parse_str(value).replace("::", "_").replace(".", "_")
+
+
+def _as_bool(value) -> bool:
+    return bool(int(value)) if hasattr(value, "value") else bool(value)
+
 
 # =============================================================================
 # bar.arrive / bar.sync — alias of barrier.arrive/sync. 1 form each.
@@ -359,56 +371,81 @@ def _codegen_mbarrier_arrive(*args):
 
 
 # =============================================================================
-# mbarrier.complete_tx — local cluster-scope + remote mapped forms.
+# mbarrier.complete_tx{.sem.scope}{.space}.b64 [addr], txCount;
+#   sem   = {.relaxed}
+#   scope = {.cta, .cluster}
+#   space = {.shared{::cta}, .shared::cluster}
+# Optional conveniences:
+#   remote: map addr with mapa.shared::cluster.u32 before complete_tx.
+#   pred:   predicate the complete_tx instruction with @p.
 # =============================================================================
-device_intrinsic(
-    "_ptx_mbarrier_complete_tx_local",
-    helper_name="tvm_builtin_ptx_mbarrier_complete_tx",
-    c_signature="(void* barrier, int byte_count)",
-    body=(
-        "    unsigned int barrier_addr = __cvta_generic_to_shared(barrier);\n"
-        '    asm volatile("mbarrier.complete_tx.shared::cluster.relaxed.cluster.b64 [%0], %1;"\n'
-        '                 :: "r"(barrier_addr), "r"(byte_count) : "memory");'
-    ),
-)
+def _ptx_mbarrier_complete_tx_parts(*args):
+    sem, scope, space, has_remote, has_pred = args[-5:]
+    sem = parse_str(sem)
+    scope = parse_str(scope)
+    space = parse_str(space)
+    has_remote = _as_bool(has_remote)
+    has_pred = _as_bool(has_pred)
+    if sem not in MBARRIER_COMPLETE_TX_SEM:
+        raise ValueError(f"invalid mbarrier.complete_tx sem {sem!r}")
+    if scope not in MBARRIER_COMPLETE_TX_SCOPE:
+        raise ValueError(f"invalid mbarrier.complete_tx scope {scope!r}")
+    if space not in MBARRIER_COMPLETE_TX_SPACE:
+        raise ValueError(f"invalid mbarrier.complete_tx space {space!r}")
+    if has_remote and space != "shared::cluster":
+        raise ValueError("remote mbarrier.complete_tx requires space='shared::cluster'")
 
-device_intrinsic(
-    "_ptx_mbarrier_complete_tx_remote",
-    helper_name="tvm_builtin_ptx_mbarrier_complete_tx_remote",
-    c_signature="(void* barrier, int cta_id, int pred, int byte_count)",
-    body=(
-        "    unsigned int barrier_addr = __cvta_generic_to_shared(barrier);\n"
-        "    unsigned int remote_addr;\n"
-        '    asm volatile("mapa.shared::cluster.u32 %0, %1, %2;"\n'
-        '                 : "=r"(remote_addr) : "r"(barrier_addr), "r"(cta_id));\n'
-        "    asm volatile(\n"
-        '        "{\\n"\n'
-        '        ".reg .pred p;\\n"\n'
-        '        "setp.eq.u32 p, %2, 1;\\n"\n'
-        '        "@p mbarrier.complete_tx.shared::cluster.relaxed.cluster.b64 [%1], %0;\\n"\n'
-        '        "}\\n"\n'
-        '        :: "r"(byte_count), "r"(remote_addr), "r"(pred) : "memory");'
-    ),
-)
+    name = (
+        "tvm_builtin_ptx_mbarrier_complete_tx"
+        f"_{_safe_attr(sem)}_{_safe_attr(scope)}_{_safe_attr(space)}"
+    )
+    if has_remote:
+        name += "_remote"
+    if has_pred:
+        name += "_pred"
 
+    params = ["void* barrier", "int tx_count"]
+    if has_remote:
+        params.append("int remote")
+    if has_pred:
+        params.append("int pred")
 
-@register_codegen("ptx_mbarrier_complete_tx")
-def _codegen_mbarrier_complete_tx(*args):
-    """Dispatch by arg count: 2 -> local, 4 -> remote.
-
-    Remote user args are ``(bar, byte_count, cta_id, pred)``; reorder to match
-    the helper signature ``(bar, cta_id, pred, byte_count)``.
-    """
-    if len(args) == 2:
-        result = CODEGEN_REGISTRY["tirx._ptx_mbarrier_complete_tx_local"](list(args))
-    elif len(args) == 4:
-        bar, byte_count, cta_id, pred = args
-        result = CODEGEN_REGISTRY["tirx._ptx_mbarrier_complete_tx_remote"](
-            [bar, cta_id, pred, byte_count]
+    instr = f"mbarrier.complete_tx.{sem}.{scope}.{space}.b64"
+    body = "    unsigned int barrier_addr = __cvta_generic_to_shared(barrier);\n"
+    addr = "barrier_addr"
+    if has_remote:
+        body += (
+            "    unsigned int remote_addr;\n"
+            '    asm volatile("mapa.shared::cluster.u32 %0, %1, %2;"\n'
+            '                 : "=r"(remote_addr) : "r"(barrier_addr), "r"(remote));\n'
+        )
+        addr = "remote_addr"
+    if has_pred:
+        body += (
+            "    asm volatile(\n"
+            '        "{\\n"\n'
+            '        ".reg .pred p;\\n"\n'
+            '        "setp.ne.s32 p, %2, 0;\\n"\n'
+            f'        "@p {instr} [%0], %1;\\n"\n'
+            '        "}\\n"\n'
+            f'        :: "r"({addr}), "r"(tx_count), "r"(pred) : "memory");'
         )
     else:
-        raise ValueError(f"ptx_mbarrier_complete_tx expects 2 or 4 args, got {len(args)}")
-    return result[0] if isinstance(result, tuple) else result
+        body += (
+            f'    asm volatile("{instr} [%0], %1;"\n'
+            f'                 :: "r"({addr}), "r"(tx_count) : "memory");'
+        )
+
+    return name, f"({', '.join(params)})", body
+
+
+device_intrinsic(
+    "ptx_mbarrier_complete_tx",
+    n_attrs=5,
+    helper_name=lambda *a: _ptx_mbarrier_complete_tx_parts(*a)[0],
+    c_signature=lambda *a: _ptx_mbarrier_complete_tx_parts(*a)[1],
+    body=lambda *a: _ptx_mbarrier_complete_tx_parts(*a)[2],
+)
 
 
 # =============================================================================

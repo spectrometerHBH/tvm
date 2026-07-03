@@ -20,6 +20,7 @@ import pytest
 
 import tvm
 import tvm.testing
+from tvm import tirx as tir
 from tvm.script import tirx as T
 from tvm.testing import env
 
@@ -441,12 +442,25 @@ def test_ptx_sync_and_clc_codegen():
         T.device_entry()
         tx = T.thread_id([32])
         if tx == 0:
-            bar = T.alloc_buffer((2,), "uint64", scope="shared", align=16)
+            bar = T.alloc_buffer((5,), "uint64", scope="shared", align=16)
             response = T.alloc_buffer((4,), "uint32", scope="shared", align=16)
             T.ptx.cp_async.mbarrier.arrive(bar.ptr_to([0]))
             T.ptx.cp_async.mbarrier.arrive.noinc(bar.ptr_to([0]))
             T.ptx.mbarrier.complete_tx(bar.ptr_to([0]), T.uint32(16))
-            T.ptx.mbarrier.complete_tx(bar.ptr_to([1]), T.uint32(32), T.int32(1), T.uint32(1))
+            T.ptx.mbarrier.complete_tx(
+                bar.ptr_to([1]), T.uint32(24), scope="cta", space="shared::cta"
+            )
+            T.ptx.mbarrier.complete_tx(
+                bar.ptr_to([2]),
+                T.uint32(28),
+                scope="cta",
+                space="shared::cta",
+                pred=T.uint32(1),
+            )
+            T.ptx.mbarrier.complete_tx(bar.ptr_to([3]), T.uint32(32), remote=T.int32(1))
+            T.ptx.mbarrier.complete_tx(
+                bar.ptr_to([4]), T.uint32(40), remote=T.int32(1), pred=T.uint32(1)
+            )
             T.ptx.clc_try_cancel(response.ptr_to([0]), bar.ptr_to([0]))
             A[0] = T.ptx.clc_query_cancel(response.ptr_to([0]))
             A[0] = T.ptx.clc_query_cancel(response.ptr_to([0]), use_ld_acquire=False)
@@ -459,13 +473,41 @@ def test_ptx_sync_and_clc_codegen():
     assert "cp.async.mbarrier.arrive.shared.b64" in src
     assert "cp.async.mbarrier.arrive.noinc.shared::cta.b64" in src
     assert "tirx.ptx.cp_async_mbarrier_arrive_noinc" not in src
-    assert "mbarrier.complete_tx.shared::cluster.relaxed.cluster.b64" in src
+    assert "mbarrier.complete_tx.relaxed.cluster.shared::cluster.b64" in src
+    assert "mbarrier.complete_tx.relaxed.cta.shared::cta.b64" in src
+    assert "@p mbarrier.complete_tx.relaxed.cta.shared::cta.b64" in src
+    assert "@p mbarrier.complete_tx.relaxed.cluster.shared::cluster.b64" in src
+    pred_only = _helper_source(
+        src,
+        "tvm_builtin_ptx_mbarrier_complete_tx_relaxed_cta_shared_cta_pred",
+    )
+    remote_only = _helper_source(
+        src,
+        "tvm_builtin_ptx_mbarrier_complete_tx_relaxed_cluster_shared_cluster_remote",
+    )
+    remote_pred = _helper_source(
+        src,
+        "tvm_builtin_ptx_mbarrier_complete_tx_relaxed_cluster_shared_cluster_remote_pred",
+    )
+    assert "@p mbarrier.complete_tx.relaxed.cta.shared::cta.b64" in pred_only
+    assert "mapa.shared::cluster.u32" not in pred_only
+    assert "mapa.shared::cluster.u32" in remote_only
+    assert "@p mbarrier.complete_tx" not in remote_only
+    assert "mapa.shared::cluster.u32" in remote_pred
+    assert "@p mbarrier.complete_tx.relaxed.cluster.shared::cluster.b64" in remote_pred
+    assert "mbarrier.complete_tx.shared::cluster.relaxed.cluster.b64" not in src
     assert "mapa.shared::cluster.u32" in src
     assert "clusterlaunchcontrol.try_cancel.async.shared::cta" in src
     assert "ld.acquire.cta.shared.b128" in src
     assert "ld.shared.b128" in src
     assert "clusterlaunchcontrol.query_cancel.get_first_ctaid::x.b32.b128" in src
     assert "griddepcontrol.launch_dependents" in src
+
+
+def test_ptx_mbarrier_complete_tx_rejects_remote_non_cluster_space():
+    bar = tir.Var("bar", "handle")
+    with pytest.raises(ValueError, match="requires space='shared::cluster'"):
+        T.ptx.mbarrier.complete_tx(bar, T.uint32(16), space="shared::cta", remote=T.int32(0))
 
 
 def test_ptx_mbarrier_arrive_const_true_remote_codegen():
