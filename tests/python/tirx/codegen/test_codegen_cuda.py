@@ -15,6 +15,8 @@
 # specific language governing permissions and limitations
 # under the License.
 # pylint: disable=missing-function-docstring
+import re
+
 import numpy as np
 import pytest
 
@@ -57,7 +59,11 @@ def _get_source(func: tvm.tirx.PrimFunc) -> str:
 
 
 def _helper_source(src: str, helper_name: str) -> str:
-    start = src.index(helper_name)
+    pattern = rf"__forceinline__ __device__ [^{{;]+ {re.escape(helper_name)}\("
+    match = re.search(pattern, src)
+    if match is None:
+        raise ValueError(f"helper {helper_name!r} not found")
+    start = match.start()
     next_helper = src.find("__device__", start + len(helper_name))
     if next_helper == -1:
         return src[start:]
@@ -510,24 +516,29 @@ def test_ptx_mbarrier_complete_tx_rejects_remote_non_cluster_space():
         T.ptx.mbarrier.complete_tx(bar, T.uint32(16), space="shared::cta", remote=T.int32(0))
 
 
-def test_ptx_mbarrier_arrive_const_true_remote_codegen():
+def test_ptx_mbarrier_arrive_remote_codegen():
     @T.prim_func
     def main(Pred: T.Buffer((1,), "int32")):
         T.device_entry()
         tx = T.thread_id([32])
         if tx == 0:
-            bar = T.alloc_buffer((2,), "uint64", scope="shared", align=16)
+            bar = T.alloc_buffer((3,), "uint64", scope="shared", align=16)
             T.ptx.mbarrier.arrive(bar.ptr_to([0]), cta_id=T.int32(0), pred=True)
             T.ptx.mbarrier.arrive(bar.ptr_to([1]), cta_id=T.int32(0), pred=Pred[0])
+            T.ptx.mbarrier.arrive.cluster_count(
+                bar.ptr_to([2]), cta_id=T.int32(0), count=T.int32(2)
+            )
 
     target = tvm.target.Target({"kind": "cuda", "arch": "sm_100a"})
     with target:
         mod = tvm.compile(tvm.IRModule({"main": main}), target=target, tir_pipeline="tirx")
     src = mod.mod.imports[0].inspect_source()
-    assert "tvm_builtin_ptx_mbarrier_arrive_remote_unpred" in src
-    assert "mbarrier.arrive.shared::cluster.b64  _, [remAddr32];" in src
+    assert "tvm_builtin_ptx_mbarrier_arrive_remote_unpred" not in src
+    assert "tvm_builtin_ptx_mbarrier_arrive_remote_count_unpred" not in src
     assert "tvm_builtin_ptx_mbarrier_arrive_remote(" in src
-    assert "@p mbarrier.arrive.shared::cluster.b64  _, [remAddr32];" in src
+    assert "tvm_builtin_ptx_mbarrier_arrive_remote_count(" in src
+    assert src.count("@p mbarrier.arrive.shared::cluster.b64  _, [remAddr32];") == 1
+    assert "@p mbarrier.arrive.shared::cluster.b64  _, [remAddr32], %3;" in src
 
 
 def test_cuda_ldg_vector_scatter_codegen():
