@@ -165,21 +165,29 @@ def test_ptx_ld_acquire_and_volatile_codegen():
 
 def test_ptx_f32x2_value_codegen():
     @T.prim_func
-    def main(A: T.Buffer((1,), "uint64"), B: T.Buffer((2,), "float32")):
+    def main(A: T.Buffer((2,), "uint64"), B: T.Buffer((2,), "float32")):
         T.device_entry()
         tx = T.thread_id([32])
         if tx == 0:
             lhs: T.let = T.cuda.make_float2(B[0], B[1])
             rhs: T.let = T.cuda.make_float2(B[1], B[0])
-            prod: T.let = T.ptx.mul_f32x2_val(lhs, rhs)
-            A[0] = T.ptx.fma_f32x2_val(lhs, rhs, prod)
+            prod: T.let = T.ptx.mul_f32x2(lhs, rhs, dps=False)
+            A[0] = T.ptx.fma_f32x2(lhs, rhs, prod, dps=False)
+            sum_pair: T.let = T.ptx.add_f32x2(lhs, rhs, dps=False, return_dtype="float32x2")
+            A[1] = T.ptx.sub_f32x2(sum_pair, rhs, dps=False)
 
     src, _ = _get_source(main)
-    assert "tvm_builtin_ptx_mul_f32x2_val" in src
-    assert "tvm_builtin_ptx_fma_f32x2_val_rn" in src
-    assert src.count("tvm_builtin_ptx_mul_f32x2_val") == 2
-    assert src.count("tvm_builtin_ptx_fma_f32x2_val_rn") == 2
-    assert "A_ptr[0] = tvm_builtin_ptx_fma_f32x2_val_rn(lhs, rhs, prod);" in src
+    assert "tirx.ptx.fma_f32x2_val" not in src
+    assert "tvm_builtin_ptx_mul_f32x2_ret_u64" in src
+    assert "tvm_builtin_ptx_fma_f32x2_ret_u64_rn" in src
+    assert "tvm_builtin_ptx_add_f32x2_ret_f32x2_rn" in src
+    assert "tvm_builtin_ptx_sub_f32x2_ret_u64_rn" in src
+    assert src.count("tvm_builtin_ptx_mul_f32x2_ret_u64") == 2
+    assert src.count("tvm_builtin_ptx_fma_f32x2_ret_u64_rn") == 2
+    assert "A_ptr[0] = tvm_builtin_ptx_fma_f32x2_ret_u64_rn(lhs, rhs, prod);" in src
+    assert "float2 tvm_builtin_ptx_add_f32x2_ret_f32x2_rn" in src
+    assert "float2 sum_pair" in src
+    assert "return *reinterpret_cast<float2*>(&result);" in src
     assert "mul.f32x2 %0, %1, %2;" in src
     assert "mul.rn.f32x2 %0, %1, %2;" not in src
     assert "fma.rn.f32x2 %0, %1, %2, %3;" in src
@@ -430,7 +438,7 @@ def test_tma_cache_policy_operand_codegen():
         if tx == 0:
             smem = T.alloc_buffer((128,), "float32", scope="shared", align=128)
             bar = T.shared_scalar("uint64")
-            T.ptx.cp_async.bulk.tensor.g2c(
+            T.ptx.cp_async.bulk.tensor.g2s_cluster(
                 2,
                 smem.data,
                 T.address_of(bar),
@@ -442,7 +450,7 @@ def test_tma_cache_policy_operand_codegen():
                 0,
                 cache_policy=Cache[0],
             )
-            T.ptx.cp_async.bulk.tensor.g2c(
+            T.ptx.cp_async.bulk.tensor.g2s_cluster(
                 2,
                 smem.data,
                 T.address_of(bar),
@@ -457,12 +465,11 @@ def test_tma_cache_policy_operand_codegen():
             T.ptx.cp_async.bulk.tensor.s2g(
                 2, smem.data, T.address_of(A_map), "", 0, 0, cache_policy=Cache[0]
             )
-            T.ptx.cp_async.bulk.tensor.g2c_tile_gather4(
+            T.ptx.cp_async.bulk.tensor.g2s_cta(
                 2,
                 smem.data,
                 T.address_of(bar),
                 T.address_of(A_map),
-                1,
                 2,
                 "",
                 0,
@@ -470,55 +477,58 @@ def test_tma_cache_policy_operand_codegen():
                 2,
                 3,
                 4,
+                load_mode="tile_gather4",
                 cache_policy=Cache[0],
             )
-            masked_bar = T.cuda.sm100_tma_2sm_mbarrier_addr(T.address_of(bar))
-            T.ptx.cp_async.bulk.tensor.g2c_bar_addr(
+            leader_mbar_addr = T.cuda.sm100_2sm_leader_smem_addr(T.address_of(bar))
+            T.ptx.cp_async.bulk.tensor.g2s_cluster(
                 2,
                 smem.data,
-                masked_bar,
+                leader_mbar_addr,
                 T.address_of(A_map),
                 1,
                 2,
                 "",
                 0,
                 0,
+                mbar_is_shared_addr=True,
                 cache_policy=Cache[0],
             )
             if tx == 0:
-                T.ptx.cp_async.bulk.tensor.g2c_bar_addr(
+                T.ptx.cp_async.bulk.tensor.g2s_cluster(
                     2,
                     smem.data,
-                    masked_bar,
+                    leader_mbar_addr,
                     T.address_of(A_map),
                     1,
                     2,
                     "",
                     0,
                     0,
+                    mbar_is_shared_addr=True,
                     cache_policy=Cache[0],
                 )
             else:
-                T.ptx.cp_async.bulk.tensor.g2c_bar_addr(
+                T.ptx.cp_async.bulk.tensor.g2s_cluster(
                     2,
                     smem.data,
-                    masked_bar,
+                    leader_mbar_addr,
                     T.address_of(B_map),
                     1,
                     2,
                     "",
                     0,
                     0,
+                    mbar_is_shared_addr=True,
                     cache_policy=Cache[0],
                 )
 
     src, _ = _get_source(main)
-    assert "ptx_cp_async_bulk_tensor_g2cluster_tile_2d_cache_hint" in src
-    assert "ptx_cp_async_bulk_tensor_g2cluster_tile_gather4_2d_cache_hint" in src
-    assert "ptx_cp_async_bulk_tensor_g2cluster_tile_2d_multicast_cache_hint" in src
-    assert "g2cluster_unicast" not in src
+    assert "ptx_cp_async_bulk_tensor_g2s_cluster_tile_2d_cache_hint" in src
+    assert "ptx_cp_async_bulk_tensor_g2s_cta_tile_gather4_2d_cache_hint" in src
+    assert "ptx_cp_async_bulk_tensor_g2s_cluster_tile_2d_multicast_cache_hint" in src
+    assert "g2cluster" not in src
     assert "cta_group2_unicast" not in src
-    assert "ptx_cp_async_bulk_tensor_g2cta" not in src
     assert (
         "cp.async.bulk.tensor.2d.shared::cluster.global"
         ".mbarrier::complete_tx::bytes.cta_group::2.L2::cache_hint"
@@ -533,9 +543,10 @@ def test_tma_cache_policy_operand_codegen():
         ".mbarrier::complete_tx::bytes.cta_group::2.L2::cache_hint"
     ) in src
     assert "cp.async.bulk.tensor.2d.global.shared::cta.tile.bulk_group.L2::cache_hint" in src
-    assert "tvm_builtin_cp_async_bulk_tensor_2d_g2c_cta_group2" not in src
+    assert "bar_addr &= 0xFEFFFFFFu;" not in src
+    assert "mbar_addr &= 0xFEFFFFFFu;" not in src
     assert "tvm_builtin_cuda_cvta_generic_to_shared((&(bar_ptr[0]))) & (uint)4278190079" in src
-    assert "ptx_cp_async_bulk_tensor_g2cluster_tile_2d_cache_hint_bar_addr" in src
+    assert "ptx_cp_async_bulk_tensor_g2s_cluster_tile_2d_cache_hint_mbar_addr" in src
     assert "unsigned long long cache_policy" in src
 
 

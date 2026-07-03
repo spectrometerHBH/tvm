@@ -212,7 +212,7 @@ def test_host():
                 if threadIdx == 0:
                     T.ptx.mbarrier.init(bar.data, 1)
                     T.ptx.fence.proxy_async("shared::cta")
-                    T.ptx.cp_async.bulk.tensor.g2c(2, A_smem.data, bar.data, T.address_of(A_map), 0, 1, "", 0, 0)  # noqa: E501
+                    T.ptx.cp_async.bulk.tensor.g2s_cluster(2, A_smem.data, bar.data, T.address_of(A_map), 0, 1, "", 0, 0)  # noqa: E501
                     T.ptx.mbarrier.arrive.expect_tx(bar.data, 16*16*4)
                 T.ptx.mbarrier.try_wait(bar.data, phase[0])
                 phase[0] = phase[0] ^ 1

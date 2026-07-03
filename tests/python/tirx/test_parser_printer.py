@@ -2226,8 +2226,8 @@ def test_roundtrip_cuda_func_call_source_code():
     assert_structural_equal(func, from_source(code))
 
 
-def test_roundtrip_cp_async_bulk_tensor_g2c():
-    """cp.async.bulk.tensor.g2c must round-trip with *coords at end."""
+def test_roundtrip_cp_async_bulk_tensor_g2s_cluster():
+    """cp.async.bulk.tensor.g2s_cluster must round-trip with *coords at end."""
 
     # fmt: off
     @T.prim_func(check_well_formed=False)
@@ -2237,7 +2237,7 @@ def test_roundtrip_cp_async_bulk_tensor_g2c():
         with T.launch_thread("blockIdx.x", 1):
             T.launch_thread("threadIdx.x", 128)
             A_smem = T.alloc_buffer((16, 16), "float32", scope="shared")
-            T.ptx.cp_async.bulk.tensor.g2c(
+            T.ptx.cp_async.bulk.tensor.g2s_cluster(
                 2, A_smem.data, 0, T.address_of(A_map), 0, 1, "", 0, 0
             )
     # fmt: on
@@ -2268,8 +2268,8 @@ def test_roundtrip_cp_async_bulk_tensor_s2g():
     assert_structural_equal(func, from_source(code))
 
 
-def test_roundtrip_cp_async_bulk_tensor_g2c_prefetch():
-    """cp.async.bulk.tensor.g2c_prefetch must round-trip with *coords at end."""
+def test_roundtrip_cp_async_bulk_tensor_prefetch():
+    """cp.async.bulk.tensor.prefetch must round-trip with *coords at end."""
 
     # fmt: off
     @T.prim_func(check_well_formed=False)
@@ -2278,7 +2278,7 @@ def test_roundtrip_cp_async_bulk_tensor_g2c_prefetch():
         A_map: T.let[T.handle("tensormap")] = T.tvm_stack_alloca("tensormap", 1)
         with T.launch_thread("blockIdx.x", 1):
             T.launch_thread("threadIdx.x", 128)
-            T.ptx.cp_async.bulk.tensor.g2c_prefetch(
+            T.ptx.cp_async.bulk.tensor.prefetch(
                 2, T.address_of(A_map), "", 0, 0
             )
     # fmt: on

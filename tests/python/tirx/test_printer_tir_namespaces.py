@@ -464,21 +464,22 @@ def test_printer_ptx_mma_and_wgmma():
 def test_printer_ptx_cp_async_tensor():
     tmap = tir.Var("tm", "handle")
     _assert_print(
-        cuda_op.ptx_cp_async_bulk_tensor_global_to_cluster(2, tmap, 0, tmap, 0, 1, "", 0, 1, ""),
+        cuda_op.ptx_cp_async_bulk_tensor_g2s_cluster(2, tmap, 0, tmap, 0, 1, "", 0, 1, ""),
         "tm = T.handle()\n"
-        'T.ptx.cp_async.bulk.tensor.g2c(2, tm, 0, tm, 0, 1, T.uint64(0), 0, 0, 1, "")',
+        "T.ptx.cp_async.bulk.tensor.g2s_cluster"
+        '(2, tm, 0, tm, 0, 1, T.uint64(0), 0, "tile", 0, 0, 0, 1, "")',
     )
     _assert_print(
-        cuda_op.ptx_cp_async_bulk_tensor_tile_gather4_global_to_cluster(
-            2, tmap, 0, tmap, 0, 1, "", 0, 1, ""
+        cuda_op.ptx_cp_async_bulk_tensor_g2s_cta(
+            2, tmap, 0, tmap, 1, "", 0, 1, 2, 3, 4, load_mode="tile_gather4"
         ),
         "tm = T.handle()\n"
-        "T.ptx.cp_async.bulk.tensor.g2c_tile_gather4"
-        '(2, tm, 0, tm, 0, 1, T.uint64(0), 0, 0, 1, "")',
+        "T.ptx.cp_async.bulk.tensor.g2s_cta"
+        '(2, tm, 0, tm, 1, T.uint64(0), 0, "tile_gather4", 0, 0, 1, 2, 3, 4)',
     )
     _assert_print(
-        cuda_op.ptx_cp_async_bulk_tensor_global_to_cluster_prefetch(2, tmap, "", 0, 0, ""),
-        'tm = T.handle()\nT.ptx.cp_async.bulk.tensor.g2c_prefetch(2, tm, T.uint64(0), 0, 0, 0, "")',
+        cuda_op.ptx_cp_async_bulk_tensor_prefetch(2, tmap, "", 0, 0, ""),
+        'tm = T.handle()\nT.ptx.cp_async.bulk.tensor.prefetch(2, tm, T.uint64(0), 0, 0, 0, "")',
     )
     _assert_print(
         cuda_op.ptx_cp_async_bulk_tensor_shared_to_global(2, 0, tmap, "", 0, 0, ""),

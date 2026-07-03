@@ -23,7 +23,7 @@ from tvm import tirx
 from tvm.ir import Op, PrimExpr
 from tvm.runtime import const
 from tvm.tirx.expr import Call
-from tvm.tirx.op import bitwise_and, call_intrin, tvm_access_ptr
+from tvm.tirx.op import bitwise_and, call_intrin, reinterpret, tvm_access_ptr
 from tvm.tirx.operator.intrinsics._common import CLUSTER_BARRIER_SEM as _CLUSTER_BARRIER_SEM
 from tvm.tirx.operator.intrinsics._common import (
     CP_ASYNC_BULK_CACHE_HINT as _CP_ASYNC_BULK_CACHE_HINT,
@@ -925,10 +925,31 @@ def ptx_cp_async_wait_group(num=0):
     return call_intrin("", "tirx.ptx.cp_async_wait_group", num)
 
 
-def ptx_cp_async_bulk_tensor_global_to_cluster(
-    dim, dst_ptr, bar, tensormap_addr, cta_mask, cta_group, cache_hint, *coords, cache_policy=None
+_CP_ASYNC_BULK_TENSOR_LOAD_MODE = ("tile", "tile_gather4")
+
+
+def _is_static_unicast_cta_mask(cta_mask):
+    if isinstance(cta_mask, int):
+        return cta_mask == 0 or cta_mask & (cta_mask - 1) == 0
+    if isinstance(cta_mask, tirx.IntImm):
+        value = int(cta_mask)
+        return value == 0 or value & (value - 1) == 0
+    return False
+
+
+def ptx_cp_async_bulk_tensor_g2s_cta(
+    dim,
+    dst_ptr,
+    mbar,
+    tensormap_addr,
+    cta_group,
+    cache_hint,
+    *coords,
+    cache_policy=None,
+    load_mode="tile",
+    mbar_is_shared_addr=False,
 ):
-    """TVM intrinsic to call cp.async.bulk.tensor.dim.shared::cluster.global.tile.mbarrier::complete_tx::bytes
+    """TVM intrinsic for cp.async.bulk.tensor global -> shared::cta.
 
     Parameters
     ----------
@@ -938,21 +959,15 @@ def ptx_cp_async_bulk_tensor_global_to_cluster(
     dst_ptr : PrimExpr
         The destination pointer to the shared memory.
 
-    bar : PrimExpr
-        The pointer to mbarrier variable.
+    mbar : PrimExpr
+        The mbarrier pointer, or a uint32 shared-memory address operand when
+        ``mbar_is_shared_addr`` is true.
 
     tensormap_addr : PrimExpr
         The generic address of the tensor map object.
 
-    cta_mask : int
-        The mask of the cta for multicast.
-
     cta_group : int
         Must be either 1 or 2.
-        If set to 1, mbarrier must be in the shared memory of the same CTA
-        as the shared memory destination.  If set to 2, mbarrier can be in
-        shared memory of either the same CTA as the shared memory destination
-        or the shared memory of the peer CTA.
 
     cache_hint : str
         The cache hint.
@@ -960,48 +975,67 @@ def ptx_cp_async_bulk_tensor_global_to_cluster(
     coords : List[PrimExpr]
         specifies the starting coordinates in the tensor data in the global memory
 
+    load_mode : str
+        Either ``"tile"`` or ``"tile_gather4"``.
+
+    mbar_is_shared_addr : bool
+        Whether ``mbar`` is already the uint32 shared-memory address operand.
+
     Returns
     -------
     call : PrimExpr
         The call expression.
-    """  # noqa: E501
+    """
     _choice("cta_group", cta_group, _TCGEN05_CTA_GROUP)
+    _choice("load_mode", load_mode, _CP_ASYNC_BULK_TENSOR_LOAD_MODE)
     if isinstance(cache_hint, PrimExpr):
-        has_cache_policy, *coords = coords
+        has_cache_policy, load_mode, mbar_is_shared_addr, *coords = coords
         return call_intrin(
             "",
-            "tirx.ptx.cp_async_bulk_tensor_global_to_cluster",
+            "tirx.ptx.cp_async_bulk_tensor_g2s_cta",
             dim,
             dst_ptr,
-            bar,
+            mbar,
             tensormap_addr,
-            cta_mask,
             cta_group,
             cache_hint,
             has_cache_policy,
+            load_mode,
+            mbar_is_shared_addr,
             *coords,
         )
     cache_policy, has_cache_policy = _resolve_cache_policy(cache_hint, cache_policy)
     return call_intrin(
         "",
-        "tirx.ptx.cp_async_bulk_tensor_global_to_cluster",
+        "tirx.ptx.cp_async_bulk_tensor_g2s_cta",
         dim,
         dst_ptr,
-        bar,
+        mbar,
         tensormap_addr,
-        cta_mask,
         cta_group,
         cache_policy,
         int(has_cache_policy),
+        load_mode,
+        int(bool(mbar_is_shared_addr)),
         *coords,
     )
 
 
-def ptx_cp_async_bulk_tensor_tile_gather4_global_to_cluster(
-    dim, dst_ptr, bar, tensormap_addr, cta_mask, cta_group, cache_hint, *coords, cache_policy=None
+def ptx_cp_async_bulk_tensor_g2s_cluster(
+    dim,
+    dst_ptr,
+    mbar,
+    tensormap_addr,
+    cta_mask,
+    cta_group,
+    cache_hint,
+    *coords,
+    cache_policy=None,
+    load_mode="tile",
+    mbar_is_shared_addr=False,
+    multicast=None,
 ):
-    """TVM intrinsic to call
-    cp.async.bulk.tensor.dim.shared::cluster.global.tile::gather4.mbarrier::complete_tx::bytes
+    """TVM intrinsic for cp.async.bulk.tensor global -> shared::cluster.
 
     Parameters
     ----------
@@ -1011,8 +1045,9 @@ def ptx_cp_async_bulk_tensor_tile_gather4_global_to_cluster(
     dst_ptr : PrimExpr
         The destination pointer to the shared memory.
 
-    bar : PrimExpr
-        The pointer to mbarrier variable.
+    mbar : PrimExpr
+        The mbarrier pointer, or a uint32 shared-memory address operand when
+        ``mbar_is_shared_addr`` is true.
 
     tensormap_addr : PrimExpr
         The generic address of the tensor map object.
@@ -1027,7 +1062,17 @@ def ptx_cp_async_bulk_tensor_tile_gather4_global_to_cluster(
         The cache hint.
 
     coords : List[PrimExpr]
-        The TMA coordinates followed by the 4 gather row indices.
+        Specifies the starting coordinates in the tensor data in global memory.
+
+    load_mode : str
+        Either ``"tile"`` or ``"tile_gather4"``.
+
+    mbar_is_shared_addr : bool
+        Whether ``mbar`` is already the uint32 shared-memory address operand.
+
+    multicast : bool, optional
+        Whether to emit ``.multicast::cluster``. If omitted, infer it from a
+        static ``cta_mask``; dynamic masks are treated as multicast.
 
     Returns
     -------
@@ -1035,33 +1080,42 @@ def ptx_cp_async_bulk_tensor_tile_gather4_global_to_cluster(
         The call expression.
     """
     _choice("cta_group", cta_group, _TCGEN05_CTA_GROUP)
+    _choice("load_mode", load_mode, _CP_ASYNC_BULK_TENSOR_LOAD_MODE)
     if isinstance(cache_hint, PrimExpr):
-        has_cache_policy, *coords = coords
+        has_cache_policy, load_mode, mbar_is_shared_addr, multicast, *coords = coords
         return call_intrin(
             "",
-            "tirx.ptx.cp_async_bulk_tensor_tile_gather4_global_to_cluster",
+            "tirx.ptx.cp_async_bulk_tensor_g2s_cluster",
             dim,
             dst_ptr,
-            bar,
+            mbar,
             tensormap_addr,
             cta_mask,
             cta_group,
             cache_hint,
             has_cache_policy,
+            load_mode,
+            mbar_is_shared_addr,
+            multicast,
             *coords,
         )
     cache_policy, has_cache_policy = _resolve_cache_policy(cache_hint, cache_policy)
+    if multicast is None:
+        multicast = not _is_static_unicast_cta_mask(cta_mask)
     return call_intrin(
         "",
-        "tirx.ptx.cp_async_bulk_tensor_tile_gather4_global_to_cluster",
+        "tirx.ptx.cp_async_bulk_tensor_g2s_cluster",
         dim,
         dst_ptr,
-        bar,
+        mbar,
         tensormap_addr,
         cta_mask,
         cta_group,
         cache_policy,
         int(has_cache_policy),
+        load_mode,
+        int(bool(mbar_is_shared_addr)),
+        int(bool(multicast)),
         *coords,
     )
 
@@ -1118,9 +1172,7 @@ def ptx_cp_async_bulk_tensor_shared_to_global(
     )
 
 
-def ptx_cp_async_bulk_tensor_global_to_cluster_prefetch(
-    dim, tensormap_addr, cache_hint, *coords, cache_policy=None
-):
+def ptx_cp_async_bulk_tensor_prefetch(dim, tensormap_addr, cache_hint, *coords, cache_policy=None):
     """TVM intrinsic to call cp.async.bulk.prefetch.tensor.dim.L2.global.tile
 
     Parameters
@@ -1146,7 +1198,7 @@ def ptx_cp_async_bulk_tensor_global_to_cluster_prefetch(
         has_cache_policy, *coords = coords
         return call_intrin(
             "",
-            "tirx.ptx.cp_async_bulk_tensor_global_to_cluster_prefetch",
+            "tirx.ptx.cp_async_bulk_tensor_prefetch",
             dim,
             tensormap_addr,
             cache_hint,
@@ -1156,7 +1208,7 @@ def ptx_cp_async_bulk_tensor_global_to_cluster_prefetch(
     cache_policy, has_cache_policy = _resolve_cache_policy(cache_hint, cache_policy)
     return call_intrin(
         "",
-        "tirx.ptx.cp_async_bulk_tensor_global_to_cluster_prefetch",
+        "tirx.ptx.cp_async_bulk_tensor_prefetch",
         dim,
         tensormap_addr,
         cache_policy,
@@ -3277,9 +3329,12 @@ def cuda_smem_addr_from_uint64(cluster_addr):
     return call_intrin("uint32", "tirx.cuda.smem_addr_from_uint64", cluster_addr)
 
 
-def cuda_sm100_tma_2sm_mbarrier_addr(bar):
-    """Compute the SM100 2SM TMA mbarrier shared-address operand."""
-    return bitwise_and(cuda_cvta_generic_to_shared(bar), const(0xFEFFFFFF, dtype="uint32"))
+def cuda_sm100_2sm_leader_smem_addr(ptr):
+    """Return the SM100 2SM leader CTA shared-address operand.
+
+    The input is a generic pointer to shared memory.
+    """
+    return bitwise_and(cuda_cvta_generic_to_shared(ptr), const(0xFEFFFFFF, dtype="uint32"))
 
 
 def ptx_exp2(x):
@@ -3383,6 +3438,62 @@ def _ptx_binary_arith(op_name, dtype, d, a, b, *, rounding="rn", ftz=False, sat=
     )
 
 
+_PTX_F32X2_VALUE_RETURN_DTYPES = ("uint64", "float32x2")
+
+
+def _validate_f32x2_value_return_dtype(return_dtype: str) -> str:
+    if return_dtype not in _PTX_F32X2_VALUE_RETURN_DTYPES:
+        raise ValueError(
+            f"invalid return_dtype={return_dtype!r}; expected one of "
+            f"{_PTX_F32X2_VALUE_RETURN_DTYPES}"
+        )
+    return return_dtype
+
+
+def _as_f32x2_bits(value):
+    if isinstance(value, PrimExpr) and str(value.ty) == "float32x2":
+        return reinterpret("uint64", value)
+    return value
+
+
+def _ptx_binary_f32x2(op_name, *args, rounding="rn", ftz=False, dps=True, return_dtype="uint64"):
+    """Shared helper for packed f32x2 binary forms.
+
+    ``dps=True`` emits the destination-passing form and returns void.
+    ``dps=False`` returns either packed ``uint64`` bits or ``float32x2``.
+    """
+    _choice("rounding", rounding, _F32X2_ROUND)
+    if dps:
+        if len(args) != 3:
+            raise TypeError(f"ptx_{op_name}_f32x2 dps form expects (d_addr, a, b)")
+        d, a, b = args
+        return call_intrin(
+            "",
+            f"tirx.ptx.{op_name}_f32x2",
+            d,
+            _as_f32x2_bits(a),
+            _as_f32x2_bits(b),
+            rounding,
+            int(ftz),
+            int(True),
+            "void",
+        )
+    if len(args) != 2:
+        raise TypeError(f"ptx_{op_name}_f32x2 value form expects (a, b)")
+    return_dtype = _validate_f32x2_value_return_dtype(return_dtype)
+    a, b = args
+    return call_intrin(
+        return_dtype,
+        f"tirx.ptx.{op_name}_f32x2",
+        _as_f32x2_bits(a),
+        _as_f32x2_bits(b),
+        rounding,
+        int(ftz),
+        int(False),
+        return_dtype,
+    )
+
+
 def _ptx_fma(dtype, d, a, b, c, *, rounding="rn", ftz=False, sat=False):
     """Shared helper for fma over (f32 | f32x2 | f64), DPS form."""
     _choice("rounding", rounding, _F32X2_ROUND)
@@ -3403,17 +3514,56 @@ def _ptx_fma(dtype, d, a, b, c, *, rounding="rn", ftz=False, sat=False):
     )
 
 
+def _ptx_fma_f32x2(*args, rounding="rn", ftz=False, dps=True, return_dtype="uint64"):
+    """Shared helper for packed f32x2 fma forms."""
+    _choice("rounding", rounding, _F32X2_ROUND)
+    if dps:
+        if len(args) != 4:
+            raise TypeError("ptx_fma_f32x2 dps form expects (d_addr, a, b, c)")
+        d, a, b, c = args
+        return call_intrin(
+            "",
+            "tirx.ptx.fma_f32x2",
+            d,
+            _as_f32x2_bits(a),
+            _as_f32x2_bits(b),
+            _as_f32x2_bits(c),
+            rounding,
+            int(ftz),
+            int(True),
+            "void",
+        )
+    if len(args) != 3:
+        raise TypeError("ptx_fma_f32x2 value form expects (a, b, c)")
+    return_dtype = _validate_f32x2_value_return_dtype(return_dtype)
+    a, b, c = args
+    return call_intrin(
+        return_dtype,
+        "tirx.ptx.fma_f32x2",
+        _as_f32x2_bits(a),
+        _as_f32x2_bits(b),
+        _as_f32x2_bits(c),
+        rounding,
+        int(ftz),
+        int(False),
+        return_dtype,
+    )
+
+
 def ptx_add_f32(d_addr, a, b, *, rounding="rn", ftz=False, sat=False):
     """PTX ``add{.rnd}{.ftz}{.sat}.f32 [d_addr], a, b`` — DPS form."""
     return _ptx_binary_arith("add", "f32", d_addr, a, b, rounding=rounding, ftz=ftz, sat=sat)
 
 
-def ptx_add_f32x2(d_addr, a, b, *, rounding="rn", ftz=False):
-    """PTX ``add{.rnd}{.ftz}.f32x2 [d_addr], a, b`` — DPS form.
+def ptx_add_f32x2(*args, rounding="rn", ftz=False, dps=True, return_dtype="uint64"):
+    """PTX ``add{.rnd}{.ftz}.f32x2``.
 
-    a, b are packed-as-uint64 register operands (2 fp32 each).
+    DPS form: ``(d_addr, a, b, dps=True)`` returns void.
+    Value form: ``(a, b, dps=False)`` returns ``return_dtype``.
     """
-    return _ptx_binary_arith("add", "f32x2", d_addr, a, b, rounding=rounding, ftz=ftz)
+    return _ptx_binary_f32x2(
+        "add", *args, rounding=rounding, ftz=ftz, dps=dps, return_dtype=return_dtype
+    )
 
 
 def ptx_add_f64(d_addr, a, b, *, rounding="rn"):
@@ -3426,9 +3576,11 @@ def ptx_sub_f32(d_addr, a, b, *, rounding="rn", ftz=False, sat=False):
     return _ptx_binary_arith("sub", "f32", d_addr, a, b, rounding=rounding, ftz=ftz, sat=sat)
 
 
-def ptx_sub_f32x2(d_addr, a, b, *, rounding="rn", ftz=False):
-    """PTX ``sub{.rnd}{.ftz}.f32x2 [d_addr], a, b`` — DPS form."""
-    return _ptx_binary_arith("sub", "f32x2", d_addr, a, b, rounding=rounding, ftz=ftz)
+def ptx_sub_f32x2(*args, rounding="rn", ftz=False, dps=True, return_dtype="uint64"):
+    """PTX ``sub{.rnd}{.ftz}.f32x2``; see :func:`ptx_add_f32x2`."""
+    return _ptx_binary_f32x2(
+        "sub", *args, rounding=rounding, ftz=ftz, dps=dps, return_dtype=return_dtype
+    )
 
 
 def ptx_sub_f64(d_addr, a, b, *, rounding="rn"):
@@ -3441,30 +3593,11 @@ def ptx_mul_f32(d_addr, a, b, *, rounding="rn", ftz=False, sat=False):
     return _ptx_binary_arith("mul", "f32", d_addr, a, b, rounding=rounding, ftz=ftz, sat=sat)
 
 
-def ptx_mul_f32x2(d_addr, a, b, *, rounding="", ftz=False):
-    """PTX ``mul{.rnd}{.ftz}.f32x2 [d_addr], a, b`` — DPS form."""
-    return _ptx_binary_arith("mul", "f32x2", d_addr, a, b, rounding=rounding, ftz=ftz)
-
-
-def _ptx_binary_f32x2_val(op_name, a, b, *, rounding="rn", ftz=False):
-    """Shared helper for packed f32x2 register-result binary forms."""
-    _choice("rounding", rounding, _F32X2_ROUND)
-    return call_intrin("uint64", f"tirx.ptx.{op_name}_f32x2_val", a, b, rounding, int(ftz))
-
-
-def ptx_add_f32x2_val(a, b, *, rounding="rn", ftz=False):
-    """PTX ``add{.rnd}{.ftz}.f32x2 d, a, b`` returning packed uint64."""
-    return _ptx_binary_f32x2_val("add", a, b, rounding=rounding, ftz=ftz)
-
-
-def ptx_sub_f32x2_val(a, b, *, rounding="rn", ftz=False):
-    """PTX ``sub{.rnd}{.ftz}.f32x2 d, a, b`` returning packed uint64."""
-    return _ptx_binary_f32x2_val("sub", a, b, rounding=rounding, ftz=ftz)
-
-
-def ptx_mul_f32x2_val(a, b, *, rounding="", ftz=False):
-    """PTX ``mul{.rnd}{.ftz}.f32x2 d, a, b`` returning packed uint64."""
-    return _ptx_binary_f32x2_val("mul", a, b, rounding=rounding, ftz=ftz)
+def ptx_mul_f32x2(*args, rounding="", ftz=False, dps=True, return_dtype="uint64"):
+    """PTX ``mul{.rnd}{.ftz}.f32x2``; see :func:`ptx_add_f32x2`."""
+    return _ptx_binary_f32x2(
+        "mul", *args, rounding=rounding, ftz=ftz, dps=dps, return_dtype=return_dtype
+    )
 
 
 def ptx_mul_f64(d_addr, a, b, *, rounding="rn"):
@@ -3477,18 +3610,13 @@ def ptx_fma_f32(d_addr, a, b, c, *, rounding="rn", ftz=False, sat=False):
     return _ptx_fma("f32", d_addr, a, b, c, rounding=rounding, ftz=ftz, sat=sat)
 
 
-def ptx_fma_f32x2(d_addr, a, b, c, *, rounding="rn", ftz=False):
-    """PTX ``fma{.rnd}{.ftz}.f32x2 [d_addr], a, b, c`` — DPS form.
+def ptx_fma_f32x2(*args, rounding="rn", ftz=False, dps=True, return_dtype="uint64"):
+    """PTX ``fma{.rnd}{.ftz}.f32x2``.
 
-    a, b, c are packed-as-uint64 register operands.
+    DPS form: ``(d_addr, a, b, c, dps=True)`` returns void.
+    Value form: ``(a, b, c, dps=False)`` returns ``return_dtype``.
     """
-    return _ptx_fma("f32x2", d_addr, a, b, c, rounding=rounding, ftz=ftz)
-
-
-def ptx_fma_f32x2_val(a, b, c, *, rounding="rn", ftz=False):
-    """PTX ``fma{.rnd}{.ftz}.f32x2 d, a, b, c`` returning packed uint64."""
-    _choice("rounding", rounding, _F32X2_ROUND)
-    return call_intrin("uint64", "tirx.ptx.fma_f32x2_val", a, b, c, rounding, int(ftz))
+    return _ptx_fma_f32x2(*args, rounding=rounding, ftz=ftz, dps=dps, return_dtype=return_dtype)
 
 
 def ptx_fma_f64(d_addr, a, b, c, *, rounding="rn"):

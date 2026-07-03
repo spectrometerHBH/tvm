@@ -2,13 +2,12 @@ Run the full TIRX test suite.
 
 ## Steps
 
-1. Install the kernel package and select the least busy GPU:
+1. Point Python at this workspace's repos and select the least busy GPU:
    ```bash
-   pip install -e /path/to/tirx-kernels-staging   # or sibling tirx-kernels checkout
+   export WORKSPACE=/path/to/workspace
    export CUDA_VISIBLE_DEVICES=$(nvidia-smi --query-gpu=index,memory.used --format=csv,noheader,nounits | sort -t',' -k2 -n | head -1 | cut -d',' -f1 | tr -d ' ')
-   export TVM_PATH=/path/to/tvm
-   export PYTHONPATH="${TVM_PATH}/python"
-   export TVM_LIBRARY_PATH="${TVM_PATH}/build/lib"
+   export PYTHONPATH="${WORKSPACE}/tirx-kernels:${WORKSPACE}/tvm/python"
+   export TVM_LIBRARY_PATH="${WORKSPACE}/tvm/build/lib"
    ```
 
 2. Start the GPU monitor in the background so we can detect if anyone else lands on the same GPU mid-run:
