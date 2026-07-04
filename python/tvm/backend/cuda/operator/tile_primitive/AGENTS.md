@@ -24,6 +24,25 @@ proofs. The proofs are normative: they state the invariants the dispatchers
 rely on and why the emitted IR is semantically equal to the primitive's
 declared semantics.
 
+## Answering "does dispatch support X?"
+
+Never conclude a primitive or case is unsupported from a name grep. The
+support surface is defined by:
+
+1. the **capability index**
+   `.agents/docs/tile_primitive_capabilities.md` (repo root) — per-variant
+   scopes, directions, frag/thread-axis support, and acceptance constraints;
+2. the `register_dispatch(...)` sites and their `predicate` functions in
+   this directory (the executable ground truth);
+3. the **acceptance-domain** sections of the correctness proofs (they
+   characterize exactly which calls are accepted);
+4. the layout thread axes (`Axis.tid_in_wg` / `laneid` / `wid_in_wg`,
+   `python/tvm/tirx/layout.py`) — local buffers with thread-axis TileLayouts
+   are distributed register tiles (frags) and are first-class copy operands.
+
+Check all of these before answering a support question or advising a kernel
+author that something needs a new primitive.
+
 ## Required reading before editing dispatch logic
 
 Before modifying any of the following files, read the matching proof in
