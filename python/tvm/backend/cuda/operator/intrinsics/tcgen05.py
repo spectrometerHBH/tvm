@@ -442,6 +442,22 @@ _TCGEN05_MMA_K = {
     "mxf4nvf4": (64, 128),
 }
 
+# Operand dtypes that admit a transposed (MN-major) SMEM read in dense
+# tcgen05.mma. Shared with the gemm_async dispatcher's compile-time
+# instruction-descriptor fold so both paths validate identically.
+_TCGEN05_MMA_TRANS_DTYPES = frozenset(
+    {
+        PTXDataType.FLOAT8_E4M3FN,
+        PTXDataType.FLOAT8_E4M3FNUZ,
+        PTXDataType.FLOAT8_E5M2,
+        PTXDataType.INT8,
+        PTXDataType.UINT8,
+        PTXDataType.FLOAT16,
+        PTXDataType.BFLOAT16,
+        PTXDataType.TENSOR_FLOAT32,
+    }
+)
+
 
 def _check_tcgen05_mma_matrix_shape(kind, cta_group, m, n, k, is_sparse):
     err = (
@@ -573,19 +589,9 @@ def codegen_ptx_tcgen05_encode_instr_descriptor(
     a_format = format_map[atype]
     b_format = format_map[btype]
 
-    valid_dtypes_for_trans = {
-        PTXDataType.FLOAT8_E4M3FN,
-        PTXDataType.FLOAT8_E4M3FNUZ,
-        PTXDataType.FLOAT8_E5M2,
-        PTXDataType.INT8,
-        PTXDataType.UINT8,
-        PTXDataType.FLOAT16,
-        PTXDataType.BFLOAT16,
-        PTXDataType.TENSOR_FLOAT32,
-    }
-    if trans_a and atype not in valid_dtypes_for_trans:
+    if trans_a and atype not in _TCGEN05_MMA_TRANS_DTYPES:
         raise ValueError(f"Invalid a_dtype for transpose: {a_dtype}")
-    if trans_b and btype not in valid_dtypes_for_trans:
+    if trans_b and btype not in _TCGEN05_MMA_TRANS_DTYPES:
         raise ValueError(f"Invalid b_dtype for transpose: {b_dtype}")
     if (neg_a or neg_b) and kind not in ["f16", "tf32", "f8f6f4"]:
         raise ValueError(f"Invalid kind for negate: {kind}")

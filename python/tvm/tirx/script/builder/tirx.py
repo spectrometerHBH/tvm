@@ -650,10 +650,12 @@ def tcgen05_instr_desc(
 ):
     """Encode a dense tcgen05 MMA instruction descriptor.
 
-    This helper keeps descriptor setup in the ``Tx`` surface so kernels can
-    declare one descriptor outside a loop and pass it to
-    ``Tx.gemm_async(..., descI=...)`` without spelling the raw PTX intrinsic at
-    each call site.
+    This helper keeps descriptor setup in the ``Tx`` surface for kernels that
+    issue ``T.ptx.tcgen05.mma`` directly, without spelling the raw PTX
+    intrinsic at each call site. Note that dense ``Tx.gemm_async`` no longer
+    accepts a hand-passed ``descI``: the dispatcher folds the descriptor to a
+    literal uint32 itself (only block-scaled gemm_async still takes ``descI``
+    for the hoisted-encode + per-ki sf_id rotation pattern).
     """
     from tvm.backend.cuda import op as _cuda_op  # pylint: disable=import-outside-toplevel
 

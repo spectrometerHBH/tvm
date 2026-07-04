@@ -45,6 +45,12 @@ from tvm.tirx.operator.tile_primitive import DispatchContext, predicate, registe
 from tvm.tirx.stmt import AllocBuffer, Evaluate, SeqStmt
 from tvm.tirx.tile_primitive import TilePrimitiveCall
 
+from ...intrinsics.tcgen05 import (
+    _TCGEN05_MMA_TRANS_DTYPES,
+    _check_tcgen05_mma_matrix_shape,
+    _get_tcgen05_mma_kind,
+)
+from ...intrinsics.types import PTXDataType
 from ..common import get_st_extent, smem_desc_add_16B_offset
 from ..exec_scope_utils import single_thread
 from ..tma_utils import (
@@ -86,11 +92,13 @@ def _dtype_name(dtype) -> str:
 def _encode_instr_descriptor_dense_uint32(
     M,
     N,
+    K,
     d_dtype,
     a_dtype,
     b_dtype,
     trans_a,
     trans_b,
+    cta_group=1,
     neg_a=False,
     neg_b=False,
     sat_d=False,
@@ -103,10 +111,34 @@ def _encode_instr_descriptor_dense_uint32(
     ``T.ptx.tcgen05.mma`` instead of allocating + encoding a per-dispatch
     local descriptor on every gemm_async call (which forces an inline ``asm``
     block that ptxas cannot hoist out of the i_kv loop body).
+
+    Mirrors the runtime encoder's validation
+    (``codegen_ptx_tcgen05_encode_instr_descriptor``): the compile-time fold
+    must not accept kind/shape/trans combinations the runtime encoder would
+    reject — e.g. cta_group=1 M=128 requires N % 16 == 0, which the tile
+    chooser alone does not guarantee (it only enforces N % 8).
     """
     d_dtype = _dtype_name(d_dtype)
     a_dtype = _dtype_name(a_dtype)
     b_dtype = _dtype_name(b_dtype)
+
+    # PTXDataType spells tensor-float32 as "tf32".
+    _PTX_NAME = {"tensor_float32": "tf32"}
+    d_ptx_name = _PTX_NAME.get(d_dtype, d_dtype)
+    a_ptx_name = _PTX_NAME.get(a_dtype, a_dtype)
+    b_ptx_name = _PTX_NAME.get(b_dtype, b_dtype)
+    kind = _get_tcgen05_mma_kind(d_ptx_name, a_ptx_name, b_ptx_name)
+    if kind not in ("f16", "tf32", "f8f6f4", "i8"):
+        raise ValueError(
+            f"Check failed for Data Type Kind. d_dtype: {d_dtype}, "
+            f"a_dtype: {a_dtype}, b_dtype: {b_dtype}"
+        )
+    _check_tcgen05_mma_matrix_shape(kind, cta_group, int(M), int(N), int(K), is_sparse)
+    if trans_a and PTXDataType.from_string(a_ptx_name) not in _TCGEN05_MMA_TRANS_DTYPES:
+        raise ValueError(f"Invalid a_dtype for transpose: {a_dtype}")
+    if trans_b and PTXDataType.from_string(b_ptx_name) not in _TCGEN05_MMA_TRANS_DTYPES:
+        raise ValueError(f"Invalid b_dtype for transpose: {b_dtype}")
+
     d_format = _INSTR_DESC_FORMAT_MAP[d_dtype]
     a_format = _INSTR_DESC_FORMAT_MAP[a_dtype]
     b_format = _INSTR_DESC_FORMAT_MAP[b_dtype]
@@ -357,6 +389,8 @@ def gemm_async_tcgen05_impl(op_call: TilePrimitiveCall, sctx: DispatchContext) -
             Config:
             - config["cta_group"]: CTA group in tcgen05 instructions (default 1)
             - config["descI"]: Optional pre-encoded instruction descriptor
+              (block-scaled only; the dense path always self-encodes and
+              raises if descI is passed)
         sctx: Schedule context (single-thread or warp execution scope)
 
     Returns:
@@ -481,8 +515,19 @@ def gemm_async_tcgen05_impl(op_call: TilePrimitiveCall, sctx: DispatchContext) -
 
     cta_group = op_call.config.get("cta_group", 1)
     assert cta_group in [1, 2], f"tcgen05 schedule expected cta_group=1 or 2, got {cta_group}"
-    # descI: pre-encoded instruction descriptor (uint32), if None we encode it locally
+    # descI: pre-encoded instruction descriptor (uint32). The dense path no
+    # longer accepts it: a hand-passed descI performs zero cross-checks
+    # against the dispatcher-constructed descA/descB majorness (historically
+    # this masked a majorness/field desync) and the dispatcher folds the dense
+    # descriptor to a literal uint32 itself. Block-scaled callers may still
+    # hoist the encode above their loops and pass it in (the dispatcher
+    # rotates the per-ki sf_id on a local copy; see
+    # tirx-kernels deepgemm/mqa_logits_fp4.py).
     descI = op_call.config.get("descI", None)
+    if descI is not None and not is_block_scaled:
+        raise ValueError(
+            "descI was removed: the dispatcher encodes the instruction descriptor itself"
+        )
 
     C_elem_size = DataType(C_type).bits
     C_elem_per_32b = 32 // C_elem_size
@@ -568,6 +613,20 @@ def gemm_async_tcgen05_impl(op_call: TilePrimitiveCall, sctx: DispatchContext) -
                     return None
                 tiler_shape = [s // a for s, a in zip(shape_2d, atom_shape)]
                 tiler_grouped, seps = tiler.canonicalize().group(tiler_shape)
+                # Each tiler dimension must group into exactly one iter:
+                # the ldo/sdo fields below read shard[-1]/shard[-2], i.e.
+                # only the *innermost* iter of each dimension. A multi-iter
+                # group (non-uniform atom grid, e.g. an atom tiling with a
+                # stride gap between atom blocks) would silently take the
+                # local inner stride and drop the outer structure, so a
+                # single MMA spanning several atom groups would walk wrong
+                # addresses (audit B7 — same hazard class as the fixed
+                # majorness/field desync). mma_shared_layout-family layouts
+                # always produce single-iter groups; anything else falls
+                # through to the "no MMA SMEM descriptor matches" rejection.
+                seps = list(seps)
+                if seps != list(range(len(tiler_shape) + 1)):
+                    return None
                 elem_per_128b = 128 // tvm.DataType(dtype).bits
 
                 # extent==1 leading dim -> unused LBO/SBO offset.
@@ -701,7 +760,22 @@ def gemm_async_tcgen05_impl(op_call: TilePrimitiveCall, sctx: DispatchContext) -
                     and int(dim2.stride) == 1
                 )
                 if is_packed_16B:
-                    return SwizzleMode.SWIZZLE_NONE, shape_2d[0], elem_per_16B, is_transposed
+                    # SBO of the packed-16B no-swizzle layout is the 8-row
+                    # group pitch: 8 rows x 16B = 128B, i.e. a literal 8 in
+                    # 16B units regardless of dtype (PTX ISA §9.7.16.3.2).
+                    # The previous ``sdo = elem_per_16B`` expression only
+                    # equals 8 for 16-bit dtypes; that is also the only
+                    # domain this encoding has been hardware-validated on
+                    # (FlashMLA + unit tests, all bf16), so reject other
+                    # dtypes instead of silently extending the domain.
+                    if elem_per_16B != 8:
+                        raise ValueError(
+                            f"gemm_async: no-swizzle packed-16B SMEM descriptors are "
+                            f"only supported for 16-bit dtypes (8 elements per 16B "
+                            f"line); got dtype {dtype} with {elem_per_16B} elements "
+                            f"per 16B line"
+                        )
+                    return SwizzleMode.SWIZZLE_NONE, shape_2d[0], 8, is_transposed
 
             dim0, dim1 = shard[-2], shard[-1]
             is_col_major = int(dim0.stride) == 1 and int(dim1.stride) == shape_2d[0]
@@ -710,19 +784,49 @@ def gemm_async_tcgen05_impl(op_call: TilePrimitiveCall, sctx: DispatchContext) -
                     "gemm_async: no-swizzle SMEM descriptors currently require the "
                     "penultimate matrix dimension to be contiguous or 16B-packed"
                 )
-            if shape_2d[0] % elem_per_16B != 0:
+            if shape_2d[0] != 8 * elem_per_16B:
+                # The SBO field emitted below is the literal 8 (128B row-group
+                # pitch); it only agrees with this view's packed ABI when the
+                # contiguous dimension spans exactly 8 x 16B = 128B, i.e.
+                # 8 * elem_per_16B elements (64 for bf16). A longer contiguous
+                # dim (e.g. M=128 col-major bf16) would need SBO 8 while the
+                # old ``shape_2d[0] // elem_per_16B`` expression encoded 16 —
+                # silently reading the wrong rows. Reject outside the domain.
                 raise ValueError(
-                    f"gemm_async: no-swizzle contiguous dimension {shape_2d[0]} must be "
-                    f"a multiple of 16B ({elem_per_16B} elements for {dtype})"
+                    f"gemm_async: no-swizzle column-major-view SMEM descriptors "
+                    f"require the contiguous matrix dimension to span exactly 128B "
+                    f"(= {8 * elem_per_16B} elements for {dtype}); got "
+                    f"{shape_2d[0]}. Use a swizzled or packed-16B layout for "
+                    f"larger tiles."
                 )
             # No-swizzle tcgen05 descriptors use byte-offset fields differently
             # from the swizzled atom matcher below.  This branch reproduces the
-            # descriptor ABI used by FlashMLA's column-major S tiles:
+            # descriptor ABI used by FlashMLA's column-major S-tile *views*:
             # ldo is the K-column stride in elements, while sdo advances one
             # 16B group along the contiguous matrix dimension.
+            #
+            # The returned majorness must agree with this (ldo, sdo) encoding,
+            # and that encoding is K-major, NOT MN-major, despite the view's
+            # MN-contiguous strides.  The column-major view is a stride
+            # fiction: FlashMLA physically stores the S tile 16B-line packed
+            # along K (elem offset 8*m + 8*MN*(k//8) + k%8 — the same order as
+            # the packed-16B branch above), and the view's strides merely
+            # reproduce the byte offsets of that K-major layout (they coincide
+            # exactly when the contiguous dim is 64 elements of a 16-bit
+            # dtype).  Hardware consumes it with the instruction-descriptor
+            # transpose bit CLEAR (bit-exact-validated by FlashMLA head64 with
+            # hand trans_a=0 descriptors, and by the no_swizzle_col_major unit
+            # test); returning "MN-major" here pairs an MN-major instruction
+            # bit with K-major offsets and miscompiles once the dispatcher
+            # encodes descI locally.  Matching the packed-16B branch above,
+            # the flag is `is_transposed`.
             ldo = int(dim1.stride)
-            sdo = shape_2d[0] // elem_per_16B
-            return SwizzleMode.SWIZZLE_NONE, ldo, sdo, not is_transposed
+            # True SBO field: 8-row group pitch = 128B = literal 8 in 16B
+            # units (PTX ISA §9.7.16.3.2). Equal to the old
+            # ``shape_2d[0] // elem_per_16B`` expression exactly on the
+            # domain enforced above.
+            sdo = 8
+            return SwizzleMode.SWIZZLE_NONE, ldo, sdo, is_transposed
 
         result = _match(slice_layout, shape_2d)
         if result is not None:
@@ -760,6 +864,25 @@ def gemm_async_tcgen05_impl(op_call: TilePrimitiveCall, sctx: DispatchContext) -
     B_swizzle_mode, B_ldo, B_sdo, b_mn_major = compute_canonical_params(
         B_buffer, B_buffer_region, B_type, transB
     )
+
+    # tf32 operands are only PTX-legal as MN-major with the 128B-32B-atomicity
+    # swizzle (layout_type=1, PTX ISA Table 52), a mode the atom matcher never
+    # produces. Any tf32 MN-major match here would therefore encode an illegal
+    # majorness/swizzle pairing that the hardware does not support — reject
+    # instead of silently emitting it. tf32 GEMMs must keep both operands
+    # K-major (contiguous along K).
+    if A_sem in ("tf32", "tensor_float32") and not a_is_tmem and a_mn_major:
+        raise ValueError(
+            "gemm_async: tf32 A operand matched an MN-major SMEM layout, which is "
+            "PTX-illegal without 128B-32B-atomicity swizzle support; lay A out "
+            "K-major (K contiguous) instead"
+        )
+    if B_sem in ("tf32", "tensor_float32") and b_mn_major:
+        raise ValueError(
+            "gemm_async: tf32 B operand matched an MN-major SMEM layout, which is "
+            "PTX-illegal without 128B-32B-atomicity swizzle support; lay B out "
+            "K-major (K contiguous) instead"
+        )
 
     # Extract K from A dims using transA (shape order).
     # transA tells us which dim is K; a_mn_major tells us the layout orientation.
@@ -833,6 +956,24 @@ def gemm_async_tcgen05_impl(op_call: TilePrimitiveCall, sctx: DispatchContext) -
             packed_n2 = True
         except (AssertionError, ValueError):
             packed_n2 = False
+
+    # Audit B13 (datapath x ws coupling): for cta_group::1 the packed
+    # (M, 2, N//2):(1@TLane, 64@TLane, 1@TCol) organization is the M=64
+    # weight-stationary datapath (PTX ISA 8.8 §9.7.16.10.5, Layout E); a
+    # non-ws cta_group::1 M=64 MMA writes the scattered Layout F instead, so
+    # accepting a packed C without ``.ws`` would silently misplace the
+    # accumulator. The cta_group::2 2x2 path (Layout B) is a different,
+    # non-ws organization and is unaffected.
+    if packed_n2 and not is_2x2 and not weight_stationary:
+        raise ValueError(
+            "gemm_async[tcgen05]: C uses the packed (M, 2, N//2):(1@TLane, "
+            "64@TLane, 1@TCol) TMEM layout, which is the M=64 "
+            "weight-stationary datapath organization (PTX ISA 8.8 "
+            "§9.7.16.10.5, Layout E; cta_group::1 requires .ws). A non-ws "
+            "M=64 MMA writes the scattered Layout F instead. Pass "
+            "weight_stationary=True, or declare C with the Layout F / "
+            "identity datapath layout"
+        )
 
     if is_2x2 or packed_n2:
         # Some FlashMLA cta_group::1 M=64 tiles use the same logical-N/physical-column
@@ -1212,6 +1353,7 @@ def gemm_async_tcgen05_impl(op_call: TilePrimitiveCall, sctx: DispatchContext) -
         else:
             main_impl(descA_val, descB_buf, descI_arg)
 
+    # descI is not None only for block-scaled calls (dense descI raises above).
     if descI is not None and not needs_sf_id:
         @T.prim_func(check_well_formed=False)
         def impl():
@@ -1240,11 +1382,13 @@ def gemm_async_tcgen05_impl(op_call: TilePrimitiveCall, sctx: DispatchContext) -
         descI_value = _encode_instr_descriptor_dense_uint32(
             M=M_mma * cta_group,
             N=N_mma,
+            K=MMA_K,
             d_dtype="float32",
             a_dtype=A_sem,
             b_dtype=B_sem,
             trans_a=a_mn_major,
             trans_b=b_mn_major,
+            cta_group=cta_group,
         )
         descI_const = tvm.tirx.const(descI_value, "uint32")
 

@@ -2039,6 +2039,121 @@ def test_gemm_tcgen05_no_swizzle_smem_descriptor_codegen(a_layout_kind):
 
 @pytest.mark.gpu
 @pytest.mark.skipif(not env.has_cuda_compute(10), reason="need cuda compute >= 10.0")
+@pytest.mark.skipif(ml_dtypes is None, reason="Requires ml_dtypes")
+def test_gemm_tcgen05_no_swizzle_col_major_a_ws_local_idesc():
+    """A column-major-viewed unswizzled SMEM A under kind::f16 + ws.
+
+    This is the FlashMLA head64 O-GEMM: A = S tile [M=64, K=64] bf16 whose
+    GEMM operand view is column-major (M, K):(1, M) with no swizzle.  The view
+    is a stride fiction: the S tile is physically stored 16B-line packed along
+    K (elem offset 8*m + 8*M*(k//8) + k%8), and the view's strides reproduce
+    that K-major layout's byte offsets.  The dispatcher's no-swizzle
+    descriptor (ldo=64, sdo=8) is therefore a K-major encoding: hardware
+    consumes it with instruction-descriptor bit15 (a_major) CLEAR.
+    Historically callers masked this by hand-passing ``descI`` with
+    trans_a=0; with the locally encoded descI the dispatcher's returned
+    majorness must itself be consistent with the descriptor it constructed.
+
+    Asserts (a) the generated idesc literal equals the hand-validated
+    0x04410490 (bit15=0) and not the MN-major mis-encoding 0x04418490, with
+    the unchanged descA fields (64, 8, 0); and (b) the GEMM is numerically
+    correct on GPU.
+    """
+    M, K, N = 64, 64, 256
+    dtype = "bfloat16"
+    A_layout = TileLayout(S[(M, K) : (1, M)])  # column-major, unswizzled
+    B_layout = mma_shared_layout(dtype, SwizzleMode.SWIZZLE_128B_ATOM, (K, N))
+
+    # fmt: off
+    @T.prim_func
+    def gemm_ws(A_ptr: T.handle, B_ptr: T.handle, C_ptr: T.handle) -> None:
+        A = T.match_buffer(A_ptr, (M, K), dtype)
+        B = T.match_buffer(B_ptr, (K, N), dtype)
+        C = T.match_buffer(C_ptr, (128, N // 2), "float32")
+        T.device_entry()
+        warp_id = T.warp_id([4])
+        wg_id = T.warpgroup_id([1])
+        tid_in_wg = T.thread_id_in_wg([128])
+        A_smem = T.alloc_buffer((M, K), dtype, scope="shared", layout=A_layout)
+        B_smem = T.alloc_buffer((K, N), dtype, scope="shared", layout=B_layout)
+        tmem_addr = T.alloc_shared([1], "uint32")
+        mma_mbar = T.alloc_shared([1], "uint64")
+        if tid_in_wg == 0:
+            T.ptx.mbarrier.init(mma_mbar.ptr_to([0]), 1)
+        T.cuda.cta_sync()
+        if warp_id == 0:
+            T.ptx.tcgen05.alloc(T.address_of(tmem_addr), n_cols=128, cta_group=1)
+        T.cuda.cta_sync()
+        # M=64 .ws accumulates via datapath E: column halves folded across the
+        # two 64-lane halves (lane = m + 64*(n >= N/2), col = n % (N/2)) —
+        # the same packed C layout FlashMLA head64 uses for tmem_o.
+        tmem = T.decl_buffer((M, N), "float32", scope="tmem", allocated_addr=tmem_addr[0], layout=TileLayout(S[(M, 2, N // 2) : (1 @ TLane, 64 @ TLane, 1 @ TCol)]))  # noqa: E501
+        # Identity overlay of the physical 128x128 TMEM footprint for readback.
+        tmem_ldst = T.decl_buffer((128, N // 2), "float32", scope="tmem", allocated_addr=tmem_addr[0], layout=TileLayout(S[(128, N // 2) : (1 @ TLane, 1 @ TCol)]))  # noqa: E501
+        # Plain generic-proxy stores (the S tile in FlashMLA is likewise
+        # written by regular stores, not TMA).  A's physical bytes follow the
+        # FlashMLA S-tile ABI: 16B lines packed along K
+        # (phys = 8*m + 8*M*(k//8) + k%8); the column-major layout on A_smem
+        # is only the stride fiction handed to the descriptor builder, so the
+        # store maps the packed physical offset back through it.
+        for i in range(M * K // 128):
+            a_idx = i * 128 + tid_in_wg
+            a_m = a_idx % M
+            a_k = a_idx // M
+            a_phys = 8 * a_m + 8 * M * (a_k // 8) + (a_k % 8)
+            A_smem[a_phys % M, a_phys // M] = A[a_m, a_k]
+        for i in range(K * N // 128):
+            b_idx = i * 128 + tid_in_wg
+            B_smem[b_idx // N, b_idx % N] = B[b_idx // N, b_idx % N]
+        T.ptx.fence.proxy_async("shared::cta")
+        T.cuda.cta_sync()
+        if tid_in_wg == 0:
+            Tx.gemm_async(tmem[:, :], A_smem[:, :], B_smem[:, :], transB=True, dispatch="tcgen05", cta_group=1, weight_stationary=True)  # noqa: E501
+            T.ptx.tcgen05.commit(mma_mbar.ptr_to([0]), cta_group=1)
+        T.ptx.mbarrier.try_wait(mma_mbar.ptr_to([0]), 0)
+        T.cuda.cta_sync()
+        T.ptx.tcgen05.fence.after_thread_sync()
+        C_reg = T.alloc_local(N // 2, dtype="float32")
+        C_view = C_reg.view(128, N // 2, layout=TileLayout(S[(128, N // 2) : (1@axis_tid_in_wg, 1)]))  # noqa: E501
+        if wg_id == 0:
+            Tx.wg.copy_async(C_view[:, :], tmem_ldst[:, :])
+            T.ptx.tcgen05.wait.ld()
+        T.cuda.cta_sync()
+        Tx.copy(C[tid_in_wg, 0 : N // 2], C_reg[:])
+        if warp_id == 0:
+            T.ptx.tcgen05.relinquish_alloc_permit(cta_group=1)
+            T.ptx.tcgen05.dealloc(tmem_addr[0], n_cols=128, cta_group=1)
+    # fmt: on
+
+    with tvm.target.Target("cuda"):
+        mod = tvm.compile(tvm.IRModule({"main": gemm_ws}), target="cuda", tir_pipeline="tirx")
+
+    src = mod.mod.imports[0].inspect_source()
+    # Descriptor construction: no-swizzle col-major A -> (ldo=64, sdo=8, swizzle=0).
+    assert ", 64, 8, 0)" in src
+    assert "tcgen05.mma.ws.cta_group::1.kind::f16" in src
+    # idesc literal: M=64, N=256, f32 <- bf16 x bf16, a_major=0 (K-major,
+    # bit15 clear -- consistent with the descA above), b_major=1.  This is the
+    # exact hand-encoded value FlashMLA head64 validated bit-exactly.
+    assert str(0x04410490) in src, "expected K-major (bit15=0) idesc literal"
+    assert str(0x04418490) not in src, "MN-major idesc (bit15=1) mis-pairs the K-major descA"
+
+    dev = tvm.cuda(0)
+    np.random.seed(0)
+    A_np = np.random.randn(M, K).astype(ml_dtypes.bfloat16)
+    B_np = np.random.randn(K, N).astype(ml_dtypes.bfloat16)
+    C_np = np.zeros((128, N // 2), "float32")
+    A_t, B_t, C_t = (tvm.runtime.tensor(x, dev) for x in (A_np, B_np, C_np))
+    mod["main"](A_t, B_t, C_t)
+    C_ref = A_np.astype("float32") @ B_np.astype("float32")
+    C_out = C_t.numpy()
+    # Datapath E: lanes 0-63 hold columns [0, N/2), lanes 64-127 hold [N/2, N).
+    np.testing.assert_allclose(C_out[:M], C_ref[:, : N // 2], atol=1e-2, rtol=1e-2)
+    np.testing.assert_allclose(C_out[M:], C_ref[:, N // 2 :], atol=1e-2, rtol=1e-2)
+
+
+@pytest.mark.gpu
+@pytest.mark.skipif(not env.has_cuda_compute(10), reason="need cuda compute >= 10.0")
 @pytest.mark.parametrize("k_lo,k_hi", [(0, 16), (0, 32), (16, 32), (16, 48), (32, 64)])
 def test_gemm_tcgen05_contiguous_kslice_partial_k(k_lo, k_hi):
     """A slice on the *contiguous* (K) axis of a swizzled gemm_async operand must
@@ -2386,36 +2501,34 @@ def test_gemm_tcgen05_weight_stationary_codegen():
     assert "tvm_builtin_cuda_get_tmem_addr" not in src
 
 
-def test_gemm_tcgen05_tx_instr_desc_codegen():
-    """Dense descI can be encoded once through Tx and reused by gemm_async.
+def test_gemm_tcgen05_dense_descI_rejected():
+    """Dense ``descI=`` was removed (audit B11): the dispatcher self-encodes.
 
-    FlashMLA head64 is sensitive to passing the instruction descriptor through
-    a local encoded value instead of an immediate.  The Tx helper should provide
-    that codegen shape without requiring kernels to hand-write
-    ``T.ptx.tcgen05.encode_instr_descriptor``.
+    A hand-passed dense descI performed zero cross-checks against the
+    dispatcher-constructed descA/descB majorness — historically this masked
+    the col-major-view majorness desync. Passing it must now raise loudly
+    (block-scaled gemm_async still accepts descI for the hoisted-encode +
+    per-ki sf_id rotation pattern; see deepgemm/mqa_logits_fp4).
     """
 
     target = tvm.target.Target("cuda")
     with target:
-        mod = tvm.compile(
-            tvm.IRModule(
-                {
-                    "main": _build_smem_desc_kernel(
-                        "local_hoist", weight_stationary=True, use_tx_instr_desc=True
-                    )
-                }
-            ),
-            target=target,
-            tir_pipeline="tirx",
-        )
-    src = mod.mod.imports[0].inspect_source()
-    assert src.count("ptx_tcgen05_encode_instr_descriptor((&") == 1
-    assert "desc_i_ptr[0]" in src
-    assert "tcgen05.mma.ws.cta_group::1.kind::f16" in src
+        with pytest.raises(Exception, match="descI was removed"):
+            tvm.compile(
+                tvm.IRModule(
+                    {
+                        "main": _build_smem_desc_kernel(
+                            "local_hoist", weight_stationary=True, use_tx_instr_desc=True
+                        )
+                    }
+                ),
+                target=target,
+                tir_pipeline="tirx",
+            )
 
 
-def test_gemm_tcgen05_cta1_m64_accepts_packed_c_layout():
-    """FlashMLA head64 stores logical N=128 in 64 physical TMEM columns."""
+def _build_cta1_m64_packed_c_kernel(weight_stationary):
+    """cta_group::1 M=64 GEMM whose C uses the packed (M, 2, N//2) TMEM layout."""
 
     M, N, K = 64, 128, 16
     A_dtype = B_dtype = "bfloat16"
@@ -2457,17 +2570,236 @@ def test_gemm_tcgen05_cta1_m64_accepts_packed_c_layout():
                 B_smem[:, :],
                 dispatch="tcgen05",
                 cta_group=1,
+                weight_stationary=weight_stationary,
             )
+
+    return gemm_packed_c
+
+
+def test_gemm_tcgen05_cta1_m64_accepts_packed_c_layout_ws():
+    """FlashMLA head64 stores logical N=128 in 64 physical TMEM columns.
+
+    The packed (M, 2, N//2):(1@TLane, 64@TLane, 1@TCol) C layout is the M=64
+    ``.ws`` datapath organization (PTX ISA 8.8 §9.7.16.10.5 Layout E,
+    cta_group::1), so it is accepted with ``weight_stationary=True``."""
 
     target = tvm.target.Target("cuda")
     with target:
-        mod = tvm.compile(tvm.IRModule({"main": gemm_packed_c}), target=target, tir_pipeline="tirx")
+        mod = tvm.compile(
+            tvm.IRModule({"main": _build_cta1_m64_packed_c_kernel(weight_stationary=True)}),
+            target=target,
+            tir_pipeline="tirx",
+        )
 
     src = mod.mod.imports[0].inspect_source()
-    assert "tcgen05.mma" in src
-    assert "ptx_tcgen05_mma_cta_1_kind_f16_TS(400," in src
+    assert "tcgen05.mma.ws.cta_group::1.kind::f16" in src
+    assert "ptx_tcgen05_mma_cta_1_kind_f16_TS_ws(400," in src
     assert "get_tmem_addr(400, 0, 0)" not in src
     assert "get_tmem_addr(400, 0, 64)" not in src
+
+
+def test_gemm_tcgen05_cta1_m64_packed_c_requires_weight_stationary():
+    """Audit B13: packed C without ``.ws`` must be rejected, not accepted.
+
+    Per PTX ISA 8.8 §9.7.16.10.5 the packed (M, 2, N//2):(1@TLane, 64@TLane,
+    1@TCol) organization is Layout E — M=64 with ``.ws`` (cta_group::1). A
+    non-ws cta_group::1 M=64 MMA writes the scattered Layout F instead, so
+    accepting a packed C layout without ``weight_stationary=True`` would
+    silently misplace the accumulator."""
+
+    target = tvm.target.Target("cuda")
+    with target:
+        with pytest.raises(Exception, match="weight_stationary"):
+            tvm.compile(
+                tvm.IRModule({"main": _build_cta1_m64_packed_c_kernel(weight_stationary=False)}),
+                target=target,
+                tir_pipeline="tirx",
+            )
+
+
+# ---------------------------------------------------------------------------
+# Dispatch-level audit regression tests (gemm proof §5, B-series findings).
+# These call gemm_async_tcgen05_impl directly on a constructed
+# TilePrimitiveCall so rejection paths are pinned without full kernel
+# compilation.
+# ---------------------------------------------------------------------------
+
+
+def _make_gemm_tcgen05_call(
+    M,
+    N,
+    K,
+    dtype,
+    A_layout,
+    B_layout,
+    transA=False,
+    transB=True,
+    config=None,
+):
+    """Construct a GemmAsync TilePrimitiveCall and run the tcgen05 dispatch.
+
+    Buffer-shape convention follows the dispatcher: transA=False -> A is
+    [M, K]; transB=True -> B is [K, N], transB=False -> B is [N, K].
+    C is a full-region (M, N) float32 TMEM buffer with the identity
+    (1@TLane, 1@TCol) layout.
+    """
+    from tvm.ir import Range
+    from tvm.tirx.cuda.operator.tile_primitive.gemm_async.tcgen05 import (
+        gemm_async_tcgen05_impl,
+    )
+    from tvm.tirx.exec_scope import ExecScope
+    from tvm.tirx.operator.tile_primitive.dispatch_context import DispatchContext
+    from tvm.tirx.operator.tile_primitive.ops import GemmAsync
+    from tvm.tirx.stmt import BufferRegion
+
+    def full_region(buf):
+        return BufferRegion(buf, [Range.from_min_extent(0, s) for s in buf.shape])
+
+    A_shape = (M, K) if not transA else (K, M)
+    B_shape = (K, N) if transB else (N, K)
+    A_buf = tvm.tirx.decl_buffer(A_shape, dtype, "A_smem", scope="shared.dyn", layout=A_layout)
+    B_buf = tvm.tirx.decl_buffer(B_shape, dtype, "B_smem", scope="shared.dyn", layout=B_layout)
+    C_layout = TileLayout(S[(M, N) : (1 @ TLane, 1 @ TCol)])
+    C_buf = tvm.tirx.decl_buffer((M, N), "float32", "C_tmem", scope="tmem", layout=C_layout)
+    C_buf = C_buf.with_allocated_addr([tvm.tirx.IntImm("uint32", 0)])
+    call = GemmAsync(
+        full_region(C_buf),
+        full_region(A_buf),
+        full_region(B_buf),
+        transA,
+        transB,
+        False,
+        config=dict(config or {}),
+    )
+    target = tvm.target.Target({"kind": "cuda", "arch": "sm_100a"})
+    sctx = DispatchContext(target, ExecScope("thread"), {}, {})
+    return gemm_async_tcgen05_impl(call, sctx)
+
+
+def test_gemm_tcgen05_no_swizzle_col_major_rejects_non_128B_contiguous():
+    """Audit B1: the col-major-view no-swizzle branch encodes the SBO field as
+    the literal 8 (128B row-group pitch), which only matches the packed ABI
+    when the contiguous dim spans exactly 128B (64 bf16 elements). A larger
+    contiguous dim (M=128 here) used to be accepted with a silently wrong
+    ``sdo = shape // elem_per_16B = 16`` — it must now be rejected."""
+    M, N, K = 128, 256, 64
+    dtype = "bfloat16"
+    A_layout = TileLayout(S[(M, K) : (1, M)])  # column-major view, contiguous dim 128
+    B_layout = mma_shared_layout(dtype, SwizzleMode.SWIZZLE_128B_ATOM, (K, N))
+    with pytest.raises(ValueError, match="span exactly 128B"):
+        _make_gemm_tcgen05_call(M, N, K, dtype, A_layout, B_layout)
+
+    # In-domain sanity: M=64 col-major view still dispatches.
+    A_ok = TileLayout(S[(64, K) : (1, 64)])
+    impl = _make_gemm_tcgen05_call(64, N, K, dtype, A_ok, B_layout)
+    assert impl is not None
+
+
+def test_gemm_tcgen05_no_swizzle_packed_16b_rejects_non_16bit_dtype():
+    """Audit B2: the packed-16B no-swizzle branch used to encode
+    ``sdo = elem_per_16B``, which equals the true SBO field (8 = 128B row
+    pitch, PTX ISA §9.7.16.3.2) only for 16-bit dtypes. An fp8 packed-16B
+    layout (elem_per_16B = 16) used to be accepted with sdo=16 — it must now
+    be rejected (that domain is not hardware-validated)."""
+    M, N, K = 64, 256, 64
+    dtype = "float8_e4m3fn"  # 16 elements per 16B line
+    A_layout = TileLayout(S[(M, K // 16, 16) : (16, M * 16, 1)])
+    B_layout = mma_shared_layout(dtype, SwizzleMode.SWIZZLE_128B_ATOM, (K, N))
+    with pytest.raises(ValueError, match="16-bit dtypes"):
+        _make_gemm_tcgen05_call(M, N, K, dtype, A_layout, B_layout)
+
+    # In-domain sanity: the bf16 packed-16B layout still dispatches.
+    bf16_A = TileLayout(S[(M, K // 8, 8) : (8, M * 8, 1)])
+    bf16_B = mma_shared_layout("bfloat16", SwizzleMode.SWIZZLE_128B_ATOM, (K, N))
+    impl = _make_gemm_tcgen05_call(M, N, K, "bfloat16", bf16_A, bf16_B)
+    assert impl is not None
+
+
+def test_gemm_tcgen05_instr_desc_fold_mirrors_runtime_shape_rules():
+    """Audit B4: the compile-time descI fold must run the runtime encoder's
+    shape validation. cta_group=1 with descriptor M=128 requires N % 16 == 0;
+    the tile chooser alone only guarantees N % 8, so M=128/N=24 used to fold
+    a descriptor the runtime encoder would reject."""
+    M, N, K = 128, 24, 64
+    dtype = "bfloat16"
+    A_layout = mma_shared_layout(dtype, SwizzleMode.SWIZZLE_128B_ATOM, (M, K))
+    B_layout = mma_shared_layout(dtype, SwizzleMode.SWIZZLE_128B_ATOM, (N, K))
+    with pytest.raises(ValueError, match="Invalid matrix shape"):
+        _make_gemm_tcgen05_call(M, N, K, dtype, A_layout, B_layout, transB=False)
+
+    # N=32 (divisible by 16) with the same M=128 tile is accepted.
+    B_ok = mma_shared_layout(dtype, SwizzleMode.SWIZZLE_128B_ATOM, (32, K))
+    impl = _make_gemm_tcgen05_call(M, 32, K, dtype, A_layout, B_ok, transB=False)
+    assert impl is not None
+
+
+def test_gemm_tcgen05_rejects_tf32_mn_major():
+    """Audit B6: tf32 MN-major operands are PTX-illegal without the
+    128B-32B-atomicity swizzle, which the atom matcher never produces. A
+    tf32 (is_AB_tf32) B operand matching MN-major used to be silently
+    encoded; it must now be rejected."""
+    M, N, K = 64, 256, 32
+    dtype = "float32"
+    A_layout = mma_shared_layout(dtype, SwizzleMode.SWIZZLE_128B_ATOM, (M, K))
+    # transB=True means B is [K, N]; a row-major swizzled layout then has the
+    # MN (=N) dim contiguous, i.e. it matches as MN-major.
+    B_layout = mma_shared_layout(dtype, SwizzleMode.SWIZZLE_128B_ATOM, (K, N))
+    with pytest.raises(ValueError, match="PTX-illegal"):
+        _make_gemm_tcgen05_call(
+            M, N, K, dtype, A_layout, B_layout, transB=True, config={"is_AB_tf32": True}
+        )
+
+    # MN-major stays accepted for a dtype where it is PTX-legal (bf16).
+    bf16_A = mma_shared_layout("bfloat16", SwizzleMode.SWIZZLE_128B_ATOM, (M, 64))
+    bf16_B = mma_shared_layout("bfloat16", SwizzleMode.SWIZZLE_128B_ATOM, (64, N))
+    impl = _make_gemm_tcgen05_call(M, N, 64, "bfloat16", bf16_A, bf16_B, transB=True)
+    assert impl is not None
+
+
+def test_gemm_tcgen05_rejects_non_uniform_atom_grid():
+    """Audit B7: ``_try_atom`` reads only the innermost iter of each tiler
+    dimension for the LBO/SBO fields, so each dimension must group into a
+    single iter. A swizzled layout whose M-direction atom tiling has a
+    stride gap (atoms (2,4) with outer stride 4096 instead of 2048) used to
+    match with fields taken from the local inner stride, silently dropping
+    the gap; it must now be rejected."""
+    from tvm.tirx.layout import ComposeLayout, SwizzleLayout
+
+    M, N, K = 64, 256, 64
+    dtype = "bfloat16"
+    exotic_A = ComposeLayout(
+        SwizzleLayout(3, 3, 3),
+        TileLayout(S[(2, 4, 8, 64) : (4096, 512, 64, 1)]),
+    )
+    B_layout = mma_shared_layout(dtype, SwizzleMode.SWIZZLE_128B_ATOM, (K, N))
+    with pytest.raises(ValueError, match="no MMA SMEM descriptor matches"):
+        _make_gemm_tcgen05_call(M, N, K, dtype, exotic_A, B_layout)
+
+    # The uniform version of the same tiling (outer stride 2048) is accepted.
+    uniform_A = ComposeLayout(
+        SwizzleLayout(3, 3, 3),
+        TileLayout(S[(2, 4, 8, 64) : (2048, 512, 64, 1)]),
+    )
+    impl = _make_gemm_tcgen05_call(M, N, K, dtype, uniform_A, B_layout)
+    assert impl is not None
+
+
+def test_gemm_tcgen05_dense_descI_rejected_at_dispatch():
+    """Audit B11 (dispatch-level twin of the compile-path test above)."""
+    M, N, K = 64, 256, 64
+    dtype = "bfloat16"
+    A_layout = mma_shared_layout(dtype, SwizzleMode.SWIZZLE_128B_ATOM, (M, K))
+    B_layout = mma_shared_layout(dtype, SwizzleMode.SWIZZLE_128B_ATOM, (K, N))
+    with pytest.raises(ValueError, match="descI was removed"):
+        _make_gemm_tcgen05_call(
+            M,
+            N,
+            K,
+            dtype,
+            A_layout,
+            B_layout,
+            config={"descI": tvm.tirx.const(0x04410490, "uint32")},
+        )
 
 
 if __name__ == "__main__":
