@@ -15,7 +15,22 @@
 # specific language governing permissions and limitations
 # under the License.
 
-"""Explicit fixed-width vector copy dispatches."""
+"""Explicit fixed-width vector copy dispatches.
+
+Cache-semantics config (all variants, read from ``op_call.config``):
+
+- ``cache``: ``None`` (default, plain ``T.ptx.ld``) or ``"nc"`` (load via
+  ``T.ptx.ld_global_nc``, i.e. PTX ``ld.global.nc``). Requires a global src.
+- ``l1_evict`` / ``l2_evict`` / ``prefetch_size``: L1/L2 cache hint kwargs
+  forwarded verbatim to the emitted load (same values ``T.ptx.ld`` /
+  ``T.ptx.ld_global_nc`` accept, e.g. ``"L1::no_allocate"``,
+  ``"L2::evict_first"``, ``"L2::256B"``). Requires a global src.
+
+Example::
+
+    Tx.copy(dst_local[0:8], src_global[base : base + 8], dispatch="vec_256b",
+            cache="nc", l1_evict="L1::no_allocate", prefetch_size="L2::256B")
+"""
 
 from tvm.arith.analyzer import Analyzer
 from tvm.runtime import DataType
@@ -52,6 +67,27 @@ def _ptx_space(scope: str) -> str:
     return scope
 
 
+_LD_CACHE_HINT_KEYS = ("l1_evict", "l2_evict", "prefetch_size")
+
+
+def _ld_cache_config(op_call: TilePrimitiveCall) -> tuple[str | None, dict[str, str]]:
+    """Read the cache-semantics config from ``op_call.config``.
+
+    Returns ``(cache, hints)``: ``cache`` is ``None`` or ``"nc"``, and
+    ``hints`` maps the ``T.ptx.ld``/``T.ptx.ld_global_nc`` L1/L2 hint kwargs
+    (``l1_evict``, ``l2_evict``, ``prefetch_size``) to their string values.
+    """
+    cache = op_call.config.get("cache", None)
+    if cache is not None:
+        cache = str(cache)
+    hints: dict[str, str] = {}
+    for key in _LD_CACHE_HINT_KEYS:
+        value = op_call.config.get(key, None)
+        if value is not None and str(value):
+            hints[key] = str(value)
+    return cache, hints
+
+
 def _is_forced_vec_copy(
     op_call: TilePrimitiveCall,
     sctx: DispatchContext,
@@ -86,6 +122,15 @@ def _is_forced_vec_copy(
         return False, f"src region does not contain exactly {expected_elements} elements"
     if not _can_prove_equal(dst_elements, expected_elements):
         return False, f"dst region does not contain exactly {expected_elements} elements"
+
+    cache, hints = _ld_cache_config(op_call)
+    if cache not in (None, "nc"):
+        return False, f"unsupported cache config {cache!r}; expected None or 'nc'"
+    if (cache is not None or hints) and src.scope() != "global":
+        return False, (
+            "cache/L1/L2 hint config applies to global loads; "
+            f"requires src scope 'global', got {src.scope()!r}"
+        )
     return True, None
 
 
@@ -105,6 +150,11 @@ def _emit_forced_vec_copy(op_call: TilePrimitiveCall, _sctx: DispatchContext, nu
     n_elements = num_bytes * 8 // elem_bits
     vec, ptx_type = copy_ptx_form(num_bytes)
     return_type = copy_ptx_ld_return_type(ptx_type)
+    cache, hints = _ld_cache_config(op_call)
+    use_nc = cache == "nc"
+    l1_evict = hints.get("l1_evict", "")
+    l2_evict = hints.get("l2_evict", "")
+    prefetch_size = hints.get("prefetch_size", "")
 
     # fmt: off
     @T.prim_func(check_well_formed=False)
@@ -112,11 +162,29 @@ def _emit_forced_vec_copy(op_call: TilePrimitiveCall, _sctx: DispatchContext, nu
         if src_is_local:
             T.ptx.st(dst_ptr, src=src_ptr, space=dst_space, vec=vec, ptx_type=ptx_type)
         elif dst_is_local:
-            T.ptx.ld(src_ptr, return_type, ptx_type, dst=dst_ptr, space=src_space, vec=vec)
+            if use_nc:
+                T.ptx.ld_global_nc(
+                    src_ptr, return_type, ptx_type, dst=dst_ptr, vec=vec,
+                    l1_evict=l1_evict, l2_evict=l2_evict, prefetch_size=prefetch_size,
+                )
+            else:
+                T.ptx.ld(
+                    src_ptr, return_type, ptx_type, dst=dst_ptr, space=src_space, vec=vec,
+                    l1_evict=l1_evict, l2_evict=l2_evict, prefetch_size=prefetch_size,
+                )
         else:
             tmp = T.alloc_local((n_elements,), src.dtype)
             tmp_ptr = tmp.ptr_to([0])
-            T.ptx.ld(src_ptr, return_type, ptx_type, dst=tmp_ptr, space=src_space, vec=vec)
+            if use_nc:
+                T.ptx.ld_global_nc(
+                    src_ptr, return_type, ptx_type, dst=tmp_ptr, vec=vec,
+                    l1_evict=l1_evict, l2_evict=l2_evict, prefetch_size=prefetch_size,
+                )
+            else:
+                T.ptx.ld(
+                    src_ptr, return_type, ptx_type, dst=tmp_ptr, space=src_space, vec=vec,
+                    l1_evict=l1_evict, l2_evict=l2_evict, prefetch_size=prefetch_size,
+                )
             T.ptx.st(dst_ptr, src=tmp_ptr, space=dst_space, vec=vec, ptx_type=ptx_type)
     # fmt: on
     return impl
@@ -145,6 +213,7 @@ def _register_forced_vec_copy(variant: str, num_bytes: int) -> None:
         return _emit_forced_vec_copy(op_call, sctx, _num_bytes)
 
 
+_register_forced_vec_copy("vec_256b", 32)
 _register_forced_vec_copy("vec_128b", 16)
 _register_forced_vec_copy("vec_64b", 8)
 _register_forced_vec_copy("vec_32b", 4)
