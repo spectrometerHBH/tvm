@@ -315,8 +315,10 @@ class TMEMPool:
         layout
             Explicit ``TileLayout``. Mutually exclusive with ``datapath``.
         datapath : str | None
-            Optional tcgen05 datapath letter (``"D"`` for M=128 full datapath,
-            ``"F"`` for M=64 non-``.ws`` scattered). When provided, the buffer's
+            Optional tcgen05 datapath letter (``"B"`` for M=128 cta_group::2
+            dense per-CTA view, ``"D"`` for M=128 full datapath, ``"E"`` for
+            M=64 ``.ws`` half datapath, ``"F"`` for M=64 non-``.ws``
+            scattered). When provided, the buffer's
             layout is derived from ``tmem_datapath_layout(datapath, *shape)``
             so the row index reflects the *physical* TMEM lane occupation
             (PTX ISA §9.7.16.10.5). The downstream ``.16x*b`` / ``.32x32b``
@@ -346,6 +348,31 @@ class TMEMPool:
         self.offset = col_end
         self.max_offset = max(self.max_offset, self.offset)
         return res
+
+    def view(self, shape, dtype="float32", *, col=0, layout=None, cols=None, datapath=None):
+        """Declare a TMEM buffer at an absolute column without moving the cursor.
+
+        Use for overlay views that alias real allocations — e.g. the full
+        ``(128, 512)`` window that ``tcgen05.ld/st`` reads through. Shares
+        ``alloc``'s layout/datapath handling but never advances ``offset``,
+        so overlays don't force a ``move_base_to`` rewind.
+        """
+        from tvm.tirx.layout import tmem_datapath_layout
+
+        if layout is not None and datapath is not None:
+            raise ValueError("TMEMPool.view: pass at most one of layout= and datapath=")
+        if datapath is not None:
+            assert len(shape) == 2, "TMEMPool.view: datapath= requires a 2-D shape"
+            layout = tmem_datapath_layout(datapath, shape[0], shape[1])
+        ir = _get_ir()
+        n_cols = self._resolve_cols(shape, dtype, cols, layout)
+        assert col + n_cols <= self.total_cols, (
+            f"TMEM overflow: view [{col}, {col + n_cols}) > {self.total_cols}"
+        )
+        if layout is None:
+            assert len(shape) == 2, "TMEMPool.view() requires layout= for non-2D TMEM buffers"
+            layout = _default_tmem_layout(shape[0], shape[1])
+        return ir.decl_buffer(shape, dtype, scope="tmem", allocated_addr=col, layout=layout)
 
     def alloc_sf(self, shape, dtype, *, sf_per_mma, sf_reuse=1):
         """Allocate a tcgen05 block-scaled SF TMEM buffer with an inferred layout.

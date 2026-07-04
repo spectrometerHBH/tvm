@@ -600,7 +600,7 @@ __all__ += ["tcgen05_atom_layout", "tmem_datapath_layout", "wg_local_layout"]
 # Layouts A / B / C / E / G are reserved for future expansion.
 
 
-_TMEM_DATAPATH_ROWS = {"D": 128, "F": 64}
+_TMEM_DATAPATH_ROWS = {"A": 128, "B": 64, "C": 64, "D": 128, "E": 64, "F": 64, "G": 32}
 
 
 def tmem_datapath_layout(datapath: str, rows: int, cols: int) -> "TileLayout":
@@ -615,12 +615,24 @@ def tmem_datapath_layout(datapath: str, rows: int, cols: int) -> "TileLayout":
     Parameters
     ----------
     datapath : str
-        One of ``"D"`` (M=128, ``.cta_group::1``, full datapath) or
-        ``"F"`` (M=64, non-``.ws``, half datapath). Other layouts are not
-        yet supported by this factory.
+        PTX data path layout letter (all cta_group::2 layouts are the
+        per-CTA view of the M-rows this CTA of the pair owns):
+
+        - ``"A"``: M=256, ``.cta_group::2`` — identity over 128 rows.
+        - ``"B"``: M=128, ``.cta_group::2``, dense A — 64 rows, column
+          halves folded across the two 64-lane halves.
+        - ``"C"``: M=128, ``.cta_group::2``, sparse A — 64 rows scattered
+          16-per-warp, half datapath (same organization as F).
+        - ``"D"``: M=128, ``.cta_group::1`` — identity, full datapath.
+        - ``"E"``: M=64, ``.ws`` — 64 rows, column halves folded (same
+          organization as B).
+        - ``"F"``: M=64, non-``.ws`` — 64 rows scattered 16-per-warp,
+          half datapath.
+        - ``"G"``: M=32, ``.ws`` — 32 rows, column quarters folded across
+          the four 32-lane warp slabs.
     rows : int
         Logical row count of the TMEM buffer. Must match the datapath's M
-        dimension: 128 for D, 64 for F.
+        dimension: 128 for A/D, 64 for B/C/E/F, 32 for G.
     cols : int
         Logical column count.
 
@@ -641,10 +653,36 @@ def tmem_datapath_layout(datapath: str, rows: int, cols: int) -> "TileLayout":
         )
     tlane = Axis.get("TLane")
     tcol = Axis.get("TCol")
-    if datapath == "D":
-        # M=128, identity row→lane: row r ∈ [0, 128) → physical lane r.
+    if datapath in ("A", "D"):
+        # Identity row→lane: row r → physical lane r. D covers the full
+        # cta_group::1 datapath; A is the per-CTA view of M=256/cta_group::2
+        # (this CTA's 128 M-rows, PTX Figure "Layout A").
         return TileLayout(S[(rows, cols) : (1 @ tlane, 1 @ tcol)])
-    # Layout F: M=64 scattered. Logical row r = wid * 16 + intra (wid ∈ [0,4),
+    if datapath == "G":
+        # Layout G (M=32, .ws): quarter datapath. The logical column space
+        # splits into four quarters, quarter q living 32 lanes below the
+        # previous — lane = row + 32*q, physical col = col % (cols/4).
+        if cols % 4 != 0:
+            raise ValueError(
+                f"tmem_datapath_layout: datapath='G' requires cols % 4 == 0, got {cols}"
+            )
+        return TileLayout(S[(rows, 4, cols // 4) : (1 @ tlane, 32 @ tlane, 1 @ tcol)])
+    if datapath in ("B", "E"):
+        # Layouts B and E share the same per-CTA half-datapath organization:
+        # the logical column space splits into two halves, with the second
+        # half placed 64 lanes below the first —
+        # lane = row + 64 * (col >= cols/2), physical col = col % (cols/2).
+        # E is M=64 + .ws (cta_group::1); B is M=128 + cta_group::2 dense,
+        # where ``rows`` are the 64 M-rows owned by this CTA of the pair.
+        if cols % 2 != 0:
+            raise ValueError(
+                f"tmem_datapath_layout: datapath={datapath!r} requires even cols, got {cols}"
+            )
+        return TileLayout(S[(rows, 2, cols // 2) : (1 @ tlane, 64 @ tlane, 1 @ tcol)])
+    # Layouts C and F: M=64-rows-per-CTA scattered, half datapath (lane
+    # alignment 0 of the documented "0 or 16" choice). F is M=64 non-.ws
+    # (cta_group::1); C is M=128 + cta_group::2 sparse A, per-CTA view.
+    # Logical row r = wid * 16 + intra (wid ∈ [0,4),
     # intra ∈ [0,16)) → physical lane wid * 32 + intra, i.e.
     # ``r // 16`` is the warp selector and ``r % 16`` is the within-slab lane.
     # ``TileLayout`` decomposes a scalar row index via ``SplitCoord``
