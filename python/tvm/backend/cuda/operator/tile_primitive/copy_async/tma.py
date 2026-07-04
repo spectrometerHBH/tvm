@@ -799,7 +799,6 @@ def _assemble_plan(
     chain: list,
     g_buf: Buffer,
     analyzer: Analyzer,
-    tensor_map_dim_order: str,
 ) -> TmaPlan:
     """Build the final ``TmaPlan`` by stacking desc dims from all gmem iters.
 
@@ -825,7 +824,6 @@ def _assemble_plan(
 
     dims_natural: list = []
     origins: list = []  # parallel to dims_natural: 'ext1' | 'trailing' | ('selected', chain_idx)
-    gmem_order_keys: list = []  # parallel to dims_natural: original gmem/segment order
     issue_axes_natural: list = []
 
     # --- First pass: ext=1 iters ---
@@ -836,7 +834,6 @@ def _assemble_plan(
             DescDim(shape=it.shape, stride=it.stride, box=1, coord_base=it.copy_start)
         )
         origins.append("ext1")
-        gmem_order_keys.append((iter_idx, 0))
 
     # --- Second pass: ext>1 iters ---
     for gi, group in enumerate(l1.smem_groups):
@@ -874,7 +871,6 @@ def _assemble_plan(
                 origins.append(("selected", selected_chain_idx[p_anchor]))
             else:
                 origins.append("trailing")
-            gmem_order_keys.append((iter_idx, i_seg))
             # Segment's unselected shards become issue axes on this dim.
             for extent, coord_advance, smem_stride in seg.unselected_contribs:
                 issue_axes_natural.append(
@@ -886,52 +882,27 @@ def _assemble_plan(
                     )
                 )
 
-    if tensor_map_dim_order == "natural":
-        # Keep the host-visible cuTensorMap dimensions in the same logical order
-        # as the grouped gmem layout.  ``plan.dims`` are stored in the opposite
-        # order because emit reverses them for cuTensorMap and PTX operands; this
-        # still leaves the unit-stride gmem dimension as the plan innermost dim.
-        natural_entries = [(idx, key) for idx, key in enumerate(gmem_order_keys)]
-        natural_entries.sort(key=lambda x: x[1], reverse=True)
-        new_order = [idx for idx, _ in natural_entries]
-        old_to_new = {old: new for new, old in enumerate(new_order)}
+    # --- Permute: box=1 first (build order), box>1 last (chain DESC) ---
+    non_sel_indices = [
+        idx for idx, o in enumerate(origins) if not (isinstance(o, tuple) and o[0] == "selected")
+    ]
+    sel_entries = [
+        (idx, o[1]) for idx, o in enumerate(origins) if isinstance(o, tuple) and o[0] == "selected"
+    ]
+    sel_entries.sort(key=lambda x: -x[1])  # chain index descending = outer selected first
+    new_order = non_sel_indices + [idx for idx, _ in sel_entries]
+    old_to_new = {old: new for new, old in enumerate(new_order)}
 
-        dims = [dims_natural[old] for old in new_order]
-        issue_axes = [
-            IssueAxis(
-                extent=ax.extent,
-                dim_idx=old_to_new[ax.dim_idx],
-                coord_advance=ax.coord_advance,
-                smem_stride=ax.smem_stride,
-            )
-            for ax in issue_axes_natural
-        ]
-    else:
-        # --- Permute: box=1 first (natural order), box>1 last (chain DESC) ---
-        non_sel_indices = [
-            idx
-            for idx, o in enumerate(origins)
-            if not (isinstance(o, tuple) and o[0] == "selected")
-        ]
-        sel_entries = [
-            (idx, o[1])
-            for idx, o in enumerate(origins)
-            if isinstance(o, tuple) and o[0] == "selected"
-        ]
-        sel_entries.sort(key=lambda x: -x[1])  # chain index descending = outer selected first
-        new_order = non_sel_indices + [idx for idx, _ in sel_entries]
-        old_to_new = {old: new for new, old in enumerate(new_order)}
-
-        dims = [dims_natural[old] for old in new_order]
-        issue_axes = [
-            IssueAxis(
-                extent=ax.extent,
-                dim_idx=old_to_new[ax.dim_idx],
-                coord_advance=ax.coord_advance,
-                smem_stride=ax.smem_stride,
-            )
-            for ax in issue_axes_natural
-        ]
+    dims = [dims_natural[old] for old in new_order]
+    issue_axes = [
+        IssueAxis(
+            extent=ax.extent,
+            dim_idx=old_to_new[ax.dim_idx],
+            coord_advance=ax.coord_advance,
+            smem_stride=ax.smem_stride,
+        )
+        for ax in issue_axes_natural
+    ]
 
     elem_bytes = tvm.DataType(g_buf.dtype).bits // 8
     plan = TmaPlan(
@@ -1067,6 +1038,15 @@ def _merge_contig_full_box_dims(plan: TmaPlan, analyzer: Analyzer) -> TmaPlan:
             return None
         if not analyzer.can_prove_equal(tvm.tirx.floormod(inner.shape, 2), 0):
             return None
+        # The innermost box and coord_base are halved below, so both must be
+        # provably even; otherwise an odd box would silently drop the last
+        # (promoted) element and an odd coord_base would mis-address by one
+        # original element. Decline the promotion instead (the shrink search
+        # then falls back to other prefix lengths / variants).
+        if not analyzer.can_prove_equal(tvm.tirx.floormod(inner.box, 2), 0):
+            return None
+        if not analyzer.can_prove_equal(tvm.tirx.floormod(inner.coord_base, 2), 0):
+            return None
         for d in dims_[:-1]:
             if not analyzer.can_prove_equal(tvm.tirx.floormod(d.stride, 2), 0):
                 return None
@@ -1139,8 +1119,14 @@ def _merge_contig_full_box_dims(plan: TmaPlan, analyzer: Analyzer) -> TmaPlan:
     )
 
 
-def _validate_hw_constraints(plan: TmaPlan, dtype: str) -> tuple:
-    """Return ``(ok, reason)``. ``reason`` is the error string when ``ok`` is False."""
+def _validate_hw_constraints(plan: TmaPlan) -> tuple:
+    """Return ``(ok, reason)``. ``reason`` is the error string when ``ok`` is False.
+
+    All checks are in ``plan.elem_dtype`` / ``plan.elem_bytes`` units: after a
+    merge+promote rewrite the plan's boxes and strides are expressed in the
+    promoted element type, so validating against the original buffer dtype
+    would be off by the promotion factor (2x per promotion step).
+    """
     analyzer = Analyzer()
 
     if plan.rank == 0:
@@ -1154,15 +1140,24 @@ def _validate_hw_constraints(plan: TmaPlan, dtype: str) -> tuple:
         return False, f"TMA innermost dim must have unit stride; got {inner.stride}"
 
     # Innermost box times element size must fit the swizzle atom.
-    if not _swizzle_inner_box_fits(dtype, plan.swizzle_mode, inner.box):
+    if not _swizzle_inner_box_fits(plan.elem_dtype, plan.swizzle_mode, inner.box):
         return False, "TMA innermost box exceeds the swizzle atom size"
+
+    # Non-innermost byte strides must be multiples of 16 (cuTensorMap
+    # requirement). The merge+promote rewrite tries to fix violating plans,
+    # but it can fail (e.g. partially-boxed dims cannot merge); re-checking
+    # here declines such plans at dispatch — enabling shrink/variant
+    # fallback — instead of failing late in the host wrapper's ICHECK.
+    if _plan_needs_alignment_fix(plan.dims, plan.elem_bytes, analyzer):
+        return False, (
+            "TMA non-innermost dim byte stride is not a provable multiple of 16 "
+            "(merge+promote could not fix it)"
+        )
 
     return True, ""
 
 
-def _build_plan_with_shrink(
-    l1: L1Result, g_buf: Buffer, s_buf: Buffer, tensor_map_dim_order: str
-) -> TmaPlan:
+def _build_plan_with_shrink(l1: L1Result, g_buf: Buffer) -> TmaPlan:
     """Enumerate chain prefix length j from max down to 0, validate
     alignment per gmem iter, build and validate the plan. Return the first
     plan that passes everything. Raise when j=0 still fails.
@@ -1174,8 +1169,8 @@ def _build_plan_with_shrink(
     # Empty-smem_groups case (all ext=1): the assembly still yields a
     # valid plan (trivial desc dims).
     if not l1.smem_groups:
-        plan = _assemble_plan(l1, {}, [], g_buf, analyzer, tensor_map_dim_order)
-        ok, reason = _validate_hw_constraints(plan, s_buf.dtype)
+        plan = _assemble_plan(l1, {}, [], g_buf, analyzer)
+        ok, reason = _validate_hw_constraints(plan)
         if ok:
             return plan
         fail(f"TMA plan (no smem groups) failed hardware check: {reason}")
@@ -1196,10 +1191,8 @@ def _build_plan_with_shrink(
         if not aligned:
             continue
 
-        plan = _assemble_plan(
-            l1, per_iter_selected, chain[:j], g_buf, analyzer, tensor_map_dim_order
-        )
-        ok, reason = _validate_hw_constraints(plan, s_buf.dtype)
+        plan = _assemble_plan(l1, per_iter_selected, chain[:j], g_buf, analyzer)
+        ok, reason = _validate_hw_constraints(plan)
         if ok:
             return plan
         last_reason = reason
@@ -1255,19 +1248,31 @@ def copy_tma_impl(op_call: TilePrimitiveCall, sctx: DispatchContext) -> PrimFunc
 
     oob_mode = _normalize_oob_mode(s_buf.dtype, op_call.config.get("oob", None))
     oob_fill_kind = _oob_fill_kind(oob_mode)
-    tensor_map_dim_order = op_call.config.get("tensor_map_dim_order", "optimized")
-    if tensor_map_dim_order not in ("optimized", "natural"):
+    if "tensor_map_dim_order" in op_call.config:
         fail(
-            "copy_async(tma) tensor_map_dim_order must be 'optimized' or 'natural', "
-            f"got {tensor_map_dim_order!r}"
+            "copy_async(tma) tensor_map_dim_order was removed: the descriptor dim "
+            "order is always derived from the declared smem layout's contiguous "
+            "chain, which is the only placement-correct order"
         )
-    # ``optimized`` preserves the historical swizzle-friendly descriptor dim
-    # placement.  ``natural`` keeps dimensions in grouped-gmem order for kernels
-    # ported from explicit cuTensorMap descriptors that must keep the same ABI.
+    # TMA writes the box into smem in plain box-linear order (descriptor dim 0
+    # fastest), so the descriptor dim order decides where each element lands.
+    # The plan orders the box>1 dims by the declared smem layout's contiguous
+    # chain, which makes the hardware fill match the declared placement for
+    # any faithful layout.
 
     # L1 → L2 → L3
     l1 = _build_l1_result(s_buf, g_buf, g_st_plan, g_ext_plan, s_st, s_ext_plan)
-    plan = _build_plan_with_shrink(l1, g_buf, s_buf, tensor_map_dim_order)
+    plan = _build_plan_with_shrink(l1, g_buf)
+
+    # Re-validate the oob contract against the *plan's* element dtype: a
+    # merge+promote rewrite re-types the descriptor as uintN, and the host
+    # wrapper rejects oob='nan' for non-float descriptors. Decline at
+    # dispatch instead of failing late in host init.
+    if oob_mode == "nan" and plan.elem_dtype not in ("float16", "float32", "float64", "bfloat16"):
+        fail(
+            f"TMA oob='nan' requires a floating-point tensormap dtype, but the "
+            f"merge+promote rewrite re-typed the descriptor as {plan.elem_dtype}"
+        )
 
     # Optional descriptor dtype override. An fp32 buffer feeding a tf32 MMA should
     # be loaded via a TFLOAT32 (== 11) descriptor so the TMA hardware RN-truncates
@@ -1386,8 +1391,14 @@ def copy_tma_impl(op_call: TilePrimitiveCall, sctx: DispatchContext) -> PrimFunc
         return str(value)
 
     external_tensor_map = op_call.config.get("tensor_map", None)
+    # ``plan.elem_dtype`` must be part of the key: merge+promote re-types the
+    # descriptor, and two plans over the same buffer can otherwise collide on
+    # identical numeric fields while differing in promotion level (e.g. a
+    # uint8 box of 256 promoted once and a box of 512 promoted twice both
+    # encode innermost shape/box 256 — in different element units).
     tensormap_cache_key = (
-        f"tensormap:{hash(plan.tensor_ptr)}:{g_buf.dtype}:{val_key(plan.rank)}"
+        f"tensormap:{hash(plan.tensor_ptr)}:{g_buf.dtype}:{plan.elem_dtype}"
+        f":{val_key(plan.rank)}"
         f":{tuple(val_key(v) for v in plan.shape)}"
         f":{tuple(val_key(v) for v in tma_g_strides_for_map)}"
         f":{tuple(val_key(v) for v in plan.box_dim)}"

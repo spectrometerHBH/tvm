@@ -96,17 +96,42 @@ def tma_atom_compatible(dst_shape, dst_st, dst_extent, atom_shape):
 
 
 def get_swizzle_mode_from_layout(layout: Layout) -> SwizzleMode | None:
-    """Extract swizzle mode from a shared memory layout."""
+    """Extract swizzle mode from a shared memory layout.
+
+    The hardware swizzle modes this maps to (TMA descriptor swizzles and the
+    tcgen05 smem matrix descriptor walk) implement the ``swizzle_inner=True``
+    address permutation ``x ^ ((x & outer_mask) >> atom_len)`` — the atom-row
+    bits XORed into the 16B-unit bits — pinned bit-exactly on hardware by the
+    TMA / tcgen05.cp GPU round-trip tests. ``swizzle_inner=False`` is the
+    mirrored permutation ``x ^ ((x & inner_mask) << atom_len)``; for
+    ``swizzle_len=sw >= 1`` (``atom_len=3``) the two coincide only on the
+    ``2^(3-sw)`` of the ``2^(3+sw)`` chunks per atom period whose inner
+    ``[0, sw)`` and outer ``[3, 3+sw)`` chunk bits are all zero (exhaustive
+    enumeration over the full domain), so planning a flipped layout by its
+    ``swizzle_len`` alone would silently misplace data — reject it instead.
+    For ``swizzle_len == 0`` both masks are 0 and either value is the
+    identity, so ``swizzle_inner`` is a don't-care there.
+    """
     if isinstance(layout, ComposeLayout):
         swizzle = layout.swizzle  # SwizzleLayout is named 'swizzle' in ComposeLayout
-        swizzle_len = swizzle.swizzle_len
     elif isinstance(layout, SwizzleLayout):
-        swizzle_len = layout.swizzle_len
+        swizzle = layout
     elif isinstance(layout, TileLayout):
         # TileLayout without SwizzleLayout means no swizzle (mode 0)
         return SwizzleMode.SWIZZLE_NONE
     else:
         return None
+
+    swizzle_len = swizzle.swizzle_len
+    if int(swizzle_len) > 0 and not bool(swizzle.swizzle_inner):
+        raise ValueError(
+            "swizzle direction mismatch: the hardware swizzle modes implement "
+            "the swizzle_inner=True address permutation "
+            "(x ^ ((x & outer_mask) >> atom_len)); got a SwizzleLayout with "
+            f"swizzle_inner=False (per_element={int(swizzle.per_element)}, "
+            f"swizzle_len={int(swizzle_len)}, atom_len={int(swizzle.atom_len)}), "
+            "whose mirrored permutation would be silently misplaced"
+        )
 
     # Map swizzle_len to SwizzleMode
     return {

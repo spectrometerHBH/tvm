@@ -175,19 +175,25 @@ def _make_tma_call(
     dtype="float16",
     direction="g2s",
     config=None,
+    g_data=None,
+    sctx=None,
 ):
     """Construct TilePrimitiveCall + DispatchContext and call copy_tma_impl.
 
     Returns (impl, host_init_stmts) on success, raises DispatchFail on failure.
     impl is the device-side PrimFunc, host_init_stmts is a list of Stmt
     for host-side tensor map creation.
+
+    ``g_data`` optionally pins the global buffer's data var (so two calls can
+    share one underlying tensor pointer); ``sctx`` optionally reuses a
+    DispatchContext across calls (so the tensormap cache is shared).
     """
     from tvm.ir import Range
     from tvm.tirx import Var
     from tvm.tirx.cuda.operator.tile_primitive.copy_async.tma import copy_tma_impl
     from tvm.tirx.stmt import BufferRegion
 
-    g_buf = tvm.tirx.decl_buffer(g_shape, dtype, "A", layout=gmem_layout)
+    g_buf = tvm.tirx.decl_buffer(g_shape, dtype, "A", layout=gmem_layout, data=g_data)
     s_buf = tvm.tirx.decl_buffer(s_shape, dtype, "A_smem", scope="shared.dyn", layout=smem_layout)
 
     g_ranges = [Range.from_min_extent(r[0], r[1] - r[0]) for r in g_region]
@@ -207,8 +213,9 @@ def _make_tma_call(
 
     op_call = CopyAsync(dst_br, src_br, config=config)
 
-    target = tvm.target.Target({"kind": "cuda", "arch": "sm_90a"})
-    sctx = DispatchContext(target, ExecScope("thread"), {}, {})
+    if sctx is None:
+        target = tvm.target.Target({"kind": "cuda", "arch": "sm_90a"})
+        sctx = DispatchContext(target, ExecScope("thread"), {}, {})
 
     impl = copy_tma_impl(op_call, sctx)
     host_init_stmts = list(sctx.callbacks.get("host_init_stmt", []))
@@ -2123,7 +2130,7 @@ def test_copy_tma_gather4_cta_group2_pointer_masks_mbarrier_codegen():
     assert "4278190079" in src
 
 
-def test_copy_tma_dispatch_accepts_permuted_non_square_extents():
+def test_copy_tma_declines_non_derivable_fold_layout():
     """Regression: TMA dispatch accepts FlashMLA RoPE's 32x64 -> 64x32 copy."""
 
     dtype = "bfloat16"
@@ -2159,87 +2166,452 @@ def test_copy_tma_dispatch_accepts_permuted_non_square_extents():
                 dispatch="tma",
                 mbar=mb.ptr_to([0]),
                 cta_group=1,
-                tensor_map_dim_order="natural",
             )
+
+    import pytest
 
     target = tvm.target.Target({"kind": "cuda", "arch": "sm_100a"})
     with target:
-        mod = tvm.compile(
-            tvm.IRModule({"main": tma_permuted_extents}), target=target, tir_pipeline="tirx"
+        # The rope-fold smem layout's placement is not derivable from its
+        # contiguous chain, so the planner must DECLINE (loud, not silently
+        # mis-placed). This pins the completeness boundary left behind by the
+        # removed "natural" ABI mode, which used to accept this case.
+        with pytest.raises(Exception, match="unit stride"):
+            tvm.compile(
+                tvm.IRModule({"main": tma_permuted_extents}), target=target, tir_pipeline="tirx"
+            )
+
+
+def test_copy_tma_rejects_flipped_swizzle_inner():
+    """A canonical-family SwizzleLayout with ``swizzle_inner=False`` must be
+    rejected at planning: the TMA hardware swizzle modes implement the
+    ``swizzle_inner=True`` permutation ``x ^ ((x & outer_mask) >> atom_len)``
+    (pinned bit-exactly on hardware by the GPU smoke tests in this file),
+    while ``swizzle_inner=False`` is the mirrored
+    ``x ^ ((x & inner_mask) << atom_len)`` — extracting only ``swizzle_len``
+    would silently plan the wrong placement."""
+    import pytest
+
+    canonical = mma_shared_layout("float16", 3, (8, 256))
+    # Identical linear tiling and swizzle family; only the permutation
+    # direction is flipped, so only a swizzle_inner check can reject it.
+    flipped = ComposeLayout(
+        SwizzleLayout(3, 3, 3, swizzle_inner=False),
+        canonical.tile_layout,
+    )
+    with pytest.raises(Exception, match="swizzle_inner"):
+        _make_tma_call(
+            g_shape=(8, 256),
+            g_region=((0, 8), (0, 256)),
+            s_shape=(8, 256),
+            s_region=((0, 8), (0, 256)),
+            gmem_layout=TileLayout(S[8, 256]),
+            smem_layout=flipped,
+            dtype="float16",
         )
 
-    src = mod.mod.imports[0].inspect_source()
-    assert "cp.async.bulk.tensor.3d.shared::cluster.global" in src
 
-
-def test_copy_tma_natural_dim_order_keeps_flashmla_q_descriptor():
-    """Natural dim order matches the FlashMLA 5D Q tensor-map ABI."""
+def test_copy_tma_rejects_removed_tensor_map_dim_order():
+    """The dim-order knob was removed: the descriptor order is always derived
+    from the declared smem layout. Passing the old config must fail loudly."""
+    import pytest
 
     smem_layout = ComposeLayout(
         SwizzleLayout(3, 3, 3, swizzle_inner=True),
-        TileLayout(S[(64, 64, 2, 4) : (1, 64, 16384, 4096)]),
+        TileLayout(S[(64, 64, 2, 4) : (1, 64, 4096, 8192)]),
     )
-    impl, host_init_stmts = _make_tma_call(
+    with pytest.raises(Exception, match="tensor_map_dim_order was removed"):
+        _make_tma_call(
+            g_shape=(64, 128, 2, 4, 3),
+            g_region=((0, 64), (64, 128), (0, 2), (0, 4), (1, 2)),
+            s_shape=(64, 64, 2, 4),
+            s_region=((0, 64), (0, 64), (0, 2), (0, 4)),
+            gmem_layout=TileLayout(S[(64, 128, 2, 4, 3) : (1, 512, 256, 64, 65536)]),
+            smem_layout=smem_layout,
+            dtype="bfloat16",
+            config={"tensor_map_dim_order": "natural"},
+        )
+
+
+# FlashMLA 5D Q fold: gmem is a (64, h_q, 2, D_QK//128, s_q) strided view of a
+# (s_q, h_q, D_QK) tensor.  Logical element (a, b, c, d, e) sits at linear
+# gmem offset a + 512*b + 256*c + 64*d + 65536*e; head-dim index is
+# k = a + 64*d + 256*c (c = 256-half, d = 64-chunk within the half).
+_FLASHMLA_Q_GMEM_LAYOUT = TileLayout(S[(64, 128, 2, 4, 3) : (1, 512, 256, 64, 65536)])
+_FLASHMLA_Q_G_REGION = ((0, 64), (64, 128), (0, 2), (0, 4), (1, 2))
+
+# TMA writes the box into smem in plain box-linear order (descriptor dim 0
+# fastest).  The default ("optimized") planner orders the box>1 descriptor
+# dims by the declared smem layout's contiguous chain, so the hardware fill
+# lands every element exactly where the declared layout says.  Two different
+# declared placements of the same fold must therefore yield two different
+# descriptor dim orders, and both must be element-exact on hardware.
+_FLASHMLA_Q_SMEM_CASES = [
+    pytest.param(
+        # Interleaved halves (chunk order d0 c0 d1 c1 ...): the true FlashMLA
+        # Q placement.  The derived descriptor is the FlashMLA 5D Q ABI, i.e.
+        # identical to the historical FlashMLA ABI order for this gmem view.
+        (1, 64, 4096, 8192),
+        [5, 64, 128, 2, 4, 3, 1024, 512, 128, 131072, 64, 64, 2, 4, 1],
+        id="interleaved-halves-abi",
+    ),
+    pytest.param(
+        # Half-major placement (all of half c=0, then half c=1): the planner
+        # must swap the two middle descriptor dims to honor it.
+        (1, 64, 16384, 4096),
+        [5, 64, 128, 4, 2, 3, 1024, 128, 512, 131072, 64, 64, 4, 2, 1],
+        id="half-major",
+    ),
+]
+
+
+@pytest.mark.parametrize("smem_strides, encode_head", _FLASHMLA_Q_SMEM_CASES)
+def test_copy_tma_optimized_dim_order_derives_from_declared_smem_layout(smem_strides, encode_head):
+    """Default dim order follows the declared smem placement, not gmem order."""
+
+    smem_layout = ComposeLayout(
+        SwizzleLayout(3, 3, 3, swizzle_inner=True),
+        TileLayout(S[(64, 64, 2, 4) : smem_strides]),
+    )
+    _, host_init_stmts = _make_tma_call(
         g_shape=(64, 128, 2, 4, 3),
-        g_region=((0, 64), (64, 128), (0, 2), (0, 4), (1, 2)),
+        g_region=_FLASHMLA_Q_G_REGION,
         s_shape=(64, 64, 2, 4),
         s_region=((0, 64), (0, 64), (0, 2), (0, 4)),
-        gmem_layout=TileLayout(S[(64, 128, 2, 4, 3) : (1, 512, 256, 64, 65536)]),
+        gmem_layout=_FLASHMLA_Q_GMEM_LAYOUT,
         smem_layout=smem_layout,
         dtype="bfloat16",
-        config={"tensor_map_dim_order": "natural"},
     )
 
-    expected_impl = _build_expected_impl(
-        "g2s",
-        "bfloat16",
-        (64, 64, 2, 4),
-        smem_layout,
-        dict(
-            loop_extents=[1],
-            dim=5,
-            coord_fn=lambda lv: [
-                IntImm("int32", 0),
-                IntImm("int32", 64),
-                IntImm("int32", 0),
-                IntImm("int32", 0),
-                IntImm("int32", 1),
-            ],
-        ),
-    )
-    tvm.ir.assert_structural_equal(impl, expected_impl, map_free_vars=True)
-
-    expected_host = _build_expected_host_init(
-        "bfloat16",
-        [
-            5,
-            64,
-            128,
-            2,
-            4,
-            3,
-            1024,
-            512,
-            128,
-            131072,
-            64,
-            64,
-            2,
-            4,
-            1,
-            1,
-            1,
-            1,
-            1,
-            1,
-            0,
-            3,
-            2,
-            0,
-        ],
-    )
+    expected_host = _build_expected_host_init("bfloat16", [*encode_head, 1, 1, 1, 1, 1, 0, 3, 2, 0])
     assert len(host_init_stmts) == 1
     tvm.ir.assert_structural_equal(host_init_stmts[0], expected_host, map_free_vars=True)
+
+
+@pytest.mark.gpu
+@pytest.mark.skipif(not env.has_cuda_compute(9), reason="need cuda compute >= 9.0")
+@pytest.mark.parametrize("smem_strides, encode_head", _FLASHMLA_Q_SMEM_CASES)
+def test_copy_tma_optimized_folded_view_placement_matches_declared_layout(
+    smem_strides, encode_head
+):
+    """GPU: folded-view TMA fill is element-exact against the declared smem layout.
+
+    Copies the FlashMLA-Q-shaped 5D folded gmem view into a swizzled smem view
+    whose middle dims the planner reorders, then reads smem back through the
+    declared layout and compares elementwise.  A descriptor dim order that
+    desynchronizes from the declared placement (e.g. blindly keeping the gmem
+    order for the half-major case) scrambles the two middle dims and fails.
+    """
+    del encode_head
+    dtype = "uint16"
+    g_total = 3 * 65536
+    n_elems = 64 * 64 * 2 * 4
+    smem_bytes = n_elems * 2
+    dev = tvm.cuda(0)
+
+    smem_layout = ComposeLayout(
+        SwizzleLayout(3, 3, 3, swizzle_inner=True),
+        TileLayout(S[(64, 64, 2, 4) : smem_strides]),
+    )
+    gmem_layout = _FLASHMLA_Q_GMEM_LAYOUT
+
+    # fmt: off
+    @T.prim_func
+    def copy_async(A_ptr: T.handle, B_ptr: T.handle) -> None:
+        A = T.match_buffer(A_ptr, (g_total,), dtype)
+        B = T.match_buffer(B_ptr, (64, 64, 2, 4), dtype)
+        T.device_entry()
+        cta_id = T.cta_id([1])
+        tid = T.thread_id([128])
+        dyn = T.alloc_buffer([smem_bytes + 64], "uint8", scope="shared.dyn")
+        A_smem = T.decl_buffer((64, 64, 2, 4), dtype, dyn.data, elem_offset=0, layout=smem_layout)
+        mbarrier = T.decl_buffer([1], "uint64", dyn.data, elem_offset=smem_bytes // 8)
+        mbar_ptr = T.meta_var(mbarrier.ptr_to([0]))
+        A_tma = A.view(64, 128, 2, 4, 3, layout=gmem_layout)
+
+        if tid == 0:
+            T.ptx.mbarrier.init(mbar_ptr, 1)
+        T.ptx.fence.proxy_async("shared::cta")
+        T.cuda.cta_sync()
+
+        if tid == 0:
+            Tx.copy_async(
+                A_smem[:, :, :, :],
+                A_tma[0:64, 64:128, 0:2, 0:4, 1:2],
+                dispatch="tma",
+                mbar=mbar_ptr,
+            )
+            T.ptx.mbarrier.arrive.expect_tx(mbar_ptr, smem_bytes)
+        T.ptx.mbarrier.try_wait(mbar_ptr, 0)
+        T.ptx.fence.proxy_async("shared::cta")
+        T.cuda.cta_sync()
+        Tx.cta.copy(B[:, :, :, :], A_smem[:, :, :, :])
+    # fmt: on
+
+    target = tvm.target.Target("cuda")
+    with target:
+        mod = tvm.compile(tvm.IRModule({"main": copy_async}), target=target, tir_pipeline="tirx")
+
+    # Value == linear gmem offset (mod 2^16); every copied element is unique.
+    A_np = (np.arange(g_total) % 65536).astype(np.uint16)
+    B_np = np.zeros((64, 64, 2, 4), dtype=np.uint16)
+    A_t = tvm.runtime.tensor(A_np, dev)
+    B_t = tvm.runtime.tensor(B_np, dev)
+    mod(A_t, B_t)
+
+    a = np.arange(64).reshape(64, 1, 1, 1)
+    b = np.arange(64).reshape(1, 64, 1, 1)
+    c = np.arange(2).reshape(1, 1, 2, 1)
+    d = np.arange(4).reshape(1, 1, 1, 4)
+    B_ref = ((a + 512 * (64 + b) + 256 * c + 64 * d + 65536) % 65536).astype(np.uint16)
+    np.testing.assert_array_equal(B_ref, B_t.numpy())
+
+
+# ---------------------------------------------------------------------------
+# Audit regression tests (TMA proof §5, A-series findings): merge+promote
+# soundness, promoted-unit validation, unfixable-alignment declines, and the
+# tensormap cache key.
+# ---------------------------------------------------------------------------
+
+
+def _tensormap_encode_calls(stmt):
+    """Collect (dtype_str, ndim, int_args) for each cuTensorMapEncodeTiled call."""
+
+    class _Collector(StmtExprVisitor):
+        def __init__(self):
+            super().__init__()
+            self.calls = []
+
+        def visit_call_(self, op):
+            if (
+                isinstance(op.op, tvm.ir.Op)
+                and op.op.name == "tirx.tvm_call_packed"
+                and len(op.args) >= 5
+                and isinstance(op.args[0], StringImm)
+                and op.args[0].value == "runtime.cuTensorMapEncodeTiled"
+            ):
+                self.calls.append(
+                    (
+                        op.args[2].value,
+                        int(op.args[3]),
+                        [int(a) for a in op.args[5:] if isinstance(a, IntImm)],
+                    )
+                )
+            super().visit_call_(op)
+
+    collector = _Collector()
+    collector.visit_stmt(stmt)
+    return collector.calls
+
+
+def test_copy_tma_merge_promote_positive_pin():
+    """Positive pin for the merge+promote path (audit A1 noted it had zero
+    test pins repo-wide): a full uint8 (64, 8) copy has a non-innermost byte
+    stride of 8 (< 16), the direct merge is blocked by boxDim > 256
+    (64*8 = 512), so the plan promotes uint8 -> uint16 and then merges to a
+    single rank-1 dim of shape/box 256 uint16 elements (= the original 512
+    bytes)."""
+    impl, host_init_stmts = _make_tma_call(
+        g_shape=(64, 8),
+        g_region=((0, 64), (0, 8)),
+        s_shape=(64, 8),
+        s_region=((0, 64), (0, 8)),
+        gmem_layout=TileLayout(S[64, 8]),
+        smem_layout=TileLayout(S[64, 8]),
+        dtype="uint8",
+    )
+    assert _count_tma_ops(impl) == 1
+    assert len(host_init_stmts) == 1
+    encodes = _tensormap_encode_calls(host_init_stmts[0])
+    assert encodes == [("uint16", 1, [256, 256, 1, 0, 0, 2, 0])]
+
+
+def test_copy_tma_promote_declines_odd_box_and_coord():
+    """Audit A1: ``try_promote`` halves the innermost box and coord_base, so
+    both must be provably even. An odd box used to be floordiv'd (silently
+    dropping the last element) and an odd coord_base mis-addressed by one
+    element; the promotion must now be declined, leaving the plan in the
+    original dtype."""
+    from tvm.arith import Analyzer
+    from tvm.tirx.cuda.operator.tile_primitive.copy_async.tma import (
+        DescDim,
+        TmaPlan,
+        _merge_contig_full_box_dims,
+    )
+    from tvm.tirx.cuda.operator.tile_primitive.tma_utils import SwizzleMode
+
+    def _plan(inner_box, inner_coord):
+        # d1's byte stride (8) violates the 16B rule -> merge machinery runs;
+        # (d0, d1) merge is blocked only by box (8*64 = 512 > 256) -> promote
+        # is attempted on the innermost dim.
+        return TmaPlan(
+            swizzle_mode=SwizzleMode.SWIZZLE_NONE,
+            dims=[
+                DescDim(shape=8, stride=512, box=8, coord_base=0),
+                DescDim(shape=64, stride=8, box=64, coord_base=0),
+                DescDim(shape=8, stride=1, box=inner_box, coord_base=inner_coord),
+            ],
+            issue_axes=[],
+            tensor_ptr=Var("p", "handle"),
+            elem_bytes=1,
+            elem_dtype="uint8",
+        )
+
+    # Even box/coord: promotion happens (uint8 -> uint16 at least).
+    promoted = _merge_contig_full_box_dims(_plan(8, 0), Analyzer())
+    assert promoted.elem_dtype != "uint8"
+
+    # Odd box: promotion declined, plan stays uint8 with the box untouched.
+    kept = _merge_contig_full_box_dims(_plan(5, 0), Analyzer())
+    assert kept.elem_dtype == "uint8"
+    assert int(kept.dims[-1].box) == 5
+
+    # Odd coord_base: promotion declined as well.
+    kept2 = _merge_contig_full_box_dims(_plan(4, 1), Analyzer())
+    assert kept2.elem_dtype == "uint8"
+    assert int(kept2.dims[-1].coord_base) == 1
+
+
+def test_copy_tma_declines_odd_box_promotion_end_to_end():
+    """Audit A1 (negative, end-to-end): a copy whose innermost box is odd
+    (5 of 8 uint8 columns) cannot be promoted and the 8-byte non-innermost
+    stride cannot be merged away, so the dispatch must decline loudly
+    instead of encoding a tensormap that halves the odd box."""
+    with pytest.raises(Exception, match="all chain prefix lengths rejected"):
+        _make_tma_call(
+            g_shape=(8, 64, 8),
+            g_region=((0, 8), (0, 64), (0, 5)),
+            s_shape=(8, 64, 5),
+            s_region=((0, 8), (0, 64), (0, 5)),
+            gmem_layout=TileLayout(S[8, 64, 8]),
+            smem_layout=TileLayout(S[8, 64, 5]),
+            dtype="uint8",
+        )
+
+
+def test_copy_tma_validate_hw_constraints_uses_promoted_dtype():
+    """Audit A2: the swizzle-atom box-fit check must compare the plan's box
+    (promoted units) against the atom width in ``plan.elem_dtype`` units. A
+    box of 128 uint16 elements spans 256B and does NOT fit the 128B swizzle
+    atom; validating it against the original uint8 buffer dtype (atom width
+    128 elements) used to accept it and fail late in the host wrapper."""
+    from tvm.tirx.cuda.operator.tile_primitive.copy_async.tma import (
+        DescDim,
+        TmaPlan,
+        _validate_hw_constraints,
+    )
+    from tvm.tirx.cuda.operator.tile_primitive.tma_utils import SwizzleMode
+
+    plan = TmaPlan(
+        swizzle_mode=SwizzleMode.SWIZZLE_128B_ATOM,
+        dims=[DescDim(shape=128, stride=1, box=128, coord_base=0)],
+        issue_axes=[],
+        tensor_ptr=Var("p", "handle"),
+        elem_bytes=2,
+        elem_dtype="uint16",  # promoted from a uint8 buffer
+    )
+    ok, reason = _validate_hw_constraints(plan)
+    assert not ok
+    assert "swizzle atom" in reason
+
+    # The same box in a plan that was NOT promoted (uint8) fits: 128 x 1B.
+    plan_u8 = TmaPlan(
+        swizzle_mode=SwizzleMode.SWIZZLE_128B_ATOM,
+        dims=[DescDim(shape=128, stride=1, box=128, coord_base=0)],
+        issue_axes=[],
+        tensor_ptr=Var("p", "handle"),
+        elem_bytes=1,
+        elem_dtype="uint8",
+    )
+    ok_u8, _ = _validate_hw_constraints(plan_u8)
+    assert ok_u8
+
+
+def test_copy_tma_oob_nan_declined_after_promotion():
+    """Audit A2 (same family): ``oob='nan'`` is validated against the buffer
+    dtype before planning, but merge+promote re-types the descriptor as
+    uintN, which the host wrapper rejects for NaN fill. The dispatch must
+    decline instead of failing late in host init."""
+    kwargs = dict(
+        g_shape=(128, 4),
+        g_region=((0, 128), (0, 4)),
+        s_shape=(128, 4),
+        s_region=((0, 128), (0, 4)),
+        gmem_layout=TileLayout(S[128, 4]),
+        smem_layout=TileLayout(S[128, 4]),
+        dtype="float16",
+    )
+    # Sanity: the same copy without oob promotes fine (fp16 -> uint32).
+    _, host_init_stmts = _make_tma_call(**kwargs)
+    encodes = _tensormap_encode_calls(host_init_stmts[0])
+    assert encodes == [("uint32", 1, [256, 256, 1, 0, 0, 2, 0])]
+
+    with pytest.raises(Exception, match="floating-point tensormap dtype"):
+        _make_tma_call(config={"oob": "nan"}, **kwargs)
+
+
+def test_copy_tma_declines_unfixable_alignment_at_dispatch():
+    """Audit A3: when ``_plan_needs_alignment_fix`` triggers the merge but the
+    merge cannot fix the plan (here: the innermost dim is partially boxed, 7
+    of 8 uint8 columns, so no merge is legal), the plan must be declined at
+    dispatch — enabling variant fallback — rather than accepted and failed
+    late by the host wrapper's 16-byte stride ICHECK."""
+    with pytest.raises(Exception, match="not a provable multiple of 16"):
+        _make_tma_call(
+            g_shape=(64, 8),
+            g_region=((0, 64), (0, 7)),
+            s_shape=(64, 7),
+            s_region=((0, 64), (0, 7)),
+            gmem_layout=TileLayout(S[64, 8]),
+            smem_layout=TileLayout(S[64, 7]),
+            dtype="uint8",
+        )
+
+
+def test_copy_tma_tensormap_cache_key_includes_promotion_dtype():
+    """Audit A4: two copies over the same tensor pointer whose plans differ
+    only in promotion level collide on every numeric cache-key field: a
+    (32, 8) uint8 view merges un-promoted to shape/box 256 uint8, while the
+    (64, 8) view promotes once and merges to shape/box 256 uint16. The cache
+    key must keep them apart (two distinct encodes, uint8 + uint16), not
+    alias the second copy to the first (half-sized) tensormap."""
+    from tvm.ir import PointerType, PrimType
+    from tvm.tirx.exec_scope import ExecScope
+    from tvm.tirx.operator.tile_primitive.dispatch_context import DispatchContext
+
+    data = Var("A", PointerType(PrimType("uint8"), "global"))
+    target = tvm.target.Target({"kind": "cuda", "arch": "sm_90a"})
+    sctx = DispatchContext(target, ExecScope("thread"), {}, {})
+
+    _, host1 = _make_tma_call(
+        g_shape=(32, 8),
+        g_region=((0, 32), (0, 8)),
+        s_shape=(32, 8),
+        s_region=((0, 32), (0, 8)),
+        gmem_layout=TileLayout(S[32, 8]),
+        smem_layout=TileLayout(S[32, 8]),
+        dtype="uint8",
+        g_data=data,
+        sctx=sctx,
+    )
+    assert [e[0] for e in _tensormap_encode_calls(host1[0])] == ["uint8"]
+
+    _, host2 = _make_tma_call(
+        g_shape=(64, 8),
+        g_region=((0, 64), (0, 8)),
+        s_shape=(64, 8),
+        s_region=((0, 64), (0, 8)),
+        gmem_layout=TileLayout(S[64, 8]),
+        smem_layout=TileLayout(S[64, 8]),
+        dtype="uint8",
+        g_data=data,
+        sctx=sctx,
+    )
+    assert len(host2) == 2, "second copy must NOT reuse the first tensormap"
+    encodes = [_tensormap_encode_calls(st) for st in host2]
+    assert [e[0][0] for e in encodes] == ["uint8", "uint16"]
+    # Identical numeric fields — only the element dtype separates the keys.
+    assert encodes[0][0][2] == encodes[1][0][2] == [256, 256, 1, 0, 0, 2, 0]
 
 
 if __name__ == "__main__":
