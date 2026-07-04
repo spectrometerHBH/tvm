@@ -2833,13 +2833,26 @@ def _choice(name: str, value, options):
     validation; specialization later replaces them with concrete values
     that the C-side intrinsic body re-checks.
     """
-    # Concrete int / IntImm value: validate.
-    try:
-        concrete = int(value)
-    except (TypeError, ValueError):
-        return  # symbolic; defer check
+    if isinstance(value, str):
+        concrete = value
+    elif isinstance(value, tirx.StringImm):
+        concrete = value.value
+    else:
+        # Concrete int / IntImm value: validate.
+        try:
+            concrete = int(value)
+        except (TypeError, ValueError):
+            return  # symbolic; defer check
     if concrete not in options:
         raise ValueError(f"invalid {name}={concrete!r}; expected one of {tuple(options)}")
+
+
+def _static_str(value):
+    if isinstance(value, str):
+        return value
+    if isinstance(value, tirx.StringImm):
+        return value.value
+    return None
 
 
 # See top-of-file imports for `_FENCE_SEM` etc. (re-exported from _common).
@@ -2894,12 +2907,15 @@ def ptx_tcgen05_cp(
     _choice("cta_group", cta_group, _TCGEN05_CTA_GROUP)
     _choice("multicast", multicast, _TCGEN05_CP_MULTICAST)
     _choice("decompress", decompress, _TCGEN05_CP_DECOMPRESS)
-    if shape == "32x128b" and multicast != "warpx4":
-        raise ValueError(f"shape=32x128b requires multicast='warpx4', got {multicast!r}")
-    if shape == "64x128b" and multicast not in ("warpx2::02_13", "warpx2::01_23"):
-        raise ValueError(f"shape=64x128b requires multicast in warpx2::*, got {multicast!r}")
-    if shape in ("128x128b", "128x256b", "4x256b") and multicast != "":
-        raise ValueError(f"shape={shape} requires multicast='', got {multicast!r}")
+    shape_s = _static_str(shape)
+    multicast_s = _static_str(multicast)
+    if shape_s is not None and multicast_s is not None:
+        if shape_s == "32x128b" and multicast_s != "warpx4":
+            raise ValueError(f"shape=32x128b requires multicast='warpx4', got {multicast_s!r}")
+        if shape_s == "64x128b" and multicast_s not in ("warpx2::02_13", "warpx2::01_23"):
+            raise ValueError(f"shape=64x128b requires multicast in warpx2::*, got {multicast_s!r}")
+        if shape_s in ("128x128b", "128x256b", "4x256b") and multicast_s != "":
+            raise ValueError(f"shape={shape_s} requires multicast='', got {multicast_s!r}")
 
     return call_intrin(
         "",
@@ -3547,7 +3563,8 @@ def _ptx_binary_f32x2(op_name, *args, rounding="rn", ftz=False, dps=True, return
     ``dps=True`` emits the destination-passing form and returns void.
     ``dps=False`` returns either packed ``uint64`` bits or ``float32x2``.
     """
-    _choice("rounding", rounding, _F32X2_ROUND)
+    rounding_options = ("", *_F32X2_ROUND) if op_name == "mul" else _F32X2_ROUND
+    _choice("rounding", rounding, rounding_options)
     if dps:
         if len(args) != 3:
             raise TypeError(f"ptx_{op_name}_f32x2 dps form expects (d_addr, a, b)")

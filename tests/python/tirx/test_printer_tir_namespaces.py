@@ -16,6 +16,8 @@
 # under the License.
 
 
+import pytest
+
 import tvm
 from tvm import tirx as tir
 from tvm.script import tirx as T
@@ -179,6 +181,12 @@ def test_printer_ptx_more():
         "d = T.handle()\n"
         'T.ptx.tcgen05.cp(a, d, "64x128b", 1, "warpx2::02_13", "", 0, 0)',
     )
+    _assert_print(
+        cuda_op.ptx_tcgen05_cp(a, d, shape="128x128b", cta_group=2, decompress="b8x16.b6x16_p32"),
+        "a = T.handle()\n"
+        "d = T.handle()\n"
+        'T.ptx.tcgen05.cp(a, d, "128x128b", 2, "", "b8x16.b6x16_p32", 0, 0)',
+    )
     _assert_print(cuda_op.ptx_tcgen05_shift(a, 1), "a = T.handle()\nT.ptx.tcgen05.shift(a, 1)")
     _assert_print(
         cuda_op.ptx_tcgen05_ld(a, 0, shape="16x64b", num=1, row=0, col=0, pack=False),
@@ -196,6 +204,25 @@ def test_printer_ptx_more():
     _assert_print(
         cuda_op.ptx_tcgen05_relinquish_alloc_permit(1), "T.ptx.tcgen05.relinquish_alloc_permit(1)"
     )
+
+
+@pytest.mark.parametrize(
+    "kwargs,match",
+    [
+        ({"shape": "bad"}, "invalid shape"),
+        ({"shape": "128x256b", "multicast": "warpx4"}, "requires multicast=''"),
+        ({"shape": "64x128b"}, "requires multicast in warpx2"),
+        ({"shape": "64x128b", "multicast": "warpx4"}, "requires multicast in warpx2"),
+        ({"shape": "32x128b"}, "requires multicast='warpx4'"),
+        ({"shape": "32x128b", "multicast": "warpx2::02_13"}, "requires multicast='warpx4'"),
+        ({"shape": "128x128b", "decompress": "bad"}, "invalid decompress"),
+    ],
+)
+def test_ptx_tcgen05_cp_validation(kwargs, match):
+    a = tir.Var("a", "handle")
+    d = tir.Var("d", "handle")
+    with pytest.raises(ValueError, match=match):
+        cuda_op.ptx_tcgen05_cp(a, d, cta_group=1, **kwargs)
 
 
 def test_printer_ptx_mbarrier():
