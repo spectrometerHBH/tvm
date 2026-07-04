@@ -88,6 +88,14 @@ pre-commit run --files <changed-file>...
 Use `python -m tirx_kernels.bench_suite` in the **tirx-kernels** repo
 (`tirx_kernels/bench_suite/`) when that workflow applies.
 
+## Tile-Primitive Dispatch Proofs
+
+The CUDA tile-primitive dispatchers are covered by normative correctness
+proofs in `.agents/docs/`. Before editing dispatch logic under
+`python/tvm/backend/cuda/operator/tile_primitive/`, read that directory's
+`AGENTS.md` and the proof matching the file you are changing, and keep the
+proof in sync with any behavioral change.
+
 ## Coding Conventions
 
 - Follow the surrounding style before introducing new abstractions.

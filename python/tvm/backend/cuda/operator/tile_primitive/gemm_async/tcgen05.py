@@ -17,6 +17,11 @@
 
 """Implementation of gemm_async operator dispatch for CUDA targets.
 
+Correctness proof: ``.agents/docs/gemm_async_instr_desc_correctness_proof.md``
+(repo root; covers the instruction-descriptor fold and majorness derivation).
+Read it before changing dispatch logic here, and keep it (including its
+``file:line`` references) in sync with any behavioral change.
+
 Registered op: gemm_async (1 variant: "tcgen05").
 See the @register_dispatch block below for detailed documentation with
 before/after IR examples.

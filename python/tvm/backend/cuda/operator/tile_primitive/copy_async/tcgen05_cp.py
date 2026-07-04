@@ -17,6 +17,11 @@
 
 """smem->tmem dispatch via ``tcgen05.cp`` — generic planner for all PTX shapes.
 
+Correctness proof: ``.agents/docs/tcgen05_cp_dispatch_correctness_proof.md``
+(repo root).
+Read it before changing dispatch logic here, and keep it (including its
+``file:line`` references) in sync with any behavioral change.
+
 ``tcgen05.cp`` is inherently async; this dispatch emits the cp loop only and
 leaves completion signaling (``tcgen05.commit`` against a barrier) to the
 caller. Callers who want sync semantics should issue ``tcgen05.commit``
