@@ -1488,12 +1488,13 @@ def copy_tma_impl(op_call: TilePrimitiveCall, sctx: DispatchContext) -> PrimFunc
 
     # fmt: off
     if has_gather_indexer and not Analyzer().can_prove_equal(flat_total_extent, 1):
+        chunk_bodies = [
+            build_gather4_chunk_body(gather_chunk)
+            for gather_chunk in range(num_gather4_chunks)
+        ]
         impl = PrimFunc(
             [],
-            tvm.tirx.SeqStmt(
-                [build_gather4_chunk_body(gather_chunk)
-                 for gather_chunk in range(num_gather4_chunks)]
-            ),
+            chunk_bodies[0] if len(chunk_bodies) == 1 else tvm.tirx.SeqStmt(chunk_bodies),
             ret_type=None,
             buffer_map={},
         ).with_attr("global_symbol", "impl")

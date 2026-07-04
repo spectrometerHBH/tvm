@@ -1396,6 +1396,101 @@ def test_copy_tma_gather4_indexer_gpu_smoke():
     np.testing.assert_allclose(A_np[I_np], B.numpy())
 
 
+def _build_tma_gather4_multi_iter_kernel(dtype="float16"):
+    """Gather4 copies whose plan needs an issue loop (flat_total_extent > 1).
+
+    The smem destination splits its 128 columns into two 64-column blocks at
+    stride rows*64 (the chunk-major mma placement), so each gather copy plans
+    box (4, 64) plus a 2-iteration issue loop; with a 4-row indexer this is
+    exactly one gather4 chunk. Regression for the single-chunk multi-iter
+    emission (a SeqStmt-of-1 crash) and for the duplicated CSE binds that
+    unrolled shared subtrees used to leave behind (non-SSA at
+    SplitHostDevice), which is re-established by ConvertSSA in the pipeline.
+    """
+    rows = 256
+    gather_rows = 8
+    cols = 128
+    thread_cnt = 128
+    shared_layout = T.ComposeLayout(
+        T.SwizzleLayout(3, 3, 3, swizzle_inner=True),
+        T.TileLayout(T.S[(gather_rows, cols // 64, 64) : (64, gather_rows * 64, 1)]),
+    )
+    smem_bytes = gather_rows * cols * tvm.DataType(dtype).bits // 8
+
+    # fmt: off
+    @T.prim_func
+    def tma_gather4_multi_iter(A_ptr: T.handle, I_ptr: T.handle, B_ptr: T.handle) -> None:
+        A = T.match_buffer(A_ptr, (rows, cols), dtype)
+        Idx = T.match_buffer(I_ptr, (gather_rows,), "int32")
+        B = T.match_buffer(B_ptr, (gather_rows, cols), dtype)
+
+        T.device_entry()
+        T.cta_id([1])
+        tid = T.thread_id([thread_cnt])
+        dyn = T.alloc_buffer([smem_bytes + 64], "uint8", scope="shared.dyn")
+        A_smem = T.decl_buffer(
+            (gather_rows, cols), dtype, dyn.data, elem_offset=0, layout=shared_layout
+        )
+        mbarrier = T.decl_buffer([1], "uint64", dyn.data, elem_offset=smem_bytes // 8)
+        mbar_ptr = T.meta_var(mbarrier.ptr_to([0]))
+
+        if tid == 0:
+            T.ptx.mbarrier.init(mbar_ptr, 1)
+        T.ptx.fence.proxy_async("shared::cta")
+        T.cuda.cta_sync()
+
+        if tid == 0:
+            for g in T.unroll(gather_rows // 4):
+                row_st: T.let = g * 4
+                Tx.copy_async(
+                    A_smem[row_st : row_st + 4, :],
+                    A[:, :],
+                    dispatch="tma",
+                    mbar=mbar_ptr,
+                    cta_group=1,
+                    cache_hint=T.uint64(0x14F0000000000000),
+                    gather_axis=0,
+                    indexer=[Idx[g * 4 + i] for i in range(4)],
+                )
+            T.ptx.mbarrier.arrive.expect_tx(mbar_ptr, smem_bytes)
+        T.ptx.mbarrier.try_wait(mbar_ptr, 0)
+        T.ptx.fence.proxy_async("shared::cta")
+        T.cuda.cta_sync()
+        Tx.cta.copy(B[:, :], A_smem[:, :])
+        # fmt: on
+
+    return tma_gather4_multi_iter
+
+
+@pytest.mark.gpu
+@pytest.mark.skipif(not env.has_cuda_compute(10), reason="need cuda compute >= 10.0")
+def test_copy_tma_gather4_multi_iter_gpu_smoke():
+    dtype = "float16"
+    rows = 256
+    gather_rows = 8
+    cols = 128
+    dev = tvm.cuda(0)
+    target = tvm.target.Target({"kind": "cuda", "arch": "sm_100a"})
+    with target:
+        mod = tvm.compile(
+            tvm.IRModule({"main": _build_tma_gather4_multi_iter_kernel(dtype)}),
+            target=target,
+            tir_pipeline="tirx",
+        )
+
+    np.random.seed(0)
+    A_np = tvm.testing.generate_random_array(dtype, (rows, cols))
+    I_np = np.array([7, 3, 19, 5, 31, 11, 2, 23], dtype="int32")
+    B_np = np.zeros((gather_rows, cols), dtype=tvm.testing.np_dtype_from_str(dtype))
+
+    A = tvm.runtime.tensor(A_np, dev)
+    Idx = tvm.runtime.tensor(I_np, dev)
+    B = tvm.runtime.tensor(B_np, dev)
+    mod(A, Idx, B)
+
+    np.testing.assert_allclose(A_np[I_np], B.numpy())
+
+
 # Section 3: TMA special cases (symbolic dimension, buffer view)
 # ===========================================================================
 

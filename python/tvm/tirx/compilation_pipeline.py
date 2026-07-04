@@ -37,12 +37,17 @@ def default_tir_pipeline():
             tirx.transform.FlattenBuffer(),
             tirx.transform.BF16ComputeLegalize(),
             tirx.transform.NarrowDataType(32),
-            tirx.transform.VectorizeLoop(not bool(config.get("tir.disable_vectorize", False))),
+            tirx.transform.VectorizeLoop(not bool(config.get("tirx.disable_vectorize", False))),
             tirx.transform.UnrollLoop(),
             tirx.transform.StmtSimplify(),
         ]
-        if not bool(config.get("tir.disable_cse_tir", False)):
+        if not bool(config.get("tirx.disable_cse_tir", False)):
             passes.append(tirx.transform.CommonSubexprElim())
+            # CSE keys its Bind insertions by Stmt object identity; when loop
+            # unrolling leaves structurally shared subtrees, the same Bind can
+            # materialize at several positions. Re-establish SSA before the
+            # passes that require it (SplitHostDevice's use-def check).
+            passes.append(tirx.transform.ConvertSSA())
         passes.extend(
             [
                 tirx.transform.FP8ComputeLegalize(),
@@ -76,12 +81,17 @@ def tirx_pipeline():
             tirx.transform.FlattenBuffer(),
             tirx.transform.BF16ComputeLegalize(),
             tirx.transform.NarrowDataType(32),
-            tirx.transform.VectorizeLoop(not bool(config.get("tir.disable_vectorize", False))),
+            tirx.transform.VectorizeLoop(not bool(config.get("tirx.disable_vectorize", False))),
             tirx.transform.UnrollLoop(),
             tirx.transform.StmtSimplify(),
         ]
-        if not bool(config.get("tir.disable_cse_tir", False)):
+        if not bool(config.get("tirx.disable_cse_tir", False)):
             passes.append(tirx.transform.CommonSubexprElim())
+            # CSE keys its Bind insertions by Stmt object identity; when loop
+            # unrolling leaves structurally shared subtrees, the same Bind can
+            # materialize at several positions. Re-establish SSA before the
+            # passes that require it (SplitHostDevice's use-def check).
+            passes.append(tirx.transform.ConvertSSA())
         passes.extend(
             [
                 tirx.transform.FP8ComputeLegalize(),

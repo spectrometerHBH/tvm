@@ -699,14 +699,17 @@ Emission (lines 1322–1512):
    WF-DECL injectivity ⟹ destination addresses never collide) ⟹ every destination is
    written exactly once. The emission order has no semantic effect (the instructions
    are mutually independent; completion is aggregated by the mbarrier).
-5. **gather4** (lines 1340–1355 + 1461–1494): one chunk per 4 indexer rows; a chunk's
+5. **gather4** (lines 1345–1360 + 1466–1501): one chunk per 4 indexer rows; a chunk's
    smem start = `s_st + chunk·4 @ dst_gather_axis` through the declared layout's
-   `ptr_to` (lines 1340–1343) — chunk-granular placement follows the declared layout ✓;
+   `ptr_to` (lines 1345–1348) — chunk-granular placement follows the declared layout ✓;
    the 4 rows within a chunk are written contiguously by AX-GATHER4 (row-pitch
-   contract, §2.4); coordinates = `[c_inner, r_0..r_3]` (lines 1345–1355; rank≠2 /
-   coordinate count≠2 rejected, lines 1347–1348 / 1353–1354). When
-   `flat_total_extent > 1` the chunk is the outermost level (lines 1485–1494; the order
-   does not affect the set semantics, test line 1304 pins the structure).
+   contract, §2.4); coordinates = `[c_inner, r_0..r_3]` (lines 1350–1360; rank≠2 /
+   coordinate count≠2 rejected, lines 1352–1353 / 1358–1359). When
+   `flat_total_extent > 1` the chunk is the outermost level and each chunk body is an
+   issue loop over the remaining iters (lines 1490–1501; a single chunk uses its body
+   directly — a length-1 SeqStmt is invalid IR); the emission order does not affect
+   the set semantics. Pinned by `test_copy_tma_gather4_multi_iter_gpu_smoke`
+   (single-chunk multi-iter roundtrip) alongside the single-tile smoke.
 6. **mbarrier / multicast operands** (lines 1357–1459): with `cta_group=2` or a
    static/predicated `mbarrier_addr`, convert the shared address; s2g goes through the
    `s2g` / `s2g_reduce` builtins (lines 1437–1459). All are operand packaging that does
