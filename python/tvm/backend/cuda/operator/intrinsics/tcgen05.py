@@ -739,9 +739,9 @@ def _mma_dense_parts(*args):
     Args layout: (d_tmem_addr, a_operand, b_desc[, sp_tmem_addr], i_desc,
                   enable_input_d, mask0..maskN-1[, pred],
                   kind, sparse, use_a_tmem, cta_group, scale_input_d,
-                  weight_stationary, has_pred)
+                  weight_stationary)
     """
-    attrs = args[-7:]
+    attrs = args[-6:]
     kind = parse_str(attrs[0])
     sparse_raw = attrs[1]
     sparse = bool(int(sparse_raw)) if hasattr(sparse_raw, "value") else bool(sparse_raw)
@@ -752,7 +752,6 @@ def _mma_dense_parts(*args):
     cta_group = int(attrs[3])
     scale_input_d = int(attrs[4])
     weight_stationary = bool(int(attrs[5]))
-    has_pred = bool(int(attrs[6]))
 
     if not 0 <= scale_input_d <= 15:
         raise ValueError(
@@ -770,6 +769,18 @@ def _mma_dense_parts(*args):
         raise ValueError("tcgen05.mma.ws does not support scale_input_d in this intrinsic")
 
     num_masks = 8 if cta_group == 2 else 4
+    operand_count = len(args) - len(attrs)
+    expected_operand_count = (6 if sparse else 5) + num_masks
+    if operand_count == expected_operand_count:
+        has_pred = False
+    elif operand_count == expected_operand_count + 1:
+        has_pred = True
+    else:
+        raise ValueError(
+            "The number of operands for ptx_tcgen05_mma is incorrect, expected "
+            f"{expected_operand_count} or {expected_operand_count + 1}, got {operand_count}."
+        )
+
     a_type = "uint32_t" if use_a_tmem else "uint64_t"
     a_constraint = "r" if use_a_tmem else "l"
 
@@ -867,7 +878,7 @@ def _mma_dense_parts(*args):
 for _form_op in ("_ptx_tcgen05_mma_fp_form", "_ptx_tcgen05_mma_int_form"):
     device_intrinsic(
         _form_op,
-        n_attrs=7,
+        n_attrs=6,
         helper_name=lambda *a: _mma_dense_parts(*a)[0],
         c_signature=lambda *a: _mma_dense_parts(*a)[1],
         body=lambda *a: _mma_dense_parts(*a)[2],
@@ -933,7 +944,6 @@ def _dispatch_tcgen05_mma(
         cta_group_i,
         scale_input_d_i,
         int(weight_stationary),
-        int(has_pred),
     ]
     return CODEGEN_REGISTRY[f"tirx.{op}"](operand_args + attr_args)
 
