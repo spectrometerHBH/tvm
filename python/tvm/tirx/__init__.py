@@ -87,8 +87,8 @@ from .generic import add, subtract, multiply
 # TIRX-specific imports (must come before subpackage imports to avoid circular imports)
 from .exec_scope import ExecScope, ScopeIdDef
 from .layout import TileLayout, Layout, SwizzleLayout, ComposeLayout
-from .predicate import Predicate
 from .expr_functor import ExprFunctor
+from .lambda_expr import LambdaExpr
 
 from . import transform
 from . import analysis

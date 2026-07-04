@@ -15,7 +15,7 @@
 # specific language governing permissions and limitations
 # under the License.
 # pylint: disable=no-member
-"""Async structures for TIRX"""
+"""Reified lambda expression for TIRX tile primitive ops."""
 
 import inspect
 from collections.abc import Callable
@@ -28,9 +28,13 @@ from tvm.tirx import PrimExpr, Var
 from . import _ffi_api
 
 
-@register_object("tirx.Predicate")
-class Predicate(Object):
-    """A predicate object for TIRX"""
+@register_object("tirx.LambdaExpr")
+class LambdaExpr(Object):
+    """A reified Python lambda: bound variables and a body over them.
+
+    Used by tile primitive ops that take a per-element expression over the
+    destination axes (e.g. ``tirx.tile.select``).
+    """
 
     vars: list[Var]
     pred: PrimExpr
@@ -38,8 +42,8 @@ class Predicate(Object):
     def __init__(self, f_pred: Callable[..., PrimExpr]):
         vars = [Var(name, "int32") for name in inspect.signature(f_pred).parameters]
         pred = f_pred(*vars)
-        self.__init_handle_by_constructor__(_ffi_api.Predicate, vars, pred)
+        self.__init_handle_by_constructor__(_ffi_api.LambdaExpr, vars, pred)
 
     def apply(self, indices: list[PrimExpr]) -> PrimExpr:
-        """Apply the predicate to the given indices"""
-        return _ffi_api.PredicateApply(self, indices)
+        """Substitute the bound variables with the given indices, returning the body."""
+        return _ffi_api.LambdaExprApply(self, indices)
