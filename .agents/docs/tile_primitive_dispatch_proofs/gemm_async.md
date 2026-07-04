@@ -46,7 +46,7 @@ Suggested reading order: §0 overview → §1 definitions → §2 axioms and tru
 lemmas → §3 step-by-step lemmas → §4 theorems → §5 trust base →
 Appendix A (full table of code checkpoints ↔ lemmas).
 
-Sibling document: `tcgen05_cp_dispatch_correctness_proof.md` (hereafter the
+Sibling document: `tcgen05_cp.md` (hereafter the
 **cp proof**). This document reuses its notation and already-proven lemmas
 (T-SLICE / T-APPLY / T-CANON / T-GROUP / swizzle semantic equivalence) without
 re-proving them.

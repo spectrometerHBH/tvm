@@ -31,9 +31,9 @@ Before modifying any of the following files, read the matching proof in
 
 | Dispatch file | Correctness proof |
 | --- | --- |
-| `copy_async/tcgen05_cp.py` | `.agents/docs/tile_primitive_dispatch_proofs/tcgen05_cp_dispatch_correctness_proof.md` |
-| `copy_async/tma.py`, `tma_utils.py` | `.agents/docs/tile_primitive_dispatch_proofs/tma_dispatch_correctness_proof.md` |
-| `gemm_async/tcgen05.py` (and the instruction-descriptor helpers in `../intrinsics/tcgen05.py`) | `.agents/docs/tile_primitive_dispatch_proofs/gemm_async_instr_desc_correctness_proof.md` |
+| `copy_async/tcgen05_cp.py` | `.agents/docs/tile_primitive_dispatch_proofs/tcgen05_cp.md` |
+| `copy_async/tma.py`, `tma_utils.py` | `.agents/docs/tile_primitive_dispatch_proofs/tma.md` |
+| `gemm_async/tcgen05.py` (and the instruction-descriptor helpers in `../intrinsics/tcgen05.py`) | `.agents/docs/tile_primitive_dispatch_proofs/gemm_async.md` |
 
 ## Rules for changes in this directory
 

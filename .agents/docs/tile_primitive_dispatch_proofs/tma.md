@@ -50,8 +50,8 @@ Suggested reading order: §0 overview → §1 definitions → §2 axioms and tru
 §3 step-by-step lemmas → §4 theorems → §5 trust base → Appendix A (the full
 code-checkpoint ↔ lemma cross-reference table).
 
-Sibling documents: `tcgen05_cp_dispatch_correctness_proof.md` (hereafter the
-**cp proof**) and `gemm_async_instr_desc_correctness_proof.md` (hereafter the
+Sibling documents: `tcgen05_cp.md` (hereafter the
+**cp proof**) and `gemm_async.md` (hereafter the
 **gemm proof**). This document reuses the notation and the proven / trusted lemmas of
 the cp proof (T-SLICE / T-APPLY / T-CANON / T-GROUP / T-ARITH, swizzle semantic
 equivalence) without re-proving them.

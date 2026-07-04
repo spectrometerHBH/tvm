@@ -19,7 +19,7 @@
 
 Correctness proof (repo root; covers the instruction-descriptor fold and
 majorness derivation):
-``.agents/docs/tile_primitive_dispatch_proofs/gemm_async_instr_desc_correctness_proof.md``.
+``.agents/docs/tile_primitive_dispatch_proofs/gemm_async.md``.
 Read it before changing dispatch logic here, and keep it (including its
 ``file:line`` references) in sync with any behavioral change.
 

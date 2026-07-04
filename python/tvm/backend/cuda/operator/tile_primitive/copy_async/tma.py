@@ -17,7 +17,7 @@
 
 """copy_async dispatch variant: tma (unified algorithm).
 
-Correctness proof: ``.agents/docs/tile_primitive_dispatch_proofs/tma_dispatch_correctness_proof.md``
+Correctness proof: ``.agents/docs/tile_primitive_dispatch_proofs/tma.md``
 (repo root).
 Read it before changing dispatch logic here, and keep it (including its
 ``file:line`` references) in sync with any behavioral change.
