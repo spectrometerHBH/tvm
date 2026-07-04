@@ -17,8 +17,9 @@
 
 """Implementation of gemm_async operator dispatch for CUDA targets.
 
-Correctness proof: ``.agents/docs/gemm_async_instr_desc_correctness_proof.md``
-(repo root; covers the instruction-descriptor fold and majorness derivation).
+Correctness proof (repo root; covers the instruction-descriptor fold and
+majorness derivation):
+``.agents/docs/tile_primitive_dispatch_proofs/gemm_async_instr_desc_correctness_proof.md``.
 Read it before changing dispatch logic here, and keep it (including its
 ``file:line`` references) in sync with any behavioral change.
 

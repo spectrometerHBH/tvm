@@ -91,7 +91,8 @@ Use `python -m tirx_kernels.bench_suite` in the **tirx-kernels** repo
 ## Tile-Primitive Dispatch Proofs
 
 The CUDA tile-primitive dispatchers are covered by normative correctness
-proofs in `.agents/docs/`. Before editing dispatch logic under
+proofs in `.agents/docs/tile_primitive_dispatch_proofs/`. Before editing
+dispatch logic under
 `python/tvm/backend/cuda/operator/tile_primitive/`, read that directory's
 `AGENTS.md` and the proof matching the file you are changing, and keep the
 proof in sync with any behavioral change.

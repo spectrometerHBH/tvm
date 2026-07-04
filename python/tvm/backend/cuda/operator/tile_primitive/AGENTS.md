@@ -27,13 +27,13 @@ declared semantics.
 ## Required reading before editing dispatch logic
 
 Before modifying any of the following files, read the matching proof in
-`.agents/docs/` (repo root) end to end:
+`.agents/docs/tile_primitive_dispatch_proofs/` (repo root) end to end:
 
 | Dispatch file | Correctness proof |
 | --- | --- |
-| `copy_async/tcgen05_cp.py` | `.agents/docs/tcgen05_cp_dispatch_correctness_proof.md` |
-| `copy_async/tma.py`, `tma_utils.py` | `.agents/docs/tma_dispatch_correctness_proof.md` |
-| `gemm_async/tcgen05.py` (and the instruction-descriptor helpers in `../intrinsics/tcgen05.py`) | `.agents/docs/gemm_async_instr_desc_correctness_proof.md` |
+| `copy_async/tcgen05_cp.py` | `.agents/docs/tile_primitive_dispatch_proofs/tcgen05_cp_dispatch_correctness_proof.md` |
+| `copy_async/tma.py`, `tma_utils.py` | `.agents/docs/tile_primitive_dispatch_proofs/tma_dispatch_correctness_proof.md` |
+| `gemm_async/tcgen05.py` (and the instruction-descriptor helpers in `../intrinsics/tcgen05.py`) | `.agents/docs/tile_primitive_dispatch_proofs/gemm_async_instr_desc_correctness_proof.md` |
 
 ## Rules for changes in this directory
 

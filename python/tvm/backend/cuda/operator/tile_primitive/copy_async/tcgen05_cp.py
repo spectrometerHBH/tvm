@@ -17,8 +17,8 @@
 
 """smem->tmem dispatch via ``tcgen05.cp`` — generic planner for all PTX shapes.
 
-Correctness proof: ``.agents/docs/tcgen05_cp_dispatch_correctness_proof.md``
-(repo root).
+Correctness proof (repo root):
+``.agents/docs/tile_primitive_dispatch_proofs/tcgen05_cp_dispatch_correctness_proof.md``.
 Read it before changing dispatch logic here, and keep it (including its
 ``file:line`` references) in sync with any behavioral change.
 
