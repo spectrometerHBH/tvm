@@ -443,8 +443,18 @@ class Buffer(Object, Scriptable):
         # plus seps over *that* layout — permute the regrouped one, not
         # ``self.layout``. For a simple layout (one shard iter per axis) this
         # reduces to ``permute_dims(dims)``.
-        grouped, seps = self.layout.group(list(self.shape))
+        layout = self.layout
+        swizzle = None
+        if isinstance(layout, tvm.tirx.layout.ComposeLayout):
+            # The swizzle permutes the flat offset, so it commutes with a
+            # permutation of the logical dims: permute the inner tile layout
+            # and re-compose.
+            swizzle = layout.swizzle
+            layout = layout.tile_layout
+        grouped, seps = layout.group(list(self.shape))
         new_layout = grouped.permute_by_groups(seps, list(dims))
+        if swizzle is not None:
+            new_layout = tvm.tirx.layout.ComposeLayout(swizzle, new_layout)
         return tvm.tirx.script.builder.decl_buffer(
             new_shape,
             self.dtype,

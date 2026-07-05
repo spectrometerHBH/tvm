@@ -1385,6 +1385,42 @@ def test_buffer_permute_ir():
     assert from_source(code).script() == code
 
 
+def test_buffer_permute_compose_layout_ir():
+    """Verify .permute on a swizzle-composed layout: the swizzle is preserved
+    and the inner tile layout's dim groups are permuted (the reshape-permute-
+    reshape idiom used to refactor gather views without restating strides)."""
+
+    # fmt: off
+    @T.prim_func
+    def func() -> None:
+        T.device_entry()
+        A = T.alloc_buffer(
+            [4, 4, 4, 64], dtype="bfloat16", scope="shared.dyn",
+            layout=T.ComposeLayout(
+                T.SwizzleLayout(3, 3, 3, swizzle_inner=True),
+                T.TileLayout(T.S[(4, 4, 4, 64) : (1024, 256, 64, 1)]),
+            ),
+        )
+        B = A.permute(1, 0, 2, 3)
+        B[0, 0, 0, 0] = T.bfloat16(0)
+        # fmt: on
+
+    bufs = _collect_buffers(func)
+    a_buf = bufs["A"]
+    b_buf = bufs["B"]
+
+    assert b_buf.data.same_as(a_buf.data)
+    assert [int(s) for s in b_buf.shape] == [4, 4, 4, 64]
+    expected = tvm.tirx.layout.ComposeLayout(
+        a_buf.layout.swizzle,
+        a_buf.layout.tile_layout.permute_dims([1, 0, 2, 3]),
+    )
+    assert_structural_equal(b_buf.layout, expected)
+
+    code = func.script()
+    assert from_source(code).script() == code
+
+
 def test_buffer_view_dtype_ir():
     """Verify .view('float32') on float16: dtype correct, last dim halved, shared data."""
 
