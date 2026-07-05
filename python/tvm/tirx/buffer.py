@@ -616,6 +616,32 @@ class Buffer(Object, Scriptable):
         otherwise it stays inside the tile layout's offset so the swizzle
         keeps applying to it and the view addresses the same bytes."""
         offset_map = dict(grouped.offset.items())
+        if self.allocated_addr is not None and len(self.allocated_addr) > 0:
+            # tmem addresses by physical column: a narrowed column range shifts
+            # the allocated_addr (col base), not elem_offset/data. extra_offset
+            # is the narrowed dim's TCol-stride offset, i.e. a column count.
+            new_addr = self.allocated_addr[0]
+            if extra_offset is not None:
+                new_addr = new_addr + extra_offset
+            new_layout = tvm.tirx.layout.TileLayout.from_iters(
+                new_shard, list(grouped.replica), offset_map
+            )
+            new_layout = self._rewrap_swizzle(new_layout, swizzle)
+            return tvm.tirx.script.builder.decl_buffer(
+                new_shape,
+                self.dtype,
+                None,
+                None,
+                None,
+                None,
+                self.scope(),
+                self.data_alignment,
+                0,
+                "",
+                self.axis_separators,
+                new_layout,
+                allocated_addr=new_addr,
+            )
         if extra_offset is not None and not self._swizzle_offset_commutes(swizzle, extra_offset):
             m_axis = tvm.tirx.layout.Axis.get("m")
             prev = offset_map.get(m_axis)
