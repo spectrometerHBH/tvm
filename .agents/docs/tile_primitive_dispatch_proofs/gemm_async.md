@@ -319,17 +319,34 @@ Per §9.7.16.10 (p665) and §9.7.16.10.9.1/.3 (p712–725):
    two 64-lane banks (`n < N/2` → lane m, `n ≥ N/2` → lane m+64). But the
    two banks are an *output* axis of extent 2, and a caller is free to use
    that axis as a **batch** rather than as the upper/lower half of one N
-   range. FlashMLA's NoPE gemm does exactly this: it feeds A and B so that
-   bank `b ∈ {0,1}` receives the partial contraction over head-dim half `b`
-   of the *same* 64 keys, i.e. the true operation is a **batch-2 M=64 bmm**
-   `einsum("i k0 k1 k2, j k0 k1 k2 -> k1 i j")` (k1 = 2 = the fold/batch,
-   contracted over k0,k2), producing `C[2,64,64]` — two partials that the
-   kernel reduces *downstream* by adding the two banks
-   (`P[h,key] = tmem_p[h,key] + tmem_p[h,key+64]`,
-   `sparse_prefill_head64_phase1.py`). The tell-tale is that `tmem_p` is
-   64×128 = twice the 64×64 a complete Q·Kᵀ over one key set could produce,
-   and that adding bank 0 to bank 1 is only meaningful if they are the same
-   keys' two head-dim halves, never two independent N-halves.
+   range. FlashMLA's NoPE gemm does exactly this.
+
+   **The exact operation (derived from the emitted code, not the layout
+   names).** The kernel accumulates the `kv_nope_part_idx` K-tiling into
+   `tmem_p[64,128]` = `C[i,n] = Σ_{k<256} q[i,k]·k_nope[n,k]` (`n < 128`),
+   then reduces the two banks in the read-back:
+   `P[i,j] = tmem_p[i,j] + tmem_p[i,j+64]`
+   (`sparse_prefill_head64_phase1.py`). Substituting the two banks:
+
+   - bank 0: `D[0,i,j] = C[i,j]    = Σ_{k<256} q[i,k]·k_nope[j,    k]`
+   - bank 1: `D[1,i,j] = C[i,j+64] = Σ_{k<256} q[i,k]·k_nope[j+64, k]`
+
+   Both banks share the **same** `q[i,k]` and differ only in the K row
+   (`k_nope[j]` vs `k_nope[j+64]`). So the operation is an **A-shared,
+   B/C-batched gemm**, not a symmetric bmm:
+
+   ```
+   A[M=64, K=256]  ·  B[batch=2, N=64, K=256]  →  C[batch=2, M=64, N=64]
+   einsum("i k, b j k -> b i j")   (b = 2 = the fold/batch = key-row half)
+   ```
+
+   **A (=Q) is NOT batched** — it is read 64-lane (the emit shows
+   `A_tmem = (M=64, K)`) and reused across both banks; only **B's key-row
+   half and C's two banks** carry the batch. `C[2,64,64]` is two partials the
+   kernel sums downstream. The tell-tale is that `tmem_p` is 64×128 = twice
+   the 64×64 a complete Q·Kᵀ over one key set could produce, and that adding
+   bank 0 to bank 1 is only meaningful if they are the same queries against
+   two key-row halves, never two independent N-halves.
 
    So dispatching this via `gemm_async(A[M,K], B[N,K], C[M,N])` with the
    packed Layout-E C is **byte-correct but semantically a coincidence**: the
