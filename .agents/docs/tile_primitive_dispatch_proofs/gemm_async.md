@@ -368,7 +368,21 @@ Per §9.7.16.10 (p665) and §9.7.16.10.9.1/.3 (p712–725):
       step 1's assert, so "accepted batched C" ⟺ ".ws is the correct
       datapath". Hence **dispatch-accepts ⟹ generated code is correct**.
 
-   The packed-C path is retained for existing callers and is unchanged.
+   **Packed vs batched — when each is correct.** The packed C[M, 2, N//2]
+   path is *not* deleted, because the M=64 fold is also the correct spelling
+   for a **genuine N** output whose two banks are distinct output columns
+   (reduced by nothing downstream) — e.g. FlashMLA head64's `O = P·V` gemm
+   writes `tmem_o_{lo,hi}` = O[:, 0:256] / O[:, 256:512], real N=256 folded
+   into 64 lanes. That is a legitimate packed-C use and stays. The **wrong
+   path** is precisely the opposite: using packed C to mean a *batch* whose
+   two banks are summed downstream (the logits gemm, `tmem_p[h,key] +
+   tmem_p[h,key+64]`). That caller — head64's only one — is now migrated to
+   the explicit `C[2, M, N//2]` form, so no batch is hidden in an N-fold
+   anymore. The dispatch cannot tell genuine-N from batch at the packed
+   level (identical bytes), which is exactly why the batch case must declare
+   itself via the batched shape; both spellings remain, each correct for its
+   intent. (cta_group::2 M=64 uses the 2×2 Layout B — a different, M-across-
+   CTA organization — and is unaffected by all of this.)
 5. **Ordering** (§9.7.16.6.2, p646): `tcgen05.mma.cta_group::N →
    tcgen05.mma.cta_group::N (same N and accumulator and shape)` forms a
    pipeline, guaranteeing execution in issue order — the correctness basis
