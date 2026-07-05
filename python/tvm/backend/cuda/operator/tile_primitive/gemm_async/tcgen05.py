@@ -17,12 +17,6 @@
 
 """Implementation of gemm_async operator dispatch for CUDA targets.
 
-Correctness proof (repo root; covers the instruction-descriptor fold and
-majorness derivation):
-``.agents/docs/tile_primitive_dispatch_proofs/gemm_async.md``.
-Read it before changing dispatch logic here, and keep it (including its
-``file:line`` references) in sync with any behavioral change.
-
 Registered op: gemm_async (1 variant: "tcgen05").
 See the @register_dispatch block below for detailed documentation with
 before/after IR examples.
@@ -1055,7 +1049,7 @@ def gemm_async_tcgen05_impl(op_call: TilePrimitiveCall, sctx: DispatchContext) -
     # datapath writes the two banks to lanes {m, m+64} while the caller reads
     # them at rows {m, m+1}, silently mis-placing the accumulator. Reject it —
     # this is the converse of the packed-C weight_stationary=False rejection
-    # above, and closes the "ws + Layout-F C" hole the proof previously left
+    # above, and closes the "ws + Layout-F C" hole that was previously left
     # open.
     if weight_stationary and cta_group == 1 and M == 64 and not packed_n2 and not is_2x2:
         raise ValueError(

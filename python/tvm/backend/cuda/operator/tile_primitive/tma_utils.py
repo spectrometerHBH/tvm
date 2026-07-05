@@ -15,12 +15,7 @@
 # specific language governing permissions and limitations
 # under the License.
 
-"""TMA (Tensor Memory Accelerator) utilities for CUDA op dispatches.
-
-Correctness proof: ``.agents/docs/tile_primitive_dispatch_proofs/tma.md``
-(repo root). Read it before changing swizzle-mode or tensor-map
-derivation here, and keep it in sync with any behavioral change.
-"""
+"""TMA (Tensor Memory Accelerator) utilities for CUDA op dispatches."""
 
 import copy
 from enum import Enum

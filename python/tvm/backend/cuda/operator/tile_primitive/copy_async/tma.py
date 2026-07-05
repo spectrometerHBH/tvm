@@ -17,11 +17,6 @@
 
 """copy_async dispatch variant: tma (unified algorithm).
 
-Correctness proof: ``.agents/docs/tile_primitive_dispatch_proofs/tma.md``
-(repo root).
-Read it before changing dispatch logic here, and keep it (including its
-``file:line`` references) in sync with any behavioral change.
-
 One algorithm handles all global↔shared TMA copies, respecting the user's
 logical OOB spec through alignment conditions on the reshape. No more
 aggressive vs exact family split; ``oob`` only selects the hardware fill
