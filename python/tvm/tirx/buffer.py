@@ -798,6 +798,52 @@ class Buffer(Object, Scriptable):
         """
         return _rearrange(self, pattern, **sizes)
 
+    def tile(self, *specs) -> "_TileIndexer":
+        """Chunk a dim: split it into factors, pick a chunk, keep the rest.
+
+        Rank-preserving — the picked dim's remaining factors merge back into
+        that one dim, and every other dim is untouched, so N dims in gives N
+        dims out. Chunk multiple dims by chaining (dims never shift):
+        ``buf.tile(0, (nx, -1))[cx, :].tile(1, (-1, ny))[:, cy]``.
+
+        Call as ``tile(dim, factors)`` for one dim, or pass several
+        ``(dim, factors)`` specs as sugar for a chain. ``factors`` is the
+        tuple the dim splits into (row-major, like :meth:`unflatten`; one
+        ``-1`` inferred). The indexer takes one entry per factor: an ``int`` /
+        ``PrimExpr`` **picks** it (fixing the chunk, dropping the axis, folding
+        its offset) and ``:`` **keeps** it. At least one factor per dim must be
+        picked — a pure keep-everything split is :meth:`unflatten`, not a
+        chunk::
+
+            # 64 rows split into (stripe, warp, row) = (-1, WARPS, 4); this
+            # warp's 16 interleaved rows (stripe x row merged):
+            buf.tile(1, (-1, WARPS, 4))[:, warp, :]
+
+            tile(d, (n, -1))[c, :]   # contiguous block c
+            tile(d, (-1, n))[:, c]   # round-robin chunk c
+
+        A picked index may be a dynamic PrimExpr (e.g. a warp id); picking
+        several factors of one dim is allowed.
+        """
+        if specs and isinstance(specs[0], int | Integral):
+            if len(specs) != 2:
+                raise ValueError("tile(dim, factors) takes a dim and a factors tuple")
+            specs = (specs,)  # single-dim positional form
+        norm = []
+        seen = set()
+        for spec in specs:
+            if not isinstance(spec, tuple | list) or len(spec) != 2:
+                raise ValueError(f"tile: each spec must be (dim, factors), got {spec!r}")
+            dim = self._normalized_dim(spec[0], "tile")
+            if dim in seen:
+                raise ValueError(f"tile: dim {dim} tiled more than once")
+            seen.add(dim)
+            factors = spec[1]
+            if not isinstance(factors, tuple | list) or len(factors) < 1:
+                raise ValueError(f"tile: factors for dim {dim} must be a non-empty tuple")
+            norm.append((dim, tuple(factors)))
+        return _TileIndexer(self, norm)
+
     def __getitem__(self, indices):
         from ..arith import Analyzer  # pylint: disable=import-outside-toplevel
         from .expr import BufferLoad, Ramp  # pylint: disable=import-outside-toplevel
@@ -1036,6 +1082,66 @@ class _SubIndexer:
                     dim += 1
             else:
                 buf = buf.select(dim, item)
+        return buf
+
+
+class _TileIndexer:
+    """Indexer object returned by :meth:`Buffer.tile`.
+
+    Holds ``(dim, factors)`` specs; ``[...]`` takes one entry per factor
+    (``int`` / ``PrimExpr`` picks and drops it, ``:`` keeps it). Each dim is
+    processed as :meth:`unflatten` -> per-factor :meth:`select` -> a single
+    :meth:`flatten` of the kept factors. Dims are processed high-to-low so a
+    fully-picked (rank-reducing) dim never shifts a lower dim's index.
+    """
+
+    def __init__(self, buffer: Buffer, specs):
+        self._buffer = buffer
+        self._specs = specs
+
+    def __getitem__(self, picks) -> Buffer:
+        if not isinstance(picks, tuple):
+            picks = (picks,)
+        n_factors = sum(len(factors) for _, factors in self._specs)
+        if len(picks) != n_factors:
+            raise ValueError(
+                f"tile: split into {n_factors} factor(s) but {len(picks)} "
+                f"index(es) given (int/PrimExpr picks, ':' keeps)"
+            )
+        # Distribute the flat index list across specs, left to right.
+        groups, pos = [], 0
+        for dim, factors in self._specs:
+            groups.append((dim, factors, picks[pos : pos + len(factors)]))
+            pos += len(factors)
+        buf = self._buffer
+        for dim, factors, dim_picks in sorted(groups, key=lambda g: g[0], reverse=True):
+            buf = self._apply(buf, dim, factors, dim_picks)
+        return buf
+
+    @staticmethod
+    def _is_keep(p):
+        return isinstance(p, slice) and p.start is None and p.stop is None and p.step is None
+
+    @classmethod
+    def _apply(cls, buf, dim, factors, dim_picks):
+        for p in dim_picks:
+            if isinstance(p, slice) and not cls._is_keep(p):
+                raise ValueError("tile: a factor slice must be ':' (keep whole); got a sub-slice")
+        n_keep = sum(1 for p in dim_picks if cls._is_keep(p))
+        if n_keep == len(dim_picks):
+            raise ValueError(
+                f"tile: dim {dim} picks no factor (all ':'); a chunk must pick "
+                f"at least one factor. Use .unflatten for a pure reshape."
+            )
+        buf = buf.unflatten(dim, factors)
+        # Drop picked factors from the last to the first so earlier dim indices
+        # stay valid; kept factors then sit contiguously starting at ``dim``.
+        for i in reversed(range(len(dim_picks))):
+            if not cls._is_keep(dim_picks[i]):
+                buf = buf.select(dim + i, dim_picks[i])
+        # Merge the kept factors back into the one dim (rank-preserving).
+        if n_keep >= 2:
+            buf = buf.flatten(dim, dim + n_keep - 1)
         return buf
 
 

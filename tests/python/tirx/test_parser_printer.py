@@ -1831,6 +1831,95 @@ def test_buffer_select_narrow_swizzle_commutation():
         assert addr(a3, a3.elem_offset, 8 + j) == addr(b3, a3.elem_offset, j) == 8 + j
 
 
+def test_buffer_tile_ir():
+    """buf.tile((dim, factors))[picks] splits dims into factors and picks
+    chunks in one call: int/PrimExpr picks a factor, ':' keeps it, kept
+    factors merge back. Equivalent to the unflatten/select/flatten chain."""
+
+    # fmt: off
+    @T.prim_func
+    def func() -> None:
+        T.device_entry()
+        A = T.alloc_buffer([3, 64, 512], dtype="float16", scope="shared",
+                           layout=T.TileLayout(T.S[(3, 64, 512) : (64 * 512, 512, 1)]))
+        for w in T.serial(4):
+            B = A.tile((1, (-1, 4, 4)))[:, w, :]
+            B[0, 0, 0] = T.float16(0)
+            C = A.unflatten(1, (4, 4, 4)).select(2, w).flatten(1, 2)
+            C[0, 0, 0] = T.float16(0)
+        D = A.tile((1, (-1, 4)))[:, 2]
+        D[0, 0, 0] = T.float16(0)
+        E = A.sub[:, 2::4]
+        E[0, 0, 0] = T.float16(0)
+        F = A.tile((1, (4, -1)))[2, :]
+        F[0, 0, 0] = T.float16(0)
+        G = A.narrow(1, 32, 16)
+        G[0, 0, 0] = T.float16(0)
+
+    @T.prim_func
+    def func_multi() -> None:
+        T.device_entry()
+        A = T.alloc_buffer([64, 128], dtype="float16", scope="shared",
+                           layout=T.TileLayout(T.S[(64, 128) : (128, 1)]))
+        for wx in T.serial(4):
+            for wy in T.serial(2):
+                H = A.tile((0, (-1, 4, 2)), (1, (-1, 2, 8)))[:, wx, :, :, wy, :]
+                H[0, 0] = T.float16(0)
+                J = (A.unflatten(0, (8, 4, 2)).select(1, wx).flatten(0, 1)
+                      .unflatten(1, (8, 2, 8)).select(2, wy).flatten(1, 2))
+                J[0, 0] = T.float16(0)
+
+    @T.prim_func
+    def func_multipick() -> None:
+        T.device_entry()
+        A = T.alloc_buffer([128, 16], dtype="float16", scope="shared",
+                           layout=T.TileLayout(T.S[(128, 16) : (16, 1)]))
+        for a in T.serial(2):
+            for b in T.serial(4):
+                K = A.tile((0, (2, 4, -1)))[a, b, :]
+                K[0, 0] = T.float16(0)
+                L = A.unflatten(0, (2, 4, 16)).select(0, a).select(0, b)
+                L[0, 0] = T.float16(0)
+    # fmt: on
+
+    b = _collect_buffers(func)
+    assert [int(s) for s in b["B"].shape] == [3, 16, 512]
+    assert_structural_equal(b["B"].layout, b["C"].layout)
+    assert_structural_equal(b["D"].layout, b["E"].layout)
+    assert_structural_equal(b["F"].layout, b["G"].layout)
+    m = _collect_buffers(func_multi)
+    assert [int(s) for s in m["H"].shape] == [16, 64]
+    assert_structural_equal(m["H"].layout, m["J"].layout)
+    mp = _collect_buffers(func_multipick)
+    assert [int(s) for s in mp["K"].shape] == [16, 16]
+    assert_structural_equal(mp["K"].layout, mp["L"].layout)
+
+    code = func_multipick.script()
+    assert from_source(code).script() == code
+
+
+def test_buffer_tile_rejected():
+    buf = tvm.tirx.decl_buffer(
+        (3, 64, 512),
+        "float16",
+        layout=tvm.tirx.layout.TileLayout(T.S[(3, 64, 512) : (64 * 512, 512, 1)]),
+    )
+    with pytest.raises(ValueError, match="takes a dim and a factors"):
+        buf.tile(1, 4, 4)  # positional single-dim form takes exactly (dim, factors)
+    with pytest.raises(ValueError, match="picks no factor"):
+        buf.tile(1, (-1, 4))[:, :]  # a chunk must pick at least one factor
+    with pytest.raises(ValueError, match="non-empty tuple"):
+        buf.tile((1, 4))  # factors must be a tuple
+    with pytest.raises(ValueError, match="non-empty tuple"):
+        buf.tile((1, ()))
+    with pytest.raises(ValueError, match="tiled more than once"):
+        buf.tile((1, (4, -1)), (1, (2, -1)))
+    with pytest.raises(ValueError, match="index"):
+        buf.tile((1, (-1, 4)))[2]  # 2 factors, 1 index
+    with pytest.raises(ValueError, match="must be ':'"):
+        buf.tile((1, (-1, 4)))[:, 1:3]  # sub-slice on a factor
+
+
 def test_buffer_rearrange_singleton_size_mismatch_rejected():
     buf = tvm.tirx.decl_buffer(
         (2, 3), "float16", layout=tvm.tirx.layout.TileLayout(T.S[(2, 3) : (3, 1)])
