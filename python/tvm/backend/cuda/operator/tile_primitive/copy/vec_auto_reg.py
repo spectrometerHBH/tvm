@@ -47,6 +47,7 @@ from ._swizzle_iter import (
     try_recognize,
 )
 from .utils import _is_valid_copy, _scope_allowed
+from .vec_forced import _ld_cache_config
 
 
 def _extract_tile(layout, region):
@@ -510,6 +511,16 @@ def _emit_reg(op_call: TilePrimitiveCall, sctx: DispatchContext) -> PrimFunc:
     vec, ptx_type = copy_ptx_form(num_bytes)
     space = "shared" if s_is_shared else "global"
 
+    # Honor the load cache hint (cache="nc" + L1/L2 evict / prefetch), matching
+    # vec_forced. Applies only to a global -> register LOAD: ``nc`` is a
+    # global-memory qualifier, so register->global stores (r_is_src) and
+    # shared-side copies keep the plain form.
+    _cache, _cache_hints = _ld_cache_config(op_call)
+    _use_nc = _cache == "nc" and space == "global" and not r_is_src
+    _l1_evict = _cache_hints.get("l1_evict", "")
+    _l2_evict = _cache_hints.get("l2_evict", "")
+    _prefetch = _cache_hints.get("prefetch_size", "")
+
     total_outer = 1
     for a in outer:
         total_outer *= a[0]
@@ -566,6 +577,17 @@ def _emit_reg(op_call: TilePrimitiveCall, sctx: DispatchContext) -> PrimFunc:
             r_ptr = _ptr_off(r_local.ptr_to([0]), r_off_base + dr)
             if r_is_src:
                 T.ptx.st(s_ptr, src=r_ptr, space=space, vec=vec, ptx_type=ptx_type)
+            elif _use_nc:
+                T.ptx.ld_global_nc(
+                    s_ptr,
+                    copy_ptx_ld_return_type(ptx_type),
+                    ptx_type,
+                    dst=r_ptr,
+                    vec=vec,
+                    l1_evict=_l1_evict,
+                    l2_evict=_l2_evict,
+                    prefetch_size=_prefetch,
+                )
             else:
                 T.ptx.ld(
                     s_ptr,
@@ -574,6 +596,9 @@ def _emit_reg(op_call: TilePrimitiveCall, sctx: DispatchContext) -> PrimFunc:
                     dst=r_ptr,
                     space=space,
                     vec=vec,
+                    l1_evict=_l1_evict,
+                    l2_evict=_l2_evict,
+                    prefetch_size=_prefetch,
                 )
     # fmt: on
     import os

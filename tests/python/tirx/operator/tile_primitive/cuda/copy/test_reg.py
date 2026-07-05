@@ -331,6 +331,71 @@ def test_copy_g2l_l2g_vec_load(task, dtype):
         np.testing.assert_allclose(B_ref, B.numpy())
 
 
+# ----------------------------------------------------------------------------
+# vec_auto register path must honor the load cache hint (cache="nc"). A single
+# strided [4,4]:(16,1) global->register copy (4 rows of 4 contiguous int32 =
+# one 128b vec each, rows strided by 16) vectorizes to 4x 128b either way; with
+# cache="nc" it must emit ld.global.nc (not a plain ld). The reg path used to
+# drop the hint.
+# ----------------------------------------------------------------------------
+
+
+@T.prim_func
+def _nc_strided_reg_copy(src_ptr: T.handle) -> None:
+    src = T.match_buffer(src_ptr, (1024,), "int32")
+    T.device_entry()
+    T.thread_id([128])
+    tid = T.thread_id_in_wg([128])
+    dst = T.alloc_local((4, 4), "int32")
+    if tid == 0:
+        # view as (blk, row, warp, j); pick warp=1 -> [4,4]:(16,1)
+        blk = src.view(1024 // 64, 4, 4, 4).sub[0, :, 1, :]
+        Tx.copy(dst[:, :], blk[:, :], cache="nc")
+        for i in T.unroll(4):
+            for j in T.unroll(4):
+                T.evaluate(dst[i, j])
+
+
+@T.prim_func
+def _plain_strided_reg_copy(src_ptr: T.handle) -> None:
+    src = T.match_buffer(src_ptr, (1024,), "int32")
+    T.device_entry()
+    T.thread_id([128])
+    tid = T.thread_id_in_wg([128])
+    dst = T.alloc_local((4, 4), "int32")
+    if tid == 0:
+        blk = src.view(1024 // 64, 4, 4, 4).sub[0, :, 1, :]
+        Tx.copy(dst[:, :], blk[:, :])
+        for i in T.unroll(4):
+            for j in T.unroll(4):
+                T.evaluate(dst[i, j])
+
+
+def test_vec_auto_reg_honors_cache_nc():
+    target = tvm.target.Target("cuda")
+
+    def _src(f):
+        with target:
+            mod = tvm.compile(tvm.IRModule({"main": f}), target=target, tir_pipeline="tirx")
+        return mod.mod.imports[0].inspect_source()
+
+    nc_src = _src(_nc_strided_reg_copy)
+    plain_src = _src(_plain_strided_reg_copy)
+
+    # cache="nc" -> vectorized 128b ld.global.nc; no cache -> vectorized 128b
+    # plain ld. Both spellings must vectorize (the strided [4,4] does dispatch);
+    # only the cache qualifier differs.
+    assert "ld_global_nc_v4_u32" in nc_src, (
+        "vec_auto reg path must vectorize AND honor cache='nc' (emit "
+        "ld.global.nc.v4), got:\n"
+        + "\n".join(line for line in nc_src.splitlines() if "ld_" in line and "v4" in line)
+    )
+    assert "ld_plain_None_global_v4_u32" in plain_src, (
+        "no cache hint must vectorize to a plain 128b ld (ld.global.v4)"
+    )
+    assert "ld_global_nc_v4_u32" not in plain_src, "no cache hint must NOT be nc"
+
+
 def test_reg_copy_wg_local_to_swizzled_shared_uses_swizzle_fastpath():
     """Regression: R→S copy where R has a ``wg_local_layout`` (thread iter
     ``1 @ tid_in_wg``) must pick the widest vec PTX ``st.shared.v4`` AND use the
