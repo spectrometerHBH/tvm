@@ -287,6 +287,32 @@ Per §9.7.16.10 (p665) and §9.7.16.10.9.1/.3 (p712–725):
    false): A is M×K (TMEM or SMEM desc), B is K×N (SMEM desc), D is M×N
    (TMEM). M/N come from idesc bits 24–28/17–22; K is uniquely determined by
    the kind (§2.1). **Single-thread issue semantics** (Table 49, p644).
+
+   **`.ws` M=64 physically executes as two half-MMAs, and the A source
+   changes what "the two halves" are (WS-TWO-HALVES).** With M=64, D owns
+   only 64 lanes, so an N>64 output is folded into two 64-lane banks
+   (Layout E, AX-MMA.4). The datapath produces those banks as
+   `bank_upper = A_upper·B_left` and `bank_lower = A_lower·B_right`. What
+   `A_upper`/`A_lower` are depends on where A lives:
+
+   - **A in SMEM:** A is a *single* M=64×K tile. The hardware sources it once
+     via the matrix descriptor and applies it to the whole folded N, so
+     `A_upper = A_lower` = that one tile — no second copy exists or is needed.
+     The two banks then differ only in B's N-columns:
+     `bank_u = A·B[:, 0:N/2]`, `bank_l = A·B[:, N/2:N]` — the two N-halves of a
+     genuine `C[64, N] = A·Bᵀ`.
+   - **A in TMEM:** A physically occupies **both** 64-lane halves (128 lanes);
+     `A_upper` are lanes 0–63 and `A_lower` are lanes 64–127, and they may hold
+     **different** data. Then `bank_u = A_upper·B_left` and
+     `bank_l = A_lower·B_right` are two *independent* products; the caller
+     recombines them (concatenate → wider output, or sum → a contraction split
+     across the two halves).
+
+   This is the crux the earlier version of this proof got wrong by treating A
+   as a uniform "M×K broadcast over N". It is not: `.ws` A-in-smem is one tile
+   applied to a folded N; `.ws` A-in-tmem is two lane-halves, each multiplied
+   by its own B half. The FlashMLA characterization below (AX-MMA.4) rests on
+   this distinction.
 2. **`.ws` and non-`.ws` share the Table 45 idesc format** (§9.7.16.10.9.3
    states verbatim "The 32-bit register operand idesc is the instruction
    descriptor as described in Instruction descriptor", p724). The difference
@@ -313,47 +339,50 @@ Per §9.7.16.10 (p665) and §9.7.16.10.9.1/.3 (p712–725):
    (`python/tvm/tirx/layout.py` lines 606–696) implements this table
    verbatim.
 
-   **Layout E is a batch fold, and this dispatch conflates it with N — a
-   known semantic gap (SEM-WS-BATCH).** The hardware `.ws` computes a plain
-   `D[M,N] = A·B` (point 1), and for M=64 stores the two halves of N in the
-   two 64-lane banks (`n < N/2` → lane m, `n ≥ N/2` → lane m+64). But the
-   two banks are an *output* axis of extent 2, and a caller is free to use
-   that axis as a **batch** rather than as the upper/lower half of one N
-   range. FlashMLA's NoPE gemm does exactly this.
+   **Layout E's two banks mean different things depending on A's scope
+   (SEM-WS-BATCH), and the flat `gemm_async(A,B,C)` framing hides which.** By
+   WS-TWO-HALVES (point 1), M=64 `.ws` produces `bank_u = A_upper·B_left`,
+   `bank_l = A_lower·B_right`. The two FlashMLA `.ws` gemms use *opposite*
+   sides of that:
 
-   **The exact operation (derived from the emitted code, not the layout
-   names).** The kernel accumulates the `kv_nope_part_idx` K-tiling into
-   `tmem_p[64,128]` = `C[i,n] = Σ_{k<256} q[i,k]·k_nope[n,k]` (`n < 128`),
-   then reduces the two banks in the read-back:
-   `P[i,j] = tmem_p[i,j] + tmem_p[i,j+64]`
-   (`sparse_prefill_head64_phase1.py`). Substituting the two banks:
+   - **O = P·V is A-in-smem (genuine N).** A = `s_smem_gemm` — a single M=64
+     P tile in **shared memory**, written once by
+     `Tx.wg.copy(s_smem_gemm, s_frag)` (the softmax register frag →
+     `s_q_rope_s = pool.alloc(...)`, `pool = SMEMPool`;
+     `sparse_prefill_head64_phase1.py:301,328,396,616`). So `A_upper = A_lower`
+     = that one P, and the two banks are `P·V_left` / `P·V_right` = the two
+     N-column halves of a genuine `O[64,256] = P·Vᵀ`. The rescale epilogue
+     reads both banks through the identity `tmem_ldst` view and scales each
+     **independently** (never sums), then stores them to distinct output
+     columns — confirming genuine N.
 
-   - bank 0: `D[0,i,j] = C[i,j]    = Σ_{k<256} q[i,k]·k_nope[j,    k]`
-   - bank 1: `D[1,i,j] = C[i,j+64] = Σ_{k<256} q[i,k]·k_nope[j+64, k]`
+   - **logits = Q·Kᵀ is A-in-tmem (contraction split, summed).** A =
+     `q_nope_tmem`, whose cp footprint `q_nope_tmem_cp`
+     `(B_H, D_V//128, 2, 64):(1@TLane, 64@TCol, 64@TLane, 1@TCol)` places the
+     head-dim-half dim (`2`) at stride **`64@TLane`** — so `A_upper` (lanes
+     0–63) and `A_lower` (lanes 64–127) hold q's **two different head-dim
+     halves**. B (`k_nope`) is split the same way. So
+     `bank_u = q_hi·k_hi`, `bank_l = q_lo·k_lo` — two independent partials over
+     the two head-dim halves — and the read-back
+     `P[i,j] = tmem_p[i,j] + tmem_p[i,j+64]`
+     (`sparse_prefill_head64_phase1.py`) **sums** them to the full-head-dim
+     contraction. The tell-tale is `tmem_p` being 64×128 = twice a single
+     64×64 logit tile, and that summing the banks is only meaningful if they
+     are two contraction halves of the same (i,j), never two independent N
+     columns.
 
-   Both banks share the **same** `q[i,k]` and differ only in the K row
-   (`k_nope[j]` vs `k_nope[j+64]`). So the operation is an **A-shared,
-   B/C-batched gemm**, not a symmetric bmm:
+   The earlier version of this proof claimed "A-shared, B/C-batched, one
+   gemm" — **wrong**: A is a single smem tile only for the O gemm; for the
+   logits gemm A occupies both tmem lane-halves with *different* head-dim
+   data (per WS-TWO-HALVES), and the "batch" is a summed contraction split,
+   not a shared-A bmm.
 
-   ```
-   A[M=64, K=256]  ·  B[batch=2, N=64, K=256]  →  C[batch=2, M=64, N=64]
-   einsum("i k, b j k -> b i j")   (b = 2 = the fold/batch = key-row half)
-   ```
-
-   **A (=Q) is NOT batched** — it is read 64-lane (the emit shows
-   `A_tmem = (M=64, K)`) and reused across both banks; only **B's key-row
-   half and C's two banks** carry the batch. `C[2,64,64]` is two partials the
-   kernel sums downstream. The tell-tale is that `tmem_p` is 64×128 = twice
-   the 64×64 a complete Q·Kᵀ over one key set could produce, and that adding
-   bank 0 to bank 1 is only meaningful if they are the same queries against
-   two key-row halves, never two independent N-halves.
-
-   So dispatching this via `gemm_async(A[M,K], B[N,K], C[M,N])` with the
-   packed Layout-E C is **byte-correct but semantically a coincidence**: the
-   physical footprint is identical whether the "2" is an N-half or a batch,
-   so the emitted `.ws` writes the right bytes and the standalone-gemm tests
-   (§2.3 measured anchors, which feed a genuine N=128) pass — but the
-   dispatch never checks that the caller's batch semantics match.
+   So dispatching the logits gemm via `gemm_async(A[M,K], B[N,K], C[M,N])`
+   with the packed Layout-E C is **byte-correct but semantically opaque**:
+   the physical footprint is identical whether the two banks are an N-split
+   (O) or a summed contraction split (logits), so the emit is right and the
+   standalone N-split tests pass — but the flat signature never states which,
+   nor that an A-in-tmem `.ws` requires A physically in both lane-halves.
 
    **SEM-WS-BATCH remediation (implemented, lines 563–599):** the dispatch
    now accepts C in the **explicit batched form** `C[2, M, N//2]` with the

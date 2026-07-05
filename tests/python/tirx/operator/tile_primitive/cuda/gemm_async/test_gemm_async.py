@@ -2654,6 +2654,70 @@ def _build_cta1_m64_batched_c_kernel():
     return gemm_batched_c
 
 
+def _build_cta1_m64_identity_c_ws_kernel():
+    """M=64 cta_group::1 gemm forcing .ws but declaring C in the identity
+    (Layout-D) layout instead of the Layout-E fold — the WS-TWO-HALVES dual
+    error the dispatch must reject."""
+
+    M, N, K = 64, 128, 16
+    B_dtype = "bfloat16"
+    B_layout = mma_shared_layout(B_dtype, SwizzleMode.SWIZZLE_32B_ATOM, (N, K))
+
+    @T.prim_func
+    def gemm_identity_c(B_ptr: T.handle) -> None:
+        B = T.match_buffer(B_ptr, (N, K), B_dtype)
+        T.device_entry()
+        warp_id = T.warp_id([4])
+        T.thread_id([128])
+        tid = T.thread_id_in_wg([128])
+        B_smem = T.alloc_buffer((N, K), B_dtype, scope="shared", layout=B_layout)
+        tmem_addr = T.alloc_shared([1], "uint32")
+        if warp_id == 0:
+            T.ptx.tcgen05.alloc(T.address_of(tmem_addr[0]), n_cols=512, cta_group=1)
+        T.cuda.cta_sync()
+        A_tmem = T.decl_buffer(
+            (M, K),
+            B_dtype,
+            scope="tmem",
+            allocated_addr=256,
+            layout=TileLayout(S[(M, K) : (1 @ TLane, 1 @ TCol)]),
+        )
+        C_tmem = T.decl_buffer(
+            (M, N),
+            "float32",
+            scope="tmem",
+            allocated_addr=400,
+            layout=TileLayout(S[(M, N) : (1 @ TLane, 1 @ TCol)]),
+        )
+        if tid == 0:
+            Tx.copy(B_smem[:, :], B[:, :])
+            Tx.gemm_async(
+                C_tmem[:, :],
+                A_tmem[:, :],
+                B_smem[:, :],
+                dispatch="tcgen05",
+                cta_group=1,
+                weight_stationary=True,
+            )
+
+    return gemm_identity_c
+
+
+def test_gemm_tcgen05_cta1_m64_ws_requires_layout_e_c():
+    """A forced .ws (M=64, cta_group::1) with an identity/Layout-F C is
+    rejected: .ws writes the Layout-E fold, so an identity C would read the
+    two banks from the wrong lanes (WS-TWO-HALVES dual error)."""
+
+    target = tvm.target.Target("cuda")
+    with target:
+        with pytest.raises(Exception, match="Layout-E"):
+            tvm.compile(
+                tvm.IRModule({"main": _build_cta1_m64_identity_c_ws_kernel()}),
+                target=target,
+                tir_pipeline="tirx",
+            )
+
+
 def test_gemm_tcgen05_cta1_m64_accepts_batched_c_layout_ws():
     """The honest batched C[2, M, N//2] .ws output form is accepted and emits
     byte-identically to the packed C[M, 2, N//2] form (SEM-WS-BATCH): the two

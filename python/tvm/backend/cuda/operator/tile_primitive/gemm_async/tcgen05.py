@@ -999,6 +999,22 @@ def gemm_async_tcgen05_impl(op_call: TilePrimitiveCall, sctx: DispatchContext) -
     # this one). An explicit weight_stationary=False on a Layout-E C is a
     # contradiction (the layout says .ws) and is rejected. The cta_group::2
     # 2x2 path (Layout B) is a different, non-ws organization and is unaffected.
+    #
+    # WS-TWO-HALVES (proof §2.3): an M=64 .ws produces the two Layout-E banks
+    # as bank_upper = A_upper·B_left, bank_lower = A_lower·B_right — two
+    # half-MMAs, not one gemm broadcast over N. What the halves are depends on
+    # A's scope, and the dispatch knows the scope (`a_is_tmem`):
+    #   * A in SMEM: A is one M=64 tile the hw applies to the folded N, so the
+    #     two banks are the two N-column halves of a genuine C[64,N]=A·Bᵀ
+    #     (FlashMLA O=P·V). The banks are distinct output columns.
+    #   * A in TMEM: A must physically occupy BOTH 64-lane halves (lanes 0-63
+    #     and 64-127); the two banks multiply the two A halves by the two B
+    #     halves independently (FlashMLA logits, whose two head-dim-half
+    #     partials the caller sums downstream). A's declared layout is the
+    #     identity 64-lane Layout D — the lower-half occupancy is written by an
+    #     upstream cp (e.g. the 128x256b q fold) and is NOT visible here, so
+    #     "A spans both halves" is a caller contract (the dual of the unchecked
+    #     "ws + Layout-F A" case), not a runtime assert.
     if packed_n2 and not is_2x2:
         if op_call.config.get("weight_stationary") is False:
             raise ValueError(
@@ -1010,6 +1026,24 @@ def gemm_async_tcgen05_impl(op_call: TilePrimitiveCall, sctx: DispatchContext) -
                 "non-ws M=64 MMA."
             )
         weight_stationary = True
+
+    # WS-TWO-HALVES dual check (proof §2.3): an M=64 cta_group::1 .ws writes
+    # its output in the Layout-E fold (packed_n2). If the caller forces .ws
+    # but declared C in the identity / Layout-F organization instead, the
+    # datapath writes the two banks to lanes {m, m+64} while the caller reads
+    # them at rows {m, m+1}, silently mis-placing the accumulator. Reject it —
+    # this is the converse of the packed-C weight_stationary=False rejection
+    # above, and closes the "ws + Layout-F C" hole the proof previously left
+    # open.
+    if weight_stationary and cta_group == 1 and M == 64 and not packed_n2 and not is_2x2:
+        raise ValueError(
+            "gemm_async[tcgen05]: weight_stationary .ws (M=64, cta_group::1) writes "
+            "the Layout-E fold (M, 2, N//2):(1@TLane, 64@TLane, 1@TCol), but C is "
+            "declared with the identity / Layout-F layout, so the two banks would be "
+            "read from the wrong lanes. Declare C in the Layout-E (packed) or the "
+            "batched C[2, M, N//2] form for a .ws output, or drop weight_stationary "
+            "for a non-ws (Layout-F) M=64 MMA."
+        )
 
     if is_2x2 or packed_n2:
         # Some FlashMLA cta_group::1 M=64 tiles use the same logical-N/physical-column
