@@ -992,20 +992,24 @@ def gemm_async_tcgen05_impl(op_call: TilePrimitiveCall, sctx: DispatchContext) -
     # Audit B13 (datapath x ws coupling): for cta_group::1 the packed
     # (M, 2, N//2):(1@TLane, 64@TLane, 1@TCol) organization is the M=64
     # weight-stationary datapath (PTX ISA 8.8 §9.7.16.10.5, Layout E); a
-    # non-ws cta_group::1 M=64 MMA writes the scattered Layout F instead, so
-    # accepting a packed C without ``.ws`` would silently misplace the
-    # accumulator. The cta_group::2 2x2 path (Layout B) is a different,
-    # non-ws organization and is unaffected.
-    if packed_n2 and not is_2x2 and not weight_stationary:
-        raise ValueError(
-            "gemm_async[tcgen05]: C uses the packed (M, 2, N//2):(1@TLane, "
-            "64@TLane, 1@TCol) TMEM layout, which is the M=64 "
-            "weight-stationary datapath organization (PTX ISA 8.8 "
-            "§9.7.16.10.5, Layout E; cta_group::1 requires .ws). A non-ws "
-            "M=64 MMA writes the scattered Layout F instead. Pass "
-            "weight_stationary=True, or declare C with the Layout F / "
-            "identity datapath layout"
-        )
+    # non-ws cta_group::1 M=64 MMA writes the scattered Layout F instead. The
+    # packed Layout-E C is therefore *uniquely* the .ws datapath, so .ws is
+    # INFERRED from the layout — the caller never sets weight_stationary by
+    # hand (a non-ws M=64 output declares the Layout-F / identity layout, not
+    # this one). An explicit weight_stationary=False on a Layout-E C is a
+    # contradiction (the layout says .ws) and is rejected. The cta_group::2
+    # 2x2 path (Layout B) is a different, non-ws organization and is unaffected.
+    if packed_n2 and not is_2x2:
+        if op_call.config.get("weight_stationary") is False:
+            raise ValueError(
+                "gemm_async[tcgen05]: C uses the packed (M, 2, N//2):(1@TLane, "
+                "64@TLane, 1@TCol) Layout-E TMEM layout, which is the M=64 "
+                "weight-stationary datapath — but weight_stationary=False was "
+                "passed. Drop the flag (it is inferred from the layout), or "
+                "declare C with the Layout F / identity datapath layout for a "
+                "non-ws M=64 MMA."
+            )
+        weight_stationary = True
 
     if is_2x2 or packed_n2:
         # Some FlashMLA cta_group::1 M=64 tiles use the same logical-N/physical-column

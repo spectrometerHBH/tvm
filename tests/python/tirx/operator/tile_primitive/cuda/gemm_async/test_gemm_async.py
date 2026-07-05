@@ -2527,8 +2527,13 @@ def test_gemm_tcgen05_dense_descI_rejected():
             )
 
 
-def _build_cta1_m64_packed_c_kernel(weight_stationary):
-    """cta_group::1 M=64 GEMM whose C uses the packed (M, 2, N//2) TMEM layout."""
+def _build_cta1_m64_packed_c_kernel(weight_stationary=None):
+    """cta_group::1 M=64 GEMM whose C uses the packed (M, 2, N//2) TMEM layout.
+
+    ``weight_stationary=None`` omits the flag entirely (the dispatch infers
+    .ws from the Layout-E C); True/False pass it explicitly.
+    """
+    ws_cfg = {} if weight_stationary is None else {"weight_stationary": weight_stationary}
 
     M, N, K = 64, 128, 16
     A_dtype = B_dtype = "bfloat16"
@@ -2570,7 +2575,7 @@ def _build_cta1_m64_packed_c_kernel(weight_stationary):
                 B_smem[:, :],
                 dispatch="tcgen05",
                 cta_group=1,
-                weight_stationary=weight_stationary,
+                **ws_cfg,
             )
 
     return gemm_packed_c
@@ -2672,18 +2677,23 @@ def test_gemm_tcgen05_cta1_m64_accepts_batched_c_layout_ws():
     assert norm(batched_src) == norm(packed_src)
 
 
-def test_gemm_tcgen05_cta1_m64_packed_c_requires_weight_stationary():
-    """Audit B13: packed C without ``.ws`` must be rejected, not accepted.
-
-    Per PTX ISA 8.8 §9.7.16.10.5 the packed (M, 2, N//2):(1@TLane, 64@TLane,
-    1@TCol) organization is Layout E — M=64 with ``.ws`` (cta_group::1). A
-    non-ws cta_group::1 M=64 MMA writes the scattered Layout F instead, so
-    accepting a packed C layout without ``weight_stationary=True`` would
-    silently misplace the accumulator."""
+def test_gemm_tcgen05_cta1_m64_packed_c_infers_weight_stationary():
+    """The packed (M, 2, N//2):(1@TLane, 64@TLane, 1@TCol) Layout-E C is
+    uniquely the M=64 .ws datapath (PTX ISA 8.8 §9.7.16.10.5), so .ws is
+    inferred with no weight_stationary flag; and an explicit
+    weight_stationary=False contradicts the layout and is rejected."""
 
     target = tvm.target.Target("cuda")
     with target:
-        with pytest.raises(Exception, match="weight_stationary"):
+        # omitted flag -> .ws inferred, compiles to a .ws MMA
+        mod = tvm.compile(
+            tvm.IRModule({"main": _build_cta1_m64_packed_c_kernel()}),
+            target=target,
+            tir_pipeline="tirx",
+        )
+        assert "tcgen05.mma.ws.cta_group::1.kind::f16" in mod.mod.imports[0].inspect_source()
+        # explicit False contradicts the Layout-E fold -> rejected
+        with pytest.raises(Exception, match="weight_stationary=False"):
             tvm.compile(
                 tvm.IRModule({"main": _build_cta1_m64_packed_c_kernel(weight_stationary=False)}),
                 target=target,

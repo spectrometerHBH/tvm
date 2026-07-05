@@ -863,17 +863,21 @@ and TMEM ≤ 512 columns ⇒ no carry overflow. Thus the D footprint of the
 `[mi·M_mma, (mi+1)·M_mma) × [ni·N_mma, (ni+1)·N_mma)`, matching AX-MMA.4's
 write footprint point by point; footprints of distinct (mi, ni) are pairwise
 disjoint (the layout is injective).
-**The coupling of packed_n2 with `.ws` is checked**: under cta_group::1, a
-packed C (Layout-E-shaped) with
-`weight_stationary=False` is explicitly rejected (lines 959–975) — non-ws
-M=64 writes Layout F ≠ E, so accepting would mean silently misplaced
-accumulators (regressions:
-`test_gemm_tcgen05_cta1_m64_packed_c_requires_weight_stationary`
-lines 2601–2617; the positive pairing is pinned by
-`test_gemm_tcgen05_cta1_m64_accepts_packed_c_layout_ws` lines 2579–2598).
-The converse (ws + Layout F/identity layout) is unchecked — the dual error
-of "ws writes E while the caller reads per F" — and remains a caller
-contract. ∎
+**`.ws` is inferred from the packed_n2 layout, not required by hand**: under
+cta_group::1 a packed C (Layout-E-shaped) is *uniquely* the M=64 `.ws`
+datapath (a non-ws M=64 writes Layout F ≠ E), so the dispatch sets
+`weight_stationary` from the layout and the caller never passes the flag
+(the batched `C[2, M, N]` form infers it the same way, AX-MMA.4). An
+*explicit* `weight_stationary=False` on a Layout-E C contradicts the layout
+and is rejected — accepting it would mean silently misplaced accumulators.
+Regressions: `test_gemm_tcgen05_cta1_m64_packed_c_infers_weight_stationary`
+(omitted flag ⇒ `.ws` emitted; explicit False ⇒ rejected); the positive
+pairing is pinned by `test_gemm_tcgen05_cta1_m64_accepts_packed_c_layout_ws`
+and `..._accepts_batched_c_layout_ws`. Because `.ws` is derived from the C
+layout rather than a hand-set flag, "packed/batched Layout-E C is accepted"
+⟺ "`.ws` is the correct datapath": dispatch-accepts ⟹ correct. The converse
+(ws + Layout F/identity layout) declares Layout F and so never reaches this
+branch — a caller contract. ∎
 
 ### L8 (Tiling + Accumulation Chain = GEMM Summation)
 
