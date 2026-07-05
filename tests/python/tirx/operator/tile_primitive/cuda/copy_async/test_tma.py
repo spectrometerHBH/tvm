@@ -2226,7 +2226,15 @@ def test_copy_tma_gather4_cta_group2_pointer_masks_mbarrier_codegen():
 
 
 def test_copy_tma_declines_non_derivable_fold_layout():
-    """Regression: TMA dispatch accepts FlashMLA RoPE's 32x64 -> 64x32 copy."""
+    """A copy that transposes gmem (D, H) into smem (H, D) is declined loudly.
+
+    The two regions are 64x32 (smem) vs 32x64 (gmem): a copy is elementwise
+    over one shared logical region, so a transpose must be spelled with a
+    permuted buffer view, never hidden inside the copy. The mismatch is
+    caught at the copy region gate (not silently mis-placed).
+    """
+
+    import pytest
 
     dtype = "bfloat16"
     D_QK, D_V, H, S_Q = 576, 512, 64, 4
@@ -2235,46 +2243,35 @@ def test_copy_tma_declines_non_derivable_fold_layout():
         TileLayout(S[(64, 2, 32) : (32, 2048, 1)]),
     )
 
-    @T.prim_func
-    def tma_permuted_extents(a_ptr: T.handle) -> None:
-        A = T.match_buffer(a_ptr, (D_QK, H, S_Q), dtype)
-        T.device_entry()
-        T.cta_id([1])
-        T.warp_id([4])
-        T.warpgroup_id([1])
-        tid = T.thread_id_in_wg([128])
+    with pytest.raises(Exception, match="identical regions"):
 
-        A_tma = A.view(
-            D_QK,
-            H,
-            S_Q,
-            layout=TileLayout(S[(D_QK, H, S_Q) : (1, D_QK, H * D_QK)]),
-        )
-        sm = T.alloc_buffer((64, 64), dtype, scope="shared", layout=q_rope_layout)
-        mb = T.alloc_shared([1], "uint64")
-        if tid == 0:
-            T.ptx.mbarrier.init(mb.ptr_to([0]), 1)
-            T.ptx.fence.mbarrier_init()
-            Tx.copy_async(
-                sm[:, 0:32],
-                A_tma[D_V : D_V + 32, :, 1:2],
-                dispatch="tma",
-                mbar=mb.ptr_to([0]),
-                cta_group=1,
+        @T.prim_func
+        def tma_permuted_extents(a_ptr: T.handle) -> None:
+            A = T.match_buffer(a_ptr, (D_QK, H, S_Q), dtype)
+            T.device_entry()
+            T.cta_id([1])
+            T.warp_id([4])
+            T.warpgroup_id([1])
+            tid = T.thread_id_in_wg([128])
+
+            A_tma = A.view(
+                D_QK,
+                H,
+                S_Q,
+                layout=TileLayout(S[(D_QK, H, S_Q) : (1, D_QK, H * D_QK)]),
             )
-
-    import pytest
-
-    target = tvm.target.Target({"kind": "cuda", "arch": "sm_100a"})
-    with target:
-        # The rope-fold smem layout's placement is not derivable from its
-        # contiguous chain, so the planner must DECLINE (loud, not silently
-        # mis-placed). This pins the completeness boundary left behind by the
-        # removed "natural" ABI mode, which used to accept this case.
-        with pytest.raises(Exception, match="unit stride"):
-            tvm.compile(
-                tvm.IRModule({"main": tma_permuted_extents}), target=target, tir_pipeline="tirx"
-            )
+            sm = T.alloc_buffer((64, 64), dtype, scope="shared", layout=q_rope_layout)
+            mb = T.alloc_shared([1], "uint64")
+            if tid == 0:
+                T.ptx.mbarrier.init(mb.ptr_to([0]), 1)
+                T.ptx.fence.mbarrier_init()
+                Tx.copy_async(
+                    sm[:, 0:32],
+                    A_tma[D_V : D_V + 32, :, 1:2],
+                    dispatch="tma",
+                    mbar=mb.ptr_to([0]),
+                    cta_group=1,
+                )
 
 
 def test_copy_tma_rejects_flipped_swizzle_inner():

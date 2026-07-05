@@ -107,9 +107,11 @@ def _tmem_layout_for(shape, multicast, C):
                 [64, C],
             )
         # 01_23: rows 0-31 at lanes 0-31, rows 32-63 at lanes 64-95; +32 mirror.
+        # The 2x32 lane split lives in the layout iters; the buffer stays the
+        # natural (64, C) logical tile so the copy region matches the smem side.
         return (
             TileLayout(S[(2, 32, C) : (64 @ TLane, 1 @ TLane, 1 @ TCol)] + R[2 : 32 @ TLane]),
-            [2, 32, C],
+            [64, C],
         )
     raise ValueError(shape)
 
@@ -241,10 +243,7 @@ def _build_case(shape, multicast, sw, dtype, n_mid, s_row_off=0, t_col_off_e=0, 
     s_region = [(s_row_off, s_row_off + rows), (0, C)]
 
     t_full, t_full_shape = _tmem_layout_for(shape, multicast, t_C)
-    if len(t_full_shape) == 3:
-        t_region = [(0, 2), (0, 32), (t_col_off_e, t_C)]
-    else:
-        t_region = [(0, t_full_shape[0]), (t_col_off_e, t_C)]
+    t_region = [(0, t_full_shape[0]), (t_col_off_e, t_C)]
 
     kernel = _make_cp_kernel(
         s_full,

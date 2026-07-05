@@ -550,11 +550,11 @@ def test_explicit_tcgen05_cp_128x256b_accepts_default_tile_fields():
         )
         tmem_addr = T.alloc_shared([1], "uint32")
         tmem = T.decl_buffer(
-            (64, 32),
+            (64, 64),
             "bfloat16",
             scope="tmem",
             allocated_addr=tmem_addr[0],
-            layout=TileLayout(S[(64, 32) : (1 @ TLane, 1 @ TCol)]),
+            layout=TileLayout(S[(64, 64) : (1 @ TLane, 1 @ TCol)]),
         )
         Tx.cta.copy(A_smem[:, :], A[:, :])
         if tid == 0:

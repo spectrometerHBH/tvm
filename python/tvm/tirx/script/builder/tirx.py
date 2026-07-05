@@ -23,7 +23,7 @@ import tvm.tirx.operator as tirx_op
 from tvm.ir import Op
 from tvm.tirx import Buffer, BufferRegion, LambdaExpr, PrimExpr
 from tvm.tirx.exec_scope import _SCOPE_KIND_TO_NAME, ExecScope
-from tvm.tirx.expr import FloatImm
+from tvm.tirx.expr import FloatImm, IntImm
 from tvm.tirx.lang.alloc_pool import SMEMPool, TMEMPool, TMEMStages
 
 from . import _ffi_api, frame
@@ -488,6 +488,65 @@ def cast(
     )
 
 
+def _check_copy_regions_match(dst, src, config, name):
+    """Enforce that plain copy operands cover identical regions.
+
+    A plain copy is elementwise between two regions over one shared logical
+    iteration space; after dropping extent-1 dims the two region shapes must
+    be identical (same rank, same extent per dim). Unit dims are pure
+    padding; any real reshape is the caller's job via Buffer views
+    (unflatten/select/...), never the copy's.
+
+    A region is buffer shape + slice: purely logical, independent of the
+    buffer's layout. The layout maps logical coords to physical addresses
+    (lanes, swizzle, broadcast) and is the right home for physical tiling;
+    baking that structure into a buffer's declared shape (e.g. declaring a
+    tmem tile ``(2, 32, C)`` instead of ``(64, C)`` with the lane split in
+    the layout) is what produces a spurious region mismatch. The fix is
+    always to declare the natural logical shape, never to exempt the copy.
+
+    Gather (``indexer`` / ``gather_axis``) is the one true exception: the
+    source region is the index table, a different logical operand.
+    """
+    if "indexer" in config or "gather_axis" in config:
+        return
+
+    def _squeeze(region):
+        return [
+            r.extent
+            for r in region
+            if not (isinstance(r.extent, IntImm) and r.extent.value == 1)
+        ]
+
+    dst_extents = _squeeze(dst.region)
+    src_extents = _squeeze(src.region)
+
+    def _fail():
+        raise ValueError(
+            f"{name}: dst region shape {[str(e) for e in dst_extents]} != "
+            f"src region shape {[str(e) for e in src_extents]}; copy operands "
+            f"must cover identical regions - reshape via buffer views "
+            f"(unflatten/select/narrow/...) instead"
+        )
+
+    if len(dst_extents) != len(src_extents):
+        _fail()
+    analyzer = None
+    for d, s in zip(dst_extents, src_extents):
+        d_int = d.value if isinstance(d, IntImm) else None
+        s_int = s.value if isinstance(s, IntImm) else None
+        if d_int is not None and s_int is not None:
+            if d_int != s_int:
+                _fail()
+            continue
+        if analyzer is None:
+            from tvm.arith import Analyzer  # pylint: disable=import-outside-toplevel
+
+            analyzer = Analyzer()
+        if not analyzer.can_prove_equal(d, s):
+            _fail()
+
+
 @ScopedOp
 def copy(
     dst: BufferRegion | Buffer,
@@ -515,6 +574,7 @@ def copy(
     config = kwargs or {}
     dst = _to_region(dst)
     src = _to_region(src)
+    _check_copy_regions_match(dst, src, config, "copy")
     return f_insert(
         tirx_op.Copy(dst, src, workspace=workspace, config=config, dispatch=dispatch, scope=scope)
     )
@@ -534,6 +594,7 @@ def copy_async(
     config = kwargs or {}
     dst = _to_region(dst)
     src = _to_region(src)
+    _check_copy_regions_match(dst, src, config, "copy_async")
     return f_insert(
         tirx_op.CopyAsync(
             dst, src, workspace=workspace, config=config, dispatch=dispatch, scope=scope

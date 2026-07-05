@@ -54,7 +54,7 @@ from dataclasses import dataclass
 import tvm
 from tvm.arith import Analyzer
 from tvm.script import tirx as T
-from tvm.tirx import Buffer, PrimFunc
+from tvm.tirx import Buffer, IntImm, PrimFunc
 from tvm.tirx.layout import ComposeLayout, Layout, S, SwizzleLayout, TileLayout
 from tvm.tirx.operator.tile_primitive import (
     DispatchContext,
@@ -412,6 +412,18 @@ def _gmem_layout(g_buf: Buffer) -> TileLayout:
     if not isinstance(layout, TileLayout):
         # cuTensorMap requires a plain memory layout on gmem side.
         raise ValueError(f"TMA gmem layout must be a TileLayout; got {type(layout).__name__}")
+    # The cuTensorMap base address and global dims are fixed on the host, so
+    # a view-folded elem_offset on the gmem operand cannot be honored at
+    # issue time; silently ignoring it reads/writes the wrong bytes. Demand
+    # the full gmem buffer and express the offset through the copy region.
+    offset = g_buf.elem_offset
+    offset_c = offset.value if isinstance(offset, IntImm) else None
+    if offset_c != 0 and not Analyzer().can_prove_equal(offset, 0):
+        raise ValueError(
+            f"TMA gmem operand has elem_offset {offset}, which a host-built "
+            f"tensor map cannot honor; pass the full gmem buffer and put the "
+            f"offset in the copy region instead"
+        )
     return layout
 
 
