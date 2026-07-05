@@ -1672,6 +1672,87 @@ def test_buffer_view_surgery_static_bounds_rejected():
         grid.sub[:, 4:12]
 
 
+def test_buffer_select_narrow_swizzle_commutation():
+    """Folding an offset past a swizzle is only sound when the offset is a
+    multiple of the swizzle period 2^(per_element + atom_len + swizzle_len)
+    (review finding: sub-period offsets produced wrong addresses). Aligned
+    offsets stay address-equivalent to the parent; everything else raises."""
+
+    compose = T.ComposeLayout(
+        T.SwizzleLayout(3, 3, 3, swizzle_inner=True),
+        T.TileLayout(T.S[(4, 1024) : (1024, 1)]),
+    )  # period = 2^(3+3+3) = 512 elements
+
+    # fmt: off
+    @T.prim_func
+    def func() -> None:
+        T.device_entry()
+        A = T.alloc_buffer([4, 1024], dtype="bfloat16", scope="shared.dyn", layout=compose)
+        B = A.select(0, 1)  # folds offset 1024 = 2 * period
+        B[0] = T.bfloat16(0)
+        C = A.narrow(1, 512, 512)  # folds offset 512 = period
+        C[0, 0] = T.bfloat16(0)
+        # fmt: on
+
+    bufs = _collect_buffers(func)
+    a_buf, b_buf, c_buf = bufs["A"], bufs["B"], bufs["C"]
+    analyzer = tvm.arith.Analyzer()
+    for j in (0, 1, 63, 511, 1023):
+        parent = analyzer.simplify(a_buf.layout.apply(1024 + j)["m"])
+        child = analyzer.simplify(
+            (b_buf.elem_offset - a_buf.elem_offset) + b_buf.layout.apply(j)["m"]
+        )
+        assert int(parent) == int(child), (j, parent, child)
+    for j in (0, 1, 255, 511):
+        parent = analyzer.simplify(a_buf.layout.apply(512 + j)["m"])
+        child = analyzer.simplify(
+            (c_buf.elem_offset - a_buf.elem_offset) + c_buf.layout.apply(j)["m"]
+        )
+        assert int(parent) == int(child), (j, parent, child)
+
+    code = func.script()
+    assert from_source(code).script() == code
+
+    # sub-period offsets do not commute with the swizzle and are rejected.
+    repro = tvm.tirx.decl_buffer(
+        (2, 16, 8),
+        "float16",
+        layout=tvm.tirx.layout.ComposeLayout(
+            T.SwizzleLayout(3, 3, 3, swizzle_inner=True),
+            tvm.tirx.layout.TileLayout(T.S[(2, 16, 8) : (128, 8, 1)]),
+        ),
+    )
+    with pytest.raises(ValueError, match="swizzle period"):
+        repro.select(1, 1)  # offset 8
+    with pytest.raises(ValueError, match="swizzle period"):
+        repro.select(2, 1)  # offset 1
+    with pytest.raises(ValueError, match="swizzle period"):
+        repro.narrow(1, 1, 2)
+    with pytest.raises(ValueError, match="swizzle period"):
+        repro.sub[:, 1:3]
+
+
+def test_buffer_rearrange_singleton_size_mismatch_rejected():
+    buf = tvm.tirx.decl_buffer(
+        (2, 3), "float16", layout=tvm.tirx.layout.TileLayout(T.S[(2, 3) : (3, 1)])
+    )
+    with pytest.raises(ValueError, match="does not match dim"):
+        buf.rearrange("a b -> b a", a=99)
+
+    # a matching explicit size on a singleton axis is accepted
+    # fmt: off
+    @T.prim_func
+    def func() -> None:
+        T.device_entry()
+        A = T.alloc_buffer([2, 3], dtype="float16", scope="local",
+                           layout=T.TileLayout(T.S[(2, 3) : (3, 1)]))
+        B = A.rearrange("a b -> b a", a=2)
+        B[0, 0] = T.float16(0)
+        # fmt: on
+
+    assert [int(s) for s in _collect_buffers(func)["B"].shape] == [3, 2]
+
+
 def test_buffer_view_dtype_ir():
     """Verify .view('float32') on float16: dtype correct, last dim halved, shared data."""
 

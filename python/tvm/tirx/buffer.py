@@ -620,7 +620,38 @@ class Buffer(Object, Scriptable):
             offset = term if offset is None else offset + term
         return offset
 
-    def _rebuild_view(self, new_shape, new_shard, grouped, swizzle, extra_offset):
+    def _check_swizzle_commutes(self, swizzle, extra_offset, name):
+        """Reject offsets that do not commute with a swizzle permutation.
+
+        Folding an offset into ``elem_offset`` moves it *outside* the layout,
+        so the address becomes ``offset + swizzle(rest)``. The swizzle XORs
+        bits within a period of ``2^(per_element + atom_len + swizzle_len)``
+        elements, so this equals the true ``swizzle(offset + rest)`` only
+        when the offset is a multiple of that period.
+        """
+        if swizzle is None or extra_offset is None:
+            return
+        sw_len = int(swizzle.swizzle_len)
+        if sw_len == 0:
+            return  # identity permutation, everything commutes
+        period = 1 << (int(swizzle.per_element) + int(swizzle.atom_len) + sw_len)
+        offset_c = self._concrete_int(extra_offset)
+        if offset_c is not None:
+            commutes = offset_c % period == 0
+        else:
+            from ..arith import Analyzer  # pylint: disable=import-outside-toplevel
+
+            commutes = Analyzer().can_prove_equal(tvm.tirx.floormod(extra_offset, period), 0)
+        if not commutes:
+            raise ValueError(
+                f"{name}: the folded offset {extra_offset} is not a multiple of "
+                f"the swizzle period ({period} elements), so it does not commute "
+                f"with the swizzle permutation; slice via a region instead, or "
+                f"keep the offset inside an explicitly declared layout"
+            )
+
+    def _rebuild_view(self, new_shape, new_shard, grouped, swizzle, extra_offset, name):
+        self._check_swizzle_commutes(swizzle, extra_offset, name)
         new_layout = tvm.tirx.layout.TileLayout.from_iters(
             new_shard, list(grouped.replica), dict(grouped.offset.items())
         )
@@ -649,7 +680,9 @@ class Buffer(Object, Scriptable):
         Torch-aligned (``Tensor.select``); ``index`` may be a dynamic
         PrimExpr, folded into the view's ``elem_offset`` through the dim's
         layout iters. Statically known indices are bounds-checked; dynamic
-        indices are the caller's responsibility.
+        indices are the caller's responsibility. On a swizzled layout the
+        folded offset must be a multiple of the swizzle period (see
+        ``_check_swizzle_commutes``); otherwise the call raises.
         """
         dim = self._normalized_dim(dim, "select")
         index_c = self._concrete_int(index)
@@ -667,7 +700,7 @@ class Buffer(Object, Scriptable):
         offset = self._dim_group_offset(iters[lo:hi], index)
         new_shape = list(self.shape[:dim]) + list(self.shape[dim + 1 :])
         new_shard = iters[:lo] + iters[hi:]
-        return self._rebuild_view(new_shape, new_shard, grouped, swizzle, offset)
+        return self._rebuild_view(new_shape, new_shard, grouped, swizzle, offset, "select")
 
     def narrow(self, dim, start, length) -> "Buffer":
         """Return a view of ``dim`` narrowed to ``[start, start + length)``.
@@ -678,7 +711,9 @@ class Buffer(Object, Scriptable):
         the inner iter block so the range stays a contiguous iter prefix.
         Statically known bounds are checked (``start >= 0``, ``length >= 1``,
         ``start + length <= extent``); dynamic values are the caller's
-        responsibility.
+        responsibility. On a swizzled layout the folded offset must be a
+        multiple of the swizzle period (see ``_check_swizzle_commutes``);
+        otherwise the call raises.
         """
         dim = self._normalized_dim(dim, "narrow")
         start_c = self._concrete_int(start)
@@ -733,7 +768,7 @@ class Buffer(Object, Scriptable):
         new_shape = list(self.shape)
         new_shape[dim] = length
         new_shard = iters[:lo] + new_group + iters[hi:]
-        return self._rebuild_view(new_shape, new_shard, grouped, swizzle, offset)
+        return self._rebuild_view(new_shape, new_shard, grouped, swizzle, offset, "narrow")
 
     @property
     def sub(self) -> "_SubIndexer":
@@ -889,6 +924,14 @@ def _rearrange(buffer, pattern, **sizes):
             name = group[0]
             if name not in axis_size:
                 axis_size[name] = extent
+            else:
+                given_c = Buffer._concrete_int(axis_size[name])
+                extent_c = Buffer._concrete_int(extent)
+                if given_c is not None and extent_c is not None and given_c != extent_c:
+                    raise ValueError(
+                        f"rearrange: size {name}={given_c} does not match dim {dim} "
+                        f"extent {extent_c} in {pattern!r}"
+                    )
             continue
         unknown_factors = [name for name in group if name not in axis_size]
         if len(unknown_factors) > 1:
