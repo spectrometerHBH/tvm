@@ -1627,6 +1627,46 @@ def test_buffer_rearrange_errors():
         buf.rearrange("b c -> c b")
 
 
+def test_buffer_view_surgery_static_bounds_rejected():
+    """Statically-known out-of-range arguments must be rejected loudly
+    (review finding: non-bijective reshapes and OOB offsets were silent)."""
+    buf = tvm.tirx.decl_buffer(
+        (10,), "float16", layout=tvm.tirx.layout.TileLayout(T.S[(10,) : (1,)])
+    )
+    grid = tvm.tirx.decl_buffer(
+        (4, 8), "float16", layout=tvm.tirx.layout.TileLayout(T.S[(4, 8) : (8, 1)])
+    )
+    # unflatten: non-bijective factorizations
+    with pytest.raises(ValueError, match="multiply to"):
+        buf.unflatten(0, (3, 4))
+    with pytest.raises(ValueError, match="not divisible"):
+        buf.unflatten(0, (-1, 4))
+    # rearrange reuses the same validation
+    with pytest.raises(ValueError, match="multiply to"):
+        buf.rearrange("(a b) -> a b", a=3, b=4)
+    with pytest.raises(ValueError, match="does not factor"):
+        buf.rearrange("(a b) -> a b", b=4)
+    # select: static index bounds
+    with pytest.raises(ValueError, match="out of range"):
+        buf.select(0, 10)
+    with pytest.raises(ValueError, match="out of range"):
+        buf.select(0, -1)
+    # narrow: static range bounds
+    with pytest.raises(ValueError, match="exceeds"):
+        buf.narrow(0, 8, 4)
+    with pytest.raises(ValueError, match="must be positive"):
+        buf.narrow(0, 0, -1)
+    with pytest.raises(ValueError, match="must be non-negative"):
+        buf.narrow(0, -2, 4)
+    # sub: negative indices/starts
+    with pytest.raises(ValueError, match=r"in \[0, 2\)"):
+        grid.sub[:, -1::2]
+    with pytest.raises(ValueError, match="out of range"):
+        grid.sub[-1, :]
+    with pytest.raises(ValueError, match="exceeds"):
+        grid.sub[:, 4:12]
+
+
 def test_buffer_view_dtype_ir():
     """Verify .view('float32') on float16: dtype correct, last dim halved, shared data."""
 

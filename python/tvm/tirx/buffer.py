@@ -488,15 +488,30 @@ class Buffer(Object, Scriptable):
             raise ValueError(f"{name}: dim {dim} out of range for buffer of rank {ndim}")
         return dim
 
+    @staticmethod
+    def _concrete_int(value):
+        """Return ``value`` as a python int when it is statically known."""
+        if isinstance(value, bool):
+            return None
+        if isinstance(value, Integral):
+            return int(value)
+        if isinstance(value, tvm.tirx.IntImm):
+            return int(value)
+        return None
+
     def unflatten(self, dim, sizes) -> "Buffer":
         """Split ``dim`` into the given factor sizes (row-major).
 
         Torch-aligned: ``x.unflatten(1, (4, 4, 4))``; one size may be ``-1``
         and is inferred from the dim's extent. Pure view: the layout is
-        carried and regrouped against the new shape.
+        carried and regrouped against the new shape. The split must be exact:
+        when the extent and factors are statically known, a non-bijective
+        factorization is rejected (symbolic values are the caller's
+        responsibility).
         """
         dim = self._normalized_dim(dim, "unflatten")
         sizes = list(sizes)
+        extent = self._concrete_int(self.shape[dim])
         negatives = [i for i, s in enumerate(sizes) if isinstance(s, int) and s == -1]
         if len(negatives) > 1:
             raise ValueError("unflatten: at most one -1 is allowed in sizes")
@@ -506,9 +521,28 @@ class Buffer(Object, Scriptable):
                 [s for i, s in enumerate(sizes) if i != negatives[0]],
                 1,
             )
-            extent = self.shape[dim]
-            extent = int(extent) if isinstance(extent, tvm.tirx.IntImm) else extent
-            sizes[negatives[0]] = extent // known
+            known_c = self._concrete_int(known)
+            if extent is not None and known_c is not None:
+                if known_c <= 0 or extent % known_c != 0:
+                    raise ValueError(
+                        f"unflatten: dim {dim} extent {extent} is not divisible "
+                        f"by the known factors (product {known_c})"
+                    )
+                sizes[negatives[0]] = extent // known_c
+            else:
+                raw_extent = self.shape[dim]
+                raw_extent = (
+                    int(raw_extent) if isinstance(raw_extent, tvm.tirx.IntImm) else raw_extent
+                )
+                sizes[negatives[0]] = raw_extent // known
+        else:
+            product = functools.reduce(lambda a, b: a * b, sizes, 1)
+            product_c = self._concrete_int(product)
+            if extent is not None and product_c is not None and product_c != extent:
+                raise ValueError(
+                    f"unflatten: sizes {sizes} multiply to {product_c}, "
+                    f"but dim {dim} has extent {extent}"
+                )
         new_shape = list(self.shape[:dim]) + sizes + list(self.shape[dim + 1 :])
         return self.view(*new_shape)
 
@@ -606,9 +640,18 @@ class Buffer(Object, Scriptable):
 
         Torch-aligned (``Tensor.select``); ``index`` may be a dynamic
         PrimExpr, folded into the view's ``elem_offset`` through the dim's
-        layout iters.
+        layout iters. Statically known indices are bounds-checked; dynamic
+        indices are the caller's responsibility.
         """
         dim = self._normalized_dim(dim, "select")
+        index_c = self._concrete_int(index)
+        extent_c = self._concrete_int(self.shape[dim])
+        if index_c is not None:
+            if index_c < 0 or (extent_c is not None and index_c >= extent_c):
+                raise ValueError(
+                    f"select: index {index_c} out of range for dim {dim} "
+                    f"of extent {extent_c if extent_c is not None else self.shape[dim]}"
+                )
         layout, swizzle = self._surgery_parts()
         grouped, seps = layout.group(list(self.shape))
         iters = list(grouped.shard)
@@ -625,8 +668,28 @@ class Buffer(Object, Scriptable):
         PrimExpr when the dim maps to a single layout iter. For dims made of
         several iters, ``start`` and ``length`` must be concrete multiples of
         the inner iter block so the range stays a contiguous iter prefix.
+        Statically known bounds are checked (``start >= 0``, ``length >= 1``,
+        ``start + length <= extent``); dynamic values are the caller's
+        responsibility.
         """
         dim = self._normalized_dim(dim, "narrow")
+        start_c = self._concrete_int(start)
+        length_c = self._concrete_int(length)
+        extent_c = self._concrete_int(self.shape[dim])
+        if start_c is not None and start_c < 0:
+            raise ValueError(f"narrow: start {start_c} must be non-negative")
+        if length_c is not None and length_c < 1:
+            raise ValueError(f"narrow: length {length_c} must be positive")
+        if (
+            start_c is not None
+            and length_c is not None
+            and extent_c is not None
+            and start_c + length_c > extent_c
+        ):
+            raise ValueError(
+                f"narrow: range [{start_c}, {start_c + length_c}) exceeds "
+                f"dim {dim} extent {extent_c}"
+            )
         layout, swizzle = self._surgery_parts()
         grouped, seps = layout.group(list(self.shape))
         iters = list(grouped.shard)
@@ -830,6 +893,18 @@ def _rearrange(buffer, pattern, **sizes):
             for name in group:
                 if name != unknown_factors[0]:
                     known = known * axis_size[name]
+            known_c = Buffer._concrete_int(known)
+            extent_c = Buffer._concrete_int(extent)
+            if (
+                extent_c is not None
+                and known_c is not None
+                and (known_c <= 0 or extent_c % known_c != 0)
+            ):
+                raise ValueError(
+                    f"rearrange: composite {'(' + ' '.join(group) + ')'} in "
+                    f"{pattern!r} does not factor dim extent {extent_c} "
+                    f"(known factors multiply to {known_c})"
+                )
             axis_size[unknown_factors[0]] = extent // known
 
     # 1. Split composites, right-to-left so dim indices stay valid.
@@ -897,9 +972,12 @@ class _SubIndexer:
                         )
                     start = 0 if item.start is None else item.start
                     # a::s over N = unflatten into (N//s, s) and fix the
-                    # remainder coordinate at a (requires a < s).
-                    if isinstance(start, Integral) and start >= step:
-                        raise ValueError(f"sub: start {start} must be < step {step}")
+                    # remainder coordinate at a (requires 0 <= a < s).
+                    start_c = Buffer._concrete_int(start)
+                    if start_c is not None and not 0 <= start_c < step:
+                        raise ValueError(
+                            f"sub: stepped-slice start {start_c} must be in [0, {step})"
+                        )
                     buf = buf.unflatten(dim, (extent // step, step)).select(dim + 1, start)
                     dim += 1
             else:
