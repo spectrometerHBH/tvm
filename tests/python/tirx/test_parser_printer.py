@@ -14,6 +14,8 @@
 # KIND, either express or implied.  See the License for the
 # specific language governing permissions and limitations
 # under the License.
+import math
+
 import pytest
 
 import tvm
@@ -1673,11 +1675,22 @@ def test_buffer_view_surgery_static_bounds_rejected():
 
 
 def test_buffer_select_narrow_swizzle_commutation():
-    """Folding an offset past a swizzle is only sound when the offset is a
-    multiple of the swizzle period 2^(per_element + atom_len + swizzle_len)
-    (review finding: sub-period offsets produced wrong addresses). Aligned
-    offsets stay address-equivalent to the parent; everything else raises."""
+    """A folded view offset moves into elem_offset only when it commutes
+    with the swizzle, i.e. is a multiple of the swizzle period
+    2^(per_element + atom_len + swizzle_len). Sub-period offsets stay inside
+    the derived tile layout's offset so the swizzle keeps applying to them
+    (review finding: folding them outside produced wrong addresses). Both
+    placements must be address-equivalent to the parent layout."""
 
+    def addr(buf, base, *coords):
+        analyzer = tvm.arith.Analyzer()
+        if len(coords) == 1:
+            rel = buf.layout.apply(coords[0])["m"]
+        else:
+            rel = buf.layout.apply(*coords, shape=[int(s) for s in buf.shape])["m"]
+        return int(analyzer.simplify((buf.elem_offset - base) + rel))
+
+    analyzer = tvm.arith.Analyzer()
     compose = T.ComposeLayout(
         T.SwizzleLayout(3, 3, 3, swizzle_inner=True),
         T.TileLayout(T.S[(4, 1024) : (1024, 1)]),
@@ -1688,48 +1701,95 @@ def test_buffer_select_narrow_swizzle_commutation():
     def func() -> None:
         T.device_entry()
         A = T.alloc_buffer([4, 1024], dtype="bfloat16", scope="shared.dyn", layout=compose)
-        B = A.select(0, 1)  # folds offset 1024 = 2 * period
+        B = A.select(0, 1)  # offset 1024 = 2 * period: folds into elem_offset
         B[0] = T.bfloat16(0)
-        C = A.narrow(1, 512, 512)  # folds offset 512 = period
+        C = A.narrow(1, 512, 512)  # offset 512 = period: folds into elem_offset
         C[0, 0] = T.bfloat16(0)
         # fmt: on
 
     bufs = _collect_buffers(func)
     a_buf, b_buf, c_buf = bufs["A"], bufs["B"], bufs["C"]
-    analyzer = tvm.arith.Analyzer()
+    base = a_buf.elem_offset
+    assert int(analyzer.simplify(b_buf.elem_offset - base)) == 1024
     for j in (0, 1, 63, 511, 1023):
-        parent = analyzer.simplify(a_buf.layout.apply(1024 + j)["m"])
-        child = analyzer.simplify(
-            (b_buf.elem_offset - a_buf.elem_offset) + b_buf.layout.apply(j)["m"]
-        )
-        assert int(parent) == int(child), (j, parent, child)
+        assert addr(a_buf, base, 1024 + j) == addr(b_buf, base, j)
     for j in (0, 1, 255, 511):
-        parent = analyzer.simplify(a_buf.layout.apply(512 + j)["m"])
-        child = analyzer.simplify(
-            (c_buf.elem_offset - a_buf.elem_offset) + c_buf.layout.apply(j)["m"]
-        )
-        assert int(parent) == int(child), (j, parent, child)
+        assert addr(a_buf, base, 512 + j) == addr(c_buf, base, 0, j)
 
     code = func.script()
     assert from_source(code).script() == code
 
-    # sub-period offsets do not commute with the swizzle and are rejected.
-    repro = tvm.tirx.decl_buffer(
-        (2, 16, 8),
-        "float16",
-        layout=tvm.tirx.layout.ComposeLayout(
-            T.SwizzleLayout(3, 3, 3, swizzle_inner=True),
-            tvm.tirx.layout.TileLayout(T.S[(2, 16, 8) : (128, 8, 1)]),
-        ),
+    # Sub-period offsets do not commute: they stay inside the tile layout's
+    # offset (elem_offset unchanged) and every address matches the parent.
+    compose2 = T.ComposeLayout(
+        T.SwizzleLayout(3, 3, 3, swizzle_inner=True),
+        T.TileLayout(T.S[(2, 16, 8) : (128, 8, 1)]),
     )
-    with pytest.raises(ValueError, match="swizzle period"):
-        repro.select(1, 1)  # offset 8
-    with pytest.raises(ValueError, match="swizzle period"):
-        repro.select(2, 1)  # offset 1
-    with pytest.raises(ValueError, match="swizzle period"):
-        repro.narrow(1, 1, 2)
-    with pytest.raises(ValueError, match="swizzle period"):
-        repro.sub[:, 1:3]
+
+    # fmt: off
+    @T.prim_func
+    def func2() -> None:
+        T.device_entry()
+        A = T.alloc_buffer([2, 16, 8], dtype="float16", scope="shared.dyn", layout=compose2)
+        B = A.select(1, 1)  # offset 8
+        B[0, 0] = T.float16(0)
+        C = A.select(2, 1)  # offset 1
+        C[0, 0] = T.float16(0)
+        D = A.narrow(1, 1, 2)  # offset 8
+        D[0, 0, 0] = T.float16(0)
+        E = A.sub[:, 1:3]  # narrow via sub
+        E[0, 0, 0] = T.float16(0)
+        for w in T.serial(16):
+            F = A.select(1, w)  # dynamic sub-period offset
+            F[0, 0] = T.float16(0)
+        # fmt: on
+
+    bufs = _collect_buffers(func2)
+    a2, base2 = bufs["A"], bufs["A"].elem_offset
+    shape2 = [2, 16, 8]
+    for name, to_parent in {
+        "B": lambda c: (c[0], 1, c[1]),
+        "C": lambda c: (c[0], c[1], 1),
+        "D": lambda c: (c[0], 1 + c[1], c[2]),
+        "E": lambda c: (c[0], 1 + c[1], c[2]),
+    }.items():
+        child = bufs[name]
+        assert int(analyzer.simplify(child.elem_offset - base2)) == 0
+        child_shape = [int(s) for s in child.shape]
+        for flat in range(math.prod(child_shape)):
+            coords, rem = [], flat
+            for extent in reversed(child_shape):
+                coords.append(rem % extent)
+                rem //= extent
+            coords = tuple(reversed(coords))
+            assert addr(a2, base2, *to_parent(coords)) == addr(child, base2, *coords), (
+                name,
+                coords,
+            )
+
+    code = func2.script()
+    assert from_source(code).script() == code
+
+    # fixed-point windows (all touched addresses below 2^(per_element +
+    # atom_len)) are correct through the same layout-offset placement
+    compose3 = T.ComposeLayout(
+        T.SwizzleLayout(3, 3, 3, swizzle_inner=True),
+        T.TileLayout(T.S[(64,) : (1,)]),
+    )
+
+    # fmt: off
+    @T.prim_func
+    def func3() -> None:
+        T.device_entry()
+        A = T.alloc_buffer([64], dtype="bfloat16", scope="shared.dyn", layout=compose3)
+        B = A.narrow(0, 8, 8)
+        B[0] = T.bfloat16(0)
+        # fmt: on
+
+    bufs = _collect_buffers(func3)
+    a3, b3 = bufs["A"], bufs["B"]
+    for j in range(8):
+        assert addr(a3, a3.elem_offset, 8 + j) == addr(b3, a3.elem_offset, j) == 8 + j
 
 
 def test_buffer_rearrange_singleton_size_mismatch_rejected():

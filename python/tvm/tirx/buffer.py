@@ -620,8 +620,8 @@ class Buffer(Object, Scriptable):
             offset = term if offset is None else offset + term
         return offset
 
-    def _check_swizzle_commutes(self, swizzle, extra_offset, name):
-        """Reject offsets that do not commute with a swizzle permutation.
+    def _swizzle_offset_commutes(self, swizzle, extra_offset):
+        """Whether ``extra_offset`` commutes with the swizzle permutation.
 
         Folding an offset into ``elem_offset`` moves it *outside* the layout,
         so the address becomes ``offset + swizzle(rest)``. The swizzle XORs
@@ -630,30 +630,31 @@ class Buffer(Object, Scriptable):
         when the offset is a multiple of that period.
         """
         if swizzle is None or extra_offset is None:
-            return
+            return True
         sw_len = int(swizzle.swizzle_len)
         if sw_len == 0:
-            return  # identity permutation, everything commutes
+            return True  # identity permutation, everything commutes
         period = 1 << (int(swizzle.per_element) + int(swizzle.atom_len) + sw_len)
         offset_c = self._concrete_int(extra_offset)
         if offset_c is not None:
-            commutes = offset_c % period == 0
-        else:
-            from ..arith import Analyzer  # pylint: disable=import-outside-toplevel
+            return offset_c % period == 0
+        from ..arith import Analyzer  # pylint: disable=import-outside-toplevel
 
-            commutes = Analyzer().can_prove_equal(tvm.tirx.floormod(extra_offset, period), 0)
-        if not commutes:
-            raise ValueError(
-                f"{name}: the folded offset {extra_offset} is not a multiple of "
-                f"the swizzle period ({period} elements), so it does not commute "
-                f"with the swizzle permutation; slice via a region instead, or "
-                f"keep the offset inside an explicitly declared layout"
-            )
+        return Analyzer().can_prove_equal(tvm.tirx.floormod(extra_offset, period), 0)
 
-    def _rebuild_view(self, new_shape, new_shard, grouped, swizzle, extra_offset, name):
-        self._check_swizzle_commutes(swizzle, extra_offset, name)
+    def _rebuild_view(self, new_shape, new_shard, grouped, swizzle, extra_offset):
+        """Rebuild a derived view; ``extra_offset`` goes into ``elem_offset``
+        when it commutes with the swizzle (provable period multiple),
+        otherwise it stays inside the tile layout's offset so the swizzle
+        keeps applying to it and the view addresses the same bytes."""
+        offset_map = dict(grouped.offset.items())
+        if extra_offset is not None and not self._swizzle_offset_commutes(swizzle, extra_offset):
+            m_axis = tvm.tirx.layout.Axis.get("m")
+            prev = offset_map.get(m_axis)
+            offset_map[m_axis] = extra_offset if prev is None else prev + extra_offset
+            extra_offset = None
         new_layout = tvm.tirx.layout.TileLayout.from_iters(
-            new_shard, list(grouped.replica), dict(grouped.offset.items())
+            new_shard, list(grouped.replica), offset_map
         )
         new_layout = self._rewrap_swizzle(new_layout, swizzle)
         elem_offset = self.elem_offset
@@ -681,8 +682,9 @@ class Buffer(Object, Scriptable):
         PrimExpr, folded into the view's ``elem_offset`` through the dim's
         layout iters. Statically known indices are bounds-checked; dynamic
         indices are the caller's responsibility. On a swizzled layout the
-        folded offset must be a multiple of the swizzle period (see
-        ``_check_swizzle_commutes``); otherwise the call raises.
+        offset folds into ``elem_offset`` only when it provably commutes
+        with the swizzle (a swizzle-period multiple); otherwise it stays
+        inside the derived layout's offset, where the swizzle applies to it.
         """
         dim = self._normalized_dim(dim, "select")
         index_c = self._concrete_int(index)
@@ -700,7 +702,7 @@ class Buffer(Object, Scriptable):
         offset = self._dim_group_offset(iters[lo:hi], index)
         new_shape = list(self.shape[:dim]) + list(self.shape[dim + 1 :])
         new_shard = iters[:lo] + iters[hi:]
-        return self._rebuild_view(new_shape, new_shard, grouped, swizzle, offset, "select")
+        return self._rebuild_view(new_shape, new_shard, grouped, swizzle, offset)
 
     def narrow(self, dim, start, length) -> "Buffer":
         """Return a view of ``dim`` narrowed to ``[start, start + length)``.
@@ -711,9 +713,10 @@ class Buffer(Object, Scriptable):
         the inner iter block so the range stays a contiguous iter prefix.
         Statically known bounds are checked (``start >= 0``, ``length >= 1``,
         ``start + length <= extent``); dynamic values are the caller's
-        responsibility. On a swizzled layout the folded offset must be a
-        multiple of the swizzle period (see ``_check_swizzle_commutes``);
-        otherwise the call raises.
+        responsibility. On a swizzled layout the offset folds into
+        ``elem_offset`` only when it provably commutes with the swizzle
+        (a swizzle-period multiple); otherwise it stays inside the derived
+        layout's offset, where the swizzle applies to it.
         """
         dim = self._normalized_dim(dim, "narrow")
         start_c = self._concrete_int(start)
@@ -768,7 +771,7 @@ class Buffer(Object, Scriptable):
         new_shape = list(self.shape)
         new_shape[dim] = length
         new_shard = iters[:lo] + new_group + iters[hi:]
-        return self._rebuild_view(new_shape, new_shard, grouped, swizzle, offset, "narrow")
+        return self._rebuild_view(new_shape, new_shard, grouped, swizzle, offset)
 
     @property
     def sub(self) -> "_SubIndexer":
