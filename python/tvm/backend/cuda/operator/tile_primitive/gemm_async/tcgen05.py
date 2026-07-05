@@ -596,6 +596,27 @@ def gemm_async_tcgen05_impl(op_call: TilePrimitiveCall, sctx: DispatchContext) -
         N = int(C_extent[-1])
     is_2x2 = M == 64 and cta_group == 2
 
+    # A may be given in the honest batched form A[2, M, K] for the M=64 .ws
+    # A-in-TMEM datapath, symmetric to the batched C above (SEM-WS-BATCH). The
+    # leading dim is the two 64-lane halves the .ws read consumes: an M=64 .ws
+    # sources A from BOTH lane-halves (lanes 0-63 and 64-127), and a flat 2D
+    # A[M, K] only describes lanes 0-63. The fold layout
+    # (2, M, K):(64@TLane, 1@TLane, 1@TCol) places batch b, row m at lane
+    # m + 64*b — the same physical tile, so once validated it normalizes to the
+    # 2D [M, K] extent (the batch dim is the lane fold, not an M or K multiplier)
+    # and every downstream step (K extraction, the emit) runs byte-identically
+    # to the flat path. Only meaningful for A in TMEM; SMEM A stays 2D.
+    A_batched = a_is_tmem and len(A_extent) == 3 and int(A_extent[0]) == 2
+    if A_batched:
+        A_bM = int(A_extent[1])
+        A_bK = int(A_extent[2])
+        a_batched_base = TileLayout(S[(2, A_bM, A_bK) : (64 @ TLane, 1 @ TLane, 1 @ TCol)])
+        expected_a_batched = TileLayout.from_iters(
+            a_batched_base.shard, a_batched_base.replica, A_slice_layout.offset
+        ).canonicalize()
+        tvm.ir.assert_structural_equal(A_slice_layout.canonicalize(), expected_a_batched)
+        A_extent = A_extent[1:]
+
     # Majorness (a_mn_major / b_mn_major) is determined later by
     # compute_canonical_params via dual-atom matching on the physical
     # SMEM layout.  Extract dim extents here for cross-validation.
@@ -1010,11 +1031,12 @@ def gemm_async_tcgen05_impl(op_call: TilePrimitiveCall, sctx: DispatchContext) -
     #   * A in TMEM: A must physically occupy BOTH 64-lane halves (lanes 0-63
     #     and 64-127); the two banks multiply the two A halves by the two B
     #     halves independently (FlashMLA logits, whose two head-dim-half
-    #     partials the caller sums downstream). A's declared layout is the
-    #     identity 64-lane Layout D — the lower-half occupancy is written by an
-    #     upstream cp (e.g. the 128x256b q fold) and is NOT visible here, so
-    #     "A spans both halves" is a caller contract (the dual of the unchecked
-    #     "ws + Layout-F A" case), not a runtime assert.
+    #     partials the caller sums downstream). This second-half occupancy is
+    #     no longer an unchecked "caller contract": A must be declared in the
+    #     honest batched A[2, M, K] fold (validated as `A_batched` above), so
+    #     the two-half read is explicit and structurally verified — a flat 2D
+    #     A[M, K] (lanes 0-63 only) is rejected below (the A-side dual of the
+    #     Layout-E C requirement).
     if packed_n2 and not is_2x2:
         if op_call.config.get("weight_stationary") is False:
             raise ValueError(
@@ -1045,6 +1067,41 @@ def gemm_async_tcgen05_impl(op_call: TilePrimitiveCall, sctx: DispatchContext) -
             "for a non-ws (Layout-F) M=64 MMA."
         )
 
+    # WS-TWO-HALVES A-side check (proof §2.3, SEM-WS-BATCH): an M=64 .ws with A
+    # in TMEM reads A from BOTH 64-lane halves. A flat 2D A[M, K] describes only
+    # lanes 0-63, so it can neither express nor let the dispatch verify the
+    # second-half occupancy the datapath consumes. Require the honest batched
+    # A[2, M, K] fold (validated as `A_batched`) so the two-half read is explicit
+    # and checkable — symmetric to the batched-C acceptance, and the A-side dual
+    # of the Layout-E C requirement. (M=128 a-in-tmem is a genuine 128-row
+    # identity and is unaffected; A in SMEM sources one tile via its descriptor
+    # and needs no batch, so only a_is_tmem M=64 .ws is constrained.)
+    if a_is_tmem and weight_stationary and cta_group == 1 and M == 64 and not A_batched:
+        raise ValueError(
+            "gemm_async[tcgen05]: an M=64 cta_group::1 .ws GEMM with A in TMEM reads "
+            "A from both 64-lane halves (lanes 0-63 and 64-127), but A was given as a "
+            "flat 2D [M, K] tile that only describes lanes 0-63. Declare A in the "
+            "batched A[2, M, K] fold (layout (2, M, K):(64@TLane, 1@TLane, 1@TCol)), "
+            "the A-side dual of the batched C[2, M, N//2] form, so the two-half "
+            "occupancy is explicit and structurally checked."
+        )
+
+    # Converse guard: the batched A[2, M, K] fold is *defined only* for the M=64
+    # cta_group::1 .ws A-in-TMEM datapath — its two banks are the two 64-lane
+    # halves the .ws reads. In any other datapath (M=128, cta_group::2, non-ws,
+    # ...) A[2, M, K] has no meaning: the `64@TLane` fold would place rows past
+    # lane 127, and the emit would be a plain MMA reading a lane range the fold
+    # never described. Accepting it (and skipping the flat identity check for it)
+    # would silently mis-declare A, so reject a batched A outside its one valid
+    # domain. Widening this domain requires a matching proof + tests.
+    if A_batched and not (weight_stationary and cta_group == 1 and M == 64):
+        raise ValueError(
+            "gemm_async[tcgen05]: batched A[2, M, K] is only valid for the M=64 "
+            f"cta_group::1 .ws A-in-TMEM datapath, but got weight_stationary="
+            f"{weight_stationary}, cta_group={cta_group}, M={M}. Declare A as a flat "
+            "2D [M, K] identity for any other datapath."
+        )
+
     if is_2x2 or packed_n2:
         # Some FlashMLA cta_group::1 M=64 tiles use the same logical-N/physical-column
         # packing as the cta_group::2 2x2 layout: N is split across two TLane
@@ -1067,13 +1124,21 @@ def gemm_async_tcgen05_impl(op_call: TilePrimitiveCall, sctx: DispatchContext) -
     tmem_addr = C_buffer.allocated_addr[0]
     tmem_offset_32b = C_slice_layout.offset.get(TCol, 0)
 
-    # Validate TMEM A layout: (A_dim2, A_dim1):(1@TLane, 1@TCol)
+    # Validate TMEM A layout. Two accepted shapes:
+    #   * flat A[M, K] identity (A_dim2, A_dim1):(1@TLane, 1@TCol) — M=128
+    #     a-in-tmem, a genuine 128-row identity;
+    #   * batched A[2, M, K] fold — already structurally validated as
+    #     `A_batched` above (the M=64 .ws two-half read). Re-checking it here
+    #     against the flat identity would wrongly reject the 128-lane fold, so
+    #     skip. The base address / TCol offset below are read from the same
+    #     (batch 0, lane 0) cell in either spelling, so the emit is unchanged.
     if a_is_tmem:
-        A_tmem_base = TileLayout(S[(A_dim2, A_dim1) : (1 @ TLane, 1 @ TCol)])
-        expected_a_layout = TileLayout.from_iters(
-            A_tmem_base.shard, A_tmem_base.replica, A_slice_layout.offset
-        ).canonicalize()
-        tvm.ir.assert_structural_equal(A_slice_layout.canonicalize(), expected_a_layout)
+        if not A_batched:
+            A_tmem_base = TileLayout(S[(A_dim2, A_dim1) : (1 @ TLane, 1 @ TCol)])
+            expected_a_layout = TileLayout.from_iters(
+                A_tmem_base.shard, A_tmem_base.replica, A_slice_layout.offset
+            ).canonicalize()
+            tvm.ir.assert_structural_equal(A_slice_layout.canonicalize(), expected_a_layout)
         assert A_buffer.allocated_addr is not None, "TMEM A buffer must have allocated_addr"
         A_tmem_addr = A_buffer.allocated_addr[0]
         A_elem_per_32b = 32 // DataType(A_type).bits

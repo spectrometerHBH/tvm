@@ -2553,12 +2553,14 @@ def _build_cta1_m64_packed_c_kernel(weight_stationary=None):
         if warp_id == 0:
             T.ptx.tcgen05.alloc(T.address_of(tmem_addr[0]), n_cols=512, cta_group=1)
         T.cuda.cta_sync()
+        # A-in-TMEM .ws reads A from both 64-lane halves, so A is declared in
+        # the honest batched A[2, M, K] fold (the A-side of SEM-WS-BATCH).
         A_tmem = T.decl_buffer(
-            (M, K),
+            (2, M, K),
             A_dtype,
             scope="tmem",
             allocated_addr=256,
-            layout=TileLayout(S[(M, K) : (1 @ TLane, 1 @ TCol)]),
+            layout=TileLayout(S[(2, M, K) : (64 @ TLane, 1 @ TLane, 1 @ TCol)]),
         )
         C_tmem = T.decl_buffer(
             (M, N),
@@ -2571,7 +2573,7 @@ def _build_cta1_m64_packed_c_kernel(weight_stationary=None):
             Tx.copy(B_smem[:, :], B[:, :])
             Tx.gemm_async(
                 C_tmem[:, :],
-                A_tmem[:, :],
+                A_tmem[:, :, :],
                 B_smem[:, :],
                 dispatch="tcgen05",
                 cta_group=1,
@@ -2625,12 +2627,14 @@ def _build_cta1_m64_batched_c_kernel():
         if warp_id == 0:
             T.ptx.tcgen05.alloc(T.address_of(tmem_addr[0]), n_cols=512, cta_group=1)
         T.cuda.cta_sync()
+        # Honest batched A[2, M, K] fold (A-side of SEM-WS-BATCH), matching the
+        # batched C below: both banks of the M=64 .ws are explicit.
         A_tmem = T.decl_buffer(
-            (M, K),
+            (2, M, K),
             B_dtype,
             scope="tmem",
             allocated_addr=256,
-            layout=TileLayout(S[(M, K) : (1 @ TLane, 1 @ TCol)]),
+            layout=TileLayout(S[(2, M, K) : (64 @ TLane, 1 @ TLane, 1 @ TCol)]),
         )
         C_tmem = T.decl_buffer(
             (2, M, N // 2),
@@ -2645,7 +2649,7 @@ def _build_cta1_m64_batched_c_kernel():
                 # No weight_stationary: the dispatch infers .ws from the
                 # batched C[2, M, N] fold layout.
                 C_tmem[:, :, :],
-                A_tmem[:, :],
+                A_tmem[:, :, :],
                 B_smem[:, :],
                 dispatch="tcgen05",
                 cta_group=1,
@@ -2713,6 +2717,138 @@ def test_gemm_tcgen05_cta1_m64_ws_requires_layout_e_c():
         with pytest.raises(Exception, match="Layout-E"):
             tvm.compile(
                 tvm.IRModule({"main": _build_cta1_m64_identity_c_ws_kernel()}),
+                target=target,
+                tir_pipeline="tirx",
+            )
+
+
+def _build_cta1_m64_flat_a_ws_kernel():
+    """M=64 cta_group::1 .ws with A in TMEM declared as a flat 2D [M, K]
+    identity (lanes 0-63 only) instead of the batched A[2, M, K] fold — the
+    A-side WS-TWO-HALVES error the dispatch must reject (the A-side dual of the
+    identity-C reject above)."""
+
+    M, N, K = 64, 128, 16
+    B_dtype = "bfloat16"
+    B_layout = mma_shared_layout(B_dtype, SwizzleMode.SWIZZLE_32B_ATOM, (N, K))
+    C_layout = TileLayout(S[(M, 2, N // 2) : (1 @ TLane, 64 @ TLane, 1 @ TCol)])
+
+    @T.prim_func
+    def gemm_flat_a(B_ptr: T.handle) -> None:
+        B = T.match_buffer(B_ptr, (N, K), B_dtype)
+        T.device_entry()
+        warp_id = T.warp_id([4])
+        T.thread_id([128])
+        tid = T.thread_id_in_wg([128])
+        B_smem = T.alloc_buffer((N, K), B_dtype, scope="shared", layout=B_layout)
+        tmem_addr = T.alloc_shared([1], "uint32")
+        if warp_id == 0:
+            T.ptx.tcgen05.alloc(T.address_of(tmem_addr[0]), n_cols=512, cta_group=1)
+        T.cuda.cta_sync()
+        A_tmem = T.decl_buffer(
+            (M, K),
+            B_dtype,
+            scope="tmem",
+            allocated_addr=256,
+            layout=TileLayout(S[(M, K) : (1 @ TLane, 1 @ TCol)]),
+        )
+        C_tmem = T.decl_buffer(
+            (M, N),
+            "float32",
+            scope="tmem",
+            allocated_addr=400,
+            layout=C_layout,
+        )
+        if tid == 0:
+            Tx.copy(B_smem[:, :], B[:, :])
+            Tx.gemm_async(
+                C_tmem[:, :],
+                A_tmem[:, :],
+                B_smem[:, :],
+                dispatch="tcgen05",
+                cta_group=1,
+                weight_stationary=True,
+            )
+
+    return gemm_flat_a
+
+
+def test_gemm_tcgen05_cta1_m64_ws_requires_batched_a():
+    """A forced .ws (M=64, cta_group::1) with A in TMEM declared as a flat 2D
+    [M, K] identity is rejected: the .ws reads A from both 64-lane halves, so a
+    flat A (lanes 0-63 only) cannot express — nor let the dispatch verify — the
+    second-half occupancy. A must use the batched A[2, M, K] fold."""
+
+    target = tvm.target.Target("cuda")
+    with target:
+        with pytest.raises(Exception, match="both 64-lane halves"):
+            tvm.compile(
+                tvm.IRModule({"main": _build_cta1_m64_flat_a_ws_kernel()}),
+                target=target,
+                tir_pipeline="tirx",
+            )
+
+
+def _build_m128_batched_a_kernel():
+    """M=128 cta_group::1 NON-ws gemm whose A is (illegitimately) declared in the
+    batched A[2, M, K] fold. The batched fold is defined *only* for the M=64
+    cta_group::1 .ws datapath, so it must be rejected here (the converse of the
+    requires-batched-A reject: batched A only for M=64 .ws)."""
+
+    M, N, K = 128, 128, 16
+    B_dtype = "bfloat16"
+    B_layout = mma_shared_layout(B_dtype, SwizzleMode.SWIZZLE_32B_ATOM, (N, K))
+
+    @T.prim_func
+    def gemm_m128_batched_a(B_ptr: T.handle) -> None:
+        B = T.match_buffer(B_ptr, (N, K), B_dtype)
+        T.device_entry()
+        warp_id = T.warp_id([4])
+        T.thread_id([128])
+        tid = T.thread_id_in_wg([128])
+        B_smem = T.alloc_buffer((N, K), B_dtype, scope="shared", layout=B_layout)
+        tmem_addr = T.alloc_shared([1], "uint32")
+        if warp_id == 0:
+            T.ptx.tcgen05.alloc(T.address_of(tmem_addr[0]), n_cols=512, cta_group=1)
+        T.cuda.cta_sync()
+        A_tmem = T.decl_buffer(
+            (2, M, K),
+            B_dtype,
+            scope="tmem",
+            allocated_addr=256,
+            layout=TileLayout(S[(2, M, K) : (64 @ TLane, 1 @ TLane, 1 @ TCol)]),
+        )
+        C_tmem = T.decl_buffer(
+            (M, N),
+            "float32",
+            scope="tmem",
+            allocated_addr=400,
+            layout=TileLayout(S[(M, N) : (1 @ TLane, 1 @ TCol)]),
+        )
+        if tid == 0:
+            Tx.copy(B_smem[:, :], B[:, :])
+            Tx.gemm_async(
+                C_tmem[:, :],
+                A_tmem[:, :, :],
+                B_smem[:, :],
+                dispatch="tcgen05",
+                cta_group=1,
+            )
+
+    return gemm_m128_batched_a
+
+
+def test_gemm_tcgen05_batched_a_only_for_m64_ws():
+    """A batched A[2, M, K] fold outside the M=64 cta_group::1 .ws datapath is
+    rejected: the fold's two banks are the two 64-lane halves the .ws reads, so
+    it has no meaning for a plain M=128 MMA and must not be silently accepted
+    (nor skip the flat-identity A check)."""
+
+    target = tvm.target.Target("cuda")
+    with target:
+        with pytest.raises(Exception, match="only valid for the M=64"):
+            tvm.compile(
+                tvm.IRModule({"main": _build_m128_batched_a_kernel()}),
                 target=target,
                 tir_pipeline="tirx",
             )

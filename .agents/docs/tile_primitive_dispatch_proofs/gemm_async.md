@@ -383,6 +383,11 @@ Per §9.7.16.10 (p665) and §9.7.16.10.9.1/.3 (p712–725):
    (O) or a summed contraction split (logits), so the emit is right and the
    standalone N-split tests pass — but the flat signature never states which,
    nor that an A-in-tmem `.ws` requires A physically in both lane-halves.
+   **Both gaps are closed by SEM-WS-BATCH below: C is spelled as the batched
+   `C[2, M, N//2]` fold, and — the A-side dual — the A-in-tmem operand is
+   spelled as the batched `A[2, M, K]` fold, so the two-half occupancy on
+   *both* sides is explicit in the layout and structurally validated, never a
+   trusted contract.**
 
    **SEM-WS-BATCH remediation (implemented, lines 563–599):** the dispatch
    now accepts C in the **explicit batched form** `C[2, M, N//2]` with the
@@ -429,6 +434,68 @@ Per §9.7.16.10 (p665) and §9.7.16.10.9.1/.3 (p712–725):
    itself via the batched shape; both spellings remain, each correct for its
    intent. (cta_group::2 M=64 uses the 2×2 Layout B — a different, M-across-
    CTA organization — and is unaffected by all of this.)
+
+   **SEM-WS-BATCH, A-side (implemented) — the A-in-tmem operand must be the
+   honest batched `A[2, M, K]` fold.** The C-side remediation above made the
+   *output* two-half structure explicit; the *input* A-in-tmem operand had the
+   symmetric gap. By WS-TWO-HALVES (point 1), an M=64 `.ws` with A in TMEM reads
+   A from **both** 64-lane halves (lanes 0–63 and 64–127) — for the logits gemm
+   the two halves hold q's two different head-dim slabs (the cp fold
+   `q_nope_tmem_cp (h,b,half,j) → lane h+64·half`,
+   `sparse_prefill_head64_phase1.py`). A flat 2D `A[M, K]` identity
+   `(M, K):(1@TLane, 1@TCol)` describes **only lanes 0–63**, so it can neither
+   express nor let the dispatch verify the second-half occupancy the datapath
+   consumes — it was a trusted "caller contract". The dispatch now requires the
+   explicit batched fold, exactly mirroring C:
+
+   1. *Acceptance is exact.* A batched A is accepted only if `A_slice_layout`
+      `assert_structural_equal`s `(2, M, K):(64@TLane, 1@TLane, 1@TCol)`
+      (lines 599–617): batch `b`, row `m` map to lane `m + 64·b`, so the two
+      halves are the two lane-halves. After validation `A_extent` is normalized
+      to the 2D `[M, K]` (the batch dim is the lane fold, not an M or K
+      multiplier), and the base TMEM address / TCol offset are read from the
+      same `(batch 0, lane 0, col 0)` cell as the flat spelling, so K
+      extraction and the emit run **byte-identically** to the old flat path.
+      The redundant flat-identity A check (lines ~1131–1137) is skipped for a
+      batched A (`if not A_batched`), since the batched form is already
+      validated.
+   2. *Rejection is total, and the domain is exact (both directions).*
+      **Forward** (lines ~1079): an `a_is_tmem` M=64 cta_group::1 `.ws` whose A
+      is **not** batched is rejected — a flat identity (lanes 0–63 only) cannot
+      feed the two-half read. **Converse** (lines ~1088): a batched `A[2, M, K]`
+      that is **not** in the M=64 cta_group::1 `.ws` datapath is *also* rejected
+      — the `64@TLane` fold is *defined only* there (its two banks are the two
+      64-lane halves the `.ws` reads); for any other datapath (M=128,
+      cta_group::2, non-ws) the fold would place rows past lane 127 and the emit
+      would be a plain MMA over a lane range the fold never described. Without
+      the converse, an M=128 cta_group::1 non-ws `A[2, M, K]` would be accepted
+      (skipping the flat-identity check) and emit a regular MMA — a silent
+      mis-declaration. So batched A ⟺ M=64 cta_group::1 `.ws`, exactly. Widening
+      the domain requires updating this proof + tests. (M=128 a-in-tmem is a
+      genuine 128-row identity and stays flat; A in SMEM sources one tile via its
+      descriptor and needs no batch; cta_group::2 uses Layout B / the
+      `R[2:64@TLane]` replica declared in that kernel's cp view.)
+   3. *Emit is byte-identical by construction; coverage is honest about what is
+      pinned.* Normalization drops only the batch dim (the lane fold), leaving M,
+      K and the base `(lane 0, col 0)` TMEM address untouched, so the batched-A
+      emit is **identical to the pre-change flat-A emit by construction**. This
+      cannot be pinned by an in-suite test, because the new dispatch *rejects*
+      flat a-in-tmem `.ws` A — there is no compilable flat spelling left to diff
+      against. It was instead verified **out-of-band**: a minimal repro compiled
+      batched-A on the new dispatch and flat-A on the pre-change dispatch (via a
+      stash) and diffed byte-for-byte (identical modulo the kernel entry name),
+      and the migrated FlashMLA head64 kernel (`q_nope_tmem_bmm` /
+      `q_rope_tmem_bmm`) is byte-identical **device+host** before/after and passes
+      `run_test` for d_qk ∈ {512, 576}. The **committed** tests pin: the emit
+      equivalence of packed-C vs batched-C *both with batched A*
+      (`..._accepts_batched_c_layout_ws`, source-equal up to the entry name — a C-
+      spelling equivalence, **not** a flat-A comparison), the forward reject
+      (`..._ws_requires_batched_a`), and the converse reject
+      (`..._batched_a_only_for_m64_ws`).
+
+   So both operands of the M=64 `.ws` logits gemm — A and C — now carry the
+   two-half structure in their declared layout, and the dispatch validates each;
+   the earlier "A spans both halves is a caller contract" surrender is gone.
 5. **Ordering** (§9.7.16.6.2, p646): `tcgen05.mma.cta_group::N →
    tcgen05.mma.cta_group::N (same N and accumulator and shape)` forms a
    pipeline, guaranteeing execution in issue order — the correctness basis
@@ -921,9 +988,12 @@ Regressions: `test_gemm_tcgen05_cta1_m64_packed_c_infers_weight_stationary`
 pairing is pinned by `test_gemm_tcgen05_cta1_m64_accepts_packed_c_layout_ws`
 and `..._accepts_batched_c_layout_ws`. Because `.ws` is derived from the C
 layout rather than a hand-set flag, "packed/batched Layout-E C is accepted"
-⟺ "`.ws` is the correct datapath": dispatch-accepts ⟹ correct. The converse
-(ws + Layout F/identity layout) declares Layout F and so never reaches this
-branch — a caller contract. ∎
+⟺ "`.ws` is the correct datapath": dispatch-accepts ⟹ correct. The
+`.ws` + Layout-F/identity **C** is rejected (the C dual-check); and — the
+A-side dual — an `a_is_tmem` M=64 cta_group::1 `.ws` whose **A** is not the
+batched `A[2, M, K]` fold is likewise rejected (SEM-WS-BATCH A-side), so both
+the output and the input two-half structure are validated rather than trusted.
+∎
 
 ### L8 (Tiling + Accumulation Chain = GEMM Summation)
 
