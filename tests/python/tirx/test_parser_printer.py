@@ -1421,6 +1421,212 @@ def test_buffer_permute_compose_layout_ir():
     assert from_source(code).script() == code
 
 
+def test_buffer_unflatten_flatten_ir():
+    """unflatten splits a dim (with -1 inference); flatten merges dims back.
+    Both keep the original layout object (pure reshapes)."""
+
+    # fmt: off
+    @T.prim_func
+    def func() -> None:
+        T.device_entry()
+        A = T.alloc_buffer([8, 64], dtype="float16", scope="local",
+                           layout=T.TileLayout(T.S[(8, 64) : (64, 1)]))
+        B = A.unflatten(1, (4, 16))
+        B[0, 0, 0] = T.float16(0)
+        C = A.unflatten(1, (-1, 16))
+        C[0, 0, 0] = T.float16(0)
+        D = B.flatten(1, 2)
+        D[0, 0] = T.float16(0)
+        # fmt: on
+
+    bufs = _collect_buffers(func)
+    a_buf, b_buf, c_buf, d_buf = bufs["A"], bufs["B"], bufs["C"], bufs["D"]
+    assert b_buf.data.same_as(a_buf.data)
+    assert [int(s) for s in b_buf.shape] == [8, 4, 16]
+    assert [int(s) for s in c_buf.shape] == [8, 4, 16]
+    assert [int(s) for s in d_buf.shape] == [8, 64]
+    assert_structural_equal(b_buf.layout, a_buf.layout)
+    assert_structural_equal(d_buf.layout, a_buf.layout)
+
+    code = func.script()
+    assert from_source(code).script() == code
+
+
+def test_buffer_select_ir():
+    """select removes a dim; the index (static or dynamic) folds into
+    elem_offset through the dim's layout iter stride."""
+
+    # fmt: off
+    @T.prim_func
+    def func() -> None:
+        T.device_entry()
+        A = T.alloc_buffer([4, 8, 16], dtype="float16", scope="local",
+                           layout=T.TileLayout(T.S[(4, 8, 16) : (256, 16, 1)]))
+        B = A.select(0, 2)
+        B[0, 0] = T.float16(0)
+        for i in T.serial(4):
+            C = A.select(0, i)
+            C[0, 0] = T.float16(0)
+        # fmt: on
+
+    bufs = _collect_buffers(func)
+    a_buf, b_buf, c_buf = bufs["A"], bufs["B"], bufs["C"]
+    assert b_buf.data.same_as(a_buf.data)
+    assert [int(s) for s in b_buf.shape] == [8, 16]
+    assert int(tvm.arith.Analyzer().simplify(b_buf.elem_offset - a_buf.elem_offset)) == 512
+    assert_structural_equal(b_buf.layout, tvm.tirx.layout.TileLayout(T.S[(8, 16) : (16, 1)]))
+    assert [int(s) for s in c_buf.shape] == [8, 16]
+
+    code = func.script()
+    assert from_source(code).script() == code
+
+
+def test_buffer_select_multi_iter_dim_ir():
+    """select on a dim carried by several layout iters decomposes the index
+    mixed-radix across the iters' strides."""
+
+    # fmt: off
+    @T.prim_func
+    def func() -> None:
+        T.device_entry()
+        A = T.alloc_buffer([8, 16], dtype="float16", scope="local",
+                           layout=T.TileLayout(T.S[(2, 4, 16) : (1024, 64, 1)]))
+        B = A.select(0, 5)
+        B[0] = T.float16(0)
+        # fmt: on
+
+    bufs = _collect_buffers(func)
+    a_buf, b_buf = bufs["A"], bufs["B"]
+    # 5 -> (5 // 4, 5 % 4) = (1, 1) -> 1 * 1024 + 1 * 64
+    assert int(tvm.arith.Analyzer().simplify(b_buf.elem_offset - a_buf.elem_offset)) == 1088
+    assert [int(s) for s in b_buf.shape] == [16]
+    assert_structural_equal(b_buf.layout, tvm.tirx.layout.TileLayout(T.S[(16,) : (1,)]))
+
+    code = func.script()
+    assert from_source(code).script() == code
+
+
+def test_buffer_narrow_ir():
+    """narrow keeps the dim at a reduced extent; multi-iter dims require
+    start/length on the inner iter block boundary."""
+
+    # fmt: off
+    @T.prim_func
+    def func() -> None:
+        T.device_entry()
+        A = T.alloc_buffer([4, 64], dtype="float16", scope="local",
+                           layout=T.TileLayout(T.S[(4, 64) : (64, 1)]))
+        for i in T.serial(2):
+            B = A.narrow(1, i * 32, 32)
+            B[0, 0] = T.float16(0)
+        M = T.alloc_buffer([8, 16], dtype="float16", scope="local",
+                           layout=T.TileLayout(T.S[(2, 4, 16) : (1024, 64, 1)]))
+        C = M.narrow(0, 4, 4)
+        C[0, 0] = T.float16(0)
+        # fmt: on
+
+    bufs = _collect_buffers(func)
+    b_buf, m_buf, c_buf = bufs["B"], bufs["M"], bufs["C"]
+    assert [int(s) for s in b_buf.shape] == [4, 32]
+    assert [int(s) for s in c_buf.shape] == [4, 16]
+    assert int(tvm.arith.Analyzer().simplify(c_buf.elem_offset - m_buf.elem_offset)) == 1024
+
+    code = func.script()
+    assert from_source(code).script() == code
+
+
+def test_buffer_narrow_multi_iter_misaligned_rejected():
+    buf = tvm.tirx.decl_buffer(
+        (8, 16), "float16", layout=tvm.tirx.layout.TileLayout(T.S[(2, 4, 16) : (1024, 64, 1)])
+    )
+    with pytest.raises(ValueError, match="multiples of the inner iter block"):
+        buf.narrow(0, 2, 4)
+
+
+def test_buffer_sub_ir():
+    """buf.sub follows numpy basic indexing as a view constructor: int drops
+    the dim, a:b narrows, a::s strides (via unflatten + select)."""
+
+    # fmt: off
+    @T.prim_func
+    def func() -> None:
+        T.device_entry()
+        A = T.alloc_buffer([4, 8, 16], dtype="float16", scope="local",
+                           layout=T.TileLayout(T.S[(4, 8, 16) : (256, 16, 1)]))
+        B = A.sub[1, 2:6]
+        B[0, 0] = T.float16(0)
+        C = A.sub[:, 1::2]
+        C[0, 0, 0] = T.float16(0)
+        D = A.select(0, 1).narrow(0, 2, 4)
+        D[0, 0] = T.float16(0)
+        E = A.unflatten(1, (4, 2)).select(2, 1)
+        E[0, 0, 0] = T.float16(0)
+        # fmt: on
+
+    bufs = _collect_buffers(func)
+    b_buf, c_buf, d_buf, e_buf = bufs["B"], bufs["C"], bufs["D"], bufs["E"]
+    assert [int(s) for s in b_buf.shape] == [4, 16]
+    assert_structural_equal(b_buf.layout, d_buf.layout)
+    assert int(tvm.arith.Analyzer().simplify(b_buf.elem_offset - d_buf.elem_offset)) == 0
+    assert [int(s) for s in c_buf.shape] == [4, 4, 16]
+    assert_structural_equal(c_buf.layout, e_buf.layout)
+    assert int(tvm.arith.Analyzer().simplify(c_buf.elem_offset - e_buf.elem_offset)) == 0
+
+    code = func.script()
+    assert from_source(code).script() == code
+
+
+def test_buffer_rearrange_ir():
+    """rearrange compiles to the unflatten/permute/flatten chain; the swizzle
+    of a composed layout is carried."""
+
+    compose = T.ComposeLayout(
+        T.SwizzleLayout(3, 3, 3, swizzle_inner=True),
+        T.TileLayout(T.S[(2, 16, 8) : (128, 8, 1)]),
+    )
+
+    # fmt: off
+    @T.prim_func
+    def func() -> None:
+        T.device_entry()
+        A = T.alloc_buffer([2, 16, 8], dtype="bfloat16", scope="shared.dyn", layout=compose)
+        B = A.rearrange("b (s w r) c -> b w (s r) c", w=2, r=4)
+        B[0, 0, 0, 0] = T.bfloat16(0)
+
+    @T.prim_func
+    def func_chain() -> None:
+        T.device_entry()
+        A = T.alloc_buffer([2, 16, 8], dtype="bfloat16", scope="shared.dyn", layout=compose)
+        C = A.unflatten(1, (2, 2, 4)).permute(0, 2, 1, 3, 4).flatten(2, 3)
+        C[0, 0, 0, 0] = T.bfloat16(0)
+        # fmt: on
+
+    b_buf = _collect_buffers(func)["B"]
+    c_buf = _collect_buffers(func_chain)["C"]
+    assert [int(s) for s in b_buf.shape] == [2, 2, 8, 8]
+    assert_structural_equal(b_buf.layout, c_buf.layout)
+    assert isinstance(b_buf.layout, tvm.tirx.layout.ComposeLayout)
+
+    code = func.script()
+    assert from_source(code).script() == code
+
+
+def test_buffer_rearrange_errors():
+    buf = tvm.tirx.decl_buffer(
+        (2, 16, 8), "float16", layout=tvm.tirx.layout.TileLayout(T.S[(2, 16, 8) : (128, 8, 1)])
+    )
+    with pytest.raises(ValueError, match="must contain '->'"):
+        buf.rearrange("b h c")
+    with pytest.raises(ValueError, match="appear on only one side"):
+        buf.rearrange("b h c -> b h d")
+    with pytest.raises(ValueError, match="duplicate axis name"):
+        buf.rearrange("b b c -> b c b")
+    with pytest.raises(ValueError, match="multiple unknown factors"):
+        buf.rearrange("b (s w r) c -> b w (s r) c")
+    with pytest.raises(ValueError, match="input dims"):
+        buf.rearrange("b c -> c b")
+
+
 def test_buffer_view_dtype_ir():
     """Verify .view('float32') on float16: dtype correct, last dim halved, shared data."""
 

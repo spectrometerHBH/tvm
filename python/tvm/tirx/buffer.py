@@ -17,6 +17,7 @@
 """Abstraction for array data structures."""
 
 import functools
+import re
 from numbers import Integral
 
 import tvm_ffi
@@ -470,6 +471,224 @@ class Buffer(Object, Scriptable):
             new_layout,
         )
 
+    # ------------------------------------------------------------------
+    # Dimension-surgery views (torch-aligned): unflatten / flatten /
+    # select / narrow, the numpy-style ``sub`` indexer, and einops-style
+    # ``rearrange``. All return derived views sharing this buffer's data;
+    # the physical placement (layout iters + swizzle) is carried, never
+    # restated, and data is never moved: an operation either yields a
+    # valid view or raises.
+    # ------------------------------------------------------------------
+
+    def _normalized_dim(self, dim, name):
+        ndim = len(self.shape)
+        if dim < 0:
+            dim += ndim
+        if not 0 <= dim < ndim:
+            raise ValueError(f"{name}: dim {dim} out of range for buffer of rank {ndim}")
+        return dim
+
+    def unflatten(self, dim, sizes) -> "Buffer":
+        """Split ``dim`` into the given factor sizes (row-major).
+
+        Torch-aligned: ``x.unflatten(1, (4, 4, 4))``; one size may be ``-1``
+        and is inferred from the dim's extent. Pure view: the layout is
+        carried and regrouped against the new shape.
+        """
+        dim = self._normalized_dim(dim, "unflatten")
+        sizes = list(sizes)
+        negatives = [i for i, s in enumerate(sizes) if isinstance(s, int) and s == -1]
+        if len(negatives) > 1:
+            raise ValueError("unflatten: at most one -1 is allowed in sizes")
+        if negatives:
+            known = functools.reduce(
+                lambda a, b: a * b,
+                [s for i, s in enumerate(sizes) if i != negatives[0]],
+                1,
+            )
+            extent = self.shape[dim]
+            extent = int(extent) if isinstance(extent, tvm.tirx.IntImm) else extent
+            sizes[negatives[0]] = extent // known
+        new_shape = list(self.shape[:dim]) + sizes + list(self.shape[dim + 1 :])
+        return self.view(*new_shape)
+
+    def flatten(self, start_dim=0, end_dim=-1) -> "Buffer":
+        """Merge dims ``start_dim..end_dim`` into one (torch-aligned).
+
+        Unlike torch this never copies: the merge is expressed in the layout
+        (a logical axis may carry several strided iters), so it either yields
+        a view or the downstream consumer rejects the layout loudly.
+        """
+        start = self._normalized_dim(start_dim, "flatten")
+        end = self._normalized_dim(end_dim, "flatten")
+        if end < start:
+            raise ValueError(f"flatten: end_dim {end} < start_dim {start}")
+        merged = functools.reduce(lambda a, b: a * b, list(self.shape[start : end + 1]), 1)
+        new_shape = [*self.shape[:start], merged, *self.shape[end + 1 :]]
+        return self.view(*new_shape)
+
+    def _surgery_parts(self):
+        """Split ``self.layout`` into (inner tile layout, optional swizzle)."""
+        layout = self.layout
+        swizzle = None
+        if isinstance(layout, tvm.tirx.layout.ComposeLayout):
+            swizzle = layout.swizzle
+            layout = layout.tile_layout
+        return layout, swizzle
+
+    @staticmethod
+    def _rewrap_swizzle(layout, swizzle):
+        if swizzle is not None:
+            return tvm.tirx.layout.ComposeLayout(swizzle, layout)
+        return layout
+
+    @staticmethod
+    def _dim_group_offset(group, index):
+        """Offset of ``index`` along a dim made of the given layout iters.
+
+        The dim's iters are outer→inner in row-major coordinate order:
+        decompose ``index`` mixed-radix over their extents and weight each
+        coordinate by its iter's stride. A single-iter dim reduces to
+        ``index * stride``. ``index`` may be a PrimExpr; multi-iter dims
+        need concrete inner extents.
+        """
+        if len(group) == 1:
+            return index * group[0].stride
+        extents = []
+        for it in group[1:]:
+            extent = it.extent
+            if not isinstance(extent, tvm.tirx.IntImm):
+                raise ValueError(
+                    "select/narrow: dim with multiple layout iters requires concrete iter extents"
+                )
+            extents.append(int(extent))
+        offset = None
+        remaining = index
+        for pos, it in enumerate(group):
+            inner = functools.reduce(lambda a, b: a * b, extents[pos:], 1)
+            if inner == 1:
+                coord = remaining
+            elif isinstance(remaining, Integral):
+                coord = remaining // inner
+                remaining = remaining % inner
+            else:
+                coord = tvm.tirx.floordiv(remaining, inner)
+                remaining = tvm.tirx.floormod(remaining, inner)
+            term = coord * it.stride
+            offset = term if offset is None else offset + term
+        return offset
+
+    def _rebuild_view(self, new_shape, new_shard, grouped, swizzle, extra_offset):
+        new_layout = tvm.tirx.layout.TileLayout.from_iters(
+            new_shard, list(grouped.replica), dict(grouped.offset.items())
+        )
+        new_layout = self._rewrap_swizzle(new_layout, swizzle)
+        elem_offset = self.elem_offset
+        if extra_offset is not None:
+            elem_offset = elem_offset + extra_offset
+        return tvm.tirx.script.builder.decl_buffer(
+            new_shape,
+            self.dtype,
+            self.data,
+            self.strides,
+            elem_offset,
+            None,
+            self.scope(),
+            self.data_alignment,
+            self.offset_factor,
+            "",
+            self.axis_separators,
+            new_layout,
+        )
+
+    def select(self, dim, index) -> "Buffer":
+        """Return a view with ``dim`` removed, fixed at ``index``.
+
+        Torch-aligned (``Tensor.select``); ``index`` may be a dynamic
+        PrimExpr, folded into the view's ``elem_offset`` through the dim's
+        layout iters.
+        """
+        dim = self._normalized_dim(dim, "select")
+        layout, swizzle = self._surgery_parts()
+        grouped, seps = layout.group(list(self.shape))
+        iters = list(grouped.shard)
+        lo, hi = seps[dim], seps[dim + 1]
+        offset = self._dim_group_offset(iters[lo:hi], index)
+        new_shape = list(self.shape[:dim]) + list(self.shape[dim + 1 :])
+        new_shard = iters[:lo] + iters[hi:]
+        return self._rebuild_view(new_shape, new_shard, grouped, swizzle, offset)
+
+    def narrow(self, dim, start, length) -> "Buffer":
+        """Return a view of ``dim`` narrowed to ``[start, start + length)``.
+
+        Torch-aligned (``Tensor.narrow``); ``start`` may be a dynamic
+        PrimExpr when the dim maps to a single layout iter. For dims made of
+        several iters, ``start`` and ``length`` must be concrete multiples of
+        the inner iter block so the range stays a contiguous iter prefix.
+        """
+        dim = self._normalized_dim(dim, "narrow")
+        layout, swizzle = self._surgery_parts()
+        grouped, seps = layout.group(list(self.shape))
+        iters = list(grouped.shard)
+        lo, hi = seps[dim], seps[dim + 1]
+        group = iters[lo:hi]
+        Iter = tvm.tirx.layout.Iter
+        if len(group) == 1:
+            it = group[0]
+            offset = start * it.stride
+            new_group = [Iter(length, it.stride, it.axis)]
+        else:
+            inner = 1
+            for it in group[1:]:
+                extent = it.extent
+                if not isinstance(extent, tvm.tirx.IntImm):
+                    raise ValueError(
+                        "narrow: dim with multiple layout iters requires concrete iter extents"
+                    )
+                inner *= int(extent)
+            if not (isinstance(start, Integral) and isinstance(length, Integral)):
+                raise ValueError(
+                    f"narrow: dim {dim} is made of {len(group)} layout iters; "
+                    f"start/length must be concrete multiples of {inner}"
+                )
+            if start % inner != 0 or length % inner != 0:
+                raise ValueError(
+                    f"narrow: dim {dim} start/length must be multiples of the "
+                    f"inner iter block {inner}; got start={start} length={length}"
+                )
+            outer = group[0]
+            offset = (start // inner) * outer.stride
+            new_group = [Iter(length // inner, outer.stride, outer.axis), *group[1:]]
+        new_shape = list(self.shape)
+        new_shape[dim] = length
+        new_shard = iters[:lo] + new_group + iters[hi:]
+        return self._rebuild_view(new_shape, new_shard, grouped, swizzle, offset)
+
+    @property
+    def sub(self) -> "_SubIndexer":
+        """Numpy-style view indexer: ``buf.sub[2, 4:8, ::4]``.
+
+        Unlike plain ``buf[...]`` (BufferLoad for scalar indices, extent-1
+        BufferRegion dims for tile-primitive operands), ``sub`` follows numpy
+        basic-indexing semantics as a *view constructor*: an integer index
+        removes the dim (``select``), ``a:b`` narrows it, and ``a::s`` takes
+        every s-th element (requires the extent divisible by ``s`` and
+        ``a < s``). Trailing dims are kept whole.
+        """
+        return _SubIndexer(self)
+
+    def rearrange(self, pattern, **sizes) -> "Buffer":
+        """Einops-style dimension rearrangement, e.g.
+        ``buf.rearrange("b (s w r) c -> b w (s r) c", w=4, r=4)``.
+
+        Pure bijective reshuffling (split / permute / merge) compiled onto
+        :meth:`unflatten`, :meth:`permute` and :meth:`flatten`; indexing is
+        out of scope (use :meth:`select` / ``sub``). Composite-axis sizes
+        come from keyword arguments; at most one factor per composite may be
+        omitted and is inferred from the dim extent.
+        """
+        return _rearrange(self, pattern, **sizes)
+
     def __getitem__(self, indices):
         from ..arith import Analyzer  # pylint: disable=import-outside-toplevel
         from .expr import BufferLoad, Ramp  # pylint: disable=import-outside-toplevel
@@ -519,6 +738,173 @@ class Buffer(Object, Scriptable):
                 else:
                     expr_indices.append(index)
             return BufferLoad(self, expr_indices)
+
+
+_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+def _rearrange_parse_side(text: str, pattern: str) -> list[list[str]]:
+    """Parse one side of a pattern into a list of axis groups.
+
+    Each top-level entry corresponds to one buffer dim: either a single axis
+    name or a parenthesized composite of axis names.
+    """
+    groups: list[list[str]] = []
+    tokens = text.replace("(", " ( ").replace(")", " ) ").split()
+    current: list[str] | None = None
+    for token in tokens:
+        if token == "(":
+            if current is not None:
+                raise ValueError(f"rearrange: nested '(' in pattern {pattern!r}")
+            current = []
+        elif token == ")":
+            if current is None:
+                raise ValueError(f"rearrange: unmatched ')' in pattern {pattern!r}")
+            if not current:
+                raise ValueError(f"rearrange: empty '()' group in pattern {pattern!r}")
+            groups.append(current)
+            current = None
+        else:
+            if not _NAME_RE.match(token):
+                raise ValueError(f"rearrange: bad axis name {token!r} in pattern {pattern!r}")
+            if current is not None:
+                current.append(token)
+            else:
+                groups.append([token])
+    if current is not None:
+        raise ValueError(f"rearrange: unmatched '(' in pattern {pattern!r}")
+    if not groups:
+        raise ValueError(f"rearrange: empty side in pattern {pattern!r}")
+    return groups
+
+
+def _rearrange_flat_names(groups: list[list[str]], pattern: str) -> list[str]:
+    names = [name for group in groups for name in group]
+    if len(set(names)) != len(names):
+        raise ValueError(f"rearrange: duplicate axis name in pattern {pattern!r}")
+    return names
+
+
+def _rearrange(buffer, pattern, **sizes):
+    """Apply an einops-style rearrangement pattern to ``buffer`` as a view."""
+    if "->" not in pattern:
+        raise ValueError(f"rearrange: pattern {pattern!r} must contain '->'")
+    lhs_text, rhs_text = pattern.split("->", 1)
+    lhs = _rearrange_parse_side(lhs_text, pattern)
+    rhs = _rearrange_parse_side(rhs_text, pattern)
+    lhs_names = _rearrange_flat_names(lhs, pattern)
+    rhs_names = _rearrange_flat_names(rhs, pattern)
+    if set(lhs_names) != set(rhs_names):
+        missing = set(lhs_names) ^ set(rhs_names)
+        raise ValueError(
+            f"rearrange: axes {sorted(missing)} appear on only one side of {pattern!r}"
+        )
+    unknown = set(sizes) - set(lhs_names)
+    if unknown:
+        raise ValueError(f"rearrange: sizes for unknown axes {sorted(unknown)} in {pattern!r}")
+    if len(lhs) != len(buffer.shape):
+        raise ValueError(
+            f"rearrange: pattern {pattern!r} has {len(lhs)} input dims, "
+            f"buffer has rank {len(buffer.shape)}"
+        )
+
+    # Resolve every axis size. Non-composite axes take the dim extent;
+    # composite factors come from ``sizes`` with at most one inferred.
+    axis_size: dict[str, object] = dict(sizes)
+    for dim, group in enumerate(lhs):
+        extent = buffer.shape[dim]
+        extent = int(extent) if isinstance(extent, tvm.tirx.IntImm) else extent
+        if len(group) == 1:
+            name = group[0]
+            if name not in axis_size:
+                axis_size[name] = extent
+            continue
+        unknown_factors = [name for name in group if name not in axis_size]
+        if len(unknown_factors) > 1:
+            raise ValueError(
+                f"rearrange: composite {'(' + ' '.join(group) + ')'} in {pattern!r} "
+                f"has multiple unknown factors {unknown_factors}; pass their sizes"
+            )
+        if unknown_factors:
+            known = 1
+            for name in group:
+                if name != unknown_factors[0]:
+                    known = known * axis_size[name]
+            axis_size[unknown_factors[0]] = extent // known
+
+    # 1. Split composites, right-to-left so dim indices stay valid.
+    result = buffer
+    for dim in range(len(lhs) - 1, -1, -1):
+        group = lhs[dim]
+        if len(group) > 1:
+            result = result.unflatten(dim, tuple(axis_size[name] for name in group))
+
+    # 2. Permute flat axes into the output order.
+    perm = [lhs_names.index(name) for name in rhs_names]
+    if perm != list(range(len(perm))):
+        result = result.permute(*perm)
+
+    # 3. Merge output composites, right-to-left over flat positions.
+    position = len(rhs_names)
+    for group in reversed(rhs):
+        position -= len(group)
+        if len(group) > 1:
+            result = result.flatten(position, position + len(group) - 1)
+    return result
+
+
+class _SubIndexer:
+    """Indexer object returned by :attr:`Buffer.sub`.
+
+    Translates numpy basic indexing into a chain of
+    :meth:`Buffer.select` / :meth:`Buffer.narrow` /
+    :meth:`Buffer.unflatten` view operations.
+    """
+
+    def __init__(self, buffer: Buffer):
+        self._buffer = buffer
+
+    def __getitem__(self, indices) -> Buffer:
+        if not isinstance(indices, tuple):
+            indices = (indices,)
+        buf = self._buffer
+        if len(indices) > len(buf.shape):
+            raise ValueError(f"sub: {len(indices)} indices for buffer of rank {len(buf.shape)}")
+        dim = 0
+        for item in indices:
+            if isinstance(item, slice):
+                step = item.step
+                if step is None or (isinstance(step, Integral) and step == 1):
+                    if item.start is None and item.stop is None:
+                        dim += 1
+                        continue
+                    start = 0 if item.start is None else item.start
+                    stop = buf.shape[dim] if item.stop is None else item.stop
+                    buf = buf.narrow(dim, start, stop - start)
+                    dim += 1
+                else:
+                    if not isinstance(step, Integral) or step <= 0:
+                        raise ValueError(f"sub: step must be a positive int, got {step!r}")
+                    if item.stop is not None:
+                        raise ValueError("sub: a stop bound with a step is not supported")
+                    extent = buf.shape[dim]
+                    if not isinstance(extent, tvm.tirx.IntImm):
+                        raise ValueError("sub: a stepped slice requires a concrete dim extent")
+                    extent = int(extent)
+                    if extent % step != 0:
+                        raise ValueError(
+                            f"sub: dim extent {extent} is not divisible by step {step}"
+                        )
+                    start = 0 if item.start is None else item.start
+                    # a::s over N = unflatten into (N//s, s) and fix the
+                    # remainder coordinate at a (requires a < s).
+                    if isinstance(start, Integral) and start >= step:
+                        raise ValueError(f"sub: start {start} must be < step {step}")
+                    buf = buf.unflatten(dim, (extent // step, step)).select(dim + 1, start)
+                    dim += 1
+            else:
+                buf = buf.select(dim, item)
+        return buf
 
 
 def decl_buffer(
