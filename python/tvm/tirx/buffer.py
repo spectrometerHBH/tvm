@@ -365,6 +365,27 @@ class Buffer(Object, Scriptable):
             if layout is None:
                 shape = _infer_shape(shape)
 
+            new_layout = self.layout if layout is None else layout
+            # tmem (and other allocated_addr) buffers alias by column address,
+            # not a data pointer: carry allocated_addr through so a reshape /
+            # relayout view of a tmem alloc reinterprets the same columns
+            # (decl_buffer rejects `data` for tmem scope).
+            if self.allocated_addr is not None and len(self.allocated_addr) > 0:
+                return tvm.tirx.script.builder.decl_buffer(
+                    shape,
+                    self.dtype,
+                    None,
+                    None,
+                    None,
+                    None,
+                    self.scope(),
+                    self.data_alignment,
+                    0,
+                    "",
+                    self.axis_separators,
+                    new_layout,
+                    allocated_addr=self.allocated_addr[0],
+                )
             return tvm.tirx.script.builder.decl_buffer(
                 shape,
                 self.dtype,
@@ -377,7 +398,7 @@ class Buffer(Object, Scriptable):
                 self.offset_factor,
                 "",
                 self.axis_separators,
-                self.layout if layout is None else layout,
+                new_layout,
             )
 
     def local(self, *shape, layout=None) -> "Buffer":
@@ -455,6 +476,24 @@ class Buffer(Object, Scriptable):
         new_layout = grouped.permute_by_groups(seps, list(dims))
         if swizzle is not None:
             new_layout = tvm.tirx.layout.ComposeLayout(swizzle, new_layout)
+        # tmem/allocated_addr buffers alias by column address, not a data
+        # pointer (decl_buffer rejects `data` for tmem scope).
+        if self.allocated_addr is not None and len(self.allocated_addr) > 0:
+            return tvm.tirx.script.builder.decl_buffer(
+                new_shape,
+                self.dtype,
+                None,
+                None,
+                None,
+                None,
+                self.scope(),
+                self.data_alignment,
+                0,
+                "",
+                self.axis_separators,
+                new_layout,
+                allocated_addr=self.allocated_addr[0],
+            )
         return tvm.tirx.script.builder.decl_buffer(
             new_shape,
             self.dtype,
