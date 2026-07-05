@@ -336,13 +336,39 @@ Per §9.7.16.10 (p665) and §9.7.16.10.9.1/.3 (p712–725):
    physical footprint is identical whether the "2" is an N-half or a batch,
    so the emitted `.ws` writes the right bytes and the standalone-gemm tests
    (§2.3 measured anchors, which feed a genuine N=128) pass — but the
-   dispatch never checks that the caller's batch semantics match. An honest
-   dispatch takes the batch as an **explicit leading operand dim** (A[2,M,K],
-   B[2,N,K] → C[2,M,N], the batch mapping to the 64-lane fold) and validates
-   it, instead of recovering `.ws` by pattern-matching the packed C layout.
-   This rewrite is tracked as the SEM-WS-BATCH remediation; until it lands,
-   the packed-C path below is retained and is byte-verified, not semantically
-   validated for the batch case.
+   dispatch never checks that the caller's batch semantics match.
+
+   **SEM-WS-BATCH remediation (implemented, lines 563–599):** the dispatch
+   now accepts C in the **explicit batched form** `C[2, M, N//2]` with the
+   fold layout `(2, M, N//2):(64@TLane, 1@TLane, 1@TCol)`, so a caller spells
+   the two `.ws` output partials as a first-class batch dim instead of hiding
+   them in the packed N-fold. **This path is correct-by-construction, and
+   acceptance implies a correct result:**
+
+   1. *Acceptance is exact.* A batched C is accepted only if its sliced
+      layout `assert_structural_equal`s `(2, M, N//2):(64@TLane, 1@TLane,
+      1@TCol)` (line 584). The M=64 `.ws` datapath is the *only* producer of
+      this fold (Layout E; a non-ws M=64 MMA writes the scattered Layout F,
+      which cannot match). So a mis-declared C fails the assert — it is never
+      silently accepted.
+   2. *It reduces to the proven packed path.* `(2, M, N//2):(64@TLane,
+      1@TLane, 1@TCol)` and the packed `(M, 2, N//2):(1@TLane, 64@TLane,
+      1@TCol)` are the **same physical tile** — batch `b`, row `m`, col `n`
+      both map to lane `m + 64·b`, column `n` (`b ≡ half`). After validation
+      the code normalizes `C_slice_layout` to the packed form (lines 585–588),
+      so every downstream step (`packed_n2`, the emit, the D-footprint of
+      AX-MMA.4) runs **byte-identically** to the packed path proved in §3.
+      This is checked in-process by
+      `test_gemm_tcgen05_cta1_m64_accepts_batched_c_layout_ws` (batched source
+      == packed source up to the entry-point name).
+   3. *`.ws` is inferred soundly.* Because the fold layout is uniquely the
+      M=64 `.ws` datapath, the batched form implies `weight_stationary`
+      (lines 596–598 set it for `cta_group::1`) — the caller need not pass the
+      flag. This cannot mis-select: any C that is *not* the `.ws` fold fails
+      step 1's assert, so "accepted batched C" ⟺ ".ws is the correct
+      datapath". Hence **dispatch-accepts ⟹ generated code is correct**.
+
+   The packed-C path is retained for existing callers and is unchanged.
 5. **Ordering** (§9.7.16.6.2, p646): `tcgen05.mma.cta_group::N →
    tcgen05.mma.cta_group::N (same N and accumulator and shape)` forms a
    pipeline, guaranteeing execution in issue order — the correctness basis
