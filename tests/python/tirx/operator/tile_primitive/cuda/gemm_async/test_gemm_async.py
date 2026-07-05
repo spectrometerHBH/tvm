@@ -2598,6 +2598,80 @@ def test_gemm_tcgen05_cta1_m64_accepts_packed_c_layout_ws():
     assert "get_tmem_addr(400, 0, 64)" not in src
 
 
+def _build_cta1_m64_batched_c_kernel():
+    """cta_group::1 M=64 GEMM whose C is the honest batched form C[2, M, N//2]
+    (the leading dim is the Layout-E lane fold), instead of the packed
+    C[M, 2, N//2]."""
+
+    M, N, K = 64, 128, 16
+    B_dtype = "bfloat16"
+    B_layout = mma_shared_layout(B_dtype, SwizzleMode.SWIZZLE_32B_ATOM, (N, K))
+    C_layout = TileLayout(S[(2, M, N // 2) : (64 @ TLane, 1 @ TLane, 1 @ TCol)])
+
+    @T.prim_func
+    def gemm_batched_c(B_ptr: T.handle) -> None:
+        B = T.match_buffer(B_ptr, (N, K), B_dtype)
+        T.device_entry()
+        warp_id = T.warp_id([4])
+        T.thread_id([128])
+        tid = T.thread_id_in_wg([128])
+        B_smem = T.alloc_buffer((N, K), B_dtype, scope="shared", layout=B_layout)
+        tmem_addr = T.alloc_shared([1], "uint32")
+        if warp_id == 0:
+            T.ptx.tcgen05.alloc(T.address_of(tmem_addr[0]), n_cols=512, cta_group=1)
+        T.cuda.cta_sync()
+        A_tmem = T.decl_buffer(
+            (M, K),
+            B_dtype,
+            scope="tmem",
+            allocated_addr=256,
+            layout=TileLayout(S[(M, K) : (1 @ TLane, 1 @ TCol)]),
+        )
+        C_tmem = T.decl_buffer(
+            (2, M, N // 2),
+            "float32",
+            scope="tmem",
+            allocated_addr=400,
+            layout=C_layout,
+        )
+        if tid == 0:
+            Tx.copy(B_smem[:, :], B[:, :])
+            Tx.gemm_async(
+                # No weight_stationary: the dispatch infers .ws from the
+                # batched C[2, M, N] fold layout.
+                C_tmem[:, :, :],
+                A_tmem[:, :],
+                B_smem[:, :],
+                dispatch="tcgen05",
+                cta_group=1,
+            )
+
+    return gemm_batched_c
+
+
+def test_gemm_tcgen05_cta1_m64_accepts_batched_c_layout_ws():
+    """The honest batched C[2, M, N//2] .ws output form is accepted and emits
+    byte-identically to the packed C[M, 2, N//2] form (SEM-WS-BATCH): the two
+    describe the same physical Layout-E tile."""
+
+    target = tvm.target.Target("cuda")
+
+    def _compile(kernel):
+        with target:
+            mod = tvm.compile(tvm.IRModule({"main": kernel}), target=target, tir_pipeline="tirx")
+        return mod.mod.imports[0].inspect_source()
+
+    batched_src = _compile(_build_cta1_m64_batched_c_kernel())
+    packed_src = _compile(_build_cta1_m64_packed_c_kernel(weight_stationary=True))
+    assert "tcgen05.mma.ws.cta_group::1.kind::f16" in batched_src
+
+    # identical up to the kernel entry name (gemm_batched_c vs gemm_packed_c)
+    def norm(s):
+        return s.replace("gemm_batched_c", "K").replace("gemm_packed_c", "K")
+
+    assert norm(batched_src) == norm(packed_src)
+
+
 def test_gemm_tcgen05_cta1_m64_packed_c_requires_weight_stationary():
     """Audit B13: packed C without ``.ws`` must be rejected, not accepted.
 

@@ -554,8 +554,15 @@ def gemm_async_tcgen05_impl(op_call: TilePrimitiveCall, sctx: DispatchContext) -
         B_slice_layout.tile_layout if isinstance(B_slice_layout, ComposeLayout) else B_slice_layout
     )
 
-    assert len(C_extent) == 2 and len(A_extent) >= 2 and len(B_extent) >= 2, (
-        "Only 2D C, A, B are supported for gemm"
+    # C may be given in the honest batched form C[2, M, N]: the leading dim
+    # is the M=64 .ws Layout-E lane fold (two partials at lanes m and m+64),
+    # the explicit-batch spelling of what the packed C[M, 2, N] encodes
+    # implicitly (SEM-WS-BATCH). It is the *same physical tile*, so once
+    # validated it is normalized to the packed C_slice_layout and everything
+    # below runs byte-identically. A and B stay 2D.
+    C_batched = len(C_extent) == 3 and int(C_extent[0]) == 2
+    assert (len(C_extent) == 2 or C_batched) and len(A_extent) >= 2 and len(B_extent) >= 2, (
+        "Only 2D C (or the batched .ws form C[2, M, N]), A, B are supported for gemm"
     )
 
     def _mat_dim_vals(extent, name):
@@ -566,8 +573,27 @@ def gemm_async_tcgen05_impl(op_call: TilePrimitiveCall, sctx: DispatchContext) -
         )
         return vals[0], vals[1]
 
-    M = int(C_extent[-2])
-    N = int(C_extent[-1])
+    if C_batched:
+        M = int(C_extent[1])
+        N = int(C_extent[2]) * 2
+        N_half = N // 2
+        batched_base = TileLayout(S[(2, M, N_half) : (64 @ TLane, 1 @ TLane, 1 @ TCol)])
+        expected_batched = TileLayout.from_iters(
+            batched_base.shard, batched_base.replica, C_slice_layout.offset
+        ).canonicalize()
+        tvm.ir.assert_structural_equal(C_slice_layout.canonicalize(), expected_batched)
+        packed_norm = TileLayout(S[(M, 2, N_half) : (1 @ TLane, 64 @ TLane, 1 @ TCol)])
+        C_slice_layout = TileLayout.from_iters(
+            packed_norm.shard, packed_norm.replica, C_slice_layout.offset
+        ).canonicalize()
+        # The batched C[2, M, N] layout is unambiguously the M=64 .ws
+        # datapath fold, so .ws is inferred — the caller need not (and should
+        # not have to) pass weight_stationary=True for it.
+        if cta_group == 1:
+            weight_stationary = True
+    else:
+        M = int(C_extent[-2])
+        N = int(C_extent[-1])
     is_2x2 = M == 64 and cta_group == 2
 
     # Majorness (a_mn_major / b_mn_major) is determined later by
