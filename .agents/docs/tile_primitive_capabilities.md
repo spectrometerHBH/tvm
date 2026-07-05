@@ -89,6 +89,36 @@ primitive (`python/tvm/tirx/script/builder/tirx.py:114-121`); a bare
 | --- | --- | --- | --- | --- |
 | `warp_xor_swizzle` | `permute_layout/warp_xor_swizzle.py:410` | in-place S↔S transpose (register-staged) | warp only | dtype width ∈ {1,2,4,8,16}B; plain TileLayouts; volume % 32 == 0; per-thread P power-of-2 ≤ 32; XOR-swizzle must be bank-free both phases |
 
+## Buffer views (dim surgery)
+
+Tile-primitive operands are tensor + region; derived tensors come from
+`Buffer` view methods (`python/tvm/tirx/buffer.py`), which never move data —
+each returns a view sharing `data`, with the layout (iters + swizzle)
+carried automatically, or raises. Prefer these over hand-written
+`T.decl_buffer` restating strides/swizzle, and over `a*k:(a+1)*k` region
+arithmetic (unflatten the dim, then index).
+
+| Method | Semantics (torch-aligned name) |
+| --- | --- |
+| `view(*shape)` | layout-preserving reshape; can split inside an iter |
+| `permute(*dims)` | reorder dims; swizzle-composed layouts supported |
+| `unflatten(dim, sizes)` | split a dim row-major; one `-1` inferred |
+| `flatten(start_dim, end_dim)` | merge adjacent dims |
+| `select(dim, index)` | fix + drop a dim; `index` may be a dynamic PrimExpr |
+| `narrow(dim, start, length)` | sub-range of a dim; multi-iter dims need inner-block alignment |
+| `sub[...]` | numpy basic indexing: int drops, `a:b` narrows, `a::s` strides |
+| `rearrange(pattern, **sizes)` | einops-style bijective rearrangement |
+
+Statically known arguments are validated loudly; dynamic PrimExprs are the
+caller's responsibility (region semantics). On swizzle-composed layouts the
+folded offset goes into `elem_offset` only when it provably commutes with
+the swizzle (a multiple of the swizzle period
+`2^(per_element + atom_len + swizzle_len)`); otherwise it stays inside the
+derived tile layout's `m`-axis offset (printed as `T.S[...] + offset`),
+where `ComposeLayout` applies the swizzle to it. Behavior and address
+equivalence are pinned by the `test_buffer_*` tests in
+`tests/python/tirx/test_parser_printer.py`.
+
 ## Distributed register tiles (frags)
 
 A `local`-scope buffer is a **frag** when its `TileLayout.shard` contains
