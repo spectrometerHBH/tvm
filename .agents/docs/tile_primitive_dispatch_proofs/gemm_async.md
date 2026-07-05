@@ -312,6 +312,37 @@ Per §9.7.16.10 (p665) and §9.7.16.10.9.1/.3 (p712–725):
    Layout F (scattered). `tmem_datapath_layout`
    (`python/tvm/tirx/layout.py` lines 606–696) implements this table
    verbatim.
+
+   **Layout E is a batch fold, and this dispatch conflates it with N — a
+   known semantic gap (SEM-WS-BATCH).** The hardware `.ws` computes a plain
+   `D[M,N] = A·B` (point 1), and for M=64 stores the two halves of N in the
+   two 64-lane banks (`n < N/2` → lane m, `n ≥ N/2` → lane m+64). But the
+   two banks are an *output* axis of extent 2, and a caller is free to use
+   that axis as a **batch** rather than as the upper/lower half of one N
+   range. FlashMLA's NoPE gemm does exactly this: it feeds A and B so that
+   bank `b ∈ {0,1}` receives the partial contraction over head-dim half `b`
+   of the *same* 64 keys, i.e. the true operation is a **batch-2 M=64 bmm**
+   `einsum("i k0 k1 k2, j k0 k1 k2 -> k1 i j")` (k1 = 2 = the fold/batch,
+   contracted over k0,k2), producing `C[2,64,64]` — two partials that the
+   kernel reduces *downstream* by adding the two banks
+   (`P[h,key] = tmem_p[h,key] + tmem_p[h,key+64]`,
+   `sparse_prefill_head64_phase1.py`). The tell-tale is that `tmem_p` is
+   64×128 = twice the 64×64 a complete Q·Kᵀ over one key set could produce,
+   and that adding bank 0 to bank 1 is only meaningful if they are the same
+   keys' two head-dim halves, never two independent N-halves.
+
+   So dispatching this via `gemm_async(A[M,K], B[N,K], C[M,N])` with the
+   packed Layout-E C is **byte-correct but semantically a coincidence**: the
+   physical footprint is identical whether the "2" is an N-half or a batch,
+   so the emitted `.ws` writes the right bytes and the standalone-gemm tests
+   (§2.3 measured anchors, which feed a genuine N=128) pass — but the
+   dispatch never checks that the caller's batch semantics match. An honest
+   dispatch takes the batch as an **explicit leading operand dim** (A[2,M,K],
+   B[2,N,K] → C[2,M,N], the batch mapping to the 64-lane fold) and validates
+   it, instead of recovering `.ws` by pattern-matching the packed C layout.
+   This rewrite is tracked as the SEM-WS-BATCH remediation; until it lands,
+   the packed-C path below is retained and is byte-verified, not semantically
+   validated for the batch case.
 5. **Ordering** (§9.7.16.6.2, p646): `tcgen05.mma.cta_group::N →
    tcgen05.mma.cta_group::N (same N and accumulator and shape)` forms a
    pipeline, guaranteeing execution in issue order — the correctness basis
@@ -771,7 +802,11 @@ of:
   (packed_n2 recognition at lines 946–957; base at lines 977–981) — the
   folded semantics of Layout B (cta2 M_total=128) or **Layout E**
   (cta1 M=64 ws): lane = m + 64·(n ≥ N/2), physical column = n mod (N/2)
-  (AX-MMA.4);
+  (AX-MMA.4). **This packed-C match is how the M=64 `.ws` path is
+  recovered, and it is the site of the SEM-WS-BATCH gap (AX-MMA.4): the
+  recognised "2" is treated as an N-half, but a batched caller uses it as
+  the batch of a bmm. The match is byte-correct; it does not verify the
+  caller's batch semantics.**;
 - Layout F (M=64 non-ws, `_layout_matches_datapath_f`,
   lines 351–367 + 982–988);
 - otherwise the identity `(M, N) : (1@TLane, 1@TCol)` (Layout D/A)
