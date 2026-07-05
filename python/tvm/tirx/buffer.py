@@ -515,6 +515,14 @@ class Buffer(Object, Scriptable):
         negatives = [i for i, s in enumerate(sizes) if isinstance(s, int) and s == -1]
         if len(negatives) > 1:
             raise ValueError("unflatten: at most one -1 is allowed in sizes")
+        for i, size in enumerate(sizes):
+            if negatives and i == negatives[0]:
+                continue
+            size_c = self._concrete_int(size)
+            if size_c is not None and size_c <= 0:
+                raise ValueError(
+                    f"unflatten: sizes must be positive (or a single -1); got {size_c}"
+                )
         if negatives:
             known = functools.reduce(
                 lambda a, b: a * b,

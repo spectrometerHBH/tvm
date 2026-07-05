@@ -1641,6 +1641,11 @@ def test_buffer_view_surgery_static_bounds_rejected():
         buf.unflatten(0, (3, 4))
     with pytest.raises(ValueError, match="not divisible"):
         buf.unflatten(0, (-1, 4))
+    # negative factors whose product happens to match the extent
+    with pytest.raises(ValueError, match="must be positive"):
+        buf.unflatten(0, (-2, -5))
+    with pytest.raises(ValueError, match="must be positive"):
+        buf.rearrange("(a b) -> a b", a=-2, b=-5)
     # rearrange reuses the same validation
     with pytest.raises(ValueError, match="multiply to"):
         buf.rearrange("(a b) -> a b", a=3, b=4)
