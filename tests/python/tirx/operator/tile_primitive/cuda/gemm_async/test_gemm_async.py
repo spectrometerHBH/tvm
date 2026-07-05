@@ -2648,9 +2648,9 @@ def _make_gemm_tcgen05_call(
         gemm_async_tcgen05_impl,
     )
     from tvm.tirx.exec_scope import ExecScope
-    from tvm.tirx.operator.tile_primitive.dispatch_context import DispatchContext
     from tvm.tirx.operator.tile_primitive.ops import GemmAsync
     from tvm.tirx.stmt import BufferRegion
+    from tvm.tirx.tile_primitive import DispatchContext
 
     def full_region(buf):
         return BufferRegion(buf, [Range.from_min_extent(0, s) for s in buf.shape])

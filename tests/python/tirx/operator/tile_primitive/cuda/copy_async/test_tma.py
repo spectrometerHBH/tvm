@@ -2672,7 +2672,7 @@ def test_copy_tma_tensormap_cache_key_includes_promotion_dtype():
     alias the second copy to the first (half-sized) tensormap."""
     from tvm.ir import PointerType, PrimType
     from tvm.tirx.exec_scope import ExecScope
-    from tvm.tirx.operator.tile_primitive.dispatch_context import DispatchContext
+    from tvm.tirx.tile_primitive import DispatchContext
 
     data = Var("A", PointerType(PrimType("uint8"), "global"))
     target = tvm.target.Target({"kind": "cuda", "arch": "sm_90a"})

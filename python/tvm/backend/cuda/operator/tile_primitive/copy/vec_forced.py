@@ -38,7 +38,8 @@ from tvm.script import tirx as T
 from tvm.tirx import Buffer, PrimFunc
 from tvm.tirx.operator.tile_primitive.dispatcher import predicate, register_dispatch
 from tvm.tirx.operator.tile_primitive.registry import DispatchContext
-from tvm.tirx.stmt import BufferRegion, TilePrimitiveCall
+from tvm.tirx.stmt import BufferRegion
+from tvm.tirx.tile_primitive import TilePrimitiveCall
 
 from ._common import copy_ptx_form, copy_ptx_ld_return_type
 from .utils import _scope_allowed

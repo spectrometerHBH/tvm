@@ -20,7 +20,7 @@
 from tvm.tirx import PrimFunc
 from tvm.tirx.operator.tile_primitive.dispatcher import fail, predicate, register_dispatch
 from tvm.tirx.operator.tile_primitive.registry import DispatchContext
-from tvm.tirx.stmt import TilePrimitiveCall
+from tvm.tirx.tile_primitive import TilePrimitiveCall
 
 from .vec_auto_gmem_smem import _emit_gmem_smem, _is_gmem_smem
 from .vec_auto_reg import _emit_reg, _is_reg_copy
