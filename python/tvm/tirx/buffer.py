@@ -669,6 +669,84 @@ class Buffer(Object, Scriptable):
             new_layout,
         )
 
+    def rearrange(self, pattern: str, **sizes) -> "Buffer":
+        """einops-style relayout in one line: ``buf.rearrange("b (2 r) -> 2 b r")``.
+
+        A pure reshape+permute+reshape over the SAME physical bytes, spelled as
+        an einops pattern. Lowers to ``view`` (split lhs groups) → ``permute``
+        (reorder to rhs atom order) → ``view`` (merge rhs groups), so it inherits
+        whatever the underlying axis machinery does: a plain (unswizzled) buffer
+        collapses to a flat layout, a swizzled buffer keeps its ``SwizzleLayout``,
+        and a tmem buffer carries ``allocated_addr`` through. It therefore does
+        NOT flatten a swizzle atom — the same pattern on a swizzled SMEM buffer
+        vs an unswizzled TMEM buffer legitimately yields different physical
+        layouts (that is the point: rearrange acts on the operand, not a string).
+
+        ``pattern`` is ``"lhs -> rhs"``; each side is space-separated axis names,
+        with ``(a b)`` grouping a product axis. Every lhs group's product must
+        equal that input dim; at most one axis per group may be unknown (inferred
+        from the dim), the rest supplied via ``**sizes``. Cannot express a
+        replica (``R[...]``), a stride-fiction/padded view, or a reshape crossing
+        a swizzle-atom boundary — keep those as explicit ``view(layout=...)``.
+        """
+        import re as _re
+
+        def _groups(side):
+            out = []
+            for grp, bare in _re.findall(r"\(([^)]*)\)|(\S+)", side.strip()):
+                out.append(grp.split() if grp else [bare])
+            return out
+
+        if "->" not in pattern:
+            raise ValueError(f"rearrange: pattern must contain '->', got {pattern!r}")
+        lhs_s, rhs_s = pattern.split("->")
+        lgroups, rgroups = _groups(lhs_s), _groups(rhs_s)
+        if len(lgroups) != len(self.shape):
+            raise ValueError(
+                f"rearrange: lhs has {len(lgroups)} groups but buffer has "
+                f"{len(self.shape)} dims (pattern {pattern!r}, shape {list(self.shape)})"
+            )
+        axis_size: dict = {}
+        for grp, dim in zip(lgroups, self.shape):
+            dim_c = int(dim)
+            known = {a: int(sizes[a]) for a in grp if a in sizes}
+            unknown = [a for a in grp if a not in sizes]
+            prod = 1
+            for v in known.values():
+                prod *= v
+            if len(unknown) == 0:
+                if prod != dim_c:
+                    raise ValueError(
+                        f"rearrange: group {grp} product {prod} != dim {dim_c}"
+                    )
+            elif len(unknown) == 1:
+                if dim_c % prod != 0:
+                    raise ValueError(
+                        f"rearrange: dim {dim_c} not divisible by known product {prod} "
+                        f"in group {grp}"
+                    )
+                known[unknown[0]] = dim_c // prod
+            else:
+                raise ValueError(
+                    f"rearrange: group {grp} has >1 unknown axis; give sizes= for all but one"
+                )
+            axis_size.update(known)
+        flat_l = [a for grp in lgroups for a in grp]
+        flat_r = [a for grp in rgroups for a in grp]
+        if sorted(flat_l) != sorted(flat_r):
+            raise ValueError(
+                f"rearrange: lhs axes {flat_l} != rhs axes {flat_r} (pattern {pattern!r})"
+            )
+        out = self.view(*[axis_size[a] for a in flat_l])  # split
+        out = out.permute(*[flat_l.index(a) for a in flat_r])  # reorder
+        merge = []
+        for grp in rgroups:
+            s = 1
+            for a in grp:
+                s *= axis_size[a]
+            merge.append(s)
+        return out.view(*merge)  # merge
+
     @property
     def sub(self) -> "_SubIndexer":
         """Numpy-style view indexer: ``buf.sub[2, 4:8, ::4]``.
