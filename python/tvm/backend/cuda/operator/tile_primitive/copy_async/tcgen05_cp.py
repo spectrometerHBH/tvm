@@ -808,7 +808,7 @@ def copy_smem_tmem_impl(op_call: TilePrimitiveCall, sctx: DispatchContext) -> Pr
         )
     # NOTE: descriptor templates are encoded with base_offset=0, so the smem
     # buffer base must be aligned to the swizzle period (8 * atom_K bytes).
-    # alloc_mma's align=1024 discharges this for all canonical sources.
+    # alloc_tcgen05_mma_AB's align=1024 discharges this for all canonical sources.
     plan = _build_plan(op_call, sctx)
     s_buf = plan["s_buf"]
     t_buf = plan["t_buf"]

@@ -118,7 +118,7 @@ def _validate_mma_alloc_shape(shape, dtype, swizzle_mode):
 
     if len(shape) < 2:
         raise ValueError(
-            f"alloc_mma shape={tuple(shape)} has fewer than 2 dimensions; "
+            f"alloc_tcgen05_mma_AB shape={tuple(shape)} has fewer than 2 dimensions; "
             f"swizzled MMA layouts tile over the last two dims (rows, cols). "
             f"Use swizzle_mode='none' for 1-D allocations."
         )
@@ -141,7 +141,7 @@ def _validate_mma_alloc_shape(shape, dtype, swizzle_mode):
             atom_bytes = _swizzle_atom_bytes(swizzle_mode)
             suggestion = _suggest_swizzle_for_row_bytes(col_bits // 8 if col_bits >= 8 else 0)
             raise ValueError(
-                f"alloc_mma shape={tuple(shape)} with dtype={dtype!r} produces "
+                f"alloc_tcgen05_mma_AB shape={tuple(shape)} with dtype={dtype!r} produces "
                 f"{row_bytes}B rows, which is incompatible with the {atom_bytes}B "
                 f"swizzle atom selected by {swizzle_mode.name}. "
                 f"Use swizzle_mode=SwizzleMode.{suggestion}, or widen shape[-1] "
@@ -155,7 +155,7 @@ def _validate_mma_alloc_shape(shape, dtype, swizzle_mode):
             suggestion = _suggest_swizzle_for_row_bytes(row_bytes)
             min_cols = atom_bytes // dtype_bytes
             raise ValueError(
-                f"alloc_mma shape={tuple(shape)} with dtype={dtype!r} produces "
+                f"alloc_tcgen05_mma_AB shape={tuple(shape)} with dtype={dtype!r} produces "
                 f"{row_bytes}B rows, which is incompatible with the {atom_bytes}B "
                 f"swizzle atom selected by {swizzle_mode.name}. "
                 f"Use swizzle_mode=SwizzleMode.{suggestion}, or widen shape[-1] "
@@ -166,7 +166,7 @@ def _validate_mma_alloc_shape(shape, dtype, swizzle_mode):
     atom_rows = 8
     if rows < atom_rows or rows % atom_rows != 0:
         raise ValueError(
-            f"alloc_mma shape={tuple(shape)} has shape[-2]={rows}, but the "
+            f"alloc_tcgen05_mma_AB shape={tuple(shape)} has shape[-2]={rows}, but the "
             f"{swizzle_mode.name} atom requires shape[-2] to be a positive "
             f"multiple of {atom_rows}. Use swizzle_mode='none', or widen shape[-2] "
             f"to a multiple of {atom_rows}."
@@ -376,7 +376,7 @@ class TMEMPool:
         )
         return self.alloc(shape, dtype, layout=layout)
 
-    def alloc_mma_A(
+    def alloc_tcgen05_mma_A(
         self, shape, dtype="bfloat16", *, M, cta_group, ws=False, sparse=False, cols=None
     ):
         """Allocate a TMEM A operand (A-in-TMEM); layout resolved from MMA
@@ -389,7 +389,7 @@ class TMEMPool:
         )
         return self.alloc(shape, dtype, layout=layout, cols=cols)
 
-    def alloc_mma_D(
+    def alloc_tcgen05_mma_D(
         self, shape, dtype="float32", *, M, cta_group, ws=False, sparse=False, group=None, cols=None
     ):
         """Allocate a TMEM D/C accumulator operand. ``M`` = PTX instruction M.
@@ -401,7 +401,7 @@ class TMEMPool:
         )
         return self.alloc(shape, dtype, layout=layout, cols=cols)
 
-    alloc_mma_C = alloc_mma_D
+    alloc_tcgen05_mma_C = alloc_tcgen05_mma_D
 
     def move_base_to(self, col):
         self.offset = col
@@ -504,7 +504,7 @@ class SMEMPool:
             self.max_offset = max(self.max_offset, self.offset)
         return res
 
-    def alloc_mma(self, shape, dtype="float16", swizzle_mode="auto", align=1024):
+    def alloc_tcgen05_mma_AB(self, shape, dtype="float16", swizzle_mode="auto", align=1024):
         """Allocate MMA-compatible shared memory with an inferred swizzle layout."""
         from tvm.backend.cuda.operator.tile_primitive.tma_utils import (
             SwizzleMode,
@@ -525,7 +525,7 @@ class SMEMPool:
         layout = mma_shared_layout(dtype, swizzle_mode, shape)
         return self.alloc(shape, dtype, align=align, layout=layout)
 
-    def alloc_mma_B(
+    def alloc_tcgen05_mma_B(
         self,
         shape,
         dtype="bfloat16",
@@ -542,12 +542,12 @@ class SMEMPool:
 
         ``M`` is the PTX instruction M. B uses the normal MMA shared-memory
         descriptor layout; this wrapper only validates the semantic shape
-        family before delegating to ``alloc_mma``.
+        family before delegating to ``alloc_tcgen05_mma_AB``.
         """
         from tvm.tirx.layout import _mma_datapath_letter
 
         if sparse:
-            raise ValueError("alloc_mma_B: sparse B is not supported in v1")
+            raise ValueError("alloc_tcgen05_mma_B: sparse B is not supported in v1")
 
         datapath = _mma_datapath_letter(M, cta_group, ws, sparse=False)
         ext = [int(s) for s in shape]
@@ -559,22 +559,22 @@ class SMEMPool:
                 pass
             elif datapath == "B":
                 raise ValueError(
-                    "alloc_mma_B: cta_group=2 banked B is group-level; "
+                    "alloc_tcgen05_mma_B: cta_group=2 banked B is group-level; "
                     "allocate the local 2D (N/2,K) or (K,N/2) slice per CTA"
                 )
             else:
                 expected = "(2,K,N/2)" if transB else "(2,N/2,K)"
                 raise ValueError(
-                    f"alloc_mma_B: 3D banked B {expected} is only supported for "
+                    f"alloc_tcgen05_mma_B: 3D banked B {expected} is only supported for "
                     f"Layout E (M=64, cta_group=1, ws=True); got datapath {datapath}"
                 )
         else:
             expected = "(K,N)" if transB else "(N,K)"
             raise ValueError(
-                f"alloc_mma_B: expected 2D {expected} or supported 3D banked B, got {ext}"
+                f"alloc_tcgen05_mma_B: expected 2D {expected} or supported 3D banked B, got {ext}"
             )
 
-        return self.alloc_mma(shape, dtype, swizzle_mode=swizzle_mode, align=align)
+        return self.alloc_tcgen05_mma_AB(shape, dtype, swizzle_mode=swizzle_mode, align=align)
 
     def move_base_to(self, offset):
         self.offset = offset

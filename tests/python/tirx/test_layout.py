@@ -1428,7 +1428,7 @@ def test_pool_allocator_alloc_mma():
         with IRBuilder():
             with Tx_builder.prim_func():
                 pool = T.SMEMPool(Var("smem_ptr", PointerType(PrimType("uint8"))))
-                buf = pool.alloc_mma(shape, dtype, swizzle_mode=swizzle_mode)
+                buf = pool.alloc_tcgen05_mma_AB(shape, dtype, swizzle_mode=swizzle_mode)
         return buf.layout
 
     cases = [
@@ -1484,7 +1484,7 @@ def test_pool_allocator_alloc_mma_B():
         with IRBuilder():
             with Tx_builder.prim_func():
                 pool = T.SMEMPool(Var("smem_ptr", PointerType(PrimType("uint8"))))
-                buf = pool.alloc_mma_B(
+                buf = pool.alloc_tcgen05_mma_B(
                     shape,
                     "bfloat16",
                     M=M,

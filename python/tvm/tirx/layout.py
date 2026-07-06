@@ -706,11 +706,12 @@ def _mma_datapath_letter(M, cta_group, ws=False, sparse=False):
     ``localdoc/claude_plan.txt`` S3a."""
     if sparse:
         raise ValueError(
-            f"alloc_mma: sparse A (Layout C) not supported in v1 (M={M}, cta_group={cta_group})"
+            f"alloc_tcgen05_mma_AB: sparse A (Layout C) not supported in v1 "
+            f"(M={M}, cta_group={cta_group})"
         )
     if ws and not (cta_group == 1 and M == 64):
         raise ValueError(
-            f"alloc_mma: ws=True only valid for cta_group=1, M=64 (Layout E); "
+            f"alloc_tcgen05_mma_AB: ws=True only valid for cta_group=1, M=64 (Layout E); "
             f"got M={M}, cta_group={cta_group}"
         )
     if cta_group == 1:
@@ -724,7 +725,7 @@ def _mma_datapath_letter(M, cta_group, ws=False, sparse=False):
         if M == 128:
             return "B"
     raise ValueError(
-        f"alloc_mma: no supported datapath for M={M}, cta_group={cta_group}, "
+        f"alloc_tcgen05_mma_AB: no supported datapath for M={M}, cta_group={cta_group}, "
         f"ws={ws} (supported: cta1 M in {{64,128}}, cta2 M in {{128,256}})"
     )
 
@@ -761,16 +762,16 @@ def tmem_mma_operand_layout(
             # flat buffer (m, N) + explicit grouping -> (m, s, 2, n) layout
             # (codex plan option b): keeps kernel O buffer 2D, layout 4-axis.
             if len(ext) != 2:
-                raise ValueError(f"alloc_mma_D group= requires 2D (m,N), got {ext}")
+                raise ValueError(f"alloc_tcgen05_mma_D group= requires 2D (m,N), got {ext}")
             m, N = ext
             gs = [int(g) for g in group]
             if len(gs) != 3 or gs[1] != 2:
-                raise ValueError(f"alloc_mma_D group must be (s,2,n), got {group}")
+                raise ValueError(f"alloc_tcgen05_mma_D group must be (s,2,n), got {group}")
             s2, _, n2 = gs
             if s2 * 2 * n2 != N:
-                raise ValueError(f"alloc_mma_D group {group} product != N={N}")
+                raise ValueError(f"alloc_tcgen05_mma_D group {group} product != N={N}")
             if datapath not in ("B", "E"):
-                raise ValueError(f"alloc_mma_D group= only for Layout B/E, got {datapath}")
+                raise ValueError(f"alloc_tcgen05_mma_D group= only for Layout B/E, got {datapath}")
             _chk_rows(m)
             return TileLayout(
                 S[(m, s2, 2, n2) : (1 @ tlane, n2 @ tcol, 64 @ tlane, 1 @ tcol)]
@@ -794,12 +795,14 @@ def tmem_mma_operand_layout(
             _chk_rows(m)
             layout = TileLayout(S[(m, s, 2, n) : (1 @ tlane, n @ tcol, 64 @ tlane, 1 @ tcol)])
         else:
-            raise ValueError(f"alloc_mma_D: unsupported D shape {ext} for datapath {datapath}")
+            raise ValueError(
+                f"alloc_tcgen05_mma_D: unsupported D shape {ext} for datapath {datapath}"
+            )
     elif operand == "A":
         if datapath in ("A", "D"):
             if len(ext) != 2:
                 raise ValueError(
-                    f"alloc_mma_A: datapath {datapath} identity needs 2D (m,K), got {ext}"
+                    f"alloc_tcgen05_mma_A: datapath {datapath} identity needs 2D (m,K), got {ext}"
                 )
             m, K = ext
             _chk_rows(m)
@@ -815,7 +818,7 @@ def tmem_mma_operand_layout(
                 layout = TileLayout(S[(2, m, K) : (64 @ tlane, 1 @ tlane, 1 @ tcol)])
             else:
                 raise ValueError(
-                    f"alloc_mma_A: datapath B needs (64,K) replica or (2,64,K) "
+                    f"alloc_tcgen05_mma_A: datapath B needs (64,K) replica or (2,64,K) "
                     f"bank-batched, got {ext}"
                 )
         elif datapath == "E":  # M=64 .ws: bank-batched only, flat rejected
@@ -825,11 +828,13 @@ def tmem_mma_operand_layout(
                 layout = TileLayout(S[(2, m, K) : (64 @ tlane, 1 @ tlane, 1 @ tcol)])
             else:
                 raise ValueError(
-                    f"alloc_mma_A: datapath E (M=64 .ws) requires bank-batched "
+                    f"alloc_tcgen05_mma_A: datapath E (M=64 .ws) requires bank-batched "
                     f"(2,64,K); flat {ext} rejected (hidden second-half read)"
                 )
         else:  # F
-            raise ValueError("alloc_mma_A: A-in-TMEM Layout F (M=64 non-.ws) rejected in v1")
+            raise ValueError(
+                "alloc_tcgen05_mma_A: A-in-TMEM Layout F (M=64 non-.ws) rejected in v1"
+            )
     else:
         raise ValueError(f"tmem_mma_operand_layout: operand must be 'A' or 'D', got {operand!r}")
     return layout.canonicalize()

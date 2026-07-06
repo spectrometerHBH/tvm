@@ -96,7 +96,7 @@ def mma_shared_layout(dtype: str, swizzle_mode: SwizzleMode | int, shape) -> Lay
     return layout.tile_to(tile_to_shape, atom_shape).tile_to(shape, tile_to_shape).canonicalize()
 
 
-# Backward-compatible aliases kept during the alloc_mma migration.
+# Backward-compatible aliases kept during the alloc_tcgen05_mma_AB migration.
 tma_atom_layout = mma_atom_layout
 tma_atom_shape = mma_atom_shape
 tma_shared_layout = mma_shared_layout

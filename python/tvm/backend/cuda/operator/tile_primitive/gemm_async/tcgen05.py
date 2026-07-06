@@ -1129,7 +1129,7 @@ def gemm_async_tcgen05_impl(op_call: TilePrimitiveCall, sctx: DispatchContext) -
     tmem_offset_32b = C_slice_layout.offset.get(TCol, 0)
 
     # Validate TMEM A layout through the same semantic resolver used by
-    # tmem_pool.alloc_mma_A. `M` here is per-CTA rows; the resolver takes the
+    # tmem_pool.alloc_tcgen05_mma_A. `M` here is per-CTA rows; the resolver takes the
     # PTX instruction M.
     if a_is_tmem:
         if not A_batched:
@@ -1153,7 +1153,7 @@ def gemm_async_tcgen05_impl(op_call: TilePrimitiveCall, sctx: DispatchContext) -
             except (AssertionError, ValueError) as err:
                 raise ValueError(
                     "gemm_async[tcgen05]: TMEM A layout does not match "
-                    "tmem_pool.alloc_mma_A semantic layout"
+                    "tmem_pool.alloc_tcgen05_mma_A semantic layout"
                 ) from err
         assert A_buffer.allocated_addr is not None, "TMEM A buffer must have allocated_addr"
         A_tmem_addr = A_buffer.allocated_addr[0]
