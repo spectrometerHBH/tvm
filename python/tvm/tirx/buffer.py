@@ -805,6 +805,25 @@ class Buffer(Object, Scriptable):
             return BufferLoad(self, expr_indices)
 
 
+def _tmem_offset_axis_check(buf, group_iters, start_c, what):
+    """tmem views fold sub offsets into ``allocated_addr`` as a *column*
+    count, so a nonzero (or non-provably-zero) pick/narrow is only valid on
+    TCol-stride layout iters — a lane-axis offset would be silently
+    misaddressed. No-op for non-tmem buffers."""
+    if buf.allocated_addr is None or len(buf.allocated_addr) == 0:
+        return
+    if start_c == 0:
+        return
+    for it in group_iters:
+        axis_name = getattr(it.axis, "name", None) if it.axis is not None else None
+        if axis_name != "TCol":
+            raise ValueError(
+                f"sub: tmem {what} with nonzero offset requires TCol-stride "
+                f"layout iters; dim iter has axis {axis_name!r} (a lane-axis "
+                f"offset cannot fold into the column allocated_addr)"
+            )
+
+
 def _view_drop(buf, dim, index):
     """Internal machinery for ``sub`` (int index) / ``tile`` (factor pick): a
     view with ``dim`` removed, fixed at ``index`` — the offset folds into
@@ -821,6 +840,7 @@ def _view_drop(buf, dim, index):
     grouped, seps = layout.group(list(buf.shape))
     iters = list(grouped.shard)
     lo, hi = seps[dim], seps[dim + 1]
+    _tmem_offset_axis_check(buf, iters[lo:hi], index_c, "index")
     offset = buf._dim_group_offset(iters[lo:hi], index)
     new_shape = list(buf.shape[:dim]) + list(buf.shape[dim + 1 :])
     new_shard = iters[:lo] + iters[hi:]
@@ -856,6 +876,7 @@ def _view_narrow(buf, dim, start, length):
     Iter = tvm.tirx.layout.Iter
     if len(group) == 1:
         it = group[0]
+        _tmem_offset_axis_check(buf, [it], start_c, "narrow")
         offset = start * it.stride
         new_group = [Iter(length, it.stride, it.axis)]
     else:
@@ -878,6 +899,7 @@ def _view_narrow(buf, dim, start, length):
                 f"inner iter block {inner}; got start={start} length={length}"
             )
         outer = group[0]
+        _tmem_offset_axis_check(buf, [outer], start // inner, "narrow")
         offset = (start // inner) * outer.stride
         new_group = [Iter(length // inner, outer.stride, outer.axis), *group[1:]]
     new_shape = list(buf.shape)

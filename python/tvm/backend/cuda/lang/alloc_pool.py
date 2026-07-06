@@ -349,31 +349,6 @@ class TMEMPool:
         self.max_offset = max(self.max_offset, self.offset)
         return res
 
-    def view(self, shape, dtype="float32", *, col=0, layout=None, cols=None, datapath=None):
-        """Declare a TMEM buffer at an absolute column without moving the cursor.
-
-        Use for overlay views that alias real allocations — e.g. the full
-        ``(128, 512)`` window that ``tcgen05.ld/st`` reads through. Shares
-        ``alloc``'s layout/datapath handling but never advances ``offset``,
-        so overlays don't force a ``move_base_to`` rewind.
-        """
-        from tvm.tirx.layout import tmem_datapath_layout
-
-        if layout is not None and datapath is not None:
-            raise ValueError("TMEMPool.view: pass at most one of layout= and datapath=")
-        if datapath is not None:
-            assert len(shape) == 2, "TMEMPool.view: datapath= requires a 2-D shape"
-            layout = tmem_datapath_layout(datapath, shape[0], shape[1])
-        ir = _get_ir()
-        n_cols = self._resolve_cols(shape, dtype, cols, layout)
-        assert col + n_cols <= self.total_cols, (
-            f"TMEM overflow: view [{col}, {col + n_cols}) > {self.total_cols}"
-        )
-        if layout is None:
-            assert len(shape) == 2, "TMEMPool.view() requires layout= for non-2D TMEM buffers"
-            layout = _default_tmem_layout(shape[0], shape[1])
-        return ir.decl_buffer(shape, dtype, scope="tmem", allocated_addr=col, layout=layout)
-
     def alloc_sf(self, shape, dtype, *, sf_per_mma, sf_reuse=1):
         """Allocate a tcgen05 block-scaled SF TMEM buffer with an inferred layout.
 
