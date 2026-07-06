@@ -43,10 +43,13 @@ from tvm.tirx.layout import (
     R,
     S,
     SwizzleLayout,
+    TCol,
     TileLayout,
+    TLane,
     laneid,
     m,
     tid_in_wg,
+    tmem_mma_operand_layout,
     tx,
     warpid,
     wg_local_layout,
@@ -1448,6 +1451,69 @@ def test_pool_allocator_alloc_mma():
     layout_none = alloc_layout(shape, "float16", "none")
     expected_none = mma_shared_layout("float16", SwizzleMode.SWIZZLE_NONE, shape)
     assert_structural_equal(layout_none, expected_none)
+
+
+def test_tmem_mma_operand_layout_grouped_d():
+    head64_o = tmem_mma_operand_layout(
+        "D", (64, 512), "float32", M=64, cta_group=1, ws=True, group=(2, 2, 128)
+    )
+    expected_head64_o = TileLayout(
+        S[(64, 2, 2, 128) : (1 @ TLane, 128 @ TCol, 64 @ TLane, 1 @ TCol)]
+    ).canonicalize()
+    assert_structural_equal(head64_o, expected_head64_o)
+
+    head128_o = tmem_mma_operand_layout(
+        "D", (64, 512), "float32", M=128, cta_group=2, group=(2, 2, 128)
+    )
+    assert_structural_equal(head128_o, expected_head64_o)
+
+    with pytest.raises(ValueError, match="ws=True only valid"):
+        tmem_mma_operand_layout("D", (128, 256), "float32", M=128, cta_group=1, ws=True)
+
+    with pytest.raises(ValueError, match="group must be"):
+        tmem_mma_operand_layout(
+            "D", (64, 512), "float32", M=64, cta_group=1, ws=True, group=(4, 128)
+        )
+
+    with pytest.raises(ValueError, match="identity needs 2D"):
+        tmem_mma_operand_layout("A", (1, 128, 64), "bfloat16", M=128, cta_group=1)
+
+
+def test_pool_allocator_alloc_mma_B():
+    def alloc_b_layout(shape, *, M, cta_group, ws=False, transB=False):
+        with IRBuilder():
+            with Tx_builder.prim_func():
+                pool = T.SMEMPool(Var("smem_ptr", PointerType(PrimType("uint8"))))
+                buf = pool.alloc_mma_B(
+                    shape,
+                    "bfloat16",
+                    M=M,
+                    cta_group=cta_group,
+                    ws=ws,
+                    transB=transB,
+                )
+        return buf.layout
+
+    flat_b = alloc_b_layout((64, 64), M=128, cta_group=2)
+    assert_structural_equal(
+        flat_b, mma_shared_layout("bfloat16", SwizzleMode.SWIZZLE_128B_ATOM, (64, 64))
+    )
+
+    banked_b = alloc_b_layout((2, 32, 64), M=64, cta_group=1, ws=True)
+    assert_structural_equal(
+        banked_b, mma_shared_layout("bfloat16", SwizzleMode.SWIZZLE_128B_ATOM, (2, 32, 64))
+    )
+
+    banked_bt = alloc_b_layout((2, 64, 64), M=64, cta_group=1, ws=True, transB=True)
+    assert_structural_equal(
+        banked_bt, mma_shared_layout("bfloat16", SwizzleMode.SWIZZLE_128B_ATOM, (2, 64, 64))
+    )
+
+    with pytest.raises(ValueError, match="group-level"):
+        alloc_b_layout((2, 32, 64), M=128, cta_group=2)
+
+    with pytest.raises(ValueError, match="only supported for Layout E"):
+        alloc_b_layout((2, 32, 64), M=128, cta_group=1)
 
 
 def test_storage():
