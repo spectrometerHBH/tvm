@@ -40,6 +40,7 @@ from tvm.tirx.layout import (
     TileLayout,
     TLane,
     tmem_datapath_layout,
+    tmem_mma_operand_layout,
 )
 from tvm.tirx.operator.tile_primitive import DispatchContext, predicate, register_dispatch
 from tvm.tirx.stmt import AllocBuffer, Evaluate, SeqStmt
@@ -1086,14 +1087,23 @@ def gemm_async_tcgen05_impl(op_call: TilePrimitiveCall, sctx: DispatchContext) -
     # ...) A[2, M, K] has no meaning: the `64@TLane` fold would place rows past
     # lane 127, and the emit would be a plain MMA reading a lane range the fold
     # never described. Accepting it (and skipping the flat identity check for it)
-    # would silently mis-declare A, so reject a batched A outside its one valid
-    # domain. Widening this domain requires a matching proof + tests.
-    if A_batched and not (weight_stationary and cta_group == 1 and M == 64):
+    # would silently mis-declare A. The fold is valid in exactly two datapaths,
+    # both per-CTA M=64 with the two banks folded into the two 64-lane halves:
+    #   * Layout E: cta_group::1 .ws                 (head64 QK)
+    #   * Layout B: cta_group::2 dense (non-.ws)     (small_topk QK)
+    # Each bank produces the matching partial (A_bank_b · B_bank_b); the kernel
+    # reduces the two banks (see gemm proof Theorem 1', Round-2b). Any other
+    # datapath has no such fold — reject.
+    _batched_ok = (weight_stationary and cta_group == 1 and M == 64) or (
+        not weight_stationary and cta_group == 2 and M == 64
+    )
+    if A_batched and not _batched_ok:
         raise ValueError(
-            "gemm_async[tcgen05]: batched A[2, M, K] is only valid for the M=64 "
-            f"cta_group::1 .ws A-in-TMEM datapath, but got weight_stationary="
-            f"{weight_stationary}, cta_group={cta_group}, M={M}. Declare A as a flat "
-            "2D [M, K] identity for any other datapath."
+            "gemm_async[tcgen05]: batched A[2, M, K] is only valid for Layout E "
+            "(cta_group::1 .ws, per-CTA M=64) or Layout B (cta_group::2 dense, "
+            f"per-CTA M=64), but got weight_stationary={weight_stationary}, "
+            f"cta_group={cta_group}, M={M}. Declare A as a flat 2D [M, K] identity "
+            "for any other datapath."
         )
 
     if is_2x2 or packed_n2:
@@ -1118,21 +1128,33 @@ def gemm_async_tcgen05_impl(op_call: TilePrimitiveCall, sctx: DispatchContext) -
     tmem_addr = C_buffer.allocated_addr[0]
     tmem_offset_32b = C_slice_layout.offset.get(TCol, 0)
 
-    # Validate TMEM A layout. Two accepted shapes:
-    #   * flat A[M, K] identity (A_dim2, A_dim1):(1@TLane, 1@TCol) — M=128
-    #     a-in-tmem, a genuine 128-row identity;
-    #   * batched A[2, M, K] fold — already structurally validated as
-    #     `A_batched` above (the M=64 .ws two-half read). Re-checking it here
-    #     against the flat identity would wrongly reject the 128-lane fold, so
-    #     skip. The base address / TCol offset below are read from the same
-    #     (batch 0, lane 0) cell in either spelling, so the emit is unchanged.
+    # Validate TMEM A layout through the same semantic resolver used by
+    # tmem_pool.alloc_mma_A. `M` here is per-CTA rows; the resolver takes the
+    # PTX instruction M.
     if a_is_tmem:
         if not A_batched:
-            A_tmem_base = TileLayout(S[(A_dim2, A_dim1) : (1 @ TLane, 1 @ TCol)])
+            instruction_M = M * cta_group
+            try:
+                A_tmem_base = tmem_mma_operand_layout(
+                    "A",
+                    (A_dim2, A_dim1),
+                    A_type,
+                    M=instruction_M,
+                    cta_group=cta_group,
+                    ws=weight_stationary,
+                )
+            except ValueError as err:
+                raise ValueError(f"gemm_async[tcgen05]: invalid TMEM A layout: {err}") from err
             expected_a_layout = TileLayout.from_iters(
                 A_tmem_base.shard, A_tmem_base.replica, A_slice_layout.offset
             ).canonicalize()
-            tvm.ir.assert_structural_equal(A_slice_layout.canonicalize(), expected_a_layout)
+            try:
+                tvm.ir.assert_structural_equal(A_slice_layout.canonicalize(), expected_a_layout)
+            except (AssertionError, ValueError) as err:
+                raise ValueError(
+                    "gemm_async[tcgen05]: TMEM A layout does not match "
+                    "tmem_pool.alloc_mma_A semantic layout"
+                ) from err
         assert A_buffer.allocated_addr is not None, "TMEM A buffer must have allocated_addr"
         A_tmem_addr = A_buffer.allocated_addr[0]
         A_elem_per_32b = 32 // DataType(A_type).bits
