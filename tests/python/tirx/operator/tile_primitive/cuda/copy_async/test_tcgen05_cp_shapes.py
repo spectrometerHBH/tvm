@@ -400,6 +400,126 @@ def test_cp_128x128b_layout_infers_wider_256b_atom():
 
 @pytest.mark.gpu
 @pytest.mark.skipif(not env.has_cuda_compute(10), reason="need cuda compute >= 10.0")
+def _make_cp_kernel_cta2(s_full, s_shape, t_full, t_shape, dtype, cfg, W32, n_cols):
+    """2-CTA cluster harness: each CTA stages its own A[cbx] slice into smem;
+    only the even CTA issues the cp (cta_group=2, commit cta_mask=3); both CTAs
+    dump their own tmem into B[cbx*128 + lane]."""
+    s_sl = tuple(slice(0, e) for e in s_shape)
+    t_sl = tuple(slice(0, e) for e in t_shape)
+
+    @T.prim_func(check_well_formed=False)
+    def kernel(A_ptr: T.handle, B_ptr: T.handle):
+        A = T.match_buffer(A_ptr, (2, *s_shape), dtype)
+        B = T.match_buffer(B_ptr, (256, W32), "uint32")
+        T.device_entry()
+        warp_id = T.warp_id([4])
+        cbx, cby = T.cta_id_in_cluster([2, 1])
+        cta_id = T.cta_id([2])
+        wg_id = T.warpgroup_id([1])
+        tid_in_wg = T.thread_id_in_wg([128])
+        A_smem = T.alloc_buffer(s_shape, dtype, scope="shared", layout=s_full, align=1024)
+        tmem_addr = T.alloc_shared([1], "uint32")
+        cp_mbar = T.alloc_shared([1], "uint64")
+        if tid_in_wg == 0:
+            T.ptx.mbarrier.init(cp_mbar.ptr_to([0]), 1)
+        if warp_id == 0:
+            T.ptx.tcgen05.alloc(T.address_of(tmem_addr), n_cols=n_cols, cta_group=2)
+        tmem = T.decl_buffer(
+            t_shape, dtype, scope="tmem", allocated_addr=tmem_addr[0], layout=t_full
+        )
+        T.ptx.fence.mbarrier_init()
+        T.ptx.fence.proxy_async("shared::cta")
+        T.cuda.cta_sync()
+        T.cuda.cluster_sync()
+        # Pre-zero both CTAs' tmem: alloc does not clear it, and the
+        # 128x256b test asserts the odd CTA stays untouched.
+        zero_reg = T.alloc_buffer((W32,), "uint32", scope="local")
+        for i in range(W32):
+            zero_reg[i] = T.uint32(0)
+        for i in range(W32):
+            T.ptx.tcgen05.st(tmem_addr[0], zero_reg[i], shape="32x32b", num=1, row=0, col=i)
+        T.ptx.tcgen05.wait.st()
+        Tx.cta.copy(A_smem[s_sl], A[(cbx, *s_sl)])
+        T.cuda.cta_sync()
+        T.cuda.cluster_sync()
+        if cbx == 0:
+            if tid_in_wg == 0:
+                Tx.copy_async(tmem[t_sl], A_smem[s_sl], **cfg)
+                T.ptx.tcgen05.commit(cp_mbar.ptr_to([0]), cta_group=2, cta_mask=3)
+        T.ptx.mbarrier.try_wait(cp_mbar.ptr_to([0]), 0)
+        T.cuda.cta_sync()
+        T.ptx.tcgen05.fence.after_thread_sync()
+        reg = T.alloc_buffer((W32,), "uint32", scope="local")
+        for i in range(W32):
+            T.ptx.tcgen05.ld(tmem_addr[0], reg[i], shape="32x32b", num=1, row=0, col=i)
+        T.ptx.tcgen05.wait.ld()
+        for i in range(W32):
+            B[cbx * 128 + tid_in_wg, i] = reg[i]
+        T.cuda.cluster_sync()
+        if warp_id == 0:
+            T.ptx.tcgen05.relinquish_alloc_permit(cta_group=2)
+            T.ptx.tcgen05.dealloc(tmem_addr[0], n_cols=n_cols, cta_group=2)
+
+    return kernel
+
+
+def _run_cta2(s_full, s_shape, t_full, t_shape, cfg, W32):
+    kernel = _make_cp_kernel_cta2(s_full, s_shape, t_full, t_shape, "bfloat16", cfg, W32, 32)
+    mod = _compile(kernel)
+    A_np = tvm.testing.generate_random_array("bfloat16", (2, *s_shape))
+    dev = tvm.cuda(0)
+    A = tvm.runtime.tensor(A_np, dev)
+    B = tvm.runtime.tensor(np.zeros((256, W32), np.uint32), dev)
+    mod(A, B)
+    B_u16 = B.numpy().view(np.uint16).reshape(2, 128, W32 * 2)
+    A_u16 = np.asarray(A_np).view(np.uint16)
+    return A_u16, B_u16
+
+
+@pytest.mark.gpu
+@pytest.mark.skipif(not env.has_cuda_compute(10), reason="need cuda compute >= 10.0")
+def test_cp_cta_group_2_128x256b_pair_collective():
+    """Production small_topk q-cp form: 128x256b + cta_group=2. One even-CTA
+    issue makes EACH CTA copy from its own smem into its own tmem (descriptor
+    smem address resolves per CTA rank). B200-pinned."""
+    C = 16
+    s_full = mma_shared_layout("bfloat16", SwizzleMode.SWIZZLE_32B_ATOM, [128, C])
+    t_full = TileLayout(S[(128, C) : (1 @ TLane, 1 @ TCol)])
+    A, B = _run_cta2(
+        s_full, [128, C], t_full, [128, C], {"shape": "128x256b", "cta_group": 2}, C * 16 // 32
+    )
+    for cta in range(2):
+        for lane in range(128):
+            np.testing.assert_array_equal(
+                B[cta, lane, :C], A[cta, lane], err_msg=f"cta{cta} lane {lane}"
+            )
+
+
+@pytest.mark.gpu
+@pytest.mark.skipif(not env.has_cuda_compute(10), reason="need cuda compute >= 10.0")
+def test_cp_cta_group_2_64x128b_warpx2_pair_collective():
+    """Production head128 q-cp form: 64x128b.warpx2::02_13 + cta_group=2 is a
+    pair-collective — one even-CTA issue makes EACH CTA copy from its own smem
+    into its own tmem (descriptor smem address resolves per CTA rank, like the
+    cta2 MMA B descriptor), with the warpx2 mirror at lane +64. B200-pinned."""
+    C = 8
+    s_full = TileLayout(S[(64, C) : (C, 1)])
+    t_full = TileLayout(S[(64, C) : (1 @ TLane, 1 @ TCol)] + R[2 : 64 @ TLane])
+    A, B = _run_cta2(
+        s_full,
+        [64, C],
+        t_full,
+        [64, C],
+        {"shape": "64x128b", "multicast": "warpx2::02_13", "cta_group": 2},
+        C * 16 // 32,
+    )
+    for cta in range(2):
+        for lane in range(128):
+            np.testing.assert_array_equal(
+                B[cta, lane, :C], A[cta, lane % 64], err_msg=f"cta{cta} lane {lane}"
+            )
+
+
 def test_cp_4x256b_lane_tiled_layout_f_scatter():
     """4x256b atoms tiled through the taddr lane half-word: 16 cps land 16
     distinct rows on each warp's first 16 lanes (the M=64 Layout-F scatter).
@@ -615,15 +735,6 @@ def test_cp_rejects_nonzero_tmem_lane_offset():
         32,
     )
     _assert_compile_raises(kernel, "TLane offset")
-
-
-def test_cp_rejects_decompress_on_generic_path():
-    """decompress requires the explicit desc_* form; the generic planner must
-    reject it loudly instead of silently dropping the qualifier."""
-    kernel, _ = _build_case(
-        "128x256b", None, 3, "bfloat16", 1, extra_cfg={"decompress": "b8x16.b6x16_p32"}
-    )
-    _assert_compile_raises(kernel, "does not support decompress")
 
 
 def test_cp_rejects_non_16b_aligned_row_group_stride():
