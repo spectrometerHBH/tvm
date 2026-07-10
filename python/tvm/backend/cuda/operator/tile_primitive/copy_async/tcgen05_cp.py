@@ -331,14 +331,6 @@ def _build_plan(op_call: TilePrimitiveCall):
       - t_col0 (PrimExpr, TMEM 32-bit col offset for cp's first call)
     """
     op_call = TilePrimitiveCall.downcast(op_call)
-    stray_desc = [
-        name for name in ("desc_ldo", "desc_sdo", "desc_swizzle") if name in op_call.config
-    ]
-    if stray_desc:
-        raise ValueError(
-            f"unsupported tcgen05.cp config {stray_desc}: descriptor fields "
-            f"are derived from the buffer layouts"
-        )
     if op_call.config.get("shape") is not None:
         shape, multicast = _resolve_cp_shape(op_call)
         return _plan_for_shape(op_call, shape, multicast)
