@@ -316,7 +316,7 @@ def _align_middles(t_middle, s_middle):
 # -----------------------------------------------------------------------------
 # Plan (state object)
 # -----------------------------------------------------------------------------
-def _build_plan(op_call: TilePrimitiveCall, sctx: DispatchContext):
+def _build_plan(op_call: TilePrimitiveCall):
     """Run A..H and return a dispatch plan.
 
     Plan fields:
@@ -330,7 +330,6 @@ def _build_plan(op_call: TilePrimitiveCall, sctx: DispatchContext):
       - init_off_16B (PrimExpr)
       - t_col0 (PrimExpr, TMEM 32-bit col offset for cp's first call)
     """
-    del sctx
     op_call = TilePrimitiveCall.downcast(op_call)
     stray_desc = [
         name for name in ("desc_ldo", "desc_sdo", "desc_swizzle") if name in op_call.config
@@ -713,7 +712,6 @@ def _desc_set_addr(desc_val, addr_ptr):
 def _validate_smem_tmem_copy(op_call: TilePrimitiveCall, sctx: DispatchContext):
     """Memory-scope envelope only; shape resolution/inference and the detailed
     layout validation raise readable ValueErrors in ``_build_plan``."""
-    del sctx
     dst_region, src_region = op_call.args[:2]
     src: Buffer = src_region.buffer
     dst: Buffer = dst_region.buffer
@@ -738,7 +736,7 @@ def copy_smem_tmem_impl(op_call: TilePrimitiveCall, sctx: DispatchContext) -> Pr
     # NOTE: descriptor templates are encoded with base_offset=0, so the smem
     # buffer base must be aligned to the swizzle period (8 * atom_K bytes).
     # alloc_tcgen05_mma_AB's align=1024 discharges this for all canonical sources.
-    plan = _build_plan(op_call, sctx)
+    plan = _build_plan(op_call)
     s_buf = plan["s_buf"]
     t_buf = plan["t_buf"]
     shape = plan["shape"]
