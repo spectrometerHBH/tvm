@@ -24,8 +24,8 @@ themselves after the copy.
 
 Routing
 -------
-- ``shape=`` config: forces that shape (see the shape table
-  ``_CP_SHAPE_TABLE`` below).
+- ``shape=`` config: forces that shape (see ``_CP_SHAPE_MULTICASTS`` below;
+  atom rows/bits are parsed from the shape name itself).
 - No ``shape`` config: the shape is inferred from the buffer layouts — each
   candidate (widest atom first) is planned until one validates. Bare warpx4
   copies resolve to ``32x128b.warpx4`` exactly as the historical dispatch.
@@ -105,7 +105,6 @@ I. Emit:
      and writes to ``tmem_addr + t_col0 + Σ i_j * t_step_j``.
 """
 
-import collections
 import functools
 import operator
 
@@ -123,19 +122,24 @@ from tvm.tirx.tile_primitive import TilePrimitiveCall
 from ..copy import _single_thread_exec
 
 # -----------------------------------------------------------------------------
-# Shape table (PTX ISA 8.8 §9.7.16.9.2): atom_rows/atom_bits = TMEM rows and
-# bits-per-row per instruction; multicasts = allowed qualifiers ("" = none,
-# single entry implied, 64x128b needs an explicit warpx2 pick).
+# Allowed .multicast qualifiers per shape (PTX ISA 8.8 §9.7.16.9.2): "" = none,
+# a single entry is implied, 64x128b needs an explicit warpx2 pick. The atom
+# rows/bits are parsed from the shape name ("<rows>x<bits>b") by _shape_dims.
 # -----------------------------------------------------------------------------
-_CpShapeSpec = collections.namedtuple("_CpShapeSpec", ["atom_rows", "atom_bits", "multicasts"])
-
-_CP_SHAPE_TABLE = {
-    "128x256b": _CpShapeSpec(128, 256, ("",)),
-    "4x256b": _CpShapeSpec(4, 256, ("",)),
-    "128x128b": _CpShapeSpec(128, 128, ("",)),
-    "64x128b": _CpShapeSpec(64, 128, ("warpx2::02_13", "warpx2::01_23")),
-    "32x128b": _CpShapeSpec(32, 128, ("warpx4",)),
+_CP_SHAPE_MULTICASTS = {
+    "128x256b": ("",),
+    "4x256b": ("",),
+    "128x128b": ("",),
+    "64x128b": ("warpx2::02_13", "warpx2::01_23"),
+    "32x128b": ("warpx4",),
 }
+
+
+def _shape_dims(shape):
+    """(atom_rows, atom_bits) parsed from the PTX shape name "<rows>x<bits>b"."""
+    rows, bits = shape.split("x")
+    return int(rows), int(bits[:-1])
+
 
 # Inference order for bare copies: widest atom first (a 256b-fitting source
 # also fits 128b at 2x the instructions); all other candidates are mutually
@@ -179,7 +183,7 @@ def _cp_lane_replica_pattern(shape: str, multicast: str):
     All mappings are verified bit-exactly on B200 hardware by the round-trip
     tests in ``test_tcgen05_cp_shapes.py``.
     """
-    rows = _CP_SHAPE_TABLE[shape].atom_rows
+    rows, _ = _shape_dims(shape)
     if multicast == "":
         if rows == 4:
             return [(4, 32)], []
@@ -194,30 +198,30 @@ def _cp_lane_replica_pattern(shape: str, multicast: str):
 
 
 def _resolve_cp_shape(op_call: TilePrimitiveCall):
-    """Resolve (shape, multicast, spec) from an explicit ``shape=`` config."""
+    """Resolve (shape, multicast) from an explicit ``shape=`` config."""
     shape = str(op_call.config["shape"])
     multicast = op_call.config.get("multicast")
-    spec = _CP_SHAPE_TABLE.get(shape)
-    if spec is None:
+    allowed = _CP_SHAPE_MULTICASTS.get(shape)
+    if allowed is None:
         raise ValueError(
-            f"unknown tcgen05.cp shape {shape!r}; expected one of {sorted(_CP_SHAPE_TABLE)}"
+            f"unknown tcgen05.cp shape {shape!r}; expected one of {sorted(_CP_SHAPE_MULTICASTS)}"
         )
     if multicast is None:
-        if len(spec.multicasts) == 1:
-            multicast = spec.multicasts[0]
+        if len(allowed) == 1:
+            multicast = allowed[0]
         else:
             raise ValueError(
                 f"tcgen05.cp shape {shape!r} requires an explicit multicast config; "
-                f"choose one of {list(spec.multicasts)}"
+                f"choose one of {list(allowed)}"
             )
     else:
         multicast = str(multicast)
-        if multicast not in spec.multicasts:
+        if multicast not in allowed:
             raise ValueError(
                 f"illegal multicast {multicast!r} for tcgen05.cp shape {shape!r}; "
-                f"allowed: {list(spec.multicasts)}"
+                f"allowed: {list(allowed)}"
             )
-    return shape, multicast, spec
+    return shape, multicast
 
 
 # -----------------------------------------------------------------------------
@@ -337,8 +341,8 @@ def _build_plan(op_call: TilePrimitiveCall, sctx: DispatchContext):
             f"are derived from the buffer layouts"
         )
     if op_call.config.get("shape") is not None:
-        shape, multicast, spec = _resolve_cp_shape(op_call)
-        return _plan_for_shape(op_call, shape, multicast, spec)
+        shape, multicast = _resolve_cp_shape(op_call)
+        return _plan_for_shape(op_call, shape, multicast)
     # No shape config: infer from the buffer layouts.
     multicast_cfg = op_call.config.get("multicast")
     errors = []
@@ -346,7 +350,7 @@ def _build_plan(op_call: TilePrimitiveCall, sctx: DispatchContext):
         if multicast_cfg is not None and str(multicast_cfg) != multicast:
             continue
         try:
-            return _plan_for_shape(op_call, shape, multicast, _CP_SHAPE_TABLE[shape])
+            return _plan_for_shape(op_call, shape, multicast)
         except ValueError as err:
             errors.append(f"{shape}{('.' + multicast) if multicast else ''}: {err}")
     raise ValueError(
@@ -354,7 +358,7 @@ def _build_plan(op_call: TilePrimitiveCall, sctx: DispatchContext):
     )
 
 
-def _plan_for_shape(op_call: TilePrimitiveCall, shape: str, multicast: str, spec: _CpShapeSpec):
+def _plan_for_shape(op_call: TilePrimitiveCall, shape: str, multicast: str):
     """Run A..I for one (shape, multicast); raises ValueError on any mismatch."""
     dst_region, src_region = op_call.args[:2]
     s_buf: Buffer = src_region.buffer
@@ -363,7 +367,8 @@ def _plan_for_shape(op_call: TilePrimitiveCall, shape: str, multicast: str, spec
     dtype_bits = DataType(dtype).bits
     elem_per_128b = 128 // dtype_bits  # elements per 16B descriptor unit
     elem_per_32b = 32 // dtype_bits
-    elem_per_atom = spec.atom_bits // dtype_bits  # per-lane elements per cp
+    atom_rows, atom_bits = _shape_dims(shape)
+    elem_per_atom = atom_bits // dtype_bits  # per-lane elements per cp
 
     # C: slice + canonicalize.
     s_region = [(r.min, r.min + r.extent) for r in src_region.region]
@@ -424,7 +429,7 @@ def _plan_for_shape(op_call: TilePrimitiveCall, shape: str, multicast: str, spec
     def shard_prod(lay):
         return functools.reduce(operator.mul, [int(it.extent) for it in lay.shard], 1)
 
-    n_lane, n_col = spec.atom_rows, elem_per_atom
+    n_lane, n_col = atom_rows, elem_per_atom
     atom_elems = n_lane * n_col
     for side, total in (("t", shard_prod(t_iso)), ("s", shard_prod(s_iso))):
         if total < atom_elems or total % atom_elems:
@@ -474,8 +479,8 @@ def _plan_for_shape(op_call: TilePrimitiveCall, shape: str, multicast: str, spec
     # 8-row descriptor core matrix (= swizzle atom row width), SDO = stride
     # between 8-row groups (4x256b has one sub-8-row group: SDO unused, 0).
     s_lane_layout = TileLayout.from_iters(s_lane, [], {})
-    rows_per_group = min(spec.atom_rows, 8)
-    n_row_groups = spec.atom_rows // rows_per_group
+    rows_per_group = min(atom_rows, 8)
+    n_row_groups = atom_rows // rows_per_group
     if n_row_groups == 1:
         blk_rows = list(_canon_segment(s_lane))
         if len(blk_rows) != 1:
@@ -543,7 +548,7 @@ def _plan_for_shape(op_call: TilePrimitiveCall, shape: str, multicast: str, spec
     # F.3: s_col = one cp's per-lane columns. 128b atoms: one 16B unit, LDO
     # never read (keep legacy 0). 256b atoms: two 16B units — adjacent when
     # swizzled (hw assumes LBO=1), else their stride is the LDO field (16B units).
-    if spec.atom_bits == 128:
+    if atom_bits == 128:
         if len(s_col) != 1:
             raise ValueError(f"s_col must canonicalize to single iter, got {s_col}")
         sci = s_col[0]
@@ -571,7 +576,7 @@ def _plan_for_shape(op_call: TilePrimitiveCall, shape: str, multicast: str, spec
         else:
             if ldo_byte != 16:
                 raise ValueError(
-                    f"swizzled {spec.atom_bits}b atom requires the two 16B units "
+                    f"swizzled {atom_bits}b atom requires the two 16B units "
                     f"adjacent in the linear layout, got stride {ldo_byte}B"
                 )
             LDO_field = 1  # ignored by hardware for swizzled layouts (assumed 1)
