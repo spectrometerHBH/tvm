@@ -513,9 +513,7 @@ def _check_copy_regions_match(dst, src, config, name):
 
     def _squeeze(region):
         return [
-            r.extent
-            for r in region
-            if not (isinstance(r.extent, IntImm) and r.extent.value == 1)
+            r.extent for r in region if not (isinstance(r.extent, IntImm) and r.extent.value == 1)
         ]
 
     dst_extents = _squeeze(dst.region)

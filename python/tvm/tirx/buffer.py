@@ -716,9 +716,7 @@ class Buffer(Object, Scriptable):
                 prod *= v
             if len(unknown) == 0:
                 if prod != dim_c:
-                    raise ValueError(
-                        f"rearrange: group {grp} product {prod} != dim {dim_c}"
-                    )
+                    raise ValueError(f"rearrange: group {grp} product {prod} != dim {dim_c}")
             elif len(unknown) == 1:
                 if dim_c % prod != 0:
                     raise ValueError(
@@ -1061,9 +1059,7 @@ class _ChunkIndexer:
             picks = (picks,)
         buf = self._buffer
         if len(picks) > len(self._spec):
-            raise ValueError(
-                f"chunk: {len(picks)} indices for a rank-{len(self._spec)} spec"
-            )
+            raise ValueError(f"chunk: {len(picks)} indices for a rank-{len(self._spec)} spec")
         translated = []
         for d, pick in enumerate(picks):
             n = self._spec[d]
