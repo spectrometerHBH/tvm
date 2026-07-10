@@ -42,15 +42,6 @@ def _is_valid_smem_tmem_copy(op_call: TilePrimitiveCall, sctx: DispatchContext):
         return (False, "both buffers must have layouts")
     if dst.allocated_addr is None:
         return (False, "tmem buffer must have allocated_addr")
-    # Explicit tcgen05.cp mode covers non-warpx4 shapes such as FlashMLA's
-    # q->tmem prologue copies.  The caller supplies the exact PTX shape and
-    # descriptor fields, so this predicate only checks the memory-scope envelope.
-    if "shape" in op_call.config and op_call.config.get("shape") != "32x128b":
-        required = ("desc_ldo", "desc_sdo", "desc_swizzle")
-        missing = [name for name in required if name not in op_call.config]
-        if missing:
-            return (False, f"explicit tcgen05.cp missing config fields {missing}")
-        return (True, None)
     # Require warpx4 router on TMEM side so this dispatch only handles the
     # 32x128b.warpx4 case; other shapes (128x256b/128x128b etc.) fall back
     # to the legacy dispatch.

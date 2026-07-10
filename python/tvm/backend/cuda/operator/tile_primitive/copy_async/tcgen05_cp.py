@@ -26,11 +26,8 @@ Routing
 -------
 - No ``shape`` config: legacy default — ``32x128b.warpx4`` generic planner
   (byte-identical to the historical warpx4-only dispatch).
-- ``shape=`` config, no ``desc_*`` fields: generic planner for that shape
-  (see the shape table ``_CP_SHAPE_TABLE`` below).
-- ``shape=`` (non-default) plus all of ``desc_ldo``/``desc_sdo``/
-  ``desc_swizzle``: fully explicit path — the caller hand-computes every
-  descriptor field and tile/subtile stride (kept unchanged for back-compat).
+- ``shape=`` config: generic planner for that shape (see the shape table
+  ``_CP_SHAPE_TABLE`` below); descriptor fields are derived from the layouts.
 
 Shape table (PTX ISA 8.8 §9.7.16.9.2)
 -------------------------------------
@@ -131,8 +128,6 @@ _CP_SHAPE_TABLE = {
     "64x128b": _CpShapeSpec(64, 128, ("warpx2::02_13", "warpx2::01_23")),
     "32x128b": _CpShapeSpec(32, 128, ("warpx4",)),
 }
-
-_EXPLICIT_DESC_KEYS = ("desc_ldo", "desc_sdo", "desc_swizzle")
 
 
 def _cp_lane_replica_pattern(shape: str, multicast: str):
@@ -317,11 +312,13 @@ def _build_plan(op_call: TilePrimitiveCall, sctx: DispatchContext):
     """
     op_call = TilePrimitiveCall.downcast(op_call)
     shape, multicast, spec = _resolve_cp_shape(op_call)
-    stray_desc = [name for name in _EXPLICIT_DESC_KEYS if name in op_call.config]
+    stray_desc = [
+        name for name in ("desc_ldo", "desc_sdo", "desc_swizzle") if name in op_call.config
+    ]
     if stray_desc:
         raise ValueError(
-            f"partial explicit tcgen05.cp config {stray_desc}: the explicit path "
-            f"needs all of {list(_EXPLICIT_DESC_KEYS)}; the generic planner accepts none"
+            f"unsupported tcgen05.cp config {stray_desc}: descriptor fields "
+            f"are derived from the buffer layouts"
         )
     dst_region, src_region = op_call.args[:2]
     s_buf: Buffer = src_region.buffer
@@ -672,32 +669,15 @@ def _desc_set_addr(desc_val, addr_ptr):
     return T.bitwise_or(T.bitwise_and(desc_val, T.bitwise_not(T.uint64(0x3FFF))), start_addr)
 
 
-def _get_config_int(op_call, name, default=None):
-    value = op_call.config.get(name, default)
-    if value is None:
-        raise ValueError(f"explicit tcgen05.cp requires config {name!r}")
-    return int(value)
-
-
-def _has_explicit_tcgen05_cp_config(op_call: TilePrimitiveCall) -> bool:
-    """Explicit path: a non-default shape plus every hand-computed desc_* field.
-
-    A call carrying ``shape=`` but no desc_* fields routes to the generic
-    planner for that shape instead."""
-    if op_call.config.get("shape", "32x128b") == "32x128b":
-        return False
-    return all(name in op_call.config for name in _EXPLICIT_DESC_KEYS)
-
-
-def _is_valid_smem_tmem_or_explicit_copy(op_call: TilePrimitiveCall, sctx: DispatchContext):
+def _validate_smem_tmem_copy(op_call: TilePrimitiveCall, sctx: DispatchContext):
     if "shape" not in op_call.config:
         # Legacy default route (32x128b.warpx4): keep the historical predicate
         # (including its replica pre-check / fall-through semantics) intact.
         return _is_valid_smem_tmem_copy(op_call, sctx)
 
-    # Explicit shape config — either the fully explicit desc_* path or the
-    # generic planner. Only the memory-scope envelope is checked here; the
-    # detailed layout validation raises readable ValueErrors in _build_plan.
+    # Explicit shape config — generic planner. Only the memory-scope envelope
+    # is checked here; the detailed layout validation raises readable
+    # ValueErrors in _build_plan.
     dst_region, src_region = op_call.args[:2]
     src: Buffer = src_region.buffer
     dst: Buffer = dst_region.buffer
@@ -711,101 +691,14 @@ def _is_valid_smem_tmem_or_explicit_copy(op_call: TilePrimitiveCall, sctx: Dispa
     )
 
 
-def _copy_smem_tmem_explicit_impl(
-    op_call: TilePrimitiveCall, sctx: DispatchContext
-) -> PrimFunc | None:
-    """Emit explicit tcgen05.cp shapes not covered by the warpx4 planner."""
-    del sctx
-    op_call = TilePrimitiveCall.downcast(op_call)
-    dst_region, src_region = op_call.args[:2]
-    s_buf: Buffer = src_region.buffer
-    t_buf: Buffer = dst_region.buffer
-    dtype_bits = DataType(s_buf.dtype).bits
-    elem_per_32b = 32 // dtype_bits
-
-    if not (s_buf.scope().startswith("shared") and t_buf.scope() == "tmem"):
-        raise ValueError(f"expected shared->tmem, got {s_buf.scope()}->{t_buf.scope()}")
-    if t_buf.allocated_addr is None:
-        raise ValueError("explicit tcgen05.cp requires allocated_addr on tmem buffer")
-
-    shape = op_call.config["shape"]
-    cta_group = op_call.config.get("cta_group", 1)
-    multicast = op_call.config.get("multicast", "")
-    decompress = op_call.config.get("decompress", "")
-    ldo = _get_config_int(op_call, "desc_ldo")
-    sdo = _get_config_int(op_call, "desc_sdo")
-    swizzle = _get_config_int(op_call, "desc_swizzle")
-    tile_count = _get_config_int(op_call, "tile_count", 1)
-    subtile_count = _get_config_int(op_call, "subtile_count", 1)
-    tmem_tile_stride_32b = _get_config_int(op_call, "tmem_tile_stride_32b", 0)
-    tmem_subtile_stride_32b = _get_config_int(op_call, "tmem_subtile_stride_32b", 0)
-    desc_tile_stride_16b = _get_config_int(op_call, "desc_tile_stride_16b", 0)
-    desc_subtile_stride_16b = _get_config_int(op_call, "desc_subtile_stride_16b", 0)
-
-    t_region = [(r.min, r.min + r.extent) for r in dst_region.region]
-    t_slice = t_buf.layout.slice(list(t_buf.shape), t_region).canonicalize()
-    t_col_offset_expr = 0
-    for ax, val in t_slice.offset.items():
-        if ax == TCol:
-            t_col_offset_expr = val
-            break
-    analyzer = Analyzer()
-    if not analyzer.can_prove_equal(t_col_offset_expr % elem_per_32b, 0):
-        raise ValueError(f"t TCol offset {t_col_offset_expr} not provably 32b-aligned")
-    t_col0 = t_col_offset_expr // elem_per_32b
-
-    s_start = [r.min for r in src_region.region]
-    t_addr = t_buf.allocated_addr
-
-    # fmt: off
-    @T.prim_func(check_well_formed=False)
-    def impl():
-        cp_desc = T.local_scalar("uint64")
-        T.ptx.tcgen05.encode_matrix_descriptor(
-            T.address_of(cp_desc),
-            s_buf.ptr_to(s_start),
-            ldo=ldo,
-            sdo=sdo,
-            swizzle=swizzle,
-        )
-        for tile_idx in T.unroll(tile_count):
-            for subtile_idx in T.unroll(subtile_count):
-                t_col: T.let = (
-                    t_addr[0]
-                    + t_col0
-                    + tile_idx * tmem_tile_stride_32b
-                    + subtile_idx * tmem_subtile_stride_32b
-                )
-                desc_off: T.let = T.uint64(
-                    tile_idx * desc_tile_stride_16b
-                    + subtile_idx * desc_subtile_stride_16b
-                )
-                T.ptx.tcgen05.cp(
-                    t_col,
-                    cp_desc + desc_off,
-                    shape=shape,
-                    cta_group=cta_group,
-                    multicast=multicast,
-                    decompress=decompress,
-                )
-    # fmt: on
-
-    return impl
-
-
 # -----------------------------------------------------------------------------
 # Core impl: emits the cp loop given a plan + cp config. Async only — caller
 # is responsible for issuing ``tcgen05.commit`` against a barrier if they
 # need synchronization.
 # -----------------------------------------------------------------------------
 def copy_smem_tmem_impl(op_call: TilePrimitiveCall, sctx: DispatchContext) -> PrimFunc | None:
-    if _has_explicit_tcgen05_cp_config(op_call):
-        return _copy_smem_tmem_explicit_impl(op_call, sctx)
-
     if op_call.config.get("decompress"):
-        raise ValueError(
-            "generic tcgen05.cp planner does not support decompress; use the explicit desc_* form"
-        )
+        raise ValueError("tcgen05.cp planner does not support decompress")
     # NOTE: descriptor templates are encoded with base_offset=0, so the smem
     # buffer base must be aligned to the swizzle period (8 * atom_K bytes).
     # alloc_tcgen05_mma_AB's align=1024 discharges this for all canonical sources.
@@ -882,7 +775,7 @@ def copy_smem_tmem_impl(op_call: TilePrimitiveCall, sctx: DispatchContext) -> Pr
     variant="smem->tmem",
     priority=10,
     when=[
-        predicate("validate_smem_tmem_copy", _is_valid_smem_tmem_or_explicit_copy),
+        predicate("validate_smem_tmem_copy", _validate_smem_tmem_copy),
         predicate("exec_scope", _single_thread_exec),
     ],
 )

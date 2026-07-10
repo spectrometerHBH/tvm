@@ -520,11 +520,11 @@ def test_cp_rejects_unknown_shape():
     _assert_compile_raises(kernel, "unknown tcgen05.cp shape")
 
 
-def test_cp_rejects_partial_explicit_desc_config():
-    """desc_* fields are all-or-nothing: a lone desc_ldo must not be
-    silently ignored by the generic planner."""
+def test_cp_rejects_desc_config():
+    """Hand-computed desc_* fields are unsupported: descriptor fields are
+    derived from the buffer layouts, so a stray desc_ldo must not be ignored."""
     kernel, _ = _build_case("128x256b", None, 3, "bfloat16", 1, extra_cfg={"desc_ldo": 1})
-    _assert_compile_raises(kernel, "partial explicit tcgen05.cp config")
+    _assert_compile_raises(kernel, "unsupported tcgen05.cp config")
 
 
 def test_cp_rejects_nonzero_tmem_lane_offset():
