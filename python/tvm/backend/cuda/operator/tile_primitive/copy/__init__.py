@@ -19,7 +19,6 @@ from .fallback import *
 from .ld_stmatrix import *
 from .utils import (
     _is_valid_copy,
-    _is_valid_smem_tmem_copy,
     _scope_allowed,
     _single_thread_exec,
 )

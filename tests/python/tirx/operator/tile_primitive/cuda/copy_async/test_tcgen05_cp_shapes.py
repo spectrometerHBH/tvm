@@ -133,12 +133,13 @@ def _make_cp_kernel(
     W32,
     n_tmem_cols,
     extra_cfg=None,
+    infer=False,
 ):
     s_sl = tuple(slice(a, b) for a, b in s_region)
     t_sl = tuple(slice(a, b) for a, b in t_region)
     s_full_sl = tuple(slice(0, e) for e in s_full_shape)
-    cfg = {"shape": shape, "cta_group": 1}
-    if multicast is not None:
+    cfg = {"cta_group": 1} if infer else {"shape": shape, "cta_group": 1}
+    if not infer and multicast is not None:
         cfg["multicast"] = multicast
     if extra_cfg:
         cfg.update(extra_cfg)
@@ -210,7 +211,9 @@ def _expected_readback(A_bits, s_region, t_full, t_full_shape, t_region, multica
     return expected, mask
 
 
-def _build_case(shape, multicast, sw, dtype, n_mid, s_row_off=0, t_col_off_e=0, extra_cfg=None):
+def _build_case(
+    shape, multicast, sw, dtype, n_mid, s_row_off=0, t_col_off_e=0, extra_cfg=None, infer=False
+):
     """Assemble (kernel, host-check closure) for one cp configuration."""
     bits = tvm.runtime.DataType(dtype).bits
     rows, atom_bits = _shape_dims(shape)
@@ -258,6 +261,7 @@ def _build_case(shape, multicast, sw, dtype, n_mid, s_row_off=0, t_col_off_e=0, 
         W32,
         n_tmem_cols,
         extra_cfg=extra_cfg,
+        infer=infer,
     )
 
     def check(mod):
@@ -365,6 +369,33 @@ def test_cp_shape_config_routes_to_generic_planner():
     assert "reinterpret_cast<void*>((uint64_t)0)" in src
     # ...and patched per cp via the 0x3FFF address-field mask.
     assert src.count("cp_desc[0] &") == 4, f"expected 4 patched cps; src=\n{src}"
+
+
+@pytest.mark.gpu
+@pytest.mark.skipif(not env.has_cuda_compute(10), reason="need cuda compute >= 10.0")
+@pytest.mark.parametrize("shape,multicast", [sm for sm in _SHAPE_MULTICAST if sm[0] != "128x128b"])
+def test_cp_shape_inferred_from_layouts_matches_explicit(shape, multicast):
+    """A bare copy_async infers (shape, multicast) from the buffer layouts and
+    must lower byte-identically to the explicitly configured call. (128x128b
+    is excluded: its layouts also fit the wider 128x256b atom, which inference
+    prefers — covered by the dedicated test below.)"""
+    explicit, _ = _build_case(shape, multicast, 2, "bfloat16", 2)
+    inferred, _ = _build_case(shape, multicast, 2, "bfloat16", 2, infer=True)
+    src_explicit = _compile(explicit).mod.imports[0].inspect_source()
+    src_inferred = _compile(inferred).mod.imports[0].inspect_source()
+    assert src_explicit == src_inferred
+
+
+@pytest.mark.gpu
+@pytest.mark.skipif(not env.has_cuda_compute(10), reason="need cuda compute >= 10.0")
+def test_cp_128x128b_layout_infers_wider_256b_atom():
+    """A 128x128b-compatible source also fits the 128x256b atom at half the
+    instruction count; inference must pick the wider atom and stay bit-exact."""
+    inferred, check = _build_case("128x128b", None, 2, "bfloat16", 2, infer=True)
+    mod = _compile(inferred)
+    src = mod.mod.imports[0].inspect_source()
+    assert "tcgen05.cp.cta_group::1.128x256b" in src, f"expected wider atom; src=\n{src}"
+    check(mod)
 
 
 def test_cp_default_32x128b_instruction_sequence_unchanged():

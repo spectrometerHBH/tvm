@@ -24,10 +24,13 @@ themselves after the copy.
 
 Routing
 -------
-- No ``shape`` config: legacy default — ``32x128b.warpx4`` generic planner
-  (byte-identical to the historical warpx4-only dispatch).
-- ``shape=`` config: generic planner for that shape (see the shape table
-  ``_CP_SHAPE_TABLE`` below); descriptor fields are derived from the layouts.
+- ``shape=`` config: forces that shape (see the shape table
+  ``_CP_SHAPE_TABLE`` below).
+- No ``shape`` config: the shape is inferred from the buffer layouts — each
+  candidate (widest atom first) is planned until one validates. Bare warpx4
+  copies resolve to ``32x128b.warpx4`` exactly as the historical dispatch.
+
+Descriptor fields are always derived from the layouts.
 
 Shape table (PTX ISA 8.8 §9.7.16.9.2)
 -------------------------------------
@@ -109,7 +112,7 @@ from tvm.tirx.operator.tile_primitive import DispatchContext, predicate, registe
 from tvm.tirx.stmt import AllocBuffer, Evaluate, SeqStmt
 from tvm.tirx.tile_primitive import TilePrimitiveCall
 
-from ..copy import _is_valid_smem_tmem_copy, _single_thread_exec
+from ..copy import _single_thread_exec
 
 # -----------------------------------------------------------------------------
 # Shape table (PTX ISA 8.8 §9.7.16.9.2, p675). Per shape:
@@ -128,6 +131,19 @@ _CP_SHAPE_TABLE = {
     "64x128b": _CpShapeSpec(64, 128, ("warpx2::02_13", "warpx2::01_23")),
     "32x128b": _CpShapeSpec(32, 128, ("warpx4",)),
 }
+
+# Inference order for bare copies (no ``shape`` config): widest atom first —
+# a source that fits a 256b atom also fits the 128b atom at twice the
+# instruction count. The (t lane, t replica) patterns are mutually exclusive
+# across the other candidates, so order only matters for that pair.
+_CP_SHAPE_CANDIDATES = (
+    ("128x256b", ""),
+    ("4x256b", ""),
+    ("128x128b", ""),
+    ("64x128b", "warpx2::02_13"),
+    ("64x128b", "warpx2::01_23"),
+    ("32x128b", "warpx4"),
+)
 
 
 def _cp_lane_replica_pattern(shape: str, multicast: str):
@@ -174,13 +190,9 @@ def _cp_lane_replica_pattern(shape: str, multicast: str):
 
 
 def _resolve_cp_shape(op_call: TilePrimitiveCall):
-    """Resolve (shape, multicast, spec) from op_call.config via the table."""
-    shape = op_call.config.get("shape")
+    """Resolve (shape, multicast, spec) from an explicit ``shape=`` config."""
+    shape = str(op_call.config["shape"])
     multicast = op_call.config.get("multicast")
-    if shape is None:
-        # Back-compat: bare smem->tmem copies keep routing to 32x128b.warpx4.
-        shape = "32x128b"
-    shape = str(shape)
     spec = _CP_SHAPE_TABLE.get(shape)
     if spec is None:
         raise ValueError(
@@ -310,8 +322,8 @@ def _build_plan(op_call: TilePrimitiveCall, sctx: DispatchContext):
       - init_off_16B (PrimExpr)
       - t_col0 (PrimExpr, TMEM 32-bit col offset for cp's first call)
     """
+    del sctx
     op_call = TilePrimitiveCall.downcast(op_call)
-    shape, multicast, spec = _resolve_cp_shape(op_call)
     stray_desc = [
         name for name in ("desc_ldo", "desc_sdo", "desc_swizzle") if name in op_call.config
     ]
@@ -320,6 +332,26 @@ def _build_plan(op_call: TilePrimitiveCall, sctx: DispatchContext):
             f"unsupported tcgen05.cp config {stray_desc}: descriptor fields "
             f"are derived from the buffer layouts"
         )
+    if op_call.config.get("shape") is not None:
+        shape, multicast, spec = _resolve_cp_shape(op_call)
+        return _plan_for_shape(op_call, shape, multicast, spec)
+    # No shape config: infer from the buffer layouts.
+    multicast_cfg = op_call.config.get("multicast")
+    errors = []
+    for shape, multicast in _CP_SHAPE_CANDIDATES:
+        if multicast_cfg is not None and str(multicast_cfg) != multicast:
+            continue
+        try:
+            return _plan_for_shape(op_call, shape, multicast, _CP_SHAPE_TABLE[shape])
+        except ValueError as err:
+            errors.append(f"{shape}{('.' + multicast) if multicast else ''}: {err}")
+    raise ValueError(
+        "no tcgen05.cp shape fits the given layouts; candidates rejected:\n  " + "\n  ".join(errors)
+    )
+
+
+def _plan_for_shape(op_call: TilePrimitiveCall, shape: str, multicast: str, spec: _CpShapeSpec):
+    """Run A..I for one (shape, multicast); raises ValueError on any mismatch."""
     dst_region, src_region = op_call.args[:2]
     s_buf: Buffer = src_region.buffer
     t_buf: Buffer = dst_region.buffer
@@ -389,8 +421,15 @@ def _build_plan(op_call: TilePrimitiveCall, sctx: DispatchContext):
         return functools.reduce(operator.mul, [int(it.extent) for it in lay.shard], 1)
 
     n_lane, n_col = spec.atom_rows, elem_per_atom
-    n_mid_t = shard_prod(t_iso) // (n_lane * n_col)
-    n_mid_s = shard_prod(s_iso) // (n_lane * n_col)
+    atom_elems = n_lane * n_col
+    for side, total in (("t", shard_prod(t_iso)), ("s", shard_prod(s_iso))):
+        if total < atom_elems or total % atom_elems:
+            raise ValueError(
+                f"{side} region ({total} elems) is not a multiple of one "
+                f"{shape} atom ({n_lane}x{n_col} elems)"
+            )
+    n_mid_t = shard_prod(t_iso) // atom_elems
+    n_mid_s = shard_prod(s_iso) // atom_elems
     t_grp, t_seps = t_iso.group([n_lane, n_mid_t, n_col])
     s_grp2, s_seps = s_iso.group([n_lane, n_mid_s, n_col])
     t_seps = list(t_seps)
@@ -670,14 +709,9 @@ def _desc_set_addr(desc_val, addr_ptr):
 
 
 def _validate_smem_tmem_copy(op_call: TilePrimitiveCall, sctx: DispatchContext):
-    if "shape" not in op_call.config:
-        # Legacy default route (32x128b.warpx4): keep the historical predicate
-        # (including its replica pre-check / fall-through semantics) intact.
-        return _is_valid_smem_tmem_copy(op_call, sctx)
-
-    # Explicit shape config — generic planner. Only the memory-scope envelope
-    # is checked here; the detailed layout validation raises readable
-    # ValueErrors in _build_plan.
+    """Memory-scope envelope only; shape resolution/inference and the detailed
+    layout validation raise readable ValueErrors in ``_build_plan``."""
+    del sctx
     dst_region, src_region = op_call.args[:2]
     src: Buffer = src_region.buffer
     dst: Buffer = dst_region.buffer
