@@ -76,12 +76,13 @@ E. Isolate broadcast: split-by-stride-zero on both t and s; their split
    Drop stride-0 iters → ``t_iso`` and ``s_iso``.
 F. Split each side's iters into three segments by grouping the flattened
    element space as ``atom_rows x n_mid x elem_per_atom``
-   (``elem_per_atom = atom_bits / dtype_bits``). One instruction covers ALL
-   rows of the region (lane product == atom_rows), so this is really
-   lane x col with the column space cut in two: ``*_middle`` = the outer
-   columns (which instruction; empty when the region is one atom wide) and
-   ``*_col`` = one instruction's own columns. Naming: ``t_*`` = tmem side,
-   ``s_*`` = smem side; ``*_lane`` = the iters addressing the atom's rows.
+   (``elem_per_atom = atom_bits / dtype_bits``). ``*_lane`` covers exactly one
+   instruction's rows (product == atom_rows); ``*_col`` = one instruction's
+   own columns; ``*_middle`` = everything between — the outer columns (which
+   instruction) and, when the region has more rows than one atom (e.g. 4x256b
+   tiling each warp's first 16 rows: the M=64 Layout-F scatter), the extra row
+   iters, stepped through the taddr lane half-word. ``t_*`` = tmem side,
+   ``s_*`` = smem side.
    Validate:
    - t_lane (row → TMEM lane) matches the shape table lane pattern (above)
    - t_col: one row's elements land in contiguous TMEM columns
@@ -645,17 +646,23 @@ def _plan_for_shape(op_call: TilePrimitiveCall, shape: str, multicast: str, spec
         n = int(ti.extent)
         if n == 1:
             continue
-        if ti.axis != TCol:
-            raise ValueError(f"middle[{i}] t axis must be TCol, got {ti.axis}")
+        if ti.axis == TCol:
+            if int(ti.stride) % elem_per_32b != 0:
+                raise ValueError(
+                    f"t_middle[{i}] stride {int(ti.stride)} elems not 32b-aligned "
+                    f"(need multiple of {elem_per_32b})"
+                )
+            t_step = int(ti.stride) // elem_per_32b
+        elif ti.axis == TLane:
+            # Lane-tiled atoms (e.g. 4x256b filling each warp's first 16 rows
+            # — the M=64 Layout-F scatter): step the taddr lane half-word.
+            t_step = int(ti.stride) << 16
+        else:
+            raise ValueError(f"middle[{i}] t axis must be TCol or TLane, got {ti.axis}")
         s_stride_byte = int(si.stride) * dtype_bits // 8
         if s_stride_byte % 16 != 0:
             raise ValueError(f"s_middle[{i}] stride {s_stride_byte}B not 16B-aligned")
-        if int(ti.stride) % elem_per_32b != 0:
-            raise ValueError(
-                f"t_middle[{i}] stride {int(ti.stride)} elems not 32b-aligned "
-                f"(need multiple of {elem_per_32b})"
-            )
-        middle_iters.append((n, s_stride_byte // 16, int(ti.stride) // elem_per_32b))
+        middle_iters.append((n, s_stride_byte // 16, t_step))
 
     SDO_field = SDO_byte // 16
     init_off_16B = s_m_offset_expr * dtype_bits // 8 // 16

@@ -398,6 +398,49 @@ def test_cp_128x128b_layout_infers_wider_256b_atom():
     check(mod)
 
 
+@pytest.mark.gpu
+@pytest.mark.skipif(not env.has_cuda_compute(10), reason="need cuda compute >= 10.0")
+def test_cp_4x256b_lane_tiled_layout_f_scatter():
+    """4x256b atoms tiled through the taddr lane half-word: 16 cps land 16
+    distinct rows on each warp's first 16 lanes (the M=64 Layout-F scatter).
+    Smem holds the rows quadrant-interleaved (row i*4+q = logical (q, i))."""
+    dtype, bits = "bfloat16", 16
+    C = 16  # one 256b atom row = 16 bf16 elements
+    W32 = C * bits // 32
+    s_full = mma_shared_layout(dtype, SwizzleMode.SWIZZLE_32B_ATOM, [64, C])
+    t_full = TileLayout(S[(16, 4, C) : (1 @ TLane, 32 @ TLane, 1 @ TCol)])
+    kernel = _make_cp_kernel(
+        s_full,
+        [64, C],
+        [(0, 64), (0, C)],
+        t_full,
+        [64, C],
+        [(0, 64), (0, C)],
+        dtype,
+        None,
+        None,
+        W32,
+        32,
+        infer=True,
+    )
+    mod = _compile(kernel)
+    src = mod.mod.imports[0].inspect_source()
+    assert "tcgen05.cp.cta_group::1.4x256b" in src, f"expected 4x256b atoms; src=\n{src}"
+
+    A_np = tvm.testing.generate_random_array(dtype, (64, C))
+    dev = tvm.cuda(0)
+    A = tvm.runtime.tensor(A_np, dev)
+    B = tvm.runtime.tensor(np.zeros((128, W32), np.uint32), dev)
+    mod(A, B)
+    B_out = B.numpy()
+    A_bits = np.asarray(A_np).view(np.uint16)
+    for i in range(16):
+        for q in range(4):
+            lane = 32 * q + i
+            exp = A_bits[i * 4 + q].copy().view(np.uint32)
+            np.testing.assert_array_equal(B_out[lane, :W32], exp, err_msg=f"lane {lane}")
+
+
 def test_cp_default_32x128b_instruction_sequence_unchanged():
     """Back-compat pin: a config-less smem->tmem copy_async must emit the
     exact legacy 32x128b.warpx4 sequence (hardcoded from the pre-generalization
