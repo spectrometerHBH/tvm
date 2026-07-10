@@ -123,12 +123,9 @@ from tvm.tirx.tile_primitive import TilePrimitiveCall
 from ..copy import _single_thread_exec
 
 # -----------------------------------------------------------------------------
-# Shape table (PTX ISA 8.8 §9.7.16.9.2, p675). Per shape:
-#   atom_rows  — TMEM rows written per instruction (before multicast)
-#   atom_bits  — bits per row per instruction
-#   multicasts — allowed .multicast qualifiers ("" = none). Shapes with
-#                exactly one entry imply it; 64x128b requires the caller to
-#                pick one of the two warpx2 variants.
+# Shape table (PTX ISA 8.8 §9.7.16.9.2): atom_rows/atom_bits = TMEM rows and
+# bits-per-row per instruction; multicasts = allowed qualifiers ("" = none,
+# single entry implied, 64x128b needs an explicit warpx2 pick).
 # -----------------------------------------------------------------------------
 _CpShapeSpec = collections.namedtuple("_CpShapeSpec", ["atom_rows", "atom_bits", "multicasts"])
 
@@ -140,10 +137,9 @@ _CP_SHAPE_TABLE = {
     "32x128b": _CpShapeSpec(32, 128, ("warpx4",)),
 }
 
-# Inference order for bare copies (no ``shape`` config): widest atom first —
-# a source that fits a 256b atom also fits the 128b atom at twice the
-# instruction count. The (t lane, t replica) patterns are mutually exclusive
-# across the other candidates, so order only matters for that pair.
+# Inference order for bare copies: widest atom first (a 256b-fitting source
+# also fits 128b at 2x the instructions); all other candidates are mutually
+# exclusive by (t lane, t replica) pattern, so order only matters there.
 _CP_SHAPE_CANDIDATES = (
     ("128x256b", ""),
     ("4x256b", ""),
@@ -474,10 +470,9 @@ def _plan_for_shape(op_call: TilePrimitiveCall, shape: str, multicast: str, spec
     if not (int(ci.extent) == elem_per_atom and int(ci.stride) == 1 and ci.axis == TCol):
         raise ValueError(f"t_col must be ({elem_per_atom}, 1@TCol), got {ci}")
 
-    # F.2: s_lane → group (atom_rows/8, 8) → (SDO_stride, atom_K_stride).
-    # atom_K is the stride between successive rows of one 8-row descriptor
-    # core-matrix group (== swizzle atom row width); SDO is the stride between
-    # 8-row groups. 4x256b has a single sub-8-row group: SDO is unused (0).
+    # F.2: s_lane → (atom_rows/8, 8) groups: atom_K = row stride within an
+    # 8-row descriptor core matrix (= swizzle atom row width), SDO = stride
+    # between 8-row groups (4x256b has one sub-8-row group: SDO unused, 0).
     s_lane_layout = TileLayout.from_iters(s_lane, [], {})
     rows_per_group = min(spec.atom_rows, 8)
     n_row_groups = spec.atom_rows // rows_per_group
@@ -530,17 +525,9 @@ def _plan_for_shape(op_call: TilePrimitiveCall, shape: str, multicast: str, spec
                 f"per_element={int(s_swizzle_obj.per_element)}, "
                 f"atom_len={int(s_swizzle_obj.atom_len)}"
             )
-        # The hardware descriptor walk implements the swizzle_inner=True
-        # permutation (x ^ ((x & outer_mask) >> atom_len): atom-row bits XORed
-        # into the 16B-unit bits), pinned bit-exactly on B200 by the round-trip
-        # tests in test_tcgen05_cp_shapes.py. swizzle_inner=False is the
-        # mirrored permutation (x ^ ((x & inner_mask) << atom_len)); for
-        # swizzle_len=sw >= 1 (atom_len=3) the two coincide only on the
-        # 2^(3-sw) of the 2^(3+sw) chunks per atom period whose inner [0, sw)
-        # and outer [3, 3+sw) chunk bits are all zero (exhaustive enumeration
-        # over the full domain), so a flipped layout would be silently
-        # mis-copied. For swizzle_len == 0 both masks are 0 and either value
-        # is the identity, so swizzle_inner is a don't-care there.
+        # The hardware walk is the swizzle_inner=True permutation (B200-pinned
+        # by the round-trip tests); an inner=False layout would be silently
+        # mis-copied. sw==0: both directions are identity, don't-care.
         if int(s_swizzle_obj.swizzle_len) > 0 and not bool(s_swizzle_obj.swizzle_inner):
             raise ValueError(
                 "swizzle direction mismatch: the tcgen05.cp smem descriptor "
@@ -553,12 +540,9 @@ def _plan_for_shape(op_call: TilePrimitiveCall, shape: str, multicast: str, spec
                 "would be silently mis-copied"
             )
 
-    # F.3: s_col — per-lane column footprint of one cp. 128b atoms consume a
-    # single contiguous 16B unit (descriptor LDO never read → keep the legacy
-    # LDO=0 encoding). 256b atoms consume two 16B units: with swizzling the
-    # units must be adjacent in the linear (pre-swizzle) layout and hardware
-    # assumes LBO=1 (PTX ISA 8.8 §9.7.16.3.1.1); without swizzling their
-    # stride is a real descriptor field (LDO, in 16B units).
+    # F.3: s_col = one cp's per-lane columns. 128b atoms: one 16B unit, LDO
+    # never read (keep legacy 0). 256b atoms: two 16B units — adjacent when
+    # swizzled (hw assumes LBO=1), else their stride is the LDO field (16B units).
     if spec.atom_bits == 128:
         if len(s_col) != 1:
             raise ValueError(f"s_col must canonicalize to single iter, got {s_col}")
@@ -604,10 +588,9 @@ def _plan_for_shape(op_call: TilePrimitiveCall, shape: str, multicast: str, spec
     if not analyzer.can_prove_equal(t_col_offset_expr % elem_per_32b, 0):
         raise ValueError(f"t TCol offset {t_col_offset_expr} not provably 32b-aligned")
 
-    # G.1b: t_iso TLane offset must be 0 — the emitted cp anchors the TMEM
-    # address at lane 0 of the multicast footprint. Only enforced for calls
-    # that opt into the shape config (the legacy default path historically
-    # ignored the lane offset; keep it byte-identical).
+    # G.1b: t TLane offset must be 0 (cp anchors at lane 0). Only enforced
+    # with an explicit shape config — the legacy default path historically
+    # ignored the lane offset; keep it byte-identical.
     if "shape" in op_call.config:
         for ax, val in t_iso.offset.items():
             if ax == TLane and not analyzer.can_prove_equal(val, 0):
@@ -775,9 +758,8 @@ def copy_smem_tmem_impl(op_call: TilePrimitiveCall, sctx: DispatchContext) -> Pr
         addr = T.ptr_byte_offset(s_buf.ptr_to([0] * s_rank), off_16B * 16, s_buf.dtype)
         return _desc_set_addr(desc_buf[0], addr)
 
-    # Flatten the N-D middle iteration into a single T.unroll. Each iteration's
-    # per-dim index is (flat // stride) % extent, summed into the t/s offsets.
-    # Works uniformly for n_mid ∈ {0, 1, 2, ...}; total == 1 (no middle dims) is
+    # Flatten the N-D middle loop into one T.unroll: per-dim index is
+    # (flat // div) % extent, summed into the t/s offsets. total == 1 is
     # special-cased to avoid a degenerate T.unroll(1).
     total = functools.reduce(operator.mul, [n for n, _, _ in middle_iters], 1)
 
