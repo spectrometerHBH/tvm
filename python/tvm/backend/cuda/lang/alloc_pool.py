@@ -173,56 +173,9 @@ def _validate_mma_alloc_shape(shape, dtype, swizzle_mode):
         )
 
 
-# ---------------------------------------------------------------------------
-# TMEMStages
-# ---------------------------------------------------------------------------
-
-
 def _meta_class(cls):
     """Apply @meta_class decorator from ir_builder."""
     return _get_ir().meta_class(cls)
-
-
-@_meta_class
-class TMEMStages:
-    """Parse-time staged view over a TMEM buffer.
-
-    Parameters
-    ----------
-    buf : Buffer
-        The underlying TMEM buffer (e.g. f32 or f16 view).
-    col_start : int
-        First column of stage 0 in *buf*'s column space.
-    width : int
-        Number of columns per stage.
-    stages : int
-        Number of pipeline stages (default 1).
-    stride : int or None
-        Column distance between consecutive stages.  When *None* (default),
-        equals *width* (stages are packed back-to-back).
-    """
-
-    def __init__(self, buf, col_start, width, stages=1, stride=None):
-        self.buf = buf
-        self.col_start = col_start
-        self.width = width
-        self.stages = stages
-        self.stride = width if stride is None else stride
-
-    def _stage_base(self, stage):
-        return self.col_start + stage * self.stride
-
-    def __getitem__(self, item):
-        if isinstance(item, tuple):
-            assert len(item) == 2, "TMEMStages expects region[stage] or region[stage, start:stop]"
-            stage, col_slice = item
-            assert isinstance(col_slice, slice), "TMEMStages tuple indexing requires a slice"
-            base = self._stage_base(stage)
-            start = 0 if col_slice.start is None else col_slice.start
-            stop = self.width if col_slice.stop is None else col_slice.stop
-            return self.buf[:, base + start : base + stop : col_slice.step]
-        base = self._stage_base(item)
-        return self.buf[:, base : base + self.width]
 
 
 # ---------------------------------------------------------------------------

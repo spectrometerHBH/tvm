@@ -555,6 +555,11 @@ def gemm_async_tcgen05_impl(op_call: TilePrimitiveCall, sctx: DispatchContext) -
     # implicitly (SEM-WS-BATCH). It is the *same physical tile*, so once
     # validated it is normalized to the packed C_slice_layout and everything
     # below runs byte-identically. A and B stay 2D.
+    # Leading unit dims (e.g. a staged view's point-indexed stage axis) carry
+    # no datapath meaning and canonicalize away in C_slice_layout — squeeze
+    # them from the extent too. The batched form keeps its leading 2.
+    while len(C_extent) > 2 and int(C_extent[0]) == 1:
+        C_extent = C_extent[1:]
     C_batched = len(C_extent) == 3 and int(C_extent[0]) == 2
     assert (len(C_extent) == 2 or C_batched) and len(A_extent) >= 2 and len(B_extent) >= 2, (
         "Only 2D C (or the batched .ws form C[2, M, N]), A, B are supported for gemm"

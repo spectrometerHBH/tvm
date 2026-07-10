@@ -24,7 +24,7 @@ from tvm.ir import Op
 from tvm.tirx import Buffer, BufferRegion, LambdaExpr, PrimExpr
 from tvm.tirx.exec_scope import _SCOPE_KIND_TO_NAME, ExecScope
 from tvm.tirx.expr import FloatImm, IntImm
-from tvm.tirx.lang.alloc_pool import SMEMPool, TMEMPool, TMEMStages
+from tvm.tirx.lang.alloc_pool import SMEMPool, TMEMPool
 
 from . import _ffi_api, frame
 from .ir import address_of, decl_buffer, meta_class
@@ -1737,7 +1737,6 @@ __all__ = [
     "ScopeNamespace",
     "ScopedOp",
     "TMEMPool",
-    "TMEMStages",
     "add",
     "binary_chain",
     "binary_reduce",
