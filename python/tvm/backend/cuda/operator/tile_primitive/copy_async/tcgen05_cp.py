@@ -74,16 +74,21 @@ D. Canonicalize again.
 E. Isolate broadcast: split-by-stride-zero on both t and s; their split
    sequences must match (same distinct prefix prods + broadcast extents).
    Drop stride-0 iters → ``t_iso`` and ``s_iso``.
-F. Group both into ``(atom_rows, middle, elem_per_atom)`` where
-   ``elem_per_atom = atom_bits / dtype_bits``. Validate:
-   - t_lane matches the shape table lane pattern (see above)
-   - t_col = (elem_per_atom, 1@TCol)
-   - s_col: contiguous 16B units; for 256b atoms the two units may sit at a
-     non-contiguous LDO stride when unswizzled (→ descriptor LDO field)
-   - s_lane refines into (atom_rows/8, 8) on m axis with strides
-     (SDO_stride, atom_K_stride); 4x256b uses a single 4-row group (SDO=0)
-   - atom_K_byte ∈ {16, 32, 64, 128} → swizzle_mode 0..3
-   - swizzle_mode matches s_buf.layout's SwizzleLayout (if any)
+F. Split each side's iters into three segments by grouping the flattened
+   element space as ``atom_rows x n_mid x elem_per_atom``
+   (``elem_per_atom = atom_bits / dtype_bits``). Naming: ``t_*`` = tmem side,
+   ``s_*`` = smem side; ``*_lane`` = the iters addressing the atom's rows,
+   ``*_col`` = the iters addressing one row's elements within a single
+   instruction, ``*_middle`` = the rest (one cp instruction per point).
+   Validate:
+   - t_lane (row → TMEM lane) matches the shape table lane pattern (above)
+   - t_col: one row's elements land in contiguous TMEM columns
+   - s_col: one row = contiguous 16B units in smem; for 256b atoms the two
+     units may sit at a non-contiguous stride when unswizzled (→ LDO field)
+   - s_lane: rows sit in smem as (atom_rows/8, 8) groups with strides
+     (SDO_stride, atom_K_stride); 4x256b is a single 4-row group (SDO=0)
+   - atom_K_byte ∈ {16, 32, 64, 128} → swizzle_mode 0..3, which must match
+     s_buf.layout's SwizzleLayout (if any)
 G. Alignment checks:
    - t_iso TCol offset ≡ 0 (mod 32-bit)
    - t_iso TLane offset ≡ 0 (checked when ``shape`` is explicit in config)
