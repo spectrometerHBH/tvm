@@ -76,10 +76,12 @@ E. Isolate broadcast: split-by-stride-zero on both t and s; their split
    Drop stride-0 iters → ``t_iso`` and ``s_iso``.
 F. Split each side's iters into three segments by grouping the flattened
    element space as ``atom_rows x n_mid x elem_per_atom``
-   (``elem_per_atom = atom_bits / dtype_bits``). Naming: ``t_*`` = tmem side,
-   ``s_*`` = smem side; ``*_lane`` = the iters addressing the atom's rows,
-   ``*_col`` = the iters addressing one row's elements within a single
-   instruction, ``*_middle`` = the rest (one cp instruction per point).
+   (``elem_per_atom = atom_bits / dtype_bits``). One instruction covers ALL
+   rows of the region (lane product == atom_rows), so this is really
+   lane x col with the column space cut in two: ``*_middle`` = the outer
+   columns (which instruction; empty when the region is one atom wide) and
+   ``*_col`` = one instruction's own columns. Naming: ``t_*`` = tmem side,
+   ``s_*`` = smem side; ``*_lane`` = the iters addressing the atom's rows.
    Validate:
    - t_lane (row → TMEM lane) matches the shape table lane pattern (above)
    - t_col: one row's elements land in contiguous TMEM columns
