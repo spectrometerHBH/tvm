@@ -459,57 +459,6 @@ class SMEMPool:
         layout = mma_shared_layout(dtype, swizzle_mode, shape)
         return self.alloc(shape, dtype, align=align, layout=layout)
 
-    def alloc_tcgen05_mma_B(
-        self,
-        shape,
-        dtype="bfloat16",
-        *,
-        M,
-        cta_group,
-        ws=False,
-        sparse=False,
-        transB=False,
-        swizzle_mode="auto",
-        align=1024,
-    ):
-        """Allocate an MMA-compatible shared-memory B operand.
-
-        ``M`` is the PTX instruction M. B uses the normal MMA shared-memory
-        descriptor layout; this wrapper only validates the semantic shape
-        family before delegating to ``alloc_tcgen05_mma_AB``.
-        """
-        from tvm.tirx.layout import _mma_datapath_letter
-
-        if sparse:
-            raise ValueError("alloc_tcgen05_mma_B: sparse B is not supported in v1")
-
-        datapath = _mma_datapath_letter(M, cta_group, ws, sparse=False)
-        ext = [int(s) for s in shape]
-
-        if len(ext) == 2:
-            pass
-        elif len(ext) == 3 and ext[0] == 2:
-            if datapath == "E":
-                pass
-            elif datapath == "B":
-                raise ValueError(
-                    "alloc_tcgen05_mma_B: cta_group=2 banked B is group-level; "
-                    "allocate the local 2D (N/2,K) or (K,N/2) slice per CTA"
-                )
-            else:
-                expected = "(2,K,N/2)" if transB else "(2,N/2,K)"
-                raise ValueError(
-                    f"alloc_tcgen05_mma_B: 3D banked B {expected} is only supported for "
-                    f"Layout E (M=64, cta_group=1, ws=True); got datapath {datapath}"
-                )
-        else:
-            expected = "(K,N)" if transB else "(N,K)"
-            raise ValueError(
-                f"alloc_tcgen05_mma_B: expected 2D {expected} or supported 3D banked B, got {ext}"
-            )
-
-        return self.alloc_tcgen05_mma_AB(shape, dtype, swizzle_mode=swizzle_mode, align=align)
-
     def move_base_to(self, offset):
         self.offset = offset
         if self._owns_buffer:
