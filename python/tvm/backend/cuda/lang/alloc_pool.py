@@ -305,7 +305,7 @@ class TMEMPool:
         )
         return total_bits // (32 * rows)
 
-    def alloc(self, shape, dtype="float32", *, layout=None, cols=None, datapath=None):
+    def alloc(self, shape, dtype="float32", *, layout=None, cols=None):
         """Allocate a TMEM buffer.
 
         Parameters
@@ -313,29 +313,10 @@ class TMEMPool:
         shape, dtype, cols
             Standard buffer shape / dtype / column count.
         layout
-            Explicit ``TileLayout``. Mutually exclusive with ``datapath``.
-        datapath : str | None
-            Optional tcgen05 datapath letter (``"B"`` for M=128 cta_group::2
-            dense per-CTA view, ``"D"`` for M=128 full datapath, ``"E"`` for
-            M=64 ``.ws`` half datapath, ``"F"`` for M=64 non-``.ws``
-            scattered). When provided, the buffer's
-            layout is derived from ``tmem_datapath_layout(datapath, *shape)``
-            so the row index reflects the *physical* TMEM lane occupation
-            (PTX ISA §9.7.16.10.5). The downstream ``.16x*b`` / ``.32x32b``
-            dispatches structurally check this layout to catch mismatched
-            atoms (e.g. a ``.16x*b`` M=128 read against a Layout F buffer).
-            Defaults to ``None``, which means Layout D's identity row→lane
-            mapping — keep this for shape ``(128, X)`` buffers that hold
-            an M=128 MMA accumulator.
+            Explicit ``TileLayout``. Defaults to the identity row→lane
+            mapping (Layout D, PTX ISA §9.7.16.10.5); for a non-default
+            tcgen05 datapath pass ``layout=tmem_datapath_layout(...)``.
         """
-        from tvm.tirx.layout import tmem_datapath_layout
-
-        if layout is not None and datapath is not None:
-            raise ValueError("TMEMPool.alloc: pass at most one of layout= and datapath=")
-        if datapath is not None:
-            assert len(shape) == 2, "TMEMPool.alloc: datapath= requires a 2-D shape"
-            layout = tmem_datapath_layout(datapath, shape[0], shape[1])
-
         ir = _get_ir()
         cols = self._resolve_cols(shape, dtype, cols, layout)
         col_start = self.offset

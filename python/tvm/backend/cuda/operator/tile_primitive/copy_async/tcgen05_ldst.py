@@ -87,7 +87,7 @@ def _classify_tmem_datapath(tmem_buf):
 
     Layout D (M=128, identity row→lane) is the default returned by
     ``_default_tmem_layout``. Layout F (M=64 non-``.ws``, scattered) is the
-    explicit opt-in produced by ``tmem_pool.alloc(..., datapath="F")``.
+    explicit opt-in produced by ``layout=tmem_datapath_layout("F", ...)``.
     The dispatch uses this to pair each ``.16x*b`` / ``.32x32b`` atom with a
     compatible layout — see ``_check_tmem_layout_for_atom``.
     """

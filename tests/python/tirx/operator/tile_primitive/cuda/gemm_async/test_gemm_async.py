@@ -300,7 +300,7 @@ def test_gemm_tcgen05_cta_group_1(task):
 @pytest.mark.gpu
 @pytest.mark.skipif(not env.has_cuda_compute(10), reason="need cuda compute >= 10.0")
 def test_gemm_tcgen05_cta_group_1_layout_f_m64():
-    """M=64 MMA with C operand allocated as Layout F (datapath="F").
+    """M=64 MMA with C operand allocated as Layout F.
 
     Exercises the new ``gemm_async`` path that accepts C buffers tagged
     Layout F — written by an M=64 MMA in their canonical scattered

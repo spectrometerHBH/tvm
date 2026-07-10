@@ -353,7 +353,7 @@ def _choose_mma_tile(M, N, cta_group, MMA_N_MIN):
 def _layout_matches_datapath_f(tmem_buf) -> bool:
     """Return True if ``tmem_buf.layout`` structurally equals Layout F (M=64
     scattered) over the buffer's full (64, X) shape — i.e. the buffer was
-    allocated via ``tmem_pool.alloc((64, X), datapath="F")``.
+    allocated with ``layout=tmem_datapath_layout("F", 64, X)``.
 
     Used by the C-operand layout check to accept M=64 MMA writes into Layout
     F C buffers (the canonical pairing for M=64 outputs that are read back
@@ -989,7 +989,7 @@ def gemm_async_tcgen05_impl(op_call: TilePrimitiveCall, sctx: DispatchContext) -
     # 2x2 layout: (M, 2, N//2):(1@TLane, 64@TLane, 1@TCol)
     # Layout F (M=64 scatter): the full TMEM buffer is shape (64, X) with the
     # scattered row→lane mapping from tmem_datapath_layout("F", 64, X). When
-    # the user allocates with ``tmem_pool.alloc(..., datapath="F")`` and slices
+    # the user allocates with that layout and slices
     # the full row range, the slice layout structurally matches Layout F over
     # (M=64, N) — assert against that base instead of the Layout D identity.
     packed_n2 = False

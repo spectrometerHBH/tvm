@@ -593,7 +593,7 @@ __all__ += [
 #
 # We surface this via the factory below. Callers pass the datapath letter
 # (``"D"`` / ``"F"``) and the logical ``(rows, cols)``; the factory returns
-# the appropriate TileLayout. ``tmem_pool.alloc(..., datapath="F")`` plumbs
+# the appropriate TileLayout. ``tmem_pool.alloc(..., layout=...)`` plumbs
 # this into the buffer's layout so the dispatch can structurally verify
 # atom ↔ datapath compatibility instead of silently accepting mismatches.
 #
