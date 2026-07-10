@@ -723,6 +723,11 @@ def _validate_smem_tmem_copy(op_call: TilePrimitiveCall, sctx: DispatchContext):
 # need synchronization.
 # -----------------------------------------------------------------------------
 def copy_smem_tmem_impl(op_call: TilePrimitiveCall, sctx: DispatchContext) -> PrimFunc | None:
+    if op_call.config.get("decompress"):
+        # A real hardware feature the planner cannot lower (fp4/fp6->fp8
+        # in-flight decompression needs dtype-pair plan derivation): reject
+        # loudly rather than silently copying without decompression.
+        raise ValueError("tcgen05.cp planner does not support decompress")
     # NOTE: descriptor templates are encoded with base_offset=0, so the smem
     # buffer base must be aligned to the swizzle period (8 * atom_K bytes).
     # alloc_tcgen05_mma_AB's align=1024 discharges this for all canonical sources.

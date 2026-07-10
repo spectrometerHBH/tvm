@@ -737,6 +737,15 @@ def test_cp_rejects_nonzero_tmem_lane_offset():
     _assert_compile_raises(kernel, "TLane offset")
 
 
+def test_cp_rejects_decompress_on_generic_path():
+    """decompress is a real PTX feature the planner cannot lower; it must be
+    rejected loudly instead of silently copying without decompression."""
+    kernel, _ = _build_case(
+        "128x256b", None, 3, "bfloat16", 1, extra_cfg={"decompress": "b8x16.b6x16_p32"}
+    )
+    _assert_compile_raises(kernel, "does not support decompress")
+
+
 def test_cp_rejects_non_16b_aligned_row_group_stride():
     """The descriptor SBO field is encoded in 16B units: an smem layout whose
     8-row-group stride is not 16B-divisible must be rejected (audit A1)."""
