@@ -31,7 +31,6 @@
 #include <tvm/tirx/analysis.h>
 #include <tvm/tirx/builtin.h>
 #include <tvm/tirx/expr.h>
-#include <tvm/tirx/expr_functor.h>
 #include <tvm/tirx/op.h>
 #include <tvm/tirx/transform.h>
 
@@ -97,20 +96,6 @@ TVM_FFI_STATIC_INIT_BLOCK() { StmtSimplifyConfigNode::RegisterReflection(); }
 
 TVM_REGISTER_PASS_CONFIG_OPTION("tirx.StmtSimplify", StmtSimplifyConfig);
 
-class CallDetector : public ExprVisitor {
- public:
-  bool ContainsCall(const PrimExpr& expr) {
-    found_call_ = false;
-    VisitExpr(expr);
-    return found_call_;
-  }
-
- private:
-  void VisitExpr_(const CallNode* op) final { found_call_ = true; }
-
-  bool found_call_{false};
-};
-
 class StmtSimplifier : public IRMutatorWithAnalyzer {
  public:
   static PrimFunc Apply(PrimFunc func, const Analyzer& analyzer,
@@ -163,11 +148,7 @@ class StmtSimplifier : public IRMutatorWithAnalyzer {
     // subsequent expressions.  Don't remove the Bind statement --
     // with flat Bind there's no body to inspect for usage patterns,
     // so we always keep the Bind.
-    //
-    // Do not inline values that contain calls.  Even pure target intrinsics
-    // can be expensive hardware instructions, and inlining a Bind while also
-    // keeping the Bind statement duplicates those calls in generated code.
-    if (SideEffect(value) <= CallEffectKind::kPure && !CallDetector().ContainsCall(value)) {
+    if (SideEffect(value) <= CallEffectKind::kPure) {
       analyzer_->Bind(op->var, value);
       // Record the binding so we can substitute it into assert conditions
       // (see VisitStmt_(const AssertStmtNode*)).  Under SSA each var is
