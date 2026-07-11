@@ -2294,28 +2294,6 @@ def test_copy_tma_rejects_flipped_swizzle_inner():
         )
 
 
-def test_copy_tma_rejects_removed_tensor_map_dim_order():
-    """The dim-order knob was removed: the descriptor order is always derived
-    from the declared smem layout. Passing the old config must fail loudly."""
-    import pytest
-
-    smem_layout = ComposeLayout(
-        SwizzleLayout(3, 3, 3, swizzle_inner=True),
-        TileLayout(S[(64, 64, 2, 4) : (1, 64, 4096, 8192)]),
-    )
-    with pytest.raises(Exception, match="tensor_map_dim_order was removed"):
-        _make_tma_call(
-            g_shape=(64, 128, 2, 4, 3),
-            g_region=((0, 64), (64, 128), (0, 2), (0, 4), (1, 2)),
-            s_shape=(64, 64, 2, 4),
-            s_region=((0, 64), (0, 64), (0, 2), (0, 4)),
-            gmem_layout=TileLayout(S[(64, 128, 2, 4, 3) : (1, 512, 256, 64, 65536)]),
-            smem_layout=smem_layout,
-            dtype="bfloat16",
-            config={"tensor_map_dim_order": "natural"},
-        )
-
-
 # FlashMLA 5D Q fold: gmem is a (64, h_q, 2, D_QK//128, s_q) strided view of a
 # (s_q, h_q, D_QK) tensor.  Logical element (a, b, c, d, e) sits at linear
 # gmem offset a + 512*b + 256*c + 64*d + 65536*e; head-dim index is

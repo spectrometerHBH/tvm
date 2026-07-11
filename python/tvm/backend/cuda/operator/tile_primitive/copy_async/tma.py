@@ -1282,12 +1282,6 @@ def copy_tma_impl(op_call: TilePrimitiveCall, sctx: DispatchContext) -> PrimFunc
 
     oob_mode = _normalize_oob_mode(s_buf.dtype, op_call.config.get("oob", None))
     oob_fill_kind = _oob_fill_kind(oob_mode)
-    if "tensor_map_dim_order" in op_call.config:
-        fail(
-            "copy_async(tma) tensor_map_dim_order was removed: the descriptor dim "
-            "order is always derived from the declared smem layout's contiguous "
-            "chain, which is the only placement-correct order"
-        )
     # TMA writes the box into smem in plain box-linear order (descriptor dim 0
     # fastest), so the descriptor dim order decides where each element lands.
     # The plan orders the box>1 dims by the declared smem layout's contiguous
