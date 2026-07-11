@@ -123,15 +123,18 @@ is s2g (anything else is an error):
 layouts (L1), then for each global iter finds the maximal contiguous stride-1 shard
 chain and cuts the axis into descriptor **box** segments (L2), then stacks those
 into a ``cuTensorMap`` and validates the hardware constraints — rank ≤ 5, innermost
-stride 1, innermost box fits the shared swizzle atom — shrinking the chain prefix
-and retrying if a constraint fails (L3). Adjacent fully-boxed contiguous dims are
-merged, and an over-256 box may trigger element-type promotion.
+stride 1, innermost box fits the shared swizzle atom, every ``boxDim`` ≤ 256, and
+``boxDim[0] * elementSize`` a multiple of 16 B — shrinking the chain prefix and
+retrying if a constraint fails (L3). Adjacent fully-boxed contiguous dims are
+merged, and an over-256 box may trigger element-type promotion; a plan that still
+violates a constraint after merge+promote is declined at dispatch rather than
+failing the host descriptor build.
 
-When ``tensor_map_dim_order="natural"`` is set, the planner additionally moves the
-physical unit-stride global dimension to the descriptor's innermost slot before
-validation. This is needed for layouts such as ``(D, H, S):(1, D, D*H)`` where the
-logical slice order is not the same as the physical innermost memory order. The
-default path keeps the historical descriptor ordering.
+The planner always orders the descriptor's ``box>1`` dims by the declared shared
+layout's contiguous chain, so the hardware box fill matches the declared placement.
+This handles layouts such as ``(D, H, S):(1, D, D*H)`` where the logical slice order
+differs from the physical innermost memory order; there is no configuration knob —
+the contiguous-chain order is the only placement-correct one.
 
 For sparse gathers, ``indexer`` describes absolute source coordinates along the
 source gather axis.  Hardware supports only four gathered coordinates per
@@ -232,8 +235,8 @@ How inputs change the algorithm
    * - input
      - effect
    * - direction
-     - ``g2s`` → ``cp.async.bulk.tensor.*.g2c``; ``s2g`` → ``…s2g``; with a reduce
-       op → ``…s2g_reduce`` (e.g. ``add``)
+     - ``g2s`` → ``cp.async.bulk.tensor.*.g2s_cluster``; ``s2g`` → ``…s2g``; with a
+       reduce op → ``…s2g_reduce`` (e.g. ``add``)
    * - shared swizzle mode
      - sets the ``swizzle_mode`` in the descriptor and the innermost-box constraint;
        a 128-B swizzle on a 2-D tile yields a **rank-3** descriptor (the inner axis
@@ -243,10 +246,6 @@ How inputs change the algorithm
        contiguous full-box dims; box > 256 triggers dtype promotion (1→2→4→8 B)
    * - dtype
      - sets element size and the descriptor's element strides / box byte width
-   * - ``tensor_map_dim_order="natural"``
-     - keeps the descriptor legal when the physical unit-stride global dimension is
-       not already the TensorMap innermost dimension; the planner remaps descriptor
-       dims and issue-axis coordinates together before hardware validation
    * - ``gather_axis`` / ``indexer``
      - selects ``tile::gather4`` load mode and changes issue coordinates from one
        dense coordinate on the gather axis to four explicit absolute coordinates.
