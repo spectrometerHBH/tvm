@@ -2170,50 +2170,97 @@ def test_copy_tma_gather4_bar_addr_dynamic_cache_hint_codegen():
     assert "4278190079" in src
 
 
-def test_copy_tma_gather4_cta_group2_pointer_masks_mbarrier_codegen():
-    @T.prim_func
-    def tma_gather4(A_map: T.TensorMap()) -> None:
-        T.device_entry()
-        tid = T.thread_id([128])
-        sm = T.alloc_buffer((64, 4), "bfloat16", scope="shared")
-        mb = T.alloc_shared([1], "uint64")
-        if tid == 0:
-            T.ptx.mbarrier.init(mb.ptr_to([0]), 1)
-            T.ptx.cp_async.bulk.tensor.g2s_cluster(
-                2,
-                sm.ptr_to([0, 0]),
-                T.cuda.sm100_2sm_leader_smem_addr(mb.ptr_to([0])),
-                T.address_of(A_map),
-                0,
-                2,
-                "",
-                0,
-                1,
-                2,
-                3,
-                4,
-                cache_policy=T.uint64(0x14F0000000000000),
-                load_mode="tile_gather4",
-                mbar_is_shared_addr=True,
-            )
+def _build_tma_gather4_cta2_kernel(cta_mask):
+    """2-CTA cluster gather through the dispatcher (``dispatch='tma'``,
+    ``cta_group=2``, ``gather_axis=0``), mirroring the FlashMLA KV gather. The
+    leader CTA (cbx==0) issues the multicast gather; ``cta_mask`` selects which
+    cluster CTAs receive the gathered rows in their own smem. Both CTAs zero
+    their smem first, then dump it to ``B[cbx]`` so an un-multicast CTA reads
+    back all-zero."""
+    dtype = "float16"
+    rows, copy_rows, cols, thread_cnt = 256, 16, 64, 128
+    shared_layout = mma_shared_layout(dtype, 3, (copy_rows, cols))
+    smem_bytes = copy_rows * cols * tvm.DataType(dtype).bits // 8
 
+    # fmt: off
+    @T.prim_func
+    def tma_gather4_cta2(A_ptr: T.handle, I_ptr: T.handle, B_ptr: T.handle) -> None:
+        A = T.match_buffer(A_ptr, (rows, cols), dtype)
+        Idx = T.match_buffer(I_ptr, (copy_rows,), "int32")
+        B = T.match_buffer(B_ptr, (2, copy_rows, cols), dtype)
+        T.device_entry()
+        cbx, cby = T.cta_id_in_cluster([2, 1])
+        T.cta_id([2])
+        tid = T.thread_id([thread_cnt])
+        dyn = T.alloc_buffer([smem_bytes + 64], "uint8", scope="shared.dyn")
+        A_smem = T.decl_buffer(
+            (copy_rows, cols), dtype, dyn.data, elem_offset=0, layout=shared_layout
+        )
+        mbarrier = T.decl_buffer([1], "uint64", dyn.data, elem_offset=smem_bytes // 8)
+        mbar_ptr = T.meta_var(mbarrier.ptr_to([0]))
+
+        if tid == 0:
+            T.ptx.mbarrier.init(mbar_ptr, 1)
+        for i in range(copy_rows * cols // thread_cnt):
+            A_smem[(tid + i * thread_cnt) // cols, (tid + i * thread_cnt) % cols] = T.float16(0)
+        T.ptx.fence.mbarrier_init()
+        T.ptx.fence.proxy_async("shared::cta")
+        T.cuda.cta_sync()
+        T.cuda.cluster_sync()
+
+        if cbx == 0:
+            if tid == 0:
+                Tx.copy_async(
+                    A_smem[:, :], A[:, :], dispatch="tma", mbar=mbar_ptr,
+                    cta_group=2, cta_mask=T.uint16(cta_mask),
+                    cache_hint=T.uint64(0x14F0000000000000),
+                    gather_axis=0, indexer=[Idx[i] for i in range(copy_rows)],
+                )
+                T.ptx.mbarrier.arrive.expect_tx(mbar_ptr, smem_bytes)
+            T.ptx.mbarrier.try_wait(mbar_ptr, 0)
+        T.cuda.cta_sync()
+        T.cuda.cluster_sync()
+        Tx.cta.copy(B[cbx, :, :], A_smem[:, :])
+    # fmt: on
+
+    return tma_gather4_cta2
+
+
+def _run_tma_gather4_cta2(cta_mask):
+    copy_rows, cols, rows = 16, 64, 256
     target = tvm.target.Target({"kind": "cuda", "arch": "sm_100a"})
     with target:
-        mod = tvm.compile(tvm.IRModule({"main": tma_gather4}), target=target, tir_pipeline="tirx")
+        mod = tvm.compile(
+            tvm.IRModule({"main": _build_tma_gather4_cta2_kernel(cta_mask)}),
+            target=target,
+            tir_pipeline="tirx",
+        )
+    np.random.seed(0)
+    A_np = tvm.testing.generate_random_array("float16", (rows, cols))
+    I_np = np.array([7, 3, 19, 5, 31, 11, 2, 23, 43, 13, 47, 17, 59, 29, 61, 37], dtype="int32")
+    dev = tvm.cuda(0)
+    A = tvm.runtime.tensor(A_np, dev)
+    Idx = tvm.runtime.tensor(I_np, dev)
+    B = tvm.runtime.tensor(np.zeros((2, copy_rows, cols), A_np.dtype), dev)
+    mod(A, Idx, B)
+    return A_np[I_np], B.numpy()
 
-    src = mod.mod.imports[0].inspect_source()
-    helper_name = "ptx_cp_async_bulk_tensor_g2s_cluster_tile_gather4_2d_cache_hint_mbar_addr"
-    assert helper_name in src
-    assert (
-        f"{helper_name}(void* dst, unsigned int mbar_addr, unsigned long long tensormap_addr, "
-        "uint16_t cta_mask, unsigned long long cache_policy"
-    ) in src
-    assert "cta_group2_unicast" not in src
-    assert (
-        "cp.async.bulk.tensor.2d.shared::cluster.global.tile::gather4"
-        ".mbarrier::complete_tx::bytes.cta_group::2.L2::cache_hint"
-    ) in src
-    assert "4278190079" in src
+
+@pytest.mark.gpu
+@pytest.mark.skipif(not env.has_cuda_compute(10), reason="need cuda compute >= 10.0")
+def test_copy_tma_gather4_cta_group2_gpu_roundtrip():
+    """Dual-CTA cta_group=2 gather round-trip through the dispatcher (the form
+    FlashMLA uses). ``cta_mask`` is the multicast destination bitmask: bit i set
+    → cluster CTA i receives the gathered rows in its smem. ``cta_mask=3`` (both
+    CTAs) must land the gathered rows in both; ``cta_mask=1`` (leader only) must
+    land them in CTA 0 and leave CTA 1 all-zero. Verified on B200."""
+    exp, both = _run_tma_gather4_cta2(cta_mask=3)
+    np.testing.assert_array_equal(both[0], exp, err_msg="cta_mask=3 cta0")
+    np.testing.assert_array_equal(both[1], exp, err_msg="cta_mask=3 cta1")
+
+    exp, leader = _run_tma_gather4_cta2(cta_mask=1)
+    np.testing.assert_array_equal(leader[0], exp, err_msg="cta_mask=1 cta0")
+    assert not leader[1].any(), "cta_mask=1 must leave CTA 1 un-multicast (all-zero)"
 
 
 def test_copy_tma_declines_non_derivable_fold_layout():
