@@ -278,6 +278,49 @@ class Buffer(Object, Scriptable):
         )
         return tvm.tirx.address_of(self[tuple(indices)])
 
+    def _redecl(self, shape, layout, *, dtype=None, elem_offset=None, addr_offset=None):
+        """Re-declare a derived view over this buffer's storage.
+
+        Routes the buffer identity by storage kind: an ``allocated_addr``
+        buffer (tmem) aliases by column address — ``addr_offset`` (a column
+        count) adds onto it, and ``decl_buffer`` rejects ``data`` for tmem
+        scope — while a pointer buffer carries ``data``/``strides``/
+        ``elem_offset`` through.
+        """
+        if self.allocated_addr is not None and len(self.allocated_addr) > 0:
+            addr = self.allocated_addr[0]
+            if addr_offset is not None:
+                addr = addr + addr_offset
+            return tvm.tirx.script.builder.decl_buffer(
+                shape,
+                self.dtype if dtype is None else dtype,
+                None,
+                None,
+                None,
+                None,
+                self.scope(),
+                self.data_alignment,
+                0,
+                "",
+                self.axis_separators,
+                layout,
+                allocated_addr=addr,
+            )
+        return tvm.tirx.script.builder.decl_buffer(
+            shape,
+            self.dtype if dtype is None else dtype,
+            self.data,
+            self.strides,
+            self.elem_offset if elem_offset is None else elem_offset,
+            None,
+            self.scope(),
+            self.data_alignment,
+            self.offset_factor,
+            "",
+            self.axis_separators,
+            layout,
+        )
+
     def view(self, *args, **kwargs) -> "Buffer":
         """Creates a new view of the buffer. (used by parser)
 
@@ -332,20 +375,7 @@ class Buffer(Object, Scriptable):
                 layout = self.layout.unpack(ratio)
                 shape = [s for s in self.shape[:-1]] + [self.shape[-1] * ratio]
                 new_elem_offset = self.elem_offset * ratio
-            return tvm.tirx.script.builder.decl_buffer(
-                shape,
-                cast_dtype,
-                self.data,
-                self.strides,
-                new_elem_offset,
-                None,
-                self.scope(),
-                self.data_alignment,
-                self.offset_factor,
-                "",
-                self.axis_separators,
-                layout,
-            )
+            return self._redecl(shape, layout, dtype=cast_dtype, elem_offset=new_elem_offset)
         else:
             # --- Signature 1: view(*shape, **opts) ---
             # Check if all positional args are integers/PrimExprs with dtype int32 or int64 (the shape)  # noqa: E501
@@ -365,41 +395,7 @@ class Buffer(Object, Scriptable):
             if layout is None:
                 shape = _infer_shape(shape)
 
-            new_layout = self.layout if layout is None else layout
-            # tmem (and other allocated_addr) buffers alias by column address,
-            # not a data pointer: carry allocated_addr through so a reshape /
-            # relayout view of a tmem alloc reinterprets the same columns
-            # (decl_buffer rejects `data` for tmem scope).
-            if self.allocated_addr is not None and len(self.allocated_addr) > 0:
-                return tvm.tirx.script.builder.decl_buffer(
-                    shape,
-                    self.dtype,
-                    None,
-                    None,
-                    None,
-                    None,
-                    self.scope(),
-                    self.data_alignment,
-                    0,
-                    "",
-                    self.axis_separators,
-                    new_layout,
-                    allocated_addr=self.allocated_addr[0],
-                )
-            return tvm.tirx.script.builder.decl_buffer(
-                shape,
-                self.dtype,
-                self.data,
-                self.strides,
-                self.elem_offset,
-                None,
-                self.scope(),
-                self.data_alignment,
-                self.offset_factor,
-                "",
-                self.axis_separators,
-                new_layout,
-            )
+            return self._redecl(shape, self.layout if layout is None else layout)
 
     def local(self, *shape, layout=None) -> "Buffer":
         """Create a thread-local view of this buffer.
@@ -428,20 +424,7 @@ class Buffer(Object, Scriptable):
                 lambda x, y: x * y, [it.extent for it in local_layout.shard], 1
             )
             shape = (total,)
-        return tvm.tirx.script.builder.decl_buffer(
-            shape,
-            self.dtype,
-            self.data,
-            self.strides,
-            self.elem_offset,
-            None,
-            self.scope(),
-            self.data_alignment,
-            self.offset_factor,
-            "",
-            self.axis_separators,
-            self.layout.storage() if layout is None else layout,
-        )
+        return self._redecl(shape, self.layout.storage() if layout is None else layout)
 
     def permute(self, *dims) -> "Buffer":
         """Permute the dimensions of the buffer.
@@ -476,38 +459,7 @@ class Buffer(Object, Scriptable):
         new_layout = grouped.permute_by_groups(seps, list(dims))
         if swizzle is not None:
             new_layout = tvm.tirx.layout.ComposeLayout(swizzle, new_layout)
-        # tmem/allocated_addr buffers alias by column address, not a data
-        # pointer (decl_buffer rejects `data` for tmem scope).
-        if self.allocated_addr is not None and len(self.allocated_addr) > 0:
-            return tvm.tirx.script.builder.decl_buffer(
-                new_shape,
-                self.dtype,
-                None,
-                None,
-                None,
-                None,
-                self.scope(),
-                self.data_alignment,
-                0,
-                "",
-                self.axis_separators,
-                new_layout,
-                allocated_addr=self.allocated_addr[0],
-            )
-        return tvm.tirx.script.builder.decl_buffer(
-            new_shape,
-            self.dtype,
-            self.data,
-            self.strides,
-            self.elem_offset,
-            None,
-            self.scope(),
-            self.data_alignment,
-            self.offset_factor,
-            "",
-            self.axis_separators,
-            new_layout,
-        )
+        return self._redecl(new_shape, new_layout)
 
     # ------------------------------------------------------------------
     # Dimension-surgery views: ``view`` / ``permute`` (reshape / transpose),
@@ -616,33 +568,12 @@ class Buffer(Object, Scriptable):
         otherwise it stays inside the tile layout's offset so the swizzle
         keeps applying to it and the view addresses the same bytes."""
         offset_map = dict(grouped.offset.items())
-        if self.allocated_addr is not None and len(self.allocated_addr) > 0:
-            # tmem addresses by physical column: a narrowed column range shifts
-            # the allocated_addr (col base), not elem_offset/data. extra_offset
-            # is the narrowed dim's TCol-stride offset, i.e. a column count.
-            new_addr = self.allocated_addr[0]
-            if extra_offset is not None:
-                new_addr = new_addr + extra_offset
-            new_layout = tvm.tirx.layout.TileLayout.from_iters(
-                new_shard, list(grouped.replica), offset_map
-            )
-            new_layout = self._rewrap_swizzle(new_layout, swizzle)
-            return tvm.tirx.script.builder.decl_buffer(
-                new_shape,
-                self.dtype,
-                None,
-                None,
-                None,
-                None,
-                self.scope(),
-                self.data_alignment,
-                0,
-                "",
-                self.axis_separators,
-                new_layout,
-                allocated_addr=new_addr,
-            )
-        if extra_offset is not None and not self._swizzle_offset_commutes(swizzle, extra_offset):
+        is_tmem = self.allocated_addr is not None and len(self.allocated_addr) > 0
+        if (
+            not is_tmem
+            and extra_offset is not None
+            and not self._swizzle_offset_commutes(swizzle, extra_offset)
+        ):
             m_axis = tvm.tirx.layout.Axis.get("m")
             prev = offset_map.get(m_axis)
             offset_map[m_axis] = extra_offset if prev is None else prev + extra_offset
@@ -651,23 +582,15 @@ class Buffer(Object, Scriptable):
             new_shard, list(grouped.replica), offset_map
         )
         new_layout = self._rewrap_swizzle(new_layout, swizzle)
+        if is_tmem:
+            # tmem addresses by physical column: a narrowed column range shifts
+            # the allocated_addr (col base), not elem_offset/data. extra_offset
+            # is the narrowed dim's TCol-stride offset, i.e. a column count.
+            return self._redecl(new_shape, new_layout, addr_offset=extra_offset)
         elem_offset = self.elem_offset
         if extra_offset is not None:
             elem_offset = elem_offset + extra_offset
-        return tvm.tirx.script.builder.decl_buffer(
-            new_shape,
-            self.dtype,
-            self.data,
-            self.strides,
-            elem_offset,
-            None,
-            self.scope(),
-            self.data_alignment,
-            self.offset_factor,
-            "",
-            self.axis_separators,
-            new_layout,
-        )
+        return self._redecl(new_shape, new_layout, elem_offset=elem_offset)
 
     def rearrange(self, pattern: str, **sizes) -> "Buffer":
         """einops-style relayout in one line: ``buf.rearrange("b (2 r) -> 2 b r")``.
