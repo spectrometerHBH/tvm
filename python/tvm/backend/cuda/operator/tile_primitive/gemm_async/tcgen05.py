@@ -552,7 +552,7 @@ def gemm_async_tcgen05_impl(op_call: TilePrimitiveCall, sctx: DispatchContext) -
     # C may be given in the honest batched form C[2, M, N]: the leading dim
     # is the M=64 .ws Layout-E lane fold (two partials at lanes m and m+64),
     # the explicit-batch spelling of what the packed C[M, 2, N] encodes
-    # implicitly (SEM-WS-BATCH). It is the *same physical tile*, so once
+    # implicitly. It is the *same physical tile*, so once
     # validated it is normalized to the packed C_slice_layout and everything
     # below runs byte-identically. A and B stay 2D.
     # Leading unit dims (e.g. a staged view's point-indexed stage axis) carry
@@ -597,7 +597,7 @@ def gemm_async_tcgen05_impl(op_call: TilePrimitiveCall, sctx: DispatchContext) -
     is_2x2 = M == 64 and cta_group == 2
 
     # A may be given in the honest batched form A[2, M, K] for the M=64 .ws
-    # A-in-TMEM datapath, symmetric to the batched C above (SEM-WS-BATCH). The
+    # A-in-TMEM datapath, symmetric to the batched C above. The
     # leading dim is the two 64-lane halves the .ws read consumes: an M=64 .ws
     # sources A from BOTH lane-halves (lanes 0-63 and 64-127), and a flat 2D
     # A[M, K] only describes lanes 0-63. The fold layout
@@ -673,7 +673,7 @@ def gemm_async_tcgen05_impl(op_call: TilePrimitiveCall, sctx: DispatchContext) -
                 # stride gap between atom blocks) would silently take the
                 # local inner stride and drop the outer structure, so a
                 # single MMA spanning several atom groups would walk wrong
-                # addresses (audit B7 — same hazard class as the fixed
+                # addresses (same hazard class as the fixed
                 # majorness/field desync). mma_shared_layout-family layouts
                 # always produce single-iter groups; anything else falls
                 # through to the "no MMA SMEM descriptor matches" rejection.
@@ -1010,7 +1010,7 @@ def gemm_async_tcgen05_impl(op_call: TilePrimitiveCall, sctx: DispatchContext) -
         except (AssertionError, ValueError):
             packed_n2 = False
 
-    # Audit B13 (datapath x ws coupling): for cta_group::1 the packed
+    # Datapath x ws coupling: for cta_group::1 the packed
     # (M, 2, N//2):(1@TLane, 64@TLane, 1@TCol) organization is the M=64
     # weight-stationary datapath (PTX ISA 8.8 §9.7.16.10.5, Layout E); a
     # non-ws cta_group::1 M=64 MMA writes the scattered Layout F instead. The
@@ -1021,7 +1021,7 @@ def gemm_async_tcgen05_impl(op_call: TilePrimitiveCall, sctx: DispatchContext) -
     # contradiction (the layout says .ws) and is rejected. The cta_group::2
     # 2x2 path (Layout B) is a different, non-ws organization and is unaffected.
     #
-    # WS-TWO-HALVES (proof §2.3): an M=64 .ws produces the two Layout-E banks
+    # An M=64 .ws produces the two Layout-E banks
     # as bank_upper = A_upper·B_left, bank_lower = A_lower·B_right — two
     # half-MMAs, not one gemm broadcast over N. What the halves are depends on
     # A's scope, and the dispatch knows the scope (`a_is_tmem`):
@@ -1049,7 +1049,7 @@ def gemm_async_tcgen05_impl(op_call: TilePrimitiveCall, sctx: DispatchContext) -
             )
         weight_stationary = True
 
-    # WS-TWO-HALVES dual check (proof §2.3): an M=64 cta_group::1 .ws writes
+    # Dual check: an M=64 cta_group::1 .ws writes
     # its output in the Layout-E fold (packed_n2). If the caller forces .ws
     # but declared C in the identity / Layout-F organization instead, the
     # datapath writes the two banks to lanes {m, m+64} while the caller reads
@@ -1067,7 +1067,7 @@ def gemm_async_tcgen05_impl(op_call: TilePrimitiveCall, sctx: DispatchContext) -
             "for a non-ws (Layout-F) M=64 MMA."
         )
 
-    # WS-TWO-HALVES A-side check (proof §2.3, SEM-WS-BATCH): an M=64 .ws with A
+    # A-side check: an M=64 .ws with A
     # in TMEM reads A from BOTH 64-lane halves. A flat 2D A[M, K] describes only
     # lanes 0-63, so it can neither express nor let the dispatch verify the
     # second-half occupancy the datapath consumes. Require the honest batched
@@ -1097,7 +1097,7 @@ def gemm_async_tcgen05_impl(op_call: TilePrimitiveCall, sctx: DispatchContext) -
     #   * Layout E: cta_group::1 .ws                 (head64 QK)
     #   * Layout B: cta_group::2 dense (non-.ws)     (small_topk QK)
     # Each bank produces the matching partial (A_bank_b · B_bank_b); the kernel
-    # reduces the two banks (see gemm proof Theorem 1', Round-2b). Any other
+    # reduces the two banks. Any other
     # datapath has no such fold — reject.
     _batched_ok = (weight_stationary and cta_group == 1 and M == 64) or (
         not weight_stationary and cta_group == 2 and M == 64

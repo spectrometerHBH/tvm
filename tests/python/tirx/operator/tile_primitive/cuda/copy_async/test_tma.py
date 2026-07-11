@@ -2476,7 +2476,7 @@ def test_copy_tma_optimized_folded_view_placement_matches_declared_layout(
 
 
 # ---------------------------------------------------------------------------
-# Audit regression tests (TMA proof §5, A-series findings): merge+promote
+# Regression tests: merge+promote
 # soundness, promoted-unit validation, unfixable-alignment declines, and the
 # tensormap cache key.
 # ---------------------------------------------------------------------------
@@ -2513,7 +2513,7 @@ def _tensormap_encode_calls(stmt):
 
 
 def test_copy_tma_merge_promote_positive_pin():
-    """Positive pin for the merge+promote path (audit A1 noted it had zero
+    """Positive pin for the merge+promote path (noted it had zero
     test pins repo-wide): a full uint8 (64, 8) copy has a non-innermost byte
     stride of 8 (< 16), the direct merge is blocked by boxDim > 256
     (64*8 = 512), so the plan promotes uint8 -> uint16 and then merges to a
@@ -2535,7 +2535,7 @@ def test_copy_tma_merge_promote_positive_pin():
 
 
 def test_copy_tma_promote_declines_odd_box_and_coord():
-    """Audit A1: ``try_promote`` halves the innermost box and coord_base, so
+    """``try_promote`` halves the innermost box and coord_base, so
     both must be provably even. An odd box used to be floordiv'd (silently
     dropping the last element) and an odd coord_base mis-addressed by one
     element; the promotion must now be declined, leaving the plan in the
@@ -2581,7 +2581,7 @@ def test_copy_tma_promote_declines_odd_box_and_coord():
 
 
 def test_copy_tma_declines_odd_box_promotion_end_to_end():
-    """Audit A1 (negative, end-to-end): a copy whose innermost box is odd
+    """Negative, end-to-end: a copy whose innermost box is odd
     (5 of 8 uint8 columns) cannot be promoted and the 8-byte non-innermost
     stride cannot be merged away, so the dispatch must decline loudly
     instead of encoding a tensormap that halves the odd box."""
@@ -2598,7 +2598,7 @@ def test_copy_tma_declines_odd_box_promotion_end_to_end():
 
 
 def test_copy_tma_validate_hw_constraints_uses_promoted_dtype():
-    """Audit A2: the swizzle-atom box-fit check must compare the plan's box
+    """the swizzle-atom box-fit check must compare the plan's box
     (promoted units) against the atom width in ``plan.elem_dtype`` units. A
     box of 128 uint16 elements spans 256B and does NOT fit the 128B swizzle
     atom; validating it against the original uint8 buffer dtype (atom width
@@ -2689,7 +2689,7 @@ def test_copy_tma_declines_oversized_box_end_to_end():
 
 
 def test_copy_tma_oob_nan_declined_after_promotion():
-    """Audit A2 (same family): ``oob='nan'`` is validated against the buffer
+    """Same family: ``oob='nan'`` is validated against the buffer
     dtype before planning, but merge+promote re-types the descriptor as
     uintN, which the host wrapper rejects for NaN fill. The dispatch must
     decline instead of failing late in host init."""
@@ -2731,7 +2731,7 @@ def test_copy_tma_declines_unfixable_alignment_at_dispatch():
 
 
 def test_copy_tma_tensormap_cache_key_includes_promotion_dtype():
-    """Audit A4: two copies over the same tensor pointer whose plans differ
+    """two copies over the same tensor pointer whose plans differ
     only in promotion level collide on every numeric cache-key field: a
     (32, 8) uint8 view merges un-promoted to shape/box 256 uint8, while the
     (64, 8) view promotes once and merges to shape/box 256 uint16. The cache

@@ -811,7 +811,7 @@ def test_cp_rejects_decompress_on_generic_path():
 
 def test_cp_rejects_non_16b_aligned_row_group_stride():
     """The descriptor SBO field is encoded in 16B units: an smem layout whose
-    8-row-group stride is not 16B-divisible must be rejected (audit A1)."""
+    8-row-group stride is not 16B-divisible must be rejected."""
     bits = 16
     C = 128 // bits  # 8 bf16 = one 16B unit per row
     # Non-swizzled (32, 8) tile: rows in (4, 8) groups; the 8-row blocks are
@@ -837,7 +837,7 @@ def test_cp_rejects_non_16b_aligned_row_group_stride():
 
 def test_cp_rejects_non_canonical_swizzle_family():
     """A SwizzleLayout outside the canonical mma atom family (wrong
-    per_element for the dtype) must be rejected (audit A2)."""
+    per_element for the dtype) must be rejected."""
     bits = 16
     C = 128 // bits
     # per_element=2 is the f32 family; using it with a bf16 source disagrees

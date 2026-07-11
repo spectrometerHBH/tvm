@@ -2623,7 +2623,7 @@ def test_gemm_tcgen05_weight_stationary_codegen():
 
 
 def test_gemm_tcgen05_dense_descI_rejected():
-    """Dense ``descI=`` was removed (audit B11): the dispatcher self-encodes.
+    """Dense ``descI=`` was removed: the dispatcher self-encodes.
 
     A hand-passed dense descI performed zero cross-checks against the
     dispatcher-constructed descA/descB majorness — historically this masked
@@ -2675,7 +2675,7 @@ def _build_cta1_m64_packed_c_kernel(weight_stationary=None):
             T.ptx.tcgen05.alloc(T.address_of(tmem_addr[0]), n_cols=512, cta_group=1)
         T.cuda.cta_sync()
         # A-in-TMEM .ws reads A from both 64-lane halves, so A is declared in
-        # the honest batched A[2, M, K] fold (the A-side of SEM-WS-BATCH).
+        # the honest batched A[2, M, K] fold (the A-side).
         A_tmem = T.decl_buffer(
             (2, M, K),
             A_dtype,
@@ -2748,7 +2748,7 @@ def _build_cta1_m64_batched_c_kernel():
         if warp_id == 0:
             T.ptx.tcgen05.alloc(T.address_of(tmem_addr[0]), n_cols=512, cta_group=1)
         T.cuda.cta_sync()
-        # Honest batched A[2, M, K] fold (A-side of SEM-WS-BATCH), matching the
+        # Honest batched A[2, M, K] fold (A-side), matching the
         # batched C below: both banks of the M=64 .ws are explicit.
         A_tmem = T.decl_buffer(
             (2, M, K),
@@ -2781,7 +2781,7 @@ def _build_cta1_m64_batched_c_kernel():
 
 def _build_cta1_m64_identity_c_ws_kernel():
     """M=64 cta_group::1 gemm forcing .ws but declaring C in the identity
-    (Layout-D) layout instead of the Layout-E fold — the WS-TWO-HALVES dual
+    (Layout-D) layout instead of the Layout-E fold — the dual
     error the dispatch must reject."""
 
     M, N, K = 64, 128, 16
@@ -2831,7 +2831,7 @@ def _build_cta1_m64_identity_c_ws_kernel():
 def test_gemm_tcgen05_cta1_m64_ws_requires_layout_e_c():
     """A forced .ws (M=64, cta_group::1) with an identity/Layout-F C is
     rejected: .ws writes the Layout-E fold, so an identity C would read the
-    two banks from the wrong lanes (WS-TWO-HALVES dual error)."""
+    two banks from the wrong lanes (dual error)."""
 
     target = tvm.target.Target("cuda")
     with target:
@@ -2846,7 +2846,7 @@ def test_gemm_tcgen05_cta1_m64_ws_requires_layout_e_c():
 def _build_cta1_m64_flat_a_ws_kernel():
     """M=64 cta_group::1 .ws with A in TMEM declared as a flat 2D [M, K]
     identity (lanes 0-63 only) instead of the batched A[2, M, K] fold — the
-    A-side WS-TWO-HALVES error the dispatch must reject (the A-side dual of the
+    A-side error the dispatch must reject (the A-side dual of the
     identity-C reject above)."""
 
     M, N, K = 64, 128, 16
@@ -2974,7 +2974,7 @@ def test_gemm_tcgen05_batched_a_rejects_unproven_datapath():
 
 def test_gemm_tcgen05_cta1_m64_accepts_batched_c_layout_ws():
     """The honest batched C[2, M, N//2] .ws output form is accepted and emits
-    byte-identically to the packed C[M, 2, N//2] form (SEM-WS-BATCH): the two
+    byte-identically to the packed C[M, 2, N//2] form: the two
     describe the same physical Layout-E tile."""
 
     target = tvm.target.Target("cuda")
@@ -3020,7 +3020,7 @@ def test_gemm_tcgen05_cta1_m64_packed_c_infers_weight_stationary():
 
 
 # ---------------------------------------------------------------------------
-# Dispatch-level audit regression tests (gemm proof §5, B-series findings).
+# Dispatch-level regression tests.
 # These call gemm_async_tcgen05_impl directly on a constructed
 # TilePrimitiveCall so rejection paths are pinned without full kernel
 # compilation.
@@ -3079,7 +3079,7 @@ def _make_gemm_tcgen05_call(
 
 
 def test_gemm_tcgen05_no_swizzle_col_major_rejects_non_128B_contiguous():
-    """Audit B1: the col-major-view no-swizzle branch encodes the SBO field as
+    """the col-major-view no-swizzle branch encodes the SBO field as
     the literal 8 (128B row-group pitch), which only matches the packed ABI
     when the contiguous dim spans exactly 128B (64 bf16 elements). A larger
     contiguous dim (M=128 here) used to be accepted with a silently wrong
@@ -3098,7 +3098,7 @@ def test_gemm_tcgen05_no_swizzle_col_major_rejects_non_128B_contiguous():
 
 
 def test_gemm_tcgen05_no_swizzle_packed_16b_rejects_non_16bit_dtype():
-    """Audit B2: the packed-16B no-swizzle branch used to encode
+    """the packed-16B no-swizzle branch used to encode
     ``sdo = elem_per_16B``, which equals the true SBO field (8 = 128B row
     pitch, PTX ISA §9.7.16.3.2) only for 16-bit dtypes. An fp8 packed-16B
     layout (elem_per_16B = 16) used to be accepted with sdo=16 — it must now
@@ -3118,7 +3118,7 @@ def test_gemm_tcgen05_no_swizzle_packed_16b_rejects_non_16bit_dtype():
 
 
 def test_gemm_tcgen05_instr_desc_fold_mirrors_runtime_shape_rules():
-    """Audit B4: the compile-time descI fold must run the runtime encoder's
+    """the compile-time descI fold must run the runtime encoder's
     shape validation. cta_group=1 with descriptor M=128 requires N % 16 == 0;
     the tile chooser alone only guarantees N % 8, so M=128/N=24 used to fold
     a descriptor the runtime encoder would reject."""
@@ -3136,7 +3136,7 @@ def test_gemm_tcgen05_instr_desc_fold_mirrors_runtime_shape_rules():
 
 
 def test_gemm_tcgen05_rejects_tf32_mn_major():
-    """Audit B6: tf32 MN-major operands are PTX-illegal without the
+    """tf32 MN-major operands are PTX-illegal without the
     128B-32B-atomicity swizzle, which the atom matcher never produces. A
     tf32 (is_AB_tf32) B operand matching MN-major used to be silently
     encoded; it must now be rejected."""
@@ -3159,7 +3159,7 @@ def test_gemm_tcgen05_rejects_tf32_mn_major():
 
 
 def test_gemm_tcgen05_rejects_non_uniform_atom_grid():
-    """Audit B7: ``_try_atom`` reads only the innermost iter of each tiler
+    """``_try_atom`` reads only the innermost iter of each tiler
     dimension for the LBO/SBO fields, so each dimension must group into a
     single iter. A swizzled layout whose M-direction atom tiling has a
     stride gap (atoms (2,4) with outer stride 4096 instead of 2048) used to
@@ -3187,7 +3187,7 @@ def test_gemm_tcgen05_rejects_non_uniform_atom_grid():
 
 
 def test_gemm_tcgen05_dense_descI_rejected_at_dispatch():
-    """Audit B11 (dispatch-level twin of the compile-path test above)."""
+    """Dispatch-level twin of the compile-path test above."""
     M, N, K = 64, 256, 64
     dtype = "bfloat16"
     A_layout = mma_shared_layout(dtype, SwizzleMode.SWIZZLE_128B_ATOM, (M, K))
