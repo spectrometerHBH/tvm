@@ -94,7 +94,7 @@ F. Split each side's iters into three segments by grouping the flattened
      s_buf.layout's SwizzleLayout (if any)
 G. Alignment checks:
    - t_iso TCol offset ≡ 0 (mod 32-bit)
-   - t_iso TLane offset ≡ 0 (checked when ``shape`` is explicit in config)
+   - t_iso TLane offset folds into the taddr lane half-word
    - s_iso m offset ≡ 0 (mod 16B for sw=0; mod atom_size for sw>0)
    - middle iter strides 16B-aligned
 H. middle 1-1 correspondence (simple-mode): t_middle and s_middle have same
@@ -102,7 +102,7 @@ H. middle 1-1 correspondence (simple-mode): t_middle and s_middle have same
 I. Emit:
    - SmemDescriptor encoded once at SMEM base (hoisted via post_buffer_def_stmt).
    - Loop over middle iters; each cp uses ``desc.add_16B_offset(init + loop)``
-     and writes to ``tmem_addr + t_col0 + Σ i_j * t_step_j``.
+     and writes to ``tmem_addr + t_addr_off + Σ i_j * t_step_j``.
 """
 
 import functools
@@ -328,7 +328,8 @@ def _build_plan(op_call: TilePrimitiveCall):
       - LDO_field, SDO_field, atom_K_byte
       - middle_iters: list of (extent, s_step_16B, t_step_32bcol)
       - init_off_16B (PrimExpr)
-      - t_col0 (PrimExpr, TMEM 32-bit col offset for cp's first call)
+      - t_addr_off (PrimExpr, taddr offset of the first cp: 32-bit col
+        offset plus the region row offset in the lane half-word)
     """
     op_call = TilePrimitiveCall.downcast(op_call)
     if op_call.config.get("shape") is not None:
@@ -584,13 +585,25 @@ def _plan_for_shape(op_call: TilePrimitiveCall, shape: str, multicast: str):
     if not analyzer.can_prove_equal(t_col_offset_expr % elem_per_32b, 0):
         raise ValueError(f"t TCol offset {t_col_offset_expr} not provably 32b-aligned")
 
-    # G.1b: t TLane offset must be 0 (cp anchors at lane 0). Only enforced
-    # with an explicit shape config — the legacy default path historically
-    # ignored the lane offset; keep it byte-identical.
-    if "shape" in op_call.config:
-        for ax, val in t_iso.offset.items():
-            if ax == TLane and not analyzer.can_prove_equal(val, 0):
-                raise ValueError(f"t TLane offset {val} not provably 0 (unsupported)")
+    # G.1b: a region row offset folds into the taddr lane half-word
+    # ([31:16]), same as the lane-tiled middle steps. The full lane footprint
+    # (lane pattern + multicast replica + lane-tiled middles) must still fit
+    # the 128-lane space — e.g. a warpx2 mirror spans all 128 lanes, so any
+    # nonzero offset would write past lane 127.
+    t_lane_offset_expr = 0
+    for ax, val in t_iso.offset.items():
+        if ax == TLane:
+            t_lane_offset_expr = val
+            break
+    lane_span = 1
+    for it in list(t_p.shard) + list(t_p.replica):
+        if it.axis == TLane:
+            lane_span += (int(it.extent) - 1) * int(it.stride)
+    if not analyzer.can_prove(t_lane_offset_expr + lane_span <= 128):
+        raise ValueError(
+            f"t TLane offset {t_lane_offset_expr} overflows the 128-lane space "
+            f"(footprint spans {lane_span} lanes)"
+        )
 
     # G.2: s_iso m offset alignment.
     s_m_offset_expr = 0
@@ -645,7 +658,9 @@ def _plan_for_shape(op_call: TilePrimitiveCall, shape: str, multicast: str):
 
     SDO_field = SDO_byte // 16
     init_off_16B = s_m_offset_expr * dtype_bits // 8 // 16
-    t_col0 = t_col_offset_expr // elem_per_32b
+    t_addr_off = t_col_offset_expr // elem_per_32b
+    if not (isinstance(t_lane_offset_expr, int) and t_lane_offset_expr == 0):
+        t_addr_off = t_addr_off + t_lane_offset_expr * 65536
 
     return {
         "s_buf": s_buf,
@@ -662,7 +677,7 @@ def _plan_for_shape(op_call: TilePrimitiveCall, shape: str, multicast: str):
         "atom_K_byte": atom_K_byte,
         "middle_iters": middle_iters,
         "init_off_16B": init_off_16B,
-        "t_col0": t_col0,
+        "t_addr_off": t_addr_off,
     }
 
 
@@ -740,7 +755,7 @@ def copy_smem_tmem_impl(op_call: TilePrimitiveCall, sctx: DispatchContext) -> Pr
     sw = plan["swizzle_mode"]
     middle_iters = plan["middle_iters"]
     init_off_16B = plan["init_off_16B"]
-    t_col0 = plan["t_col0"]
+    t_addr_off = plan["t_addr_off"]
 
     # 128b atoms never read the descriptor LDO (single 16B unit per lane):
     # keep the legacy LDO=0 encoding. 256b atoms carry the derived field.
@@ -766,7 +781,7 @@ def copy_smem_tmem_impl(op_call: TilePrimitiveCall, sctx: DispatchContext) -> Pr
         @T.prim_func(check_well_formed=False)
         def impl():
             T.ptx.tcgen05.cp(
-                t_addr[0] + t_col0,
+                t_addr[0] + t_addr_off,
                 _cp_desc(init_off_16B),
                 shape=shape, cta_group=cta_group, multicast=multicast,
             )
@@ -787,7 +802,7 @@ def copy_smem_tmem_impl(op_call: TilePrimitiveCall, sctx: DispatchContext) -> Pr
             for flat in T.unroll(total):
                 t_off, s_off = T.meta_var(compute_offsets(flat))
                 T.ptx.tcgen05.cp(
-                    t_addr[0] + t_col0 + t_off,
+                    t_addr[0] + t_addr_off + t_off,
                     _cp_desc(init_off_16B + s_off),
                     shape=shape, cta_group=cta_group, multicast=multicast,
                 )

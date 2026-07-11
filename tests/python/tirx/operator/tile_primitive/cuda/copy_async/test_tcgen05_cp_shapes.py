@@ -134,6 +134,7 @@ def _make_cp_kernel(
     n_tmem_cols,
     extra_cfg=None,
     infer=False,
+    pre_zero=False,
 ):
     s_sl = tuple(slice(a, b) for a, b in s_region)
     t_sl = tuple(slice(a, b) for a, b in t_region)
@@ -168,6 +169,15 @@ def _make_cp_kernel(
             tmem = T.decl_buffer(
                 t_full_shape, dtype, scope="tmem", allocated_addr=tmem_addr[0], layout=t_full
             )
+            if pre_zero:
+                zero_reg = T.alloc_buffer((W32,), "uint32", scope="local")
+                for i in range(W32):
+                    zero_reg[i] = T.uint32(0)
+                for i in range(W32):
+                    T.ptx.tcgen05.st(tmem_addr[0], zero_reg[i], shape="32x32b", num=1, row=0, col=i)
+                T.ptx.tcgen05.wait.st()
+                T.cuda.cta_sync()
+                T.ptx.tcgen05.fence.after_thread_sync()
             if tid_in_wg == 0:
                 Tx.copy_async(tmem[t_sl], A_smem[s_sl], **cfg)
                 T.ptx.tcgen05.commit(cp_mbar.ptr_to([0]), cta_group=1)
@@ -400,6 +410,53 @@ def test_cp_128x128b_layout_infers_wider_256b_atom():
 
 @pytest.mark.gpu
 @pytest.mark.skipif(not env.has_cuda_compute(10), reason="need cuda compute >= 10.0")
+@pytest.mark.gpu
+@pytest.mark.skipif(not env.has_cuda_compute(10), reason="need cuda compute >= 10.0")
+def test_cp_4x256b_lane_tiled_partial_window():
+    """A region row offset folds into the taddr lane half-word: after
+    pre-zeroing tmem, copying into rows [4:12) of the (16, 4, C) Layout-F
+    scatter view lands on EXACTLY lanes {32q + 4..11} — those match the smem
+    rows bit-for-bit and every other lane reads back all-zero."""
+    dtype, bits = "bfloat16", 16
+    C = 16
+    W32 = C * bits // 32
+    lo, hi = 4, 12
+    s_full = mma_shared_layout(dtype, SwizzleMode.SWIZZLE_32B_ATOM, [64, C])
+    t_full = TileLayout(S[(16, 4, C) : (1 @ TLane, 32 @ TLane, 1 @ TCol)])
+    kernel = _make_cp_kernel(
+        s_full,
+        [64, C],
+        [(0, (hi - lo) * 4), (0, C)],
+        t_full,
+        [64, C],
+        [(lo * 4, hi * 4), (0, C)],
+        dtype,
+        None,
+        None,
+        W32,
+        32,
+        infer=True,
+        pre_zero=True,
+    )
+    mod = _compile(kernel)
+    A_np = tvm.testing.generate_random_array(dtype, (64, C))
+    dev = tvm.cuda(0)
+    A = tvm.runtime.tensor(A_np, dev)
+    B = tvm.runtime.tensor(np.zeros((128, W32), np.uint32), dev)
+    mod(A, B)
+    B_u16 = B.numpy().view(np.uint16).reshape(128, W32 * 2)
+    A_u16 = np.asarray(A_np).view(np.uint16)
+    written = {32 * q + lo + il for q in range(4) for il in range(hi - lo)}
+    for lane in range(128):
+        if lane in written:
+            q, il = lane // 32, lane % 32 - lo
+            np.testing.assert_array_equal(
+                B_u16[lane, :C], A_u16[il * 4 + q], err_msg=f"lane {lane}"
+            )
+        else:
+            assert not B_u16[lane].any(), f"lane {lane} must stay zero"
+
+
 def _make_cp_kernel_cta2(s_full, s_shape, t_full, t_shape, dtype, cfg, W32, n_cols):
     """2-CTA cluster harness: each CTA stages its own A[cbx] slice into smem;
     only the even CTA issues the cp (cta_group=2, commit cta_mask=3); both CTAs
@@ -715,8 +772,9 @@ def test_cp_rejects_unknown_shape():
 
 
 def test_cp_rejects_nonzero_tmem_lane_offset():
-    """Slicing the TMEM region at a non-zero lane must be rejected (the cp
-    anchors its multicast footprint at lane 0)."""
+    """A lane offset whose footprint overflows lane space must be rejected:
+    warpx2's +64 mirror spans all 128 lanes, so any nonzero offset would
+    write past lane 127."""
     bits = 16
     C = 128 // bits
     t_full = TileLayout(S[(128, C) : (1 @ TLane, 1 @ TCol)] + R[2 : 64 @ TLane])
@@ -734,7 +792,7 @@ def test_cp_rejects_nonzero_tmem_lane_offset():
         C * bits // 32,
         32,
     )
-    _assert_compile_raises(kernel, "TLane offset")
+    _assert_compile_raises(kernel, "overflows the 128-lane space")
 
 
 def test_cp_rejects_decompress_on_generic_path():

@@ -162,7 +162,7 @@ bits, plus the lane half-word for lane-tiled atoms):
 
     for flat in T.unroll(total):
         t_off, s_off = T.meta_var(compute_offsets(flat))
-        T.ptx.tcgen05.cp(t_addr[0] + t_col0 + t_off,
+        T.ptx.tcgen05.cp(t_addr[0] + t_addr_off + t_off,
                          smem_desc_add_16B_offset(desc_buf[0], init_off_16B + s_off),
                          shape=shape, cta_group=cta_group, multicast=multicast)
 
