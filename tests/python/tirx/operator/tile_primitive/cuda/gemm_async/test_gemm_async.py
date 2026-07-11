@@ -2475,7 +2475,7 @@ def test_gemm_tf32_with_tfloat32_tma():
     )
 
 
-def _build_smem_desc_kernel(smem_desc, weight_stationary=False, use_tx_instr_desc=False):
+def _build_smem_desc_kernel(smem_desc, weight_stationary=False, pass_descI=False):
     """Minimal cta_group=1 fp16 gemm_async kernel parametrized on ``smem_desc``."""
     C_shape, C_dtype, C_region = (128, 512), "float32", [(0, 128), (256, 384)]
     A_shape, A_dtype, A_sw = (3, 128, 64), "float16", 3
@@ -2526,10 +2526,10 @@ def _build_smem_desc_kernel(smem_desc, weight_stationary=False, use_tx_instr_des
         T.ptx.mbarrier.try_wait(tma_mbar.ptr_to([0]), 0)
         T.cuda.cta_sync()
         if tid_in_wg == 0:
-            if use_tx_instr_desc:
+            if pass_descI:
                 desc_i: T.uint32
-                Tx.tcgen05_instr_desc(
-                    desc_i,  # noqa: F821
+                T.ptx.tcgen05.encode_instr_descriptor(
+                    T.address_of(desc_i),  # noqa: F821
                     d_dtype=C_dtype,
                     a_dtype=A_dtype,
                     b_dtype=B_dtype,
@@ -2639,7 +2639,7 @@ def test_gemm_tcgen05_dense_descI_rejected():
                 tvm.IRModule(
                     {
                         "main": _build_smem_desc_kernel(
-                            "local_hoist", weight_stationary=True, use_tx_instr_desc=True
+                            "local_hoist", weight_stationary=True, pass_descI=True
                         )
                     }
                 ),

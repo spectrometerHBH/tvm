@@ -89,45 +89,6 @@ def test_roundtrip_scopeid2():
     assert_structural_equal(test, from_source(code))
 
 
-def test_tile_tcgen05_instr_desc_shorthand():
-    @T.prim_func(private=True)
-    def test() -> None:
-        desc_i: T.uint32 = T.uint32(0)
-        Tx.tcgen05_instr_desc(
-            desc_i,
-            d_dtype="float32",
-            a_dtype="bfloat16",
-            b_dtype="bfloat16",
-            M=64,
-            N=512,
-            K=16,
-            trans_a=False,
-            trans_b=False,
-            n_cta_groups=1,
-        )
-
-    @T.prim_func(private=True)
-    def expected() -> None:
-        desc_i: T.uint32 = T.uint32(0)
-        T.ptx.tcgen05.encode_instr_descriptor(
-            T.address_of(desc_i),
-            d_dtype="float32",
-            a_dtype="bfloat16",
-            b_dtype="bfloat16",
-            M=64,
-            N=512,
-            K=16,
-            trans_a=False,
-            trans_b=False,
-            n_cta_groups=1,
-        )
-
-    code = test.script()
-    assert "Tx.tcgen05_instr_desc" not in code
-    assert "T.ptx.tcgen05.encode_instr_descriptor(T.address_of(desc_i)" in code
-    assert_structural_equal(test, expected)
-
-
 def test_roundtrip_scopeid_deferred():
     """Deferred ScopeIdDef (extent=None) survives print→parse round-trip
     as a no-arg ``T.cta_id()``/``T.thread_id()`` etc. call."""
