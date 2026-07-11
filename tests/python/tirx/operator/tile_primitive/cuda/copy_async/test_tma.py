@@ -529,8 +529,10 @@ TMA_CASES = [
         s_shape=(8, 256), s_region=((0, 8), (0, 256)),
         gmem_layout=TileLayout(S[8, 256]),
         smem_layout=mma_shared_layout("float16", 0, (8, 256)),
-        impl_spec=dict(loop_extents=[1], dim=2, coord_fn=lambda lv: _zeros(2)),
-        encode_args=[2, 256, 8, 512, 256, 8, 1, 1, 0, 0, 2, 0],
+        # SWIZZLE_NONE now yields the 8x128b packed-16B atom (3-axis), so the
+        # TMA descriptor is rank 3 like the swizzled variants (62f57feda6).
+        impl_spec=dict(loop_extents=[1], dim=3, coord_fn=lambda lv: _zeros(3)),
+        encode_args=[3, 8, 8, 32, 512, 16, 8, 8, 32, 1, 1, 1, 0, 0, 2, 0],
     ),
     _tma_case(
         id="g2s-2d-8x256-int8",
@@ -979,8 +981,11 @@ TMA_CASES = [
         s_shape=(8, 256), s_region=((0, 8), (0, 256)),
         gmem_layout=TileLayout(S[3, 8, 256]),
         smem_layout=mma_shared_layout("float16", 0, (8, 256)),
-        impl_spec=dict(loop_extents=[1], dim=3, coord_fn=lambda lv: _zeros(3)),
-        encode_args=[3, 256, 8, 3, 512, 4096, 256, 8, 1, 1, 1, 1, 0, 0, 2, 0],
+        # SWIZZLE_NONE now yields the 8x128b packed-16B atom (3-axis), so the
+        # descriptor gains one box dim (rank 3 -> 4) like the swizzled variants
+        # (62f57feda6).
+        impl_spec=dict(loop_extents=[1], dim=4, coord_fn=lambda lv: _zeros(4)),
+        encode_args=[4, 8, 8, 32, 3, 512, 16, 4096, 8, 8, 32, 1, 1, 1, 1, 1, 0, 0, 2, 0],
     ),
     _tma_case(
         id="s2g-multiphase-3x8x256-int8",
