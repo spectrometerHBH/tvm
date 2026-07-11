@@ -787,7 +787,13 @@ TMA_CASES = [
         encode_args=[5, 64, 8, 8, 4, 7, 1024, 128, 8192, 32768, 64, 8, 4, 2, 1, 1, 1, 1, 1, 1, 0, 3, 2, 0],  # noqa: E501
     ),
     # ======================================================================
-    # G2S — transpose-like permuted layouts
+    # G2S — transpose-like permuted layouts: DECLINED.
+    # A column-major smem tile makes the gmem-contiguous dim strided in smem,
+    # so the fastest TMA box collapses to a single element (boxDim[0]=1). For
+    # fp16 that is 2 B, which fails cuTensorMap's "boxDim[0]*elementSize must be
+    # a multiple of 16 B" rule — so these are declined at dispatch rather than
+    # emitting a descriptor the host wrapper would reject (they had no GPU
+    # round-trip and no production user; real transposes use a legal box).
     # ======================================================================
     _tma_case(
         id="g2s-transpose-32x64",
@@ -795,12 +801,7 @@ TMA_CASES = [
         s_shape=(32, 64), s_region=((0, 32), (0, 64)),
         gmem_layout=TileLayout(S[32, 64]),
         smem_layout=TileLayout(S[(32, 64):(1, 32)]),
-        impl_spec=dict(
-            loop_extents=[2048], dim=2,
-            coord_fn=lambda lv: [lv[0] % 64, lv[0] // 64],
-            elem_offset_fn=lambda lv: lv[0] % 64 * 32 + lv[0] // 64,
-        ),
-        encode_args=[2, 64, 32, 128, 1, 1, 1, 1, 0, 0, 2, 0],
+        raises=(Exception, "not a multiple of 16 B"),
     ),
     _tma_case(
         id="g2s-transpose-64x32",
@@ -808,12 +809,7 @@ TMA_CASES = [
         s_shape=(64, 32), s_region=((0, 64), (0, 32)),
         gmem_layout=TileLayout(S[64, 32]),
         smem_layout=TileLayout(S[(64, 32):(1, 64)]),
-        impl_spec=dict(
-            loop_extents=[2048], dim=2,
-            coord_fn=lambda lv: [lv[0] % 32, lv[0] // 32],
-            elem_offset_fn=lambda lv: lv[0] % 32 * 64 + lv[0] // 32,
-        ),
-        encode_args=[2, 32, 64, 64, 1, 1, 1, 1, 0, 0, 2, 0],
+        raises=(Exception, "not a multiple of 16 B"),
     ),
     _tma_case(
         id="g2s-transpose-partial-region",
@@ -821,12 +817,7 @@ TMA_CASES = [
         s_shape=(64, 64), s_region=((0, 64), (0, 64)),
         gmem_layout=TileLayout(S[128, 64]),
         smem_layout=TileLayout(S[(64, 64):(1, 64)]),
-        impl_spec=dict(
-            loop_extents=[4096], dim=2,
-            coord_fn=lambda lv: [lv[0] % 64, lv[0] // 64],
-            elem_offset_fn=lambda lv: lv[0] % 64 * 64 + lv[0] // 64,
-        ),
-        encode_args=[2, 64, 128, 128, 1, 1, 1, 1, 0, 0, 2, 0],
+        raises=(Exception, "not a multiple of 16 B"),
     ),
     _tma_case(
         id="g2s-transpose-partial-offset",
@@ -834,12 +825,7 @@ TMA_CASES = [
         s_shape=(64, 32), s_region=((0, 64), (0, 32)),
         gmem_layout=TileLayout(S[128, 64]),
         smem_layout=TileLayout(S[(64, 32):(1, 64)]),
-        impl_spec=dict(
-            loop_extents=[2048], dim=2,
-            coord_fn=lambda lv: [lv[0] % 32, lv[0] // 32 + 64],
-            elem_offset_fn=lambda lv: lv[0] % 32 * 64 + lv[0] // 32,
-        ),
-        encode_args=[2, 64, 128, 128, 1, 1, 1, 1, 0, 0, 2, 0],
+        raises=(Exception, "not a multiple of 16 B"),
     ),
     # ======================================================================
     # G2S — non-prefix compact (4D gmem collapses to one TMA tile)
@@ -2624,6 +2610,59 @@ def test_copy_tma_validate_hw_constraints_uses_promoted_dtype():
     assert ok_u8
 
 
+def test_copy_tma_declines_illegal_boxdim():
+    """cuTensorMap forbids boxDim[i] > 256 and requires boxDim[0]*elementSize
+    to be a multiple of 16 B (the host wrapper ICHECKs both). ``_validate_hw_
+    constraints`` must decline such plans at dispatch — a native oversized box
+    has no merge/promote fold and a sub-16-byte inner box cannot be widened —
+    instead of emitting a descriptor the host rejects late in init."""
+    from tvm.tirx.cuda.operator.tile_primitive.copy_async.tma import (
+        DescDim,
+        TmaPlan,
+        _validate_hw_constraints,
+    )
+    from tvm.tirx.cuda.operator.tile_primitive.tma_utils import SwizzleMode
+
+    def plan(dims, elem_bytes=1, dtype="uint8"):
+        return TmaPlan(
+            swizzle_mode=SwizzleMode.SWIZZLE_NONE,
+            dims=dims,
+            issue_axes=[],
+            tensor_ptr=Var("p", "handle"),
+            elem_bytes=elem_bytes,
+            elem_dtype=dtype,
+        )
+
+    # boxDim > 256 (single contiguous dim): only the per-dim <=256 check catches it.
+    ok, reason = _validate_hw_constraints(plan([DescDim(512, 1, 512, 0)]))
+    assert not ok and "256" in reason
+    # boxDim > 256 on a NON-innermost dim, inner box 16B-legal: same check.
+    ok, reason = _validate_hw_constraints(plan([DescDim(300, 16, 300, 0), DescDim(16, 1, 16, 0)]))
+    assert not ok and "256" in reason
+    # boxDim[0]*elementSize not a multiple of 16 (7 uint8 = 7 B): declined.
+    ok, reason = _validate_hw_constraints(plan([DescDim(7, 1, 7, 0)]))
+    assert not ok and "multiple of 16" in reason
+    # Legal: box 256 uint8 = 256 B (<=256 and 16B-aligned) passes both checks.
+    ok, _ = _validate_hw_constraints(plan([DescDim(256, 1, 256, 0)]))
+    assert ok
+
+
+def test_copy_tma_declines_oversized_box_end_to_end():
+    """A contiguous uint8[512] copy needs a single boxDim of 512 (> 256, no
+    fold), so it is declined at dispatch rather than failing the host wrapper's
+    ICHECK at kernel launch."""
+    with pytest.raises(Exception, match="256|multiple of 16"):
+        _make_tma_call(
+            g_shape=(512,),
+            g_region=((0, 512),),
+            s_shape=(512,),
+            s_region=((0, 512),),
+            gmem_layout=TileLayout(S[(512,)]),
+            smem_layout=TileLayout(S[(512,)]),
+            dtype="uint8",
+        )
+
+
 def test_copy_tma_oob_nan_declined_after_promotion():
     """Audit A2 (same family): ``oob='nan'`` is validated against the buffer
     dtype before planning, but merge+promote re-types the descriptor as
@@ -2648,12 +2687,13 @@ def test_copy_tma_oob_nan_declined_after_promotion():
 
 
 def test_copy_tma_declines_unfixable_alignment_at_dispatch():
-    """Audit A3: when ``_plan_needs_alignment_fix`` triggers the merge but the
-    merge cannot fix the plan (here: the innermost dim is partially boxed, 7
-    of 8 uint8 columns, so no merge is legal), the plan must be declined at
-    dispatch — enabling variant fallback — rather than accepted and failed
-    late by the host wrapper's 16-byte stride ICHECK."""
-    with pytest.raises(Exception, match="not a provable multiple of 16"):
+    """When the merge cannot fix an unaligned plan (here: the innermost dim is
+    partially boxed, 7 of 8 uint8 columns, so no merge is legal), the plan must
+    be declined at dispatch — enabling variant fallback — rather than accepted
+    and failed late by the host wrapper's 16-byte ICHECK. The partial box
+    leaves boxDim[0]*elementSize un-16B-aligned, so the boxDim[0] check
+    declines it."""
+    with pytest.raises(Exception, match="not a multiple of 16"):
         _make_tma_call(
             g_shape=(64, 8),
             g_region=((0, 64), (0, 7)),

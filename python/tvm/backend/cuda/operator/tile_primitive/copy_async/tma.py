@@ -1155,6 +1155,28 @@ def _validate_hw_constraints(plan: TmaPlan) -> tuple:
     if not _swizzle_inner_box_fits(plan.elem_dtype, plan.swizzle_mode, inner.box):
         return False, "TMA innermost box exceeds the swizzle atom size"
 
+    # Every boxDim must be <= 256 (cuTensorMap hardware limit, enforced by the
+    # host wrapper's ICHECK). Merge+promote only shrinks boxes that fold into a
+    # contiguous neighbour; a native oversized box (e.g. a 512-element
+    # contiguous copy) has no fold, so decline it here instead of failing late
+    # in host init. Only provably-oversized boxes are declined; a symbolic box
+    # is left for the runtime check.
+    for d in plan.dims:
+        if analyzer.can_prove(d.box > 256):
+            return False, f"TMA boxDim {d.box} exceeds the hardware limit of 256"
+
+    # boxDim[0] (the innermost dim) * elementSize must be a multiple of 16 bytes
+    # (cuTensorMap requirement on the non-interleaved, non-packed path). A
+    # provably-misaligned inner box (e.g. a uint8 box of 7 -> 7 B) is declined
+    # so the shrink search can try another prefix instead of hitting the host
+    # ICHECK.
+    inner_box_bytes = analyzer.simplify(inner.box * plan.elem_bytes)
+    if analyzer.can_prove(tvm.tirx.floormod(inner_box_bytes, 16) != 0):
+        return False, (
+            f"TMA innermost boxDim[0]*elementSize = {inner_box_bytes} B is not a "
+            f"multiple of 16 B (cuTensorMap requirement)"
+        )
+
     # Non-innermost byte strides must be multiples of 16 (cuTensorMap
     # requirement). The merge+promote rewrite tries to fix violating plans,
     # but it can fail (e.g. partially-boxed dims cannot merge); re-checking
