@@ -57,7 +57,7 @@ datapath organization (Figures 213/207, §9.7.16.10.5: M 0-31 in warp-ranks 0
 and 2, M 32-63 in warp-ranks 1 and 3). ``4x256b`` writes one row per
 warp-quadrant datapath (lanes 0/32/64/96). All row→lane mappings and replica
 structures are verified bit-exactly on B200 hardware by the round-trip tests
-in ``test_tcgen05_cp_shapes.py``.
+in ``test_tcgen05_cp.py``.
 
 Algorithm
 ---------
@@ -181,7 +181,7 @@ def _cp_lane_replica_pattern(shape: str, multicast: str):
     lanes 0, 32, 64, 96 → lane (4, 32@TLane), no replica.
 
     All mappings are verified bit-exactly on B200 hardware by the round-trip
-    tests in ``test_tcgen05_cp_shapes.py``.
+    tests in ``test_tcgen05_cp.py``.
     """
     rows, _ = _shape_dims(shape)
     if multicast == "":

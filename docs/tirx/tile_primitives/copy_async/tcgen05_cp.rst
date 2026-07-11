@@ -39,7 +39,7 @@ Shape selection
   a bare warpx4 copy still resolves to ``32x128b.warpx4``.
 
 Each shape pins a tmem row→lane mapping and replica (multicast) pattern
-(verified bit-exactly on B200 by ``test_tcgen05_cp_shapes.py``):
+(verified bit-exactly on B200 by ``test_tcgen05_cp.py``):
 
 .. list-table::
    :header-rows: 1
@@ -112,7 +112,7 @@ Demonstration program
 
 A warpgroup allocates 16 tmem columns, fills a ``32×16`` ``uint8`` shared tile,
 and copies it into tmem — no shape config, the planner infers
-``32x128b.warpx4`` from the layouts (from ``test_smem_tmem.py``; readback /
+``32x128b.warpx4`` from the layouts (from ``test_tcgen05_cp.py``; readback /
 dealloc tail elided):
 
 .. code-block:: python
@@ -178,7 +178,7 @@ Generated CUDA
     "tcgen05.cp.cta_group::1.32x128b.warpx4 [%0], %1;"   // [%0]=tmem addr, %1=descriptor
 
 (Compiled for ``sm_100a``. End-to-end correctness — including the tmem readback
-— is covered by ``test_smem_tmem.py`` and ``test_tcgen05_cp_shapes.py``.)
+— is covered by ``test_tcgen05_cp.py``.)
 
 How inputs change the algorithm
 -------------------------------
