@@ -386,6 +386,83 @@ def _prepare_gather4_plan_inputs(
     return g_st_plan, g_ext_plan, s_ext_plan, dst_gather_axis
 
 
+def _validate_gather4_dst_layout(s_buf: Buffer, dst_gather_axis: int, plan) -> None:
+    """tile::gather4 writes 4 rows box-linearly at the box payload width; the
+    declared smem layout must place consecutive dst rows at exactly that stride
+    (swizzle is applied to the flat offset, so the pre-swizzle tile row stride is
+    the invariant). A padded destination silently corrupts rows 1..3 otherwise.
+    """
+    payload_w = 1
+    for b in plan.box_dim:
+        payload_w = payload_w * int(b)
+    analyzer = Analyzer()
+    rank = len(s_buf.shape)
+    layout = s_buf.layout
+    # Pre-swizzle offset of dst-axis index t: a bare SwizzleLayout is row-major
+    # flat; a Tile/ComposeLayout may split dims, so group by shape + mixed-radix.
+    if isinstance(layout, SwizzleLayout):
+
+        def _row_off(t):
+            stride = 1
+            for j in range(dst_gather_axis + 1, rank):
+                stride *= int(s_buf.shape[j])
+            return t * stride
+    else:
+        tile = layout.tile_layout if isinstance(layout, ComposeLayout) else layout
+        grouped, seps = tile.group(list(s_buf.shape))
+        dst_iters = list(grouped.shard)[seps[dst_gather_axis] : seps[dst_gather_axis + 1]]
+
+        def _row_off(t):
+            off, rem = 0, t
+            for i, it in enumerate(dst_iters):
+                inner = 1
+                for jt in dst_iters[i + 1 :]:
+                    inner *= int(jt.extent)
+                off += (rem // inner) * int(it.stride)
+                rem = rem % inner
+            return off
+
+    for t in (1, 2, 3):
+        delta = analyzer.simplify(_row_off(t) - _row_off(0))
+        if not analyzer.can_prove_equal(delta, t * payload_w):
+            fail(
+                f"copy_async(tma) gather4 dst row {t} at smem offset {delta}, but the "
+                f"hardware writes it box-linearly at {t * payload_w}; the declared "
+                f"shared layout row stride must equal the box payload width "
+                f"(a padded destination would corrupt rows 1..3)"
+            )
+
+
+def _validate_gather4_src_provenance(plan, g_buf: Buffer, src_gather_axis: int) -> None:
+    """The four indexer values replace ``plan.dims[0]``'s coordinate (PTX row
+    slot). Prove that dim is the source gather axis: box 1, coord_base 0, no
+    issue axis drives it, and its byte stride equals the source gather-axis
+    byte stride (so the indices address rows at the declared source stride).
+    """
+    analyzer = Analyzer()
+    if plan.rank != 2:
+        fail("copy_async(tma) gather4 currently supports rank-2 TensorMaps")
+    row = plan.dims[0]
+    if not analyzer.can_prove_equal(row.box, 1):
+        fail(f"copy_async(tma) gather4 row dim box must be 1, got {row.box}")
+    if not analyzer.can_prove_equal(row.coord_base, 0):
+        fail(f"copy_async(tma) gather4 row dim coord_base must be 0, got {row.coord_base}")
+    for ax in plan.issue_axes:
+        if ax.dim_idx == 0:
+            fail("copy_async(tma) gather4 row dim must not be driven by an issue axis")
+    grouped, seps = _gmem_layout(g_buf).group(list(g_buf.shape))
+    src_iters = list(grouped.shard)[seps[src_gather_axis] : seps[src_gather_axis + 1]]
+    if not src_iters:
+        fail("copy_async(tma) gather4 source gather axis has extent 1")
+    src_byte_stride = src_iters[-1].stride * (tvm.DataType(g_buf.dtype).bits // 8)
+    if not analyzer.can_prove_equal(row.stride * plan.elem_bytes, src_byte_stride):
+        fail(
+            f"copy_async(tma) gather4 row dim byte stride {row.stride * plan.elem_bytes} "
+            f"!= source gather-axis byte stride {src_byte_stride}; the plan reordered "
+            f"or re-strided the gather dim, so the indices would select wrong rows"
+        )
+
+
 # ==============================================================================
 # L1: layout prerequisite analysis
 # ==============================================================================
@@ -1297,6 +1374,10 @@ def copy_tma_impl(op_call: TilePrimitiveCall, sctx: DispatchContext) -> PrimFunc
             f"TMA oob='nan' requires a floating-point tensormap dtype, but the "
             f"merge+promote rewrite re-typed the descriptor as {plan.elem_dtype}"
         )
+
+    if gather_indexer:
+        _validate_gather4_dst_layout(s_buf, dst_gather_axis, plan)
+        _validate_gather4_src_provenance(plan, g_buf, int(gather_axis))
 
     # Optional descriptor dtype override. An fp32 buffer feeding a tf32 MMA should
     # be loaded via a TFLOAT32 (== 11) descriptor so the TMA hardware RN-truncates

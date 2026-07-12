@@ -19,55 +19,27 @@ under the License.
 
 # Tile-primitive dispatch: agent guidance
 
-The dispatch logic in this directory is covered by written correctness
-proofs. The proofs are normative: they state the invariants the dispatchers
-rely on and why the emitted IR is semantically equal to the primitive's
-declared semantics.
-
 ## Answering "does dispatch support X?"
 
 Never conclude a primitive or case is unsupported from a name grep. The
 support surface is defined by:
 
-1. the **capability index**
-   `.agents/docs/tile_primitive_capabilities.md` (repo root) — per-variant
-   scopes, directions, frag/thread-axis support, and acceptance constraints;
-2. the `register_dispatch(...)` sites and their `predicate` functions in
+1. the `register_dispatch(...)` sites and their `predicate` functions in
    this directory (the executable ground truth);
-3. the **acceptance-domain** sections of the correctness proofs (they
-   characterize exactly which calls are accepted);
-4. the layout thread axes (`Axis.tid_in_wg` / `laneid` / `wid_in_wg`,
+2. the layout thread axes (`Axis.tid_in_wg` / `laneid` / `wid_in_wg`,
    `python/tvm/tirx/layout.py`) — local buffers with thread-axis TileLayouts
    are distributed register tiles (frags) and are first-class copy operands.
 
-Check all of these before answering a support question or advising a kernel
-author that something needs a new primitive.
-
-## Required reading before editing dispatch logic
-
-Before modifying any of the following files, read the matching proof in
-`.agents/docs/tile_primitive_dispatch_proofs/` (repo root) end to end:
-
-| Dispatch file | Correctness proof |
-| --- | --- |
-| `copy_async/tcgen05_cp.py` | `.agents/docs/tile_primitive_dispatch_proofs/tcgen05_cp.md` |
-| `copy_async/tma.py`, `tma_utils.py` | `.agents/docs/tile_primitive_dispatch_proofs/tma.md` |
-| `gemm_async/tcgen05.py` (and the instruction-descriptor helpers in `../intrinsics/tcgen05.py`) | `.agents/docs/tile_primitive_dispatch_proofs/gemm_async.md` |
+Check both before answering a support question or advising a kernel author
+that something needs a new primitive.
 
 ## Rules for changes in this directory
 
-1. **Check the change against the proof.** If your change touches a step,
-   lemma, or invariant in the proof, verify the argument still holds. Do not
-   land a change that contradicts the proof without updating the proof.
-2. **Keep the proofs in sync.** Any behavioral change to dispatch (new
-   shapes, new validation, changed descriptor encoding, changed planning
-   order) must be reflected in the corresponding proof, including its
-   `file:line` references.
-3. **Every fix needs a regression unit test** under
+1. **Every fix needs a regression unit test** under
    `tests/python/tirx/operator/tile_primitive/cuda/`.
-4. **Validation-only changes must be byte-identity checked**: compile a
+2. **Validation-only changes must be byte-identity checked**: compile a
    representative kernel before and after in separate processes (the
    in-process compile cache poisons A/B comparisons) and diff the generated
    artifacts.
-5. **Performance claims go through bench-suite** (in the tirx-kernels repo),
+3. **Performance claims go through bench-suite** (in the tirx-kernels repo),
    not ad-hoc timing.
