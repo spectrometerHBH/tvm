@@ -1478,6 +1478,11 @@ def test_tmem_mma_operand_layout_grouped_d():
     with pytest.raises(ValueError, match="identity needs 2D"):
         tmem_mma_operand_layout("A", (1, 128, 64), "bfloat16", M=128, cta_group=1)
 
+    # M=64 non-.ws A occupies lanes 0..63 identically (Layout F datapath is the
+    # accumulator's scatter, not the A operand's).
+    a_f = tmem_mma_operand_layout("A", (64, 64), "float32", M=64, cta_group=1)
+    assert_structural_equal(a_f, TileLayout(S[(64, 64) : (1 @ TLane, 1 @ TCol)]).canonicalize())
+
 
 def test_storage():
     def case1():

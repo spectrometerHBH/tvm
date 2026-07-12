@@ -831,10 +831,12 @@ def tmem_mma_operand_layout(
                     f"alloc_tcgen05_mma_A: datapath E (M=64 .ws) requires bank-batched "
                     f"(2,64,K); flat {ext} rejected (hidden second-half read)"
                 )
-        else:  # F
-            raise ValueError(
-                "alloc_tcgen05_mma_A: A-in-TMEM Layout F (M=64 non-.ws) rejected in v1"
-            )
+        else:  # F (M=64 non-.ws): A occupies lanes 0..63 identically
+            if len(ext) != 2:
+                raise ValueError(f"alloc_tcgen05_mma_A: datapath F needs 2D (m,K), got {ext}")
+            m, K = ext
+            _chk_rows(m)
+            layout = TileLayout(S[(m, K) : (1 @ tlane, 1 @ tcol)])
     else:
         raise ValueError(f"tmem_mma_operand_layout: operand must be 'A' or 'D', got {operand!r}")
     return layout.canonicalize()
