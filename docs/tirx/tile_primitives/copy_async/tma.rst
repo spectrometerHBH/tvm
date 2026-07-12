@@ -252,9 +252,10 @@ How inputs change the algorithm
        Longer indexers generate multiple issue calls, each advancing the
        destination gather-axis slice by four rows.
    * - ``cta_group=2`` mbarrier
-     - converts a generic shared pointer to the SM100 2SM leader CTA shared
-       address before calling the PTX wrapper, so the generated instruction uses
-       the correct mbarrier operand for 2SM TMA.
+     - converts the caller's generic shared pointer to a shared address for the
+       2SM TMA wrapper, preserving the CTA-select bit — completion routes to the
+       CTA the mbar names. Pass a leader-mapped pointer (``map_shared_rank`` rank
+       0) when you want both CTAs' completions to aggregate on the pair leader.
 
 A copy whose layout cannot form a legal descriptor (rank > 5 after shrinking, or no
 swizzle-atom-aligned innermost box) makes the plan search fail and the variant
