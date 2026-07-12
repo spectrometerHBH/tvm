@@ -566,7 +566,12 @@ except NameError:  # pragma: no cover
     __all__ = []  # type: ignore[var-annotated]
 __all__ += list(_AXIS_NAMES)
 __all__ += ["R", "S"]
-__all__ += ["tcgen05_atom_layout", "tmem_datapath_layout", "wg_local_layout"]
+__all__ += [
+    "tcgen05_atom_layout",
+    "tmem_datapath_layout",
+    "tmem_mma_operand_layout",
+    "wg_local_layout",
+]
 
 
 # ============================================================================
@@ -588,7 +593,7 @@ __all__ += ["tcgen05_atom_layout", "tmem_datapath_layout", "wg_local_layout"]
 #
 # We surface this via the factory below. Callers pass the datapath letter
 # (``"D"`` / ``"F"``) and the logical ``(rows, cols)``; the factory returns
-# the appropriate TileLayout. ``tmem_pool.alloc(..., datapath="F")`` plumbs
+# the appropriate TileLayout. ``tmem_pool.alloc(..., layout=...)`` plumbs
 # this into the buffer's layout so the dispatch can structurally verify
 # atom ↔ datapath compatibility instead of silently accepting mismatches.
 #
@@ -600,7 +605,7 @@ __all__ += ["tcgen05_atom_layout", "tmem_datapath_layout", "wg_local_layout"]
 # Layouts A / B / C / E / G are reserved for future expansion.
 
 
-_TMEM_DATAPATH_ROWS = {"D": 128, "F": 64}
+_TMEM_DATAPATH_ROWS = {"A": 128, "B": 64, "C": 64, "D": 128, "E": 64, "F": 64, "G": 32}
 
 
 def tmem_datapath_layout(datapath: str, rows: int, cols: int) -> "TileLayout":
@@ -615,12 +620,24 @@ def tmem_datapath_layout(datapath: str, rows: int, cols: int) -> "TileLayout":
     Parameters
     ----------
     datapath : str
-        One of ``"D"`` (M=128, ``.cta_group::1``, full datapath) or
-        ``"F"`` (M=64, non-``.ws``, half datapath). Other layouts are not
-        yet supported by this factory.
+        PTX data path layout letter (all cta_group::2 layouts are the
+        per-CTA view of the M-rows this CTA of the pair owns):
+
+        - ``"A"``: M=256, ``.cta_group::2`` — identity over 128 rows.
+        - ``"B"``: M=128, ``.cta_group::2``, dense A — 64 rows, column
+          halves folded across the two 64-lane halves.
+        - ``"C"``: M=128, ``.cta_group::2``, sparse A — 64 rows scattered
+          16-per-warp, half datapath (same organization as F).
+        - ``"D"``: M=128, ``.cta_group::1`` — identity, full datapath.
+        - ``"E"``: M=64, ``.ws`` — 64 rows, column halves folded (same
+          organization as B).
+        - ``"F"``: M=64, non-``.ws`` — 64 rows scattered 16-per-warp,
+          half datapath.
+        - ``"G"``: M=32, ``.ws`` — 32 rows, column quarters folded across
+          the four 32-lane warp slabs.
     rows : int
         Logical row count of the TMEM buffer. Must match the datapath's M
-        dimension: 128 for D, 64 for F.
+        dimension: 128 for A/D, 64 for B/C/E/F, 32 for G.
     cols : int
         Logical column count.
 
@@ -641,19 +658,172 @@ def tmem_datapath_layout(datapath: str, rows: int, cols: int) -> "TileLayout":
         )
     tlane = Axis.get("TLane")
     tcol = Axis.get("TCol")
-    if datapath == "D":
-        # M=128, identity row→lane: row r ∈ [0, 128) → physical lane r.
+    if datapath in ("A", "D"):
+        # Identity row→lane (r → lane r). D is the full cta_group::1 datapath;
+        # A is the per-CTA view of M=256/cta_group::2 (this CTA's 128 M-rows).
         return TileLayout(S[(rows, cols) : (1 @ tlane, 1 @ tcol)])
-    # Layout F: M=64 scattered. Logical row r = wid * 16 + intra (wid ∈ [0,4),
-    # intra ∈ [0,16)) → physical lane wid * 32 + intra, i.e.
-    # ``r // 16`` is the warp selector and ``r % 16`` is the within-slab lane.
-    # ``TileLayout`` decomposes a scalar row index via ``SplitCoord``
-    # (src/tirx/ir/layout/utils.cc), which uses row-major ordering: with
-    # shape ``(s0, s1)`` the FIRST iter receives ``coord // s1`` (the high
-    # bits) and the SECOND receives ``coord % s1`` (the low bits). So we
-    # pin the warp selector to iter 0 (extent 4, TLane stride 32) and the
-    # within-slab lane to iter 1 (extent 16, TLane stride 1).
+    if datapath == "G":
+        # Layout G (M=32, .ws): quarter datapath — column space splits into 4
+        # quarters, lane = row + 32*q, physical col = col % (cols/4).
+        if cols % 4 != 0:
+            raise ValueError(
+                f"tmem_datapath_layout: datapath='G' requires cols % 4 == 0, got {cols}"
+            )
+        return TileLayout(S[(rows, 4, cols // 4) : (1 @ tlane, 32 @ tlane, 1 @ tcol)])
+    if datapath in ("B", "E"):
+        # Layouts B (M=128 cta_group::2 dense) and E (M=64 .ws): half datapath,
+        # lane = row + 64 * (col >= cols/2), physical col = col % (cols/2).
+        if cols % 2 != 0:
+            raise ValueError(
+                f"tmem_datapath_layout: datapath={datapath!r} requires even cols, got {cols}"
+            )
+        return TileLayout(S[(rows, 2, cols // 2) : (1 @ tlane, 64 @ tlane, 1 @ tcol)])
+    # Layouts C (M=128 cta_group::2 sparse) and F (M=64 non-.ws): rows-per-CTA
+    # scattered, half datapath — logical row wid*16+intra → lane wid*32+intra.
     return TileLayout(S[(4, 16, cols) : (32 @ tlane, 1 @ tlane, 1 @ tcol)])
+
+
+def _mma_datapath_letter(M, cta_group, ws=False, sparse=False):
+    """Map (instruction ``M``, ``cta_group``, ``ws``, ``sparse``) to the PTX
+    tcgen05 datapath letter. Raises for families rejected in the v1 semantic
+    allocator API (sparse Layout C, M=32 Layout G). See
+    ``localdoc/claude_plan.txt`` S3a."""
+    if sparse:
+        raise ValueError(
+            f"alloc_tcgen05_mma_AB: sparse A (Layout C) not supported in v1 "
+            f"(M={M}, cta_group={cta_group})"
+        )
+    if ws and not (cta_group == 1 and M == 64):
+        raise ValueError(
+            f"alloc_tcgen05_mma_AB: ws=True only valid for cta_group=1, M=64 (Layout E); "
+            f"got M={M}, cta_group={cta_group}"
+        )
+    if cta_group == 1:
+        if M == 128:
+            return "D"
+        if M == 64:
+            return "E" if ws else "F"
+    elif cta_group == 2:
+        if M == 256:
+            return "A"
+        if M == 128:
+            return "B"
+    raise ValueError(
+        f"alloc_tcgen05_mma_AB: no supported datapath for M={M}, cta_group={cta_group}, "
+        f"ws={ws} (supported: cta1 M in {{64,128}}, cta2 M in {{128,256}})"
+    )
+
+
+def tmem_mma_operand_layout(
+    operand, shape, dtype, *, M, cta_group, ws=False, sparse=False, group=None
+):
+    """Resolve the TMEM ``TileLayout`` for a tcgen05 MMA operand from operand
+    role + instruction params.
+
+    ``operand``: ``"A"`` (A-in-TMEM) or ``"D"`` (accumulator / C).
+    ``M`` is the PTX ``tcgen05.mma`` **instruction** M (256/128/64), NOT the
+    per-CTA buffer rows; ``per_cta_rows = M // cta_group``. Physical 32-bit
+    column count is left to the pool's ``_resolve_cols`` (layout-aware).
+
+    Reproduces the hand-written layouts the three FlashMLA kernels use; the
+    supported/reject domain is spec'd in ``localdoc/claude_plan.txt`` S3a.
+    """
+    tlane = Axis.get("TLane")
+    tcol = Axis.get("TCol")
+    datapath = _mma_datapath_letter(M, cta_group, ws, sparse)
+    per_cta_rows = M // cta_group
+    ext = [int(s) for s in shape]
+
+    def _chk_rows(rows):
+        if rows != per_cta_rows:
+            raise ValueError(
+                f"alloc_mma_{operand}: M={M}, cta_group={cta_group} expects "
+                f"per-CTA rows {per_cta_rows}, got {rows} (shape {ext})"
+            )
+
+    if operand == "D":
+        if group is not None:
+            # flat buffer (m, N) + explicit grouping -> (m, s, 2, n) layout
+            # (codex plan option b): keeps kernel O buffer 2D, layout 4-axis.
+            if len(ext) != 2:
+                raise ValueError(f"alloc_tcgen05_mma_D group= requires 2D (m,N), got {ext}")
+            m, N = ext
+            gs = [int(g) for g in group]
+            if len(gs) != 3 or gs[1] != 2:
+                raise ValueError(f"alloc_tcgen05_mma_D group must be (s,2,n), got {group}")
+            s2, _, n2 = gs
+            if s2 * 2 * n2 != N:
+                raise ValueError(f"alloc_tcgen05_mma_D group {group} product != N={N}")
+            if datapath not in ("B", "E"):
+                raise ValueError(f"alloc_tcgen05_mma_D group= only for Layout B/E, got {datapath}")
+            _chk_rows(m)
+            return TileLayout(
+                S[(m, s2, 2, n2) : (1 @ tlane, n2 @ tcol, 64 @ tlane, 1 @ tcol)]
+            ).canonicalize()
+        # Grouped grammar (C3): (m,N) | (m,2,N/2) | (m,s,2,n); plus batched
+        # C[2,m,N/2] normalizing to packed. bank axis is fixed by position.
+        if len(ext) == 2:
+            m, N = ext
+            _chk_rows(m)
+            layout = tmem_datapath_layout(datapath, m, N)
+        elif len(ext) == 3 and ext[0] == 2 and datapath in ("B", "E"):
+            _, m, Nh = ext  # batched C[2, m, N/2]
+            _chk_rows(m)
+            layout = TileLayout(S[(2, m, Nh) : (64 @ tlane, 1 @ tlane, 1 @ tcol)])
+        elif len(ext) == 3 and ext[1] == 2 and datapath in ("B", "E"):
+            m, _, Nh = ext  # explicit (m, 2, N/2)
+            _chk_rows(m)
+            layout = TileLayout(S[(m, 2, Nh) : (1 @ tlane, 64 @ tlane, 1 @ tcol)])
+        elif len(ext) == 4 and ext[2] == 2 and datapath in ("B", "E"):
+            m, s, _, n = ext  # column-segmented (m, s, 2, n): flatten N=s*2*n
+            _chk_rows(m)
+            layout = TileLayout(S[(m, s, 2, n) : (1 @ tlane, n @ tcol, 64 @ tlane, 1 @ tcol)])
+        else:
+            raise ValueError(
+                f"alloc_tcgen05_mma_D: unsupported D shape {ext} for datapath {datapath}"
+            )
+    elif operand == "A":
+        if datapath in ("A", "D"):
+            if len(ext) != 2:
+                raise ValueError(
+                    f"alloc_tcgen05_mma_A: datapath {datapath} identity needs 2D (m,K), got {ext}"
+                )
+            m, K = ext
+            _chk_rows(m)
+            layout = tmem_datapath_layout(datapath, m, K)  # identity
+        elif datapath == "B":
+            if len(ext) == 2:  # replica A
+                m, K = ext
+                _chk_rows(m)
+                layout = TileLayout(S[(m, K) : (1 @ tlane, 1 @ tcol)] + R[2 : 64 @ tlane])
+            elif len(ext) == 3 and ext[0] == 2:  # bank-batched A
+                _, m, K = ext
+                _chk_rows(m)
+                layout = TileLayout(S[(2, m, K) : (64 @ tlane, 1 @ tlane, 1 @ tcol)])
+            else:
+                raise ValueError(
+                    f"alloc_tcgen05_mma_A: datapath B needs (64,K) replica or (2,64,K) "
+                    f"bank-batched, got {ext}"
+                )
+        elif datapath == "E":  # M=64 .ws: bank-batched only, flat rejected
+            if len(ext) == 3 and ext[0] == 2:
+                _, m, K = ext
+                _chk_rows(m)
+                layout = TileLayout(S[(2, m, K) : (64 @ tlane, 1 @ tlane, 1 @ tcol)])
+            else:
+                raise ValueError(
+                    f"alloc_tcgen05_mma_A: datapath E (M=64 .ws) requires bank-batched "
+                    f"(2,64,K); flat {ext} rejected (hidden second-half read)"
+                )
+        else:  # F (M=64 non-.ws): A occupies lanes 0..63 identically
+            if len(ext) != 2:
+                raise ValueError(f"alloc_tcgen05_mma_A: datapath F needs 2D (m,K), got {ext}")
+            m, K = ext
+            _chk_rows(m)
+            layout = TileLayout(S[(m, K) : (1 @ tlane, 1 @ tcol)])
+    else:
+        raise ValueError(f"tmem_mma_operand_layout: operand must be 'A' or 'D', got {operand!r}")
+    return layout.canonicalize()
 
 
 def wg_local_layout(cols, rows=128):

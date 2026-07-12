@@ -15,7 +15,7 @@
 # specific language governing permissions and limitations
 # under the License.
 # pylint: disable=missing-function-docstring
-"""Round-trip tests for the ``gmem_smem`` copy dispatch (synthesized partition).
+"""Round-trip tests for the ``vec_auto`` global ↔ shared path.
 
 Pipeline: A_gmem --G2S--> A_smem --S2G--> B_gmem. If either direction is
 wrong the round trip leaves B mismatched against A.
@@ -130,7 +130,7 @@ def test_gmem_smem_roundtrip(scope, n_threads, shape, dtype):
 
 # ----------------------------------------------------------------------------
 # Migrated from test_copy_sync.py: sync G↔S copy via the user-facing
-# Tx.copy() (which dispatches to gmem_smem).
+# Tx.copy() (which dispatches to the vec_auto global ↔ shared path).
 # ----------------------------------------------------------------------------
 
 
@@ -503,7 +503,7 @@ def test_layout_permute_copy_preserves_smem_strides():
 
 # ----------------------------------------------------------------------------
 # Fast-path firing test (positive). Pairs with the var_bounds wiring inside
-# ``gmem_smem._emit_gmem_smem``.
+# ``vec_auto_gmem_smem._emit_gmem_smem``.
 #
 # Setup: warp-scope 32x64 fp16 G2S/S2G with 128b swizzled SMEM. The outer
 # iter stride is ``thread_cnt * vec_len = 32 * 8 = 256``, which puts the

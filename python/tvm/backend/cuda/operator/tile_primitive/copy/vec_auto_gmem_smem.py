@@ -15,77 +15,58 @@
 # specific language governing permissions and limitations
 # under the License.
 
-"""``copy_async`` dispatch for ``global → shared`` via ``cp.async``
-(SASS: ``LDGSTS``).
+"""Copy dispatch for ``global ↔ shared`` (no register side).
 
-Shares the partition / layout-alignment algorithm with
-``cuda/copy/vec_auto_gmem_smem.py`` (sync ``T.copy`` global ↔ shared); differs at
-emit time only:
-
-* direction: ``cp.async`` is global → shared only (hardware restriction).
-* cp_size: PTX ``cp.async`` only accepts 4 / 8 / 16 bytes, so the vec-width
-  candidate set is restricted to ``{32, 64, 128}`` bits.
-* emit: ``T.evaluate(T.ptx.cp_async(dst, src, cp_size))`` instead of the
-  synchronous ``T.cuda.copy_{vec_bits}b(dst, src)``.
-* config: ``prefetch_size``, ``predicate`` and ``fill_mode`` are forwarded to
-  ``T.ptx.cp_async``.  This covers predicated zero-fill loads such as FlashMLA
-  RoPE KV staging while preserving the same layout partitioner.
-* config: ``direct=True`` is an explicit thread-scope fast path for callers
-  that already selected a physically contiguous 4/8/16-byte slice.  It emits
-  one ``cp.async`` from the region starts and bypasses the synthesized
-  partitioner, matching hand-written per-thread copies.
-
-Note: ``cp.async`` does **not** sync at emit time — caller is responsible
-for ``commit_group`` / ``wait_group`` / ``cta_sync`` plumbing around the
-async pipeline.
+There's no per-thread register side to inherit a partition from — both sides
+are cross-thread storage. The partition is synthesized from the surrounding
+scope context (warp / warpgroup / cta / thread): ``thread_cnt`` is derived
+from ``sctx.intra`` and each thread takes ``n_elements / thread_cnt``
+consecutive fused-index slots. Layout / partition algorithm lives in
+``_common.py`` and is shared with ``ldgsts.py``.
 """
 
+import tvm
 from tvm.runtime import DataType
 from tvm.script import tirx as T
 from tvm.tirx import Buffer, PrimFunc
 from tvm.tirx import Var as _TirVar
 from tvm.tirx.expr import IntImm as _IntImm
-from tvm.tirx.operator.tile_primitive.dispatcher import (
-    predicate,
-    register_dispatch,
-)
 from tvm.tirx.operator.tile_primitive.registry import DispatchContext
 from tvm.tirx.tile_primitive import TilePrimitiveCall
 
-from ..copy._common import (
+from ._common import (
     _TID_AXIS_FOR_SCOPE,
     _thread_cnt,
     align_layouts_gs,
+    copy_ptx_form,
+    copy_ptx_ld_return_type,
 )
-from ..copy._swizzle_iter import (
+from ._swizzle_iter import (
     emit_init,
     emit_iter_offset,
     get_swizzle,
     try_recognize,
 )
-from ..copy.utils import _is_valid_copy, _scope_allowed
-from ..copy.vec_auto_reg import _all_threads_active, _axis_decl, _ptr_off
+from .utils import _is_valid_copy, _scope_allowed
+from .vec_auto_reg import _all_threads_active, _axis_decl, _ptr_off
 
-# cp.async is unidirectional: global → shared.
-_LDGSTS_PAIRS = [("global", "shared*")]
-# cp.async cp_size ∈ {4, 8, 16} bytes ⇒ vec_bits ∈ {32, 64, 128}.
-_LDGSTS_VEC_BITS = (128, 64, 32)
-
-
-def _config_bool(value) -> bool:
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, _IntImm):
-        return bool(int(value.value))
-    return bool(value)
+_GMEM_SMEM_PAIRS = [
+    ("global", "shared*"),
+    ("shared*", "global"),
+]
 
 
-def _divides_thread_cnt_ldgsts(
+def _divides_thread_cnt(
     op_call: TilePrimitiveCall, sctx: DispatchContext
 ) -> tuple[bool, str | None]:
-    """Mirror of ``gmem_smem._divides_thread_cnt``: reject copies whose
-    region element count doesn't divide ``thread_cnt`` (and reject
-    ``thread_cnt=0`` scopes outright). See that docstring for rationale."""
+    """Reject copies whose region element count does not divide ``thread_cnt``.
+
+    Without this guard the emit's ``[outer, T, vec]`` partition has no
+    integer solution: either every thread gets fractional work, or
+    ``thread_cnt=0`` (degenerate scope) hits a modulo-by-zero. Both cases
+    indicate a poorly-shaped copy (e.g. 1024-thread CTA writing a 64-elem
+    tail) that this dispatch refuses to paper over with a slow scalar emit.
+    """
     op_call = TilePrimitiveCall.downcast(op_call)
     thread_cnt = _thread_cnt(sctx)
     if thread_cnt <= 0:
@@ -103,7 +84,7 @@ def _divides_thread_cnt_ldgsts(
     return True, None
 
 
-def _is_ldgsts(op_call: TilePrimitiveCall, sctx: DispatchContext) -> tuple[bool, str | None]:
+def _is_gmem_smem(op_call: TilePrimitiveCall, sctx: DispatchContext) -> tuple[bool, str | None]:
     if not sctx.is_target("cuda"):
         return False, "non-cuda target"
     if sctx.scope_kind not in ("thread", "warp", "warpgroup", "cta"):
@@ -111,8 +92,8 @@ def _is_ldgsts(op_call: TilePrimitiveCall, sctx: DispatchContext) -> tuple[bool,
     for check in (
         lambda: _all_threads_active(sctx),
         lambda: _is_valid_copy(op_call, sctx),
-        lambda: _scope_allowed(op_call, sctx, allowed_pairs=_LDGSTS_PAIRS),
-        lambda: _divides_thread_cnt_ldgsts(op_call, sctx),
+        lambda: _scope_allowed(op_call, sctx, allowed_pairs=_GMEM_SMEM_PAIRS),
+        lambda: _divides_thread_cnt(op_call, sctx),
     ):
         ok, msg = check()
         if not ok:
@@ -120,57 +101,21 @@ def _is_ldgsts(op_call: TilePrimitiveCall, sctx: DispatchContext) -> tuple[bool,
     return True, None
 
 
-def _emit_ldgsts(op_call: TilePrimitiveCall, sctx: DispatchContext) -> PrimFunc:
+def _emit_gmem_smem(op_call: TilePrimitiveCall, sctx: DispatchContext) -> PrimFunc:
     op_call = TilePrimitiveCall.downcast(op_call)
     src: Buffer = op_call.src.buffer
     dst: Buffer = op_call.dst.buffer
-    # Predicate above guarantees src is global, dst is shared.
-    g_buf, g_br = src, op_call.src
-    s_buf, s_br = dst, op_call.dst
-
-    elem_bits = DataType(src.dtype).bits
-    prefetch_size = op_call.config.get("prefetch_size", -1)
-    predicate_expr = op_call.config.get("predicate", -1)
-    fill_mode = op_call.config.get("fill_mode", "")
-
-    if _config_bool(op_call.config.get("direct", False)):
-        if sctx.scope_kind != "thread":
-            raise ValueError("ldgsts direct=True is only valid in thread scope")
-        n_elements = 1
-        for r in s_br.region:
-            try:
-                n_elements *= int(r.extent)
-            except (TypeError, ValueError) as err:
-                raise ValueError(
-                    f"ldgsts direct=True requires constant extent, got {r.extent}"
-                ) from err
-        cp_size = n_elements * elem_bits // 8
-        if n_elements * elem_bits % 8 != 0 or cp_size not in (4, 8, 16):
-            raise ValueError(
-                f"ldgsts direct=True requires a 4/8/16-byte region, got {n_elements} "
-                f"elements of {elem_bits} bits"
-            )
-        s_start = [r.min for r in s_br.region]
-        g_start = [r.min for r in g_br.region]
-
-        @T.prim_func(check_well_formed=False)
-        def impl():
-            T.evaluate(
-                T.ptx.cp_async(
-                    s_buf.ptr_to(s_start),
-                    g_buf.ptr_to(g_start),
-                    cp_size,
-                    prefetch_size=prefetch_size,
-                    predicate=predicate_expr,
-                    fill_mode=fill_mode,
-                )
-            )
-
-        return impl
+    if src.scope() == "global":
+        g_buf, g_br, s_buf, s_br = src, op_call.src, dst, op_call.dst
+        g_is_src = True
+    else:
+        g_buf, g_br, s_buf, s_br = dst, op_call.dst, src, op_call.src
+        g_is_src = False
 
     g_region = [(r.min, r.min + r.extent) for r in g_br.region]
     s_region = [(r.min, r.min + r.extent) for r in s_br.region]
 
+    elem_bits = DataType(src.dtype).bits
     thread_cnt = _thread_cnt(sctx)
 
     with sctx.target:
@@ -183,23 +128,17 @@ def _emit_ldgsts(op_call: TilePrimitiveCall, sctx: DispatchContext) -> PrimFunc:
             s_region,
             elem_bits,
             thread_cnt,
-            vec_bits_candidates=_LDGSTS_VEC_BITS,
         )
 
+    # vec_len=1 is the scalar fallback — uses the same unified
+    # [outer x thread x vec] coord scheme below.
+
     vec_bits = vec_len * elem_bits
-    cp_size = vec_bits // 8  # cp.async cp_size is in bytes
-    if cp_size not in (4, 8, 16):
-        # align_layouts_gs already restricted candidates to _LDGSTS_VEC_BITS,
-        # so reaching here means no candidate worked at all.
-        from tvm.tirx.operator.tile_primitive.dispatcher import fail
+    num_bytes = vec_bits // 8
+    vec, ptx_type = copy_ptx_form(num_bytes)
 
-        fail(f"ldgsts: cannot find a cp.async-compatible vec_len for elem_bits={elem_bits}")
-
-    # Mirror gmem_smem.py: build 3D `(f, tid, 0)` against
-    # `[total_outer, thread_cnt, vec_len]` and let `s_p.apply(coord, shape)`
-    # flatten + resplit into whatever multi-iter T / outer-iter structure
-    # `align_layouts_gs` picked. Emit is oblivious to how many shard iters
-    # cover T.
+    # Express the per-thread per-round address as a 3D coord ``(f, tid, 0)`` vs
+    # ``[total_outer, thread_cnt, vec_len]``; ``layout.apply`` flattens the rest.
     n_elements = 1
     for it in s_p.shard:
         n_elements *= int(it.extent)
@@ -219,8 +158,8 @@ def _emit_ldgsts(op_call: TilePrimitiveCall, sctx: DispatchContext) -> PrimFunc:
 
     tid_axis_name = _TID_AXIS_FOR_SCOPE[sctx.scope_kind] if thread_cnt > 1 else None
 
-    # T-iters-walk-back to recover outer_iters_s for the fast-path
-    # recognizer. Same trick as gmem_smem.py.
+    # Walk shard back from the vec iter to the prefix covering T exactly
+    # (∏ext == thread_cnt); the leading prefix is the outer iter list.
     if thread_cnt > 1:
         acc, _i = 1, len(s_p.shard) - 2
         while _i >= 0 and acc < thread_cnt:
@@ -233,6 +172,8 @@ def _emit_ldgsts(op_call: TilePrimitiveCall, sctx: DispatchContext) -> PrimFunc:
     else:
         outer_iters_s = list(s_p.shard[:-1])
 
+    # SwizzleLayout on s_buf: try the closed-form signed-strides pattern, else
+    # fall back to per-iter ``swizzle.apply``; closure picked at parse time.
     swizzle = get_swizzle(s_buf.layout)
     swizzle_pattern = None
     if swizzle is not None and outer_iters_s:
@@ -246,11 +187,17 @@ def _emit_ldgsts(op_call: TilePrimitiveCall, sctx: DispatchContext) -> PrimFunc:
             _IntImm("int32", 0),
             shape=apply_shape,
         )["m"]
+        # Bind the tid range so the (C1) analyzer can discharge
+        # ``bit_bj(s_off // C) == 0``; without bounds it rejects.
+        var_bounds = {}
+        if tid_axis_name is not None:
+            var_bounds[_tid_placeholder] = tvm.ir.Range.from_min_extent(0, thread_cnt)
         swizzle_pattern = try_recognize(
             swizzle,
             [int(it.extent) for it in outer_iters_s],
             [int(it.stride) for it in outer_iters_s],
             s_off_template,
+            var_bounds=var_bounds or None,
         )
 
     class _SwizzleState:
@@ -305,34 +252,39 @@ def _emit_ldgsts(op_call: TilePrimitiveCall, sctx: DispatchContext) -> PrimFunc:
     def impl():
         tid = _decl_tid()
         _setup_swizzle(tid)
-        for f in T.unroll(total_outer):
+        tmp = T.alloc_local((vec_len,), src.dtype)
+        tmp_ptr = tmp.ptr_to([0])
+        # Pass typed ptr_to(...) directly to _ptr_off (caching → byte math,
+        # misaligned vec ops); keep a serial loop, T.unroll floods the kernel.
+        for f in range(total_outer):
             s_lin = s_p.apply(f, tid, v0, shape=apply_shape)["m"]
             g_lin = g_p.apply(f, tid, v0, shape=apply_shape)["m"]
             s_off = _s_off(f, s_lin)
             s_ptr = _ptr_off(s_buf.ptr_to(s_zero), s_off)
             g_ptr = _ptr_off(g_buf.ptr_to(g_zero), g_lin)
-            T.evaluate(
-                T.ptx.cp_async(
-                    s_ptr,
+            if g_is_src:
+                T.ptx.ld(
                     g_ptr,
-                    cp_size,
-                    prefetch_size=prefetch_size,
-                    predicate=predicate_expr,
-                    fill_mode=fill_mode,
+                    copy_ptx_ld_return_type(ptx_type),
+                    ptx_type,
+                    dst=tmp_ptr,
+                    space="global",
+                    vec=vec,
                 )
-            )
-        # cp.async is caller-synced — no cta_sync here (commit_group /
-        # wait_group / cta_sync are the caller's responsibility).
+                T.ptx.st(
+                    s_ptr, src=tmp_ptr, space="shared", vec=vec, ptx_type=ptx_type
+                )
+            else:
+                T.ptx.ld(
+                    s_ptr,
+                    copy_ptx_ld_return_type(ptx_type),
+                    ptx_type,
+                    dst=tmp_ptr,
+                    space="shared",
+                    vec=vec,
+                )
+                T.ptx.st(
+                    g_ptr, src=tmp_ptr, space="global", vec=vec, ptx_type=ptx_type
+                )
     # fmt: on
     return impl
-
-
-@register_dispatch(
-    "copy_async",
-    "cuda",
-    variant="ldgsts",
-    priority=20,
-    when=[predicate("ldgsts_applicable", _is_ldgsts)],
-)
-def copy_schedule_ldgsts(op_call: TilePrimitiveCall, sctx: DispatchContext) -> PrimFunc:
-    return _emit_ldgsts(op_call, sctx)

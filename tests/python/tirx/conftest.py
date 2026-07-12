@@ -25,9 +25,44 @@ real sm_100a device so it skips cleanly where the hardware is absent and runs
 in full where it is present.
 """
 
+import gc
+import os
+
 import pytest
 
 from tvm.testing import env
+
+
+def _set_cuda_device_for_xdist_worker():
+    try:
+        import torch
+    except ImportError:
+        return
+
+    if not torch.cuda.is_available():
+        return
+
+    worker = os.environ.get("PYTEST_XDIST_WORKER", "gw0")
+    worker_index = int(worker[2:]) if worker.startswith("gw") and worker[2:].isdigit() else 0
+    torch.cuda.set_device(worker_index % torch.cuda.device_count())
+
+
+def pytest_configure(config):
+    del config
+    _set_cuda_device_for_xdist_worker()
+
+
+@pytest.fixture(autouse=True)
+def _release_cuda_cache_between_tests():
+    _set_cuda_device_for_xdist_worker()
+    yield
+    gc.collect()
+    try:
+        import torch
+    except ImportError:
+        return
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
 
 
 def pytest_collection_modifyitems(config, items):

@@ -32,7 +32,6 @@ from tvm.tirx import Var
 from tvm.tirx.cuda.operator.tile_primitive.tma_utils import (
     SwizzleMode,
     mma_shared_layout,
-    tma_shared_layout,
 )
 from tvm.tirx.layout import (
     Axis,
@@ -43,10 +42,13 @@ from tvm.tirx.layout import (
     R,
     S,
     SwizzleLayout,
+    TCol,
     TileLayout,
+    TLane,
     laneid,
     m,
     tid_in_wg,
+    tmem_mma_operand_layout,
     tx,
     warpid,
     wg_local_layout,
@@ -1413,19 +1415,12 @@ def test_mma_shared_layout():
     case3()
 
 
-def test_tma_shared_layout_alias():
-    shape = (3, 64, 256)
-    layout = mma_shared_layout("float16", SwizzleMode.SWIZZLE_128B_ATOM, shape)
-    alias_layout = tma_shared_layout("float16", SwizzleMode.SWIZZLE_128B_ATOM, shape)
-    assert_structural_equal(alias_layout, layout)
-
-
 def test_pool_allocator_alloc_mma():
     def alloc_layout(shape, dtype, swizzle_mode="auto"):
         with IRBuilder():
             with Tx_builder.prim_func():
                 pool = T.SMEMPool(Var("smem_ptr", PointerType(PrimType("uint8"))))
-                buf = pool.alloc_mma(shape, dtype, swizzle_mode=swizzle_mode)
+                buf = pool.alloc_tcgen05_mma_AB(shape, dtype, swizzle_mode=swizzle_mode)
         return buf.layout
 
     cases = [
@@ -1448,6 +1443,37 @@ def test_pool_allocator_alloc_mma():
     layout_none = alloc_layout(shape, "float16", "none")
     expected_none = mma_shared_layout("float16", SwizzleMode.SWIZZLE_NONE, shape)
     assert_structural_equal(layout_none, expected_none)
+
+
+def test_tmem_mma_operand_layout_grouped_d():
+    head64_o = tmem_mma_operand_layout(
+        "D", (64, 512), "float32", M=64, cta_group=1, ws=True, group=(2, 2, 128)
+    )
+    expected_head64_o = TileLayout(
+        S[(64, 2, 2, 128) : (1 @ TLane, 128 @ TCol, 64 @ TLane, 1 @ TCol)]
+    ).canonicalize()
+    assert_structural_equal(head64_o, expected_head64_o)
+
+    head128_o = tmem_mma_operand_layout(
+        "D", (64, 512), "float32", M=128, cta_group=2, group=(2, 2, 128)
+    )
+    assert_structural_equal(head128_o, expected_head64_o)
+
+    with pytest.raises(ValueError, match="ws=True only valid"):
+        tmem_mma_operand_layout("D", (128, 256), "float32", M=128, cta_group=1, ws=True)
+
+    with pytest.raises(ValueError, match="group must be"):
+        tmem_mma_operand_layout(
+            "D", (64, 512), "float32", M=64, cta_group=1, ws=True, group=(4, 128)
+        )
+
+    with pytest.raises(ValueError, match="identity needs 2D"):
+        tmem_mma_operand_layout("A", (1, 128, 64), "bfloat16", M=128, cta_group=1)
+
+    # M=64 non-.ws A occupies lanes 0..63 identically (Layout F datapath is the
+    # accumulator's scatter, not the A operand's).
+    a_f = tmem_mma_operand_layout("A", (64, 64), "float32", M=64, cta_group=1)
+    assert_structural_equal(a_f, TileLayout(S[(64, 64) : (1 @ TLane, 1 @ TCol)]).canonicalize())
 
 
 def test_storage():

@@ -49,7 +49,7 @@ from dataclasses import dataclass
 import tvm
 from tvm.arith import Analyzer
 from tvm.script import tirx as T
-from tvm.tirx import Buffer, PrimFunc
+from tvm.tirx import Buffer, IntImm, PrimFunc
 from tvm.tirx.layout import ComposeLayout, Layout, S, SwizzleLayout, TileLayout
 from tvm.tirx.operator.tile_primitive import (
     DispatchContext,
@@ -59,9 +59,8 @@ from tvm.tirx.operator.tile_primitive import (
 )
 from tvm.tirx.tile_primitive import TilePrimitiveCall
 
-from ..common import validate_copy_op
 from ..exec_scope_utils import single_thread
-from ..tma_utils import SwizzleMode, get_swizzle_mode_from_layout, tma_atom_shape
+from ..tma_utils import SwizzleMode, get_swizzle_mode_from_layout, mma_atom_shape
 
 # ==============================================================================
 # Data types
@@ -265,11 +264,43 @@ def _oob_fill_kind(oob_mode) -> int:
     raise ValueError(f"Unexpected oob mode: {oob_mode}")
 
 
+def _normalize_l2_promotion(l2_promotion) -> int:
+    if l2_promotion is None:
+        return 2  # CU_TENSOR_MAP_L2_PROMOTION_L2_128B
+    if isinstance(l2_promotion, tvm.tirx.IntImm):
+        l2_promotion = int(l2_promotion)
+    if isinstance(l2_promotion, int):
+        if 0 <= l2_promotion <= 3:
+            return l2_promotion
+        fail("copy_async(tma) tensormap_l2_promotion int value must be in [0, 3]")
+    promotion_map = {
+        "none": 0,
+        "L2::none": 0,
+        "L2::64B": 1,
+        "L2::128B": 2,
+        "L2::256B": 3,
+    }
+    if l2_promotion in promotion_map:
+        return promotion_map[l2_promotion]
+    fail(
+        "copy_async(tma) tensormap_l2_promotion must be one of "
+        "None, 0..3, 'none', 'L2::64B', 'L2::128B', or 'L2::256B'"
+    )
+
+
+def _normalize_cache_config(cache_hint):
+    if cache_hint is None:
+        return "", None
+    if isinstance(cache_hint, str):
+        return cache_hint, None
+    return "", cache_hint
+
+
 def _swizzle_inner_box_fits(dtype: str, swizzle_mode: SwizzleMode, inner_box) -> bool:
     """Hardware check: innermost ``boxDim[0] * elementSize`` fits swizzle atom."""
     if swizzle_mode == SwizzleMode.SWIZZLE_NONE:
         return True
-    atom = tma_atom_shape(dtype, swizzle_mode)
+    atom = mma_atom_shape(dtype, swizzle_mode)
     return bool(Analyzer().can_prove(inner_box <= atom[-1]))
 
 
@@ -287,6 +318,165 @@ def _simplify_with_var_ranges(exprs, var_ranges, sctx: DispatchContext):
         if isinstance(var, tvm.tirx.Var):
             local_analyzer.bind(var, tvm.ir.Range.from_min_extent(0, extent))
     return [local_analyzer.simplify(expr) for expr in exprs]
+
+
+def _normalize_gather_indexer(indexer) -> list:
+    """Normalize the public gather indexer config into a Python list."""
+
+    if indexer is None:
+        return []
+    if isinstance(indexer, list | tuple):
+        return list(indexer)
+    if isinstance(indexer, tvm.ir.Array):
+        return list(indexer)
+    fail("copy_async(tma) indexer must be a list/tuple/Array of source coordinates")
+
+
+def _prepare_gather4_plan_inputs(
+    *,
+    direction: str,
+    gather_axis,
+    dst_gather_axis,
+    indexer: list,
+    g_st: list,
+    g_ext: list,
+    s_ext: list,
+) -> tuple[list, list, list, int | None]:
+    """Return adjusted copy regions for a 2D tile::gather4 TMA plan.
+
+    ``gather_axis`` is the source/global axis; ``dst_gather_axis`` is the
+    shared axis that receives the gathered rows (both explicit, no inference).
+    The box along each is one row; the hardware gather4 modifier supplies four
+    runtime row coordinates per issue and writes four destination rows.
+    """
+
+    if not indexer:
+        return g_st, g_ext, s_ext, None
+    if direction != "g2s":
+        fail("copy_async(tma) gather indexer is only supported for global -> shared copies")
+    if gather_axis is None:
+        fail("copy_async(tma) indexer requires gather_axis")
+    if dst_gather_axis is None:
+        fail("copy_async(tma) indexer requires dst_gather_axis (the shared axis gathered into)")
+    src_gather_axis = int(gather_axis)
+    if src_gather_axis != 0:
+        fail("copy_async(tma) gather4 currently supports gather_axis=0")
+    if len(indexer) % 4 != 0:
+        fail("copy_async(tma) gather4 indexer length must be a multiple of 4")
+    dst_gather_axis = int(dst_gather_axis)
+    if not 0 <= dst_gather_axis < len(s_ext):
+        fail(f"copy_async(tma) gather4 dst_gather_axis {dst_gather_axis} out of range")
+    analyzer = Analyzer()
+    if not analyzer.can_prove_equal(s_ext[dst_gather_axis], len(indexer)):
+        fail(
+            f"copy_async(tma) gather4 dst extent {s_ext[dst_gather_axis]} on axis "
+            f"{dst_gather_axis} must equal len(indexer) {len(indexer)}"
+        )
+    if not analyzer.can_prove_equal(g_st[src_gather_axis], 0):
+        fail(
+            "copy_async(tma) gather4 indexer coordinates are absolute; "
+            "source gather axis min must be 0"
+        )
+
+    g_st_plan = list(g_st)
+    g_ext_plan = list(g_ext)
+    s_ext_plan = list(s_ext)
+    g_ext_plan[src_gather_axis] = 1
+    s_ext_plan[dst_gather_axis] = 1
+    return g_st_plan, g_ext_plan, s_ext_plan, dst_gather_axis
+
+
+def _validate_gather4_dst_layout(
+    s_buf: Buffer, dst_gather_axis: int, plan, s_st: list, s_ext: list, num_rows: int
+) -> None:
+    """tile::gather4 writes each 4-row chunk box-linearly at the box payload
+    width from its own base (``s_st + 4*chunk``). Validate the same unit the
+    emitter issues: slice each 4-row destination chunk, group it by the logical
+    chunk shape, and require the gather-axis group to canonicalize to exactly
+    one memory ``Iter(4, W)``, where ``W`` is the box payload width in buffer
+    elements. Chunk bases may be discontinuous because every instruction gets
+    its own smem pointer.
+    """
+    analyzer = Analyzer()
+    payload_w = 1
+    for b in plan.box_dim:
+        payload_w = payload_w * int(b)
+    buf_bytes = tvm.DataType(s_buf.dtype).bits // 8
+    box_bytes = payload_w * plan.elem_bytes
+    if box_bytes % buf_bytes != 0:
+        fail(
+            f"copy_async(tma) gather4 dst box width {box_bytes} bytes is not a "
+            f"multiple of the buffer element size {buf_bytes}"
+        )
+    W = box_bytes // buf_bytes
+
+    smem = _canonicalize_smem(s_buf)
+    chunk_ext = list(s_ext)
+    chunk_ext[dst_gather_axis] = 4
+    for chunk_idx in range(num_rows // 4):
+        chunk_st = list(s_st)
+        chunk_st[dst_gather_axis] = chunk_st[dst_gather_axis] + chunk_idx * 4
+        region = [(chunk_st[d], chunk_st[d] + chunk_ext[d]) for d in range(len(s_buf.shape))]
+        sliced = smem.slice(list(s_buf.shape), region)
+        if sliced is None:
+            fail(
+                f"copy_async(tma) gather4 dst chunk {chunk_idx} at row "
+                f"{chunk_st[dst_gather_axis]} crosses a stride discontinuity; "
+                f"its four rows would not be box-linear"
+            )
+        res = _regroup_smem_by_extgt1_shape(sliced.canonicalize(), chunk_ext)
+        if res is None:
+            fail(
+                f"copy_async(tma) gather4 dst chunk {chunk_idx} cannot be grouped "
+                f"by its logical 4-row shape"
+            )
+        grouped, seps = res
+        four = _canonicalize_gmem_group_shards(
+            list(grouped.shard)[seps[dst_gather_axis] : seps[dst_gather_axis + 1]],
+            analyzer,
+        )
+        if (
+            len(four) != 1
+            or not four[0].axis.is_memory()
+            or not analyzer.can_prove_equal(four[0].extent, 4)
+            or not analyzer.can_prove_equal(four[0].stride, W)
+        ):
+            got = four[0].stride if len(four) == 1 else four
+            fail(
+                f"copy_async(tma) gather4 dst chunk {chunk_idx} is not box-linear "
+                f"at the box payload width W={W} (declared {got}); a padded/split "
+                f"row layout corrupts rows within the chunk"
+            )
+
+
+def _validate_gather4_src_provenance(plan, g_buf: Buffer, src_gather_axis: int) -> None:
+    """The four indexer values replace ``plan.dims[0]``'s coordinate (PTX row
+    slot). Prove that dim is the source gather axis: box 1, coord_base 0, no
+    issue axis drives it, and its byte stride equals the source gather-axis
+    byte stride (so the indices address rows at the declared source stride).
+    """
+    analyzer = Analyzer()
+    if plan.rank != 2:
+        fail("copy_async(tma) gather4 currently supports rank-2 TensorMaps")
+    row = plan.dims[0]
+    if not analyzer.can_prove_equal(row.box, 1):
+        fail(f"copy_async(tma) gather4 row dim box must be 1, got {row.box}")
+    if not analyzer.can_prove_equal(row.coord_base, 0):
+        fail(f"copy_async(tma) gather4 row dim coord_base must be 0, got {row.coord_base}")
+    for ax in plan.issue_axes:
+        if ax.dim_idx == 0:
+            fail("copy_async(tma) gather4 row dim must not be driven by an issue axis")
+    grouped, seps = _gmem_layout(g_buf).group(list(g_buf.shape))
+    src_iters = list(grouped.shard)[seps[src_gather_axis] : seps[src_gather_axis + 1]]
+    if not src_iters:
+        fail("copy_async(tma) gather4 source gather axis has extent 1")
+    src_byte_stride = src_iters[-1].stride * (tvm.DataType(g_buf.dtype).bits // 8)
+    if not analyzer.can_prove_equal(row.stride * plan.elem_bytes, src_byte_stride):
+        fail(
+            f"copy_async(tma) gather4 row dim byte stride {row.stride * plan.elem_bytes} "
+            f"!= source gather-axis byte stride {src_byte_stride}; the plan reordered "
+            f"or re-strided the gather dim, so the indices would select wrong rows"
+        )
 
 
 # ==============================================================================
@@ -312,6 +502,16 @@ def _gmem_layout(g_buf: Buffer) -> TileLayout:
     if not isinstance(layout, TileLayout):
         # cuTensorMap requires a plain memory layout on gmem side.
         raise ValueError(f"TMA gmem layout must be a TileLayout; got {type(layout).__name__}")
+    # A host-built cuTensorMap cannot honor a view-folded gmem elem_offset;
+    # demand the full buffer and express the offset via the copy region.
+    offset = g_buf.elem_offset
+    offset_c = offset.value if isinstance(offset, IntImm) else None
+    if offset_c != 0 and not Analyzer().can_prove_equal(offset, 0):
+        raise ValueError(
+            f"TMA gmem operand has elem_offset {offset}, which a host-built "
+            f"tensor map cannot honor; pass the full gmem buffer and put the "
+            f"offset in the copy region instead"
+        )
     return layout
 
 
@@ -699,7 +899,11 @@ def _build_segments(
 
 
 def _assemble_plan(
-    l1: L1Result, per_iter_selected: dict, chain: list, g_buf: Buffer, analyzer: Analyzer
+    l1: L1Result,
+    per_iter_selected: dict,
+    chain: list,
+    g_buf: Buffer,
+    analyzer: Analyzer,
 ) -> TmaPlan:
     """Build the final ``TmaPlan`` by stacking desc dims from all gmem iters.
 
@@ -728,7 +932,7 @@ def _assemble_plan(
     issue_axes_natural: list = []
 
     # --- First pass: ext=1 iters ---
-    for _, it in enumerate(l1.gmem_iters):
+    for iter_idx, it in enumerate(l1.gmem_iters):
         if not it.is_ext1:
             continue
         dims_natural.append(
@@ -783,7 +987,7 @@ def _assemble_plan(
                     )
                 )
 
-    # --- Permute: box=1 first (natural order), box>1 last (chain DESC) ---
+    # --- Permute: box=1 first (build order), box>1 last (chain DESC) ---
     non_sel_indices = [
         idx for idx, o in enumerate(origins) if not (isinstance(o, tuple) and o[0] == "selected")
     ]
@@ -939,6 +1143,12 @@ def _merge_contig_full_box_dims(plan: TmaPlan, analyzer: Analyzer) -> TmaPlan:
             return None
         if not analyzer.can_prove_equal(tvm.tirx.floormod(inner.shape, 2), 0):
             return None
+        # box and coord_base are halved below, so both must be provably even;
+        # otherwise decline the promotion (odd drops/mis-addresses an element).
+        if not analyzer.can_prove_equal(tvm.tirx.floormod(inner.box, 2), 0):
+            return None
+        if not analyzer.can_prove_equal(tvm.tirx.floormod(inner.coord_base, 2), 0):
+            return None
         for d in dims_[:-1]:
             if not analyzer.can_prove_equal(tvm.tirx.floormod(d.stride, 2), 0):
                 return None
@@ -1011,8 +1221,14 @@ def _merge_contig_full_box_dims(plan: TmaPlan, analyzer: Analyzer) -> TmaPlan:
     )
 
 
-def _validate_hw_constraints(plan: TmaPlan, dtype: str) -> tuple:
-    """Return ``(ok, reason)``. ``reason`` is the error string when ``ok`` is False."""
+def _validate_hw_constraints(plan: TmaPlan) -> tuple:
+    """Return ``(ok, reason)``. ``reason`` is the error string when ``ok`` is False.
+
+    All checks are in ``plan.elem_dtype`` / ``plan.elem_bytes`` units: after a
+    merge+promote rewrite the plan's boxes and strides are expressed in the
+    promoted element type, so validating against the original buffer dtype
+    would be off by the promotion factor (2x per promotion step).
+    """
     analyzer = Analyzer()
 
     if plan.rank == 0:
@@ -1026,13 +1242,36 @@ def _validate_hw_constraints(plan: TmaPlan, dtype: str) -> tuple:
         return False, f"TMA innermost dim must have unit stride; got {inner.stride}"
 
     # Innermost box times element size must fit the swizzle atom.
-    if not _swizzle_inner_box_fits(dtype, plan.swizzle_mode, inner.box):
+    if not _swizzle_inner_box_fits(plan.elem_dtype, plan.swizzle_mode, inner.box):
         return False, "TMA innermost box exceeds the swizzle atom size"
+
+    # Every boxDim <= 256 (cuTensorMap limit); a native oversized box has no
+    # merge+promote fold. Decline only provably-oversized; symbolic left to host.
+    for d in plan.dims:
+        if analyzer.can_prove(d.box > 256):
+            return False, f"TMA boxDim {d.box} exceeds the hardware limit of 256"
+
+    # boxDim[0]*elementSize must be a multiple of 16 B (cuTensorMap, non-packed);
+    # decline a provably-misaligned inner box so the shrink search can retry.
+    inner_box_bytes = analyzer.simplify(inner.box * plan.elem_bytes)
+    if analyzer.can_prove(tvm.tirx.floormod(inner_box_bytes, 16) != 0):
+        return False, (
+            f"TMA innermost boxDim[0]*elementSize = {inner_box_bytes} B is not a "
+            f"multiple of 16 B (cuTensorMap requirement)"
+        )
+
+    # Non-innermost byte strides must be multiples of 16 (cuTensorMap); if
+    # merge+promote cannot fix it, decline at dispatch to allow fallback.
+    if _plan_needs_alignment_fix(plan.dims, plan.elem_bytes, analyzer):
+        return False, (
+            "TMA non-innermost dim byte stride is not a provable multiple of 16 "
+            "(merge+promote could not fix it)"
+        )
 
     return True, ""
 
 
-def _build_plan_with_shrink(l1: L1Result, g_buf: Buffer, s_buf: Buffer) -> TmaPlan:
+def _build_plan_with_shrink(l1: L1Result, g_buf: Buffer) -> TmaPlan:
     """Enumerate chain prefix length j from max down to 0, validate
     alignment per gmem iter, build and validate the plan. Return the first
     plan that passes everything. Raise when j=0 still fails.
@@ -1045,7 +1284,7 @@ def _build_plan_with_shrink(l1: L1Result, g_buf: Buffer, s_buf: Buffer) -> TmaPl
     # valid plan (trivial desc dims).
     if not l1.smem_groups:
         plan = _assemble_plan(l1, {}, [], g_buf, analyzer)
-        ok, reason = _validate_hw_constraints(plan, s_buf.dtype)
+        ok, reason = _validate_hw_constraints(plan)
         if ok:
             return plan
         fail(f"TMA plan (no smem groups) failed hardware check: {reason}")
@@ -1067,7 +1306,7 @@ def _build_plan_with_shrink(l1: L1Result, g_buf: Buffer, s_buf: Buffer) -> TmaPl
             continue
 
         plan = _assemble_plan(l1, per_iter_selected, chain[:j], g_buf, analyzer)
-        ok, reason = _validate_hw_constraints(plan, s_buf.dtype)
+        ok, reason = _validate_hw_constraints(plan)
         if ok:
             return plan
         last_reason = reason
@@ -1110,12 +1349,38 @@ def copy_tma_impl(op_call: TilePrimitiveCall, sctx: DispatchContext) -> PrimFunc
     s_st = [region.min for region in shared_region.region]
     s_ext = [region.extent for region in shared_region.region]
 
+    gather_axis = op_call.config.get("gather_axis", None)
+    gather_indexer = _normalize_gather_indexer(op_call.config.get("indexer", None))
+    g_st_plan, g_ext_plan, s_ext_plan, dst_gather_axis = _prepare_gather4_plan_inputs(
+        direction=direction,
+        gather_axis=gather_axis,
+        dst_gather_axis=op_call.config.get("dst_gather_axis", None),
+        indexer=gather_indexer,
+        g_st=g_st,
+        g_ext=g_ext,
+        s_ext=s_ext,
+    )
+
     oob_mode = _normalize_oob_mode(s_buf.dtype, op_call.config.get("oob", None))
     oob_fill_kind = _oob_fill_kind(oob_mode)
+    # TMA fills smem in box-linear order (descriptor dim 0 fastest); the plan
+    # orders box>1 dims by the smem layout's contiguous chain to match it.
 
     # L1 → L2 → L3
-    l1 = _build_l1_result(s_buf, g_buf, g_st, g_ext, s_st, s_ext)
-    plan = _build_plan_with_shrink(l1, g_buf, s_buf)
+    l1 = _build_l1_result(s_buf, g_buf, g_st_plan, g_ext_plan, s_st, s_ext_plan)
+    plan = _build_plan_with_shrink(l1, g_buf)
+
+    # Re-validate oob against the plan's dtype: merge+promote may re-type to
+    # uintN, and oob='nan' needs a float descriptor -- decline at dispatch.
+    if oob_mode == "nan" and plan.elem_dtype not in ("float16", "float32", "float64", "bfloat16"):
+        fail(
+            f"TMA oob='nan' requires a floating-point tensormap dtype, but the "
+            f"merge+promote rewrite re-typed the descriptor as {plan.elem_dtype}"
+        )
+
+    if gather_indexer:
+        _validate_gather4_dst_layout(s_buf, dst_gather_axis, plan, s_st, s_ext, len(gather_indexer))
+        _validate_gather4_src_provenance(plan, g_buf, int(gather_axis))
 
     # Optional descriptor dtype override. An fp32 buffer feeding a tf32 MMA should
     # be loaded via a TFLOAT32 (== 11) descriptor so the TMA hardware RN-truncates
@@ -1130,6 +1395,7 @@ def copy_tma_impl(op_call: TilePrimitiveCall, sctx: DispatchContext) -> PrimFunc
     if _tma_dtype is not None and plan.elem_dtype not in ("float32", "tfloat32"):
         fail(f"tma_dtype={_tma_dtype!r} requires a float32 descriptor; got {plan.elem_dtype}")
     force_cu_dtype = _TMA_DTYPE_TO_CU.get(_tma_dtype, -1)
+    l2_promotion = _normalize_l2_promotion(op_call.config.get("tensormap_l2_promotion", None))
 
     # Direction / runtime-config bits that don't affect the plan itself.
     cta_group = op_call.config.get("cta_group", None)
@@ -1146,6 +1412,19 @@ def copy_tma_impl(op_call: TilePrimitiveCall, sctx: DispatchContext) -> PrimFunc
         mbar = op_call.config.get("mbar", None)
         if mbar is None:
             raise ValueError("mbar is not set in config")
+    mbarrier_addr_config = op_call.config.get("mbarrier_addr", False)
+    mbarrier_addr_static = False
+    mbarrier_addr_pred = None
+    if isinstance(mbarrier_addr_config, bool):
+        mbarrier_addr_static = mbarrier_addr_config
+    elif isinstance(mbarrier_addr_config, tvm.tirx.IntImm):
+        mbarrier_addr_static = bool(int(mbarrier_addr_config))
+    elif isinstance(mbarrier_addr_config, tvm.tirx.PrimExpr):
+        mbarrier_addr_pred = mbarrier_addr_config
+    else:
+        fail("copy_async(tma) mbarrier_addr must be bool or PrimExpr")
+    if (mbarrier_addr_static or mbarrier_addr_pred is not None) and direction != "g2s":
+        fail("copy_async(tma) mbarrier_addr is only supported for global -> shared copies")
     use_tma_reduce = op_call.config.get("use_tma_reduce", None)
 
     dtype_bytes = plan.elem_bytes
@@ -1155,78 +1434,185 @@ def copy_tma_impl(op_call: TilePrimitiveCall, sctx: DispatchContext) -> PrimFunc
     element_strides = [1] * plan.rank
 
     flat_total_extent = plan.flatten_total_extent()
+    cache_hint, cache_policy = _normalize_cache_config(op_call.config.get("cache_hint", ""))
+    has_gather_indexer = bool(gather_indexer)
+    num_gather4_chunks = len(gather_indexer) // 4
 
     def compute_offsets_and_tma_coords(loop_var):
         s_offset, coords = plan.offsets_and_coords(loop_var)
         simplified = _simplify_with_var_ranges(
             [s_offset, *coords], [(loop_var, flat_total_extent)], sctx
         )
-        return simplified[0], reversed(simplified[1:])
+        return simplified[0], list(reversed(simplified[1:]))
+
+    def compute_gather4_chunk_s_start(chunk_idx):
+        start = list(s_st)
+        start[dst_gather_axis] = start[dst_gather_axis] + chunk_idx * 4
+        return start
+
+    def compute_gather4_coords(tma_coords, chunk_idx):
+        coords = list(tma_coords)
+        if plan.rank != 2:
+            fail("copy_async(tma) gather4 currently supports rank-2 TensorMaps")
+        # PTX 2D tile::gather4 takes the non-gather coord then 4 source-row
+        # coords; gather_axis=0 is the second dense coord (the indexer group).
+        if len(coords) != 2:
+            fail("copy_async(tma) gather4 expected two dense TMA coordinates")
+        return [coords[0], *gather_indexer[chunk_idx * 4 : (chunk_idx + 1) * 4]]
+
+    def compute_mbarrier_operand(force_shared_addr: bool):
+        # cta_group::2 routes completion to the CTA the mbar address names, so
+        # keep the caller's CTA-select bit — don't force it to the leader.
+        if force_shared_addr:
+            return T.cuda.cvta_generic_to_shared(mbar), True
+        return mbar, False
+
+    def emit_g2s(s_buf_w_offset, tma_coords, gather_chunk=None, force_shared_addr=False):
+        if gather_chunk is None:
+            ptr = s_buf_w_offset.ptr_to(s_st)
+            coords = tma_coords
+            load_mode = "tile"
+        else:
+            ptr = s_buf_w_offset.ptr_to(compute_gather4_chunk_s_start(gather_chunk))
+            coords = compute_gather4_coords(tma_coords, gather_chunk)
+            load_mode = "tile_gather4"
+        mbar_operand, mbar_is_shared_addr = compute_mbarrier_operand(force_shared_addr)
+        T.evaluate(
+            T.ptx.cp_async.bulk.tensor.g2s_cluster(
+                plan.rank,
+                ptr,
+                mbar_operand,
+                T.address_of(tensor_map),
+                cta_mask,
+                cta_group,
+                cache_hint,
+                *coords,
+                cache_policy=cache_policy,
+                load_mode=load_mode,
+                mbar_is_shared_addr=mbar_is_shared_addr,
+            )
+        )
 
     def val_key(value) -> str:
         return str(value)
 
+    external_tensor_map = op_call.config.get("tensor_map", None)
+    # ``plan.elem_dtype`` must be in the key: merge+promote re-types, so two
+    # plans differing only in promotion level would collide on numeric fields.
     tensormap_cache_key = (
-        f"tensormap:{hash(plan.tensor_ptr)}:{g_buf.dtype}:{val_key(plan.rank)}"
+        f"tensormap:{hash(plan.tensor_ptr)}:{g_buf.dtype}:{plan.elem_dtype}"
+        f":{val_key(plan.rank)}"
         f":{tuple(val_key(v) for v in plan.shape)}"
         f":{tuple(val_key(v) for v in tma_g_strides_for_map)}"
         f":{tuple(val_key(v) for v in plan.box_dim)}"
         f":{val_key(plan.swizzle_mode.value)}:{oob_fill_kind}:{force_cu_dtype}"
+        f":{l2_promotion}"
     )
 
-    cached_tensormap = sctx.cache_get(tensormap_cache_key)
-    if cached_tensormap is not None:
-        tensor_map = cached_tensormap
+    if external_tensor_map is not None:
+        tensor_map = external_tensor_map
         tensormap_is_cached = True
+        prefetch_cache_key = f"prefetch_tensormap:external:{val_key(external_tensor_map)}"
     else:
-        tensor_map = T.Var(
-            g_buf.data.name + "_tensormap", dtype=T.handle("tensormap").type_annotation
-        )
-        tensormap_is_cached = False
-
-    # fmt: off
-    @T.prim_func(check_well_formed=False)
-    def impl():
-        for loop_vars in T.unroll(flat_total_extent):
-            s_offset, tma_coords = T.meta_var(compute_offsets_and_tma_coords(loop_vars))
-            s_buf_w_offset = T.decl_buffer(
-                s_buf.shape,
-                s_buf.dtype,
-                s_buf.data,
-                elem_offset=s_buf.elem_offset + s_offset,
-                scope=s_buf.scope(),
-                layout=_to_tile_layout(s_buf.layout, s_buf.shape),
+        cached_tensormap = sctx.cache_get(tensormap_cache_key)
+        if cached_tensormap is not None:
+            tensor_map = cached_tensormap
+            tensormap_is_cached = True
+        else:
+            tensor_map = T.Var(
+                g_buf.data.name + "_tensormap", dtype=T.handle("tensormap").type_annotation
             )
+            tensormap_is_cached = False
+        prefetch_cache_key = f"prefetch_tensormap:{tensormap_cache_key}"
 
-            if direction == "g2s":
-                T.ptx.cp_async.bulk.tensor.g2c(
-                    plan.rank,
-                    s_buf_w_offset.ptr_to(s_st),
-                    mbar,
-                    T.address_of(tensor_map),
-                    cta_mask,
-                    cta_group,
-                    op_call.config.get("cache_hint", ""),
-                    *tma_coords,
-                )
+    def emit_tma_for_buffer(s_buf_w_offset, tma_coords, gather_chunk=None):
+        if direction == "g2s":
+            if cta_group == 2 or mbarrier_addr_static:
+                emit_g2s(s_buf_w_offset, tma_coords, gather_chunk, force_shared_addr=True)
+            elif mbarrier_addr_pred is not None:
+                with T.If(mbarrier_addr_pred):
+                    emit_g2s(s_buf_w_offset, tma_coords, gather_chunk, force_shared_addr=True)
+                with T.Else():
+                    emit_g2s(s_buf_w_offset, tma_coords, gather_chunk, force_shared_addr=False)
             else:
-                if use_tma_reduce is None:
+                emit_g2s(s_buf_w_offset, tma_coords, gather_chunk, force_shared_addr=False)
+        else:
+            if use_tma_reduce is None:
+                T.evaluate(
                     T.ptx.cp_async.bulk.tensor.s2g(
                         plan.rank,
                         s_buf_w_offset.ptr_to(s_st),
                         T.address_of(tensor_map),
-                        op_call.config.get("cache_hint", ""),
+                        cache_hint,
                         *tma_coords,
+                        cache_policy=cache_policy,
                     )
-                else:
+                )
+            else:
+                T.evaluate(
                     T.ptx.cp_async.bulk.tensor.s2g_reduce(
                         plan.rank,
                         s_buf_w_offset.ptr_to(s_st),
                         T.address_of(tensor_map),
-                        op_call.config.get("cache_hint", ""),
+                        cache_hint,
                         use_tma_reduce,
                         *tma_coords,
+                        cache_policy=cache_policy,
                     )
+                )
+
+    def build_gather4_chunk_body(gather_chunk):
+        # fmt: off
+        @T.prim_func(check_well_formed=False)
+        def gather4_chunk_impl():
+            for loop_vars in T.unroll(flat_total_extent):
+                s_offset, tma_coords = T.meta_var(compute_offsets_and_tma_coords(loop_vars))
+                s_buf_w_offset = T.decl_buffer(
+                    s_buf.shape,
+                    s_buf.dtype,
+                    s_buf.data,
+                    elem_offset=s_buf.elem_offset + s_offset,
+                    scope=s_buf.scope(),
+                    layout=_to_tile_layout(s_buf.layout, s_buf.shape),
+                )
+                emit_tma_for_buffer(s_buf_w_offset, tma_coords, gather_chunk)
+        # fmt: on
+
+        return gather4_chunk_impl.body
+
+    def emit_gather4_chunks_for_buffer(s_buf_w_offset, tma_coords):
+        for gather_chunk in range(num_gather4_chunks):
+            emit_tma_for_buffer(s_buf_w_offset, tma_coords, gather_chunk)
+
+    # fmt: off
+    if has_gather_indexer and not Analyzer().can_prove_equal(flat_total_extent, 1):
+        chunk_bodies = [
+            build_gather4_chunk_body(gather_chunk)
+            for gather_chunk in range(num_gather4_chunks)
+        ]
+        impl = PrimFunc(
+            [],
+            chunk_bodies[0] if len(chunk_bodies) == 1 else tvm.tirx.SeqStmt(chunk_bodies),
+            ret_type=None,
+            buffer_map={},
+        ).with_attr("global_symbol", "impl")
+    else:
+        @T.prim_func(check_well_formed=False)
+        def impl():
+            for loop_vars in T.unroll(flat_total_extent):
+                s_offset, tma_coords = T.meta_var(compute_offsets_and_tma_coords(loop_vars))
+                s_buf_w_offset = T.decl_buffer(
+                    s_buf.shape,
+                    s_buf.dtype,
+                    s_buf.data,
+                    elem_offset=s_buf.elem_offset + s_offset,
+                    scope=s_buf.scope(),
+                    layout=_to_tile_layout(s_buf.layout, s_buf.shape),
+                )
+                if has_gather_indexer:
+                    emit_gather4_chunks_for_buffer(s_buf_w_offset, tma_coords)
+                else:
+                    emit_tma_for_buffer(s_buf_w_offset, tma_coords)
     # fmt: on
 
     if not tensormap_is_cached:
@@ -1246,7 +1632,7 @@ def copy_tma_impl(op_call: TilePrimitiveCall, sctx: DispatchContext) -> PrimFunc
                 *element_strides,
                 0,  # CU_TENSOR_MAP_INTERLEAVE_NONE
                 plan.swizzle_mode.value,
-                2,  # CU_TENSOR_MAP_L2_PROMOTION_L2_128B
+                l2_promotion,
                 oob_fill_kind,
                 # Append the dtype override ONLY when requested, so the default
                 # (derive-from-dtype) path emits a byte-identical encode call (the
@@ -1262,7 +1648,6 @@ def copy_tma_impl(op_call: TilePrimitiveCall, sctx: DispatchContext) -> PrimFunc
     if bool(op_call.config.get("prefetch_tensormap", False)):
         if "warp_id_in_cta" not in sctx.launch_params:
             fail("tma prefetch_tensormap requires warp_id_in_cta launch param")
-        prefetch_cache_key = f"prefetch_tensormap:{tensormap_cache_key}"
         if sctx.cache_get(prefetch_cache_key) is None:
             warp_id_in_cta = sctx.launch_params["warp_id_in_cta"].var
 
@@ -1270,7 +1655,8 @@ def copy_tma_impl(op_call: TilePrimitiveCall, sctx: DispatchContext) -> PrimFunc
             @T.prim_func(check_well_formed=False)
             def prefetch_tensor_map():
                 if warp_id_in_cta == 0:
-                    T.ptx.prefetch_tensormap(T.address_of(tensor_map))
+                    if T.ptx.elect_sync():
+                        T.ptx.prefetch_tensormap(T.address_of(tensor_map))
                 T.tvm_kernel_replace_point()
             # fmt: on
 
@@ -1278,6 +1664,49 @@ def copy_tma_impl(op_call: TilePrimitiveCall, sctx: DispatchContext) -> PrimFunc
             sctx.cache_set(prefetch_cache_key, tensor_map)
 
     return impl
+
+
+def _validate_tma_copy_op(op_call: TilePrimitiveCall, sctx: DispatchContext) -> bool:
+    """Validate the copy_async shape envelope before the TMA planner runs.
+
+    The generic copy validator compares non-unit extents in order. TMA may
+    legally copy between differently ordered logical regions, such as FlashMLA
+    RoPE ``global(32, 64, 1) -> shared(64, 32)``.  Keep this predicate specific
+    to TMA and require the total copied element count to match; the planner
+    below still verifies that the layouts can be regrouped and satisfy hardware
+    constraints.
+    """
+
+    del sctx
+    dst_buffer_region, src_buffer_region = op_call.args[:2]
+    src: Buffer = src_buffer_region.buffer
+    dst: Buffer = dst_buffer_region.buffer
+    if not (src.layout and dst.layout and src.dtype == dst.dtype):
+        return False
+
+    src_scope, dst_scope = src.scope(), dst.scope()
+    if not (
+        (src_scope == "global" and dst_scope.startswith("shared"))
+        or (src_scope.startswith("shared") and dst_scope == "global")
+    ):
+        return False
+
+    analyzer = Analyzer()
+    gather_indexer = _normalize_gather_indexer(op_call.config.get("indexer", None))
+    gather_axis = op_call.config.get("gather_axis", None)
+    if gather_indexer and gather_axis is None:
+        return False
+    src_elems = 1
+    dst_elems = 1
+    for axis, region in enumerate(src_buffer_region.region):
+        if gather_indexer and axis == int(gather_axis):
+            continue
+        src_elems = analyzer.simplify(src_elems * region.extent)
+    if gather_indexer:
+        src_elems = analyzer.simplify(src_elems * len(gather_indexer))
+    for region in dst_buffer_region.region:
+        dst_elems = analyzer.simplify(dst_elems * region.extent)
+    return analyzer.can_prove_equal(src_elems, dst_elems)
 
 
 # Variant: copy_async/tma (priority=10). Applies at single-thread exec scope
@@ -1289,7 +1718,8 @@ def copy_tma_impl(op_call: TilePrimitiveCall, sctx: DispatchContext) -> PrimFunc
     priority=10,
     when=[
         predicate(
-            "validate_copy_op", lambda op, sctx: (validate_copy_op(op, sctx), "not a valid copy op")
+            "validate_tma_copy_op",
+            lambda op, sctx: (_validate_tma_copy_op(op, sctx), "not a valid TMA copy op"),
         ),
         predicate(
             "single_thread",
