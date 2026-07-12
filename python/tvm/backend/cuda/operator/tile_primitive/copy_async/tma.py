@@ -1383,8 +1383,8 @@ def copy_tma_impl(op_call: TilePrimitiveCall, sctx: DispatchContext) -> PrimFunc
         return [coords[0], *gather_indexer[chunk_idx * 4 : (chunk_idx + 1) * 4]]
 
     def compute_mbarrier_operand(force_shared_addr: bool):
-        if cta_group == 2:
-            return T.cuda.sm100_2sm_leader_smem_addr(mbar), True
+        # cta_group::2 routes completion to the CTA the mbar address names, so
+        # keep the caller's CTA-select bit — don't force it to the leader.
         if force_shared_addr:
             return T.cuda.cvta_generic_to_shared(mbar), True
         return mbar, False
