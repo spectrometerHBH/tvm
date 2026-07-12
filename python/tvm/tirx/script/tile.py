@@ -98,6 +98,7 @@ _SCOPED_TILE_OP_NAMES = [
 for _op_name in _SCOPED_TILE_OP_NAMES:
     globals()[_op_name] = _tile_scoped_op(_op_name)
 
+
 cluster = _builder.ScopeNamespace("cluster", "cluster")
 cta = _builder.ScopeNamespace("cta", "cta")
 wg = _builder.ScopeNamespace("warpgroup", "wg")
@@ -106,6 +107,7 @@ warp = _builder.ScopeNamespace("warp", "warp")
 thread = _builder.ScopeNamespace("thread", "thread")
 
 compose_op = _builder.compose_op
+
 
 __all__ = [
     *_SCOPED_TILE_OP_NAMES,

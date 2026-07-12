@@ -30,8 +30,8 @@ from tvm.tirx.operator.tile_primitive.registry import DispatchContext
 from tvm.tirx.tile_primitive import TilePrimitiveCall
 
 from ._common import _TID_AXIS_FOR_SCOPE
-from .reg import _axis_decl
 from .utils import _is_valid_copy
+from .vec_auto_reg import _axis_decl
 
 
 def _region_st_extent(buffer_region):

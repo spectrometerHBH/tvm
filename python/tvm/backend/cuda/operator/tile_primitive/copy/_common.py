@@ -543,6 +543,7 @@ def _outer_offsets(outer_iters_s, outer_iters_g, flat_idx):
 def copy_ptx_form(num_bytes: int) -> tuple[str, str]:
     """Map copy width (bytes) to PTX ``(vec, ptx_type)`` for ``T.ptx.ld`` / ``T.ptx.st``."""
     return {
+        32: ("v8", "u32"),
         16: ("v4", "u32"),
         8: ("v2", "u32"),
         4: ("", "u32"),

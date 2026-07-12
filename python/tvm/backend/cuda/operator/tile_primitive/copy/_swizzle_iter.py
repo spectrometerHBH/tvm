@@ -152,7 +152,7 @@ def try_recognize(
 
     ``iter_extents`` / ``iter_strides``: the outer-iter list on the S side
     (excluding T iter and vec iter), in outermost-first order matching
-    ``s_p.shard[:-2]`` (or the atom-derived analog in ``reg.py``).
+    ``s_p.shard[:-2]`` (or the atom-derived analog in ``vec_auto_reg.py``).
     Strides are in element units.
 
     Each outer iter with ``extent=2^k`` and ``stride=s`` is conceptually

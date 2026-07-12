@@ -409,5 +409,46 @@ def test_tcgen05_mma_ss_no_tma(swizzle):
     tvm.testing.run_with_gpu_lock(run_and_check)
 
 
+@pytest.mark.gpu
+@pytest.mark.skipif(not env.has_cuda_compute(10), reason="need cuda compute >= 10.0")
+def test_tcgen05_mma_pred_codegen():
+    # fmt: off
+    @T.prim_func
+    def test_mma_pred():
+        T.device_entry()
+        T.thread_id([1])
+        tmem_addr = T.alloc_buffer((1,), "uint32", scope="local")
+        desc_a = T.alloc_buffer((1,), "uint64", scope="local")
+        desc_b = T.alloc_buffer((1,), "uint64", scope="local")
+        desc_i = T.alloc_buffer((1,), "uint32", scope="local")
+        pred = T.alloc_buffer((1,), "uint32", scope="local")
+
+        tmem_addr[0] = T.uint32(0)
+        desc_a[0] = T.uint64(0)
+        desc_b[0] = T.uint64(0)
+        desc_i[0] = T.uint32(0)
+        pred[0] = T.uint32(1)
+        T.ptx.tcgen05.mma(
+            tmem_addr[0],
+            desc_a[0],
+            desc_b[0],
+            desc_i[0],
+            d_dtype="float32",
+            a_dtype="float16",
+            b_dtype="float16",
+            use_a_tmem=False,
+            cta_group=1,
+            pred=pred[0],
+        )
+    # fmt: on
+
+    target = tvm.target.Target("cuda")
+    with target:
+        src, _ = _get_source(test_mma_pred)
+        assert "ptx_tcgen05_mma_cta_1_kind_f16_SS_pred" in src
+        assert "setp.ne.b32 p_issue" in src
+        assert "@p_issue tcgen05.mma.cta_group::1.kind::f16" in src
+
+
 if __name__ == "__main__":
     tvm.testing.main()

@@ -110,11 +110,11 @@ class MBarrier:
         T.ptx.mbarrier.try_wait(self.buf.ptr_to([stage]), phase ^ self.phase_offset)
 
     @T.inline
-    def arrive(self, stage, cta_id=None, pred=None, count=None):
+    def arrive(self, stage, remote=None, pred=None, count=None):
         # Default: local-CTA arrive — emits the simple
         # ``mbarrier.arrive.shared.b64`` form. To arrive on a remote
         # CTA's mbarrier in a cluster kernel, callers must pass
-        # ``cta_id=`` explicitly (e.g. ``bar.arrive(stage, cta_id=0)``)
+        # ``remote=`` explicitly (e.g. ``bar.arrive(stage, remote=0)``)
         # or use ``MBarrier.remote_view(rank).arrive(stage)``. Defaulting
         # the cross-CTA path was both surprising (``bar.arrive(stage)``
         # silently ``mapa`` ed across the cluster) and a per-call cost
@@ -124,12 +124,12 @@ class MBarrier:
         # operand, i.e. ``mbarrier.arrive.shared::cluster.b64 _, [addr], count``.
         # When ``None`` the implicit count-of-1 form is emitted. Passing
         # ``count=1`` is semantically identical but spells the count explicitly.
-        if cta_id is None:
+        if remote is None:
             T.ptx.mbarrier.arrive(self.buf.ptr_to([stage]))
         else:
             actual_pred = True if pred is None else pred
             T.ptx.mbarrier.arrive(
-                self.buf.ptr_to([stage]), cta_id=cta_id, pred=actual_pred, count=count
+                self.buf.ptr_to([stage]), remote=remote, pred=actual_pred, count=count
             )
 
     def ptr_to(self, idx):
@@ -164,21 +164,21 @@ class TMABar(MBarrier):
     """
 
     @T.inline
-    def arrive(self, stage, tx_count=None, cta_id=None, pred=None):
+    def arrive(self, stage, tx_count=None, remote=None, pred=None):
         # NOTE: this arrive() kwarg set intentionally differs from
         # MBarrier.arrive (hardware necessity, LSP-incompatible by design).
         # ``tx_count``: TMA byte count for ``mbarrier.arrive.expect_tx``.
-        # ``cta_id`` / ``pred``: forwarded to the underlying
+        # ``remote`` / ``pred``: forwarded to the underlying
         # ``mbarrier.arrive`` (cluster path) when set; otherwise the
         # arrive is local-CTA only. See ``MBarrier.arrive`` for the
         # full default-local rationale.
         if tx_count is not None:
             T.ptx.mbarrier.arrive.expect_tx(self.buf.ptr_to([stage]), tx_count)
-        elif cta_id is None:
+        elif remote is None:
             T.ptx.mbarrier.arrive(self.buf.ptr_to([stage]))
         else:
             actual_pred = True if pred is None else pred
-            T.ptx.mbarrier.arrive(self.buf.ptr_to([stage]), cta_id=cta_id, pred=actual_pred)
+            T.ptx.mbarrier.arrive(self.buf.ptr_to([stage]), remote=remote, pred=actual_pred)
 
 
 class TCGen05Bar(MBarrier):

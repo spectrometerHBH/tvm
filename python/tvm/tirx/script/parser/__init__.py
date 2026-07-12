@@ -40,7 +40,6 @@ __all__ = _tir.__all__ + [
     "Ptr",
     "SMEMPool",
     "TMEMPool",
-    "TMEMStages",
     "bool",
     "constexpr",
     "inline",
