@@ -32,7 +32,6 @@ from tvm.tirx import Var
 from tvm.tirx.cuda.operator.tile_primitive.tma_utils import (
     SwizzleMode,
     mma_shared_layout,
-    tma_shared_layout,
 )
 from tvm.tirx.layout import (
     Axis,
@@ -1414,13 +1413,6 @@ def test_mma_shared_layout():
         assert_structural_equal(layout, layout_expected)
 
     case3()
-
-
-def test_tma_shared_layout_alias():
-    shape = (3, 64, 256)
-    layout = mma_shared_layout("float16", SwizzleMode.SWIZZLE_128B_ATOM, shape)
-    alias_layout = tma_shared_layout("float16", SwizzleMode.SWIZZLE_128B_ATOM, shape)
-    assert_structural_equal(alias_layout, layout)
 
 
 def test_pool_allocator_alloc_mma():

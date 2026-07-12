@@ -1535,9 +1535,27 @@ def test_copy_tma_gather4_dst_per_chunk_soundness():
         config=cfg(12),
         **g,
     )
+    # Valid split (4,4,64):(1024,64,1): each 4-row chunk stays within one inner-4
+    # block (stride 64 == payload), so it regroups to Iter(4, 64). Legal.
+    _make_tma_call(
+        s_shape=(16, 64),
+        s_region=((0, 16), (0, 64)),
+        smem_layout=TileLayout(S[(4, 4, 64) : (1024, 64, 1)]),
+        config=cfg(16),
+        **g,
+    )
+    # Chunk bases need not form one affine region: rows 0..7 and 8..15 are
+    # separated, but every emitted 4-row chunk is independently box-linear.
+    _make_tma_call(
+        s_shape=(16, 64),
+        s_region=((0, 12), (0, 64)),
+        smem_layout=TileLayout(S[(2, 8, 64) : (1024, 64, 1)]),
+        config=cfg(12),
+        **g,
+    )
     # Split (2,6,64):(1024,64,1): rows 0..3 look box-linear, but chunk 1
     # (rows 4..7) is declared at 256,320,1024,1088 vs hw 256,320,384,448.
-    with pytest.raises(Exception, match="payload width|corrupt"):
+    with pytest.raises(Exception, match="split|4-row|straddle"):
         _make_tma_call(
             s_shape=(12, 64),
             s_region=((0, 12), (0, 64)),
@@ -1545,8 +1563,8 @@ def test_copy_tma_gather4_dst_per_chunk_soundness():
             config=cfg(12),
             **g,
         )
-    # Non-zero s_st (rows 4..11): chunk base 4 straddles the discontinuity.
-    with pytest.raises(Exception, match="payload width|corrupt"):
+    # Non-zero s_st (rows 4..11): the sliced region straddles the discontinuity.
+    with pytest.raises(Exception, match="discontinuity|crosses|box-linear|split"):
         _make_tma_call(
             s_shape=(12, 64),
             s_region=((4, 12), (0, 64)),
@@ -2274,6 +2292,7 @@ def test_copy_tma_dynamic_cache_hint_g2s_keeps_rank_coords():
     src = mod.mod.imports[0].inspect_source()
     assert "ptx_cp_async_bulk_tensor_g2s_cluster_tile_4d_cache_hint_mbar_addr" in src
     assert "tvm_builtin_cuda_cvta_generic_to_shared" in src
+    assert "4278190079" not in src
     assert (
         "cp.async.bulk.tensor.4d.shared::cluster.global"
         ".mbarrier::complete_tx::bytes.cta_group::2.L2::cache_hint"
