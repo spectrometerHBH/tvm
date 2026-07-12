@@ -1216,6 +1216,7 @@ def _build_tma_gather4_indexer_kernel(
                 cache_hint=T.uint64(0x14F0000000000000),
                 mbarrier_addr=mbarrier_addr,
                 gather_axis=0,
+                dst_gather_axis=0,
                 indexer=[Idx[i] for i in range(copy_rows)],
                 prefetch_tensormap=prefetch_tensormap,
             )
@@ -1263,6 +1264,7 @@ def _build_tma_gather4_rank3_dst_kernel(dtype="float16"):
                 cta_group=2,
                 cache_hint=T.uint64(0x14F0000000000000),
                 gather_axis=0,
+                dst_gather_axis=1,
                 indexer=[Idx[i] for i in range(copy_rows)],
             )
         # fmt: on
@@ -1312,6 +1314,7 @@ def test_copy_tma_gather4_indexer_issue_axes_emit_chunks_outermost():
         ),
         config={
             "gather_axis": 0,
+            "dst_gather_axis": 0,
             "indexer": [IntImm("int32", i) for i in range(16)],
             "cache_hint": IntImm("uint64", 0),
         },
@@ -1441,6 +1444,7 @@ def _build_tma_gather4_multi_iter_kernel(dtype="float16"):
                     cta_group=1,
                     cache_hint=T.uint64(0x14F0000000000000),
                     gather_axis=0,
+                    dst_gather_axis=0,
                     indexer=[Idx[g * 4 + i] for i in range(4)],
                 )
             T.ptx.mbarrier.arrive.expect_tx(mbar_ptr, smem_bytes)
@@ -2214,7 +2218,7 @@ def _build_tma_gather4_cta2_kernel(cta_mask):
                     A_smem[:, :], A[:, :], dispatch="tma", mbar=mbar_ptr,
                     cta_group=2, cta_mask=T.uint16(cta_mask),
                     cache_hint=T.uint64(0x14F0000000000000),
-                    gather_axis=0, indexer=[Idx[i] for i in range(copy_rows)],
+                    gather_axis=0, dst_gather_axis=0, indexer=[Idx[i] for i in range(copy_rows)],
                 )
                 T.ptx.mbarrier.arrive.expect_tx(mbar_ptr, smem_bytes)
             T.ptx.mbarrier.try_wait(mbar_ptr, 0)

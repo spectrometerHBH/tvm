@@ -336,6 +336,7 @@ def _prepare_gather4_plan_inputs(
     *,
     direction: str,
     gather_axis,
+    dst_gather_axis,
     indexer: list,
     g_st: list,
     g_ext: list,
@@ -343,11 +344,10 @@ def _prepare_gather4_plan_inputs(
 ) -> tuple[list, list, list, int | None]:
     """Return adjusted copy regions for a 2D tile::gather4 TMA plan.
 
-    The current tile primitive API models gather4 as a dense copy over every
-    non-gather axis plus a runtime indexer over source rows.  The TensorMap box
-    along the gather axis must therefore be one row; the hardware gather4
-    modifier supplies four runtime row coordinates per issued instruction and
-    writes four destination rows starting at the shared-memory pointer.
+    ``gather_axis`` is the source/global axis; ``dst_gather_axis`` is the
+    shared axis that receives the gathered rows (both explicit, no inference).
+    The box along each is one row; the hardware gather4 modifier supplies four
+    runtime row coordinates per issue and writes four destination rows.
     """
 
     if not indexer:
@@ -356,20 +356,22 @@ def _prepare_gather4_plan_inputs(
         fail("copy_async(tma) gather indexer is only supported for global -> shared copies")
     if gather_axis is None:
         fail("copy_async(tma) indexer requires gather_axis")
+    if dst_gather_axis is None:
+        fail("copy_async(tma) indexer requires dst_gather_axis (the shared axis gathered into)")
     src_gather_axis = int(gather_axis)
     if src_gather_axis != 0:
         fail("copy_async(tma) gather4 currently supports gather_axis=0")
     if len(indexer) % 4 != 0:
         fail("copy_async(tma) gather4 indexer length must be a multiple of 4")
+    dst_gather_axis = int(dst_gather_axis)
+    if not 0 <= dst_gather_axis < len(s_ext):
+        fail(f"copy_async(tma) gather4 dst_gather_axis {dst_gather_axis} out of range")
     analyzer = Analyzer()
-    dst_gather_axes = [
-        axis for axis, extent in enumerate(s_ext) if analyzer.can_prove_equal(extent, len(indexer))
-    ]
-    if len(dst_gather_axes) != 1:
+    if not analyzer.can_prove_equal(s_ext[dst_gather_axis], len(indexer)):
         fail(
-            "copy_async(tma) gather4 requires exactly one destination extent to equal len(indexer)"
+            f"copy_async(tma) gather4 dst extent {s_ext[dst_gather_axis]} on axis "
+            f"{dst_gather_axis} must equal len(indexer) {len(indexer)}"
         )
-    dst_gather_axis = dst_gather_axes[0]
     if not analyzer.can_prove_equal(g_st[src_gather_axis], 0):
         fail(
             "copy_async(tma) gather4 indexer coordinates are absolute; "
@@ -1274,6 +1276,7 @@ def copy_tma_impl(op_call: TilePrimitiveCall, sctx: DispatchContext) -> PrimFunc
     g_st_plan, g_ext_plan, s_ext_plan, dst_gather_axis = _prepare_gather4_plan_inputs(
         direction=direction,
         gather_axis=gather_axis,
+        dst_gather_axis=op_call.config.get("dst_gather_axis", None),
         indexer=gather_indexer,
         g_st=g_st,
         g_ext=g_ext,
