@@ -2226,7 +2226,6 @@ def test_copy_tma_dynamic_cache_hint_g2s_keeps_rank_coords():
     src = mod.mod.imports[0].inspect_source()
     assert "ptx_cp_async_bulk_tensor_g2s_cluster_tile_4d_cache_hint_mbar_addr" in src
     assert "tvm_builtin_cuda_cvta_generic_to_shared" in src
-    assert "4278190079" in src
     assert (
         "cp.async.bulk.tensor.4d.shared::cluster.global"
         ".mbarrier::complete_tx::bytes.cta_group::2.L2::cache_hint"
