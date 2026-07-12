@@ -1504,8 +1504,56 @@ def test_copy_tma_gather4_dst_row_stride_soundness():
         },
     )
     _make_tma_call(smem_layout=TileLayout(S[(8, 64) : (64, 1)]), **common)
-    with pytest.raises(Exception, match="payload width|corrupt rows"):
+    with pytest.raises(Exception, match="payload width|corrupt"):
         _make_tma_call(smem_layout=TileLayout(S[(8, 64) : (128, 1)]), **common)
+
+
+def test_copy_tma_gather4_dst_per_chunk_soundness():
+    """Each 4-row chunk is written box-linearly from its OWN base (s_st+4*chunk),
+    so a split layout that is uniform for rows 0..3 but discontinuous at a later
+    chunk boundary must still be rejected. Non-zero s_st shifts the bases too."""
+    g = dict(
+        g_shape=(256, 64),
+        g_region=((0, 256), (0, 64)),
+        gmem_layout=TileLayout(S[(256, 64) : (64, 1)]),
+    )
+    split = TileLayout(S[(2, 6, 64) : (1024, 64, 1)])
+
+    def cfg(n):
+        return {
+            "gather_axis": 0,
+            "dst_gather_axis": 0,
+            "indexer": [IntImm("int32", i) for i in range(n)],
+            "cache_hint": IntImm("uint64", 0),
+        }
+
+    # Uniform (12,64) row-major: every chunk box-linear at 64. Legal.
+    _make_tma_call(
+        s_shape=(12, 64),
+        s_region=((0, 12), (0, 64)),
+        smem_layout=TileLayout(S[(12, 64) : (64, 1)]),
+        config=cfg(12),
+        **g,
+    )
+    # Split (2,6,64):(1024,64,1): rows 0..3 look box-linear, but chunk 1
+    # (rows 4..7) is declared at 256,320,1024,1088 vs hw 256,320,384,448.
+    with pytest.raises(Exception, match="payload width|corrupt"):
+        _make_tma_call(
+            s_shape=(12, 64),
+            s_region=((0, 12), (0, 64)),
+            smem_layout=split,
+            config=cfg(12),
+            **g,
+        )
+    # Non-zero s_st (rows 4..11): chunk base 4 straddles the discontinuity.
+    with pytest.raises(Exception, match="payload width|corrupt"):
+        _make_tma_call(
+            s_shape=(12, 64),
+            s_region=((4, 12), (0, 64)),
+            smem_layout=split,
+            config=cfg(8),
+            **g,
+        )
 
 
 def _build_tma_gather4_padded_src_kernel(dtype="float16"):

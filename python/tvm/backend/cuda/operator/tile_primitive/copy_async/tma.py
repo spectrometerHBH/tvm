@@ -386,11 +386,14 @@ def _prepare_gather4_plan_inputs(
     return g_st_plan, g_ext_plan, s_ext_plan, dst_gather_axis
 
 
-def _validate_gather4_dst_layout(s_buf: Buffer, dst_gather_axis: int, plan) -> None:
-    """tile::gather4 writes 4 rows box-linearly at the box payload width; the
-    declared smem layout must place consecutive dst rows at exactly that stride
-    (swizzle is applied to the flat offset, so the pre-swizzle tile row stride is
-    the invariant). A padded destination silently corrupts rows 1..3 otherwise.
+def _validate_gather4_dst_layout(
+    s_buf: Buffer, dst_gather_axis: int, plan, base_row, num_rows: int
+) -> None:
+    """tile::gather4 writes each 4-row chunk box-linearly at the box payload
+    width from its OWN base (``s_st + 4*chunk``), so validate every chunk, not
+    just rows 0..3. Swizzle is a bijection on the flat offset, so the pre-swizzle
+    tile offsets are the invariant. A split/padded row layout corrupts rows
+    within a chunk whose base straddles a stride discontinuity.
     """
     payload_w = 1
     for b in plan.box_dim:
@@ -398,39 +401,41 @@ def _validate_gather4_dst_layout(s_buf: Buffer, dst_gather_axis: int, plan) -> N
     analyzer = Analyzer()
     rank = len(s_buf.shape)
     layout = s_buf.layout
-    # Pre-swizzle offset of dst-axis index t: a bare SwizzleLayout is row-major
-    # flat; a Tile/ComposeLayout may split dims, so group by shape + mixed-radix.
     if isinstance(layout, SwizzleLayout):
 
-        def _row_off(t):
+        def _row_off(idx):
             stride = 1
             for j in range(dst_gather_axis + 1, rank):
                 stride *= int(s_buf.shape[j])
-            return t * stride
+            return idx * stride
     else:
         tile = layout.tile_layout if isinstance(layout, ComposeLayout) else layout
         grouped, seps = tile.group(list(s_buf.shape))
         dst_iters = list(grouped.shard)[seps[dst_gather_axis] : seps[dst_gather_axis + 1]]
 
-        def _row_off(t):
-            off, rem = 0, t
+        def _row_off(idx):
+            off, rem = 0, idx
             for i, it in enumerate(dst_iters):
                 inner = 1
                 for jt in dst_iters[i + 1 :]:
                     inner *= int(jt.extent)
-                off += (rem // inner) * int(it.stride)
-                rem = rem % inner
+                off = off + tvm.tirx.floordiv(rem, inner) * int(it.stride)
+                rem = tvm.tirx.floormod(rem, inner)
             return off
 
-    for t in (1, 2, 3):
-        delta = analyzer.simplify(_row_off(t) - _row_off(0))
-        if not analyzer.can_prove_equal(delta, t * payload_w):
-            fail(
-                f"copy_async(tma) gather4 dst row {t} at smem offset {delta}, but the "
-                f"hardware writes it box-linearly at {t * payload_w}; the declared "
-                f"shared layout row stride must equal the box payload width "
-                f"(a padded destination would corrupt rows 1..3)"
-            )
+    for k in range(num_rows // 4):
+        base = base_row + k * 4
+        base_off = _row_off(base)
+        for t in (1, 2, 3):
+            delta = analyzer.simplify(_row_off(base + t) - base_off)
+            if not analyzer.can_prove_equal(delta, t * payload_w):
+                fail(
+                    f"copy_async(tma) gather4 chunk {k} (base row {base}) writes dst row "
+                    f"{t} at smem offset delta {delta}, but the hardware writes it "
+                    f"box-linearly at {t * payload_w}; each 4-row chunk's declared layout "
+                    f"must match the box payload width (a split/padded row layout corrupts "
+                    f"rows within the chunk)"
+                )
 
 
 def _validate_gather4_src_provenance(plan, g_buf: Buffer, src_gather_axis: int) -> None:
@@ -1376,7 +1381,9 @@ def copy_tma_impl(op_call: TilePrimitiveCall, sctx: DispatchContext) -> PrimFunc
         )
 
     if gather_indexer:
-        _validate_gather4_dst_layout(s_buf, dst_gather_axis, plan)
+        _validate_gather4_dst_layout(
+            s_buf, dst_gather_axis, plan, s_st[dst_gather_axis], len(gather_indexer)
+        )
         _validate_gather4_src_provenance(plan, g_buf, int(gather_axis))
 
     # Optional descriptor dtype override. An fp32 buffer feeding a tf32 MMA should
