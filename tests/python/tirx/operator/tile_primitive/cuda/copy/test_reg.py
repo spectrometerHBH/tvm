@@ -331,13 +331,8 @@ def test_copy_g2l_l2g_vec_load(task, dtype):
         np.testing.assert_allclose(B_ref, B.numpy())
 
 
-# ----------------------------------------------------------------------------
-# vec_auto register path must honor the load cache hint (cache="nc"). A single
-# strided [4,4]:(16,1) global->register copy (4 rows of 4 contiguous int32 =
-# one 128b vec each, rows strided by 16) vectorizes to 4x 128b either way; with
-# cache="nc" it must emit ld.global.nc (not a plain ld). The reg path used to
-# drop the hint.
-# ----------------------------------------------------------------------------
+# vec_auto reg path must honor cache="nc": a strided [4,4]:(16,1) global->reg
+# copy vectorizes to 4x 128b either way, but cache="nc" must emit ld.global.nc.
 
 
 @T.prim_func
@@ -382,9 +377,8 @@ def test_vec_auto_reg_honors_cache_nc():
     nc_src = _src(_nc_strided_reg_copy)
     plain_src = _src(_plain_strided_reg_copy)
 
-    # cache="nc" -> vectorized 128b ld.global.nc; no cache -> vectorized 128b
-    # plain ld. Both spellings must vectorize (the strided [4,4] does dispatch);
-    # only the cache qualifier differs.
+    # cache="nc" -> vectorized 128b ld.global.nc; no cache -> plain 128b ld.
+    # Both must vectorize; only the cache qualifier differs.
     assert "ld_global_nc_v4_u32" in nc_src, (
         "vec_auto reg path must vectorize AND honor cache='nc' (emit "
         "ld.global.nc.v4), got:\n"

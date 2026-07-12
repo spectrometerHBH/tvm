@@ -754,14 +754,8 @@ def test_no_lift_bool_logical():
     assert "cse_v" not in after["main"].script()
 
 
-# =====================================================================
-# T24: Shared subtree stays SSA
-# UnrollLoop leaves loop-invariant subtrees as the SAME Stmt object at
-# several tree positions, and the rewriter's insertion table is keyed by
-# object identity, so every occurrence hits the plan entry. Re-emitting
-# the planned Binds verbatim would define each cse var once per
-# occurrence; later occurrences must bind fresh vars instead.
-# =====================================================================
+# T24: Shared subtree stays SSA. UnrollLoop reuses one Stmt object across
+# positions; the identity-keyed rewriter must bind fresh cse vars per occurrence.
 def test_shared_subtree_stays_ssa():
     @tvm.script.ir_module
     class Payload:

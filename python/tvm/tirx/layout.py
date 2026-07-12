@@ -659,43 +659,27 @@ def tmem_datapath_layout(datapath: str, rows: int, cols: int) -> "TileLayout":
     tlane = Axis.get("TLane")
     tcol = Axis.get("TCol")
     if datapath in ("A", "D"):
-        # Identity row→lane: row r → physical lane r. D covers the full
-        # cta_group::1 datapath; A is the per-CTA view of M=256/cta_group::2
-        # (this CTA's 128 M-rows, PTX Figure "Layout A").
+        # Identity row→lane (r → lane r). D is the full cta_group::1 datapath;
+        # A is the per-CTA view of M=256/cta_group::2 (this CTA's 128 M-rows).
         return TileLayout(S[(rows, cols) : (1 @ tlane, 1 @ tcol)])
     if datapath == "G":
-        # Layout G (M=32, .ws): quarter datapath. The logical column space
-        # splits into four quarters, quarter q living 32 lanes below the
-        # previous — lane = row + 32*q, physical col = col % (cols/4).
+        # Layout G (M=32, .ws): quarter datapath — column space splits into 4
+        # quarters, lane = row + 32*q, physical col = col % (cols/4).
         if cols % 4 != 0:
             raise ValueError(
                 f"tmem_datapath_layout: datapath='G' requires cols % 4 == 0, got {cols}"
             )
         return TileLayout(S[(rows, 4, cols // 4) : (1 @ tlane, 32 @ tlane, 1 @ tcol)])
     if datapath in ("B", "E"):
-        # Layouts B and E share the same per-CTA half-datapath organization:
-        # the logical column space splits into two halves, with the second
-        # half placed 64 lanes below the first —
+        # Layouts B (M=128 cta_group::2 dense) and E (M=64 .ws): half datapath,
         # lane = row + 64 * (col >= cols/2), physical col = col % (cols/2).
-        # E is M=64 + .ws (cta_group::1); B is M=128 + cta_group::2 dense,
-        # where ``rows`` are the 64 M-rows owned by this CTA of the pair.
         if cols % 2 != 0:
             raise ValueError(
                 f"tmem_datapath_layout: datapath={datapath!r} requires even cols, got {cols}"
             )
         return TileLayout(S[(rows, 2, cols // 2) : (1 @ tlane, 64 @ tlane, 1 @ tcol)])
-    # Layouts C and F: M=64-rows-per-CTA scattered, half datapath (lane
-    # alignment 0 of the documented "0 or 16" choice). F is M=64 non-.ws
-    # (cta_group::1); C is M=128 + cta_group::2 sparse A, per-CTA view.
-    # Logical row r = wid * 16 + intra (wid ∈ [0,4),
-    # intra ∈ [0,16)) → physical lane wid * 32 + intra, i.e.
-    # ``r // 16`` is the warp selector and ``r % 16`` is the within-slab lane.
-    # ``TileLayout`` decomposes a scalar row index via ``SplitCoord``
-    # (src/tirx/ir/layout/utils.cc), which uses row-major ordering: with
-    # shape ``(s0, s1)`` the FIRST iter receives ``coord // s1`` (the high
-    # bits) and the SECOND receives ``coord % s1`` (the low bits). So we
-    # pin the warp selector to iter 0 (extent 4, TLane stride 32) and the
-    # within-slab lane to iter 1 (extent 16, TLane stride 1).
+    # Layouts C (M=128 cta_group::2 sparse) and F (M=64 non-.ws): rows-per-CTA
+    # scattered, half datapath — logical row wid*16+intra → lane wid*32+intra.
     return TileLayout(S[(4, 16, cols) : (32 @ tlane, 1 @ tlane, 1 @ tcol)])
 
 

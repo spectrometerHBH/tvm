@@ -121,11 +121,8 @@ from tvm.tirx.tile_primitive import TilePrimitiveCall
 
 from ..copy import _single_thread_exec
 
-# -----------------------------------------------------------------------------
 # Allowed .multicast qualifiers per shape (PTX ISA 8.8 §9.7.16.9.2): "" = none,
-# a single entry is implied, 64x128b needs an explicit warpx2 pick. The atom
-# rows/bits are parsed from the shape name ("<rows>x<bits>b") by _shape_dims.
-# -----------------------------------------------------------------------------
+# 64x128b needs an explicit warpx2 pick.
 _CP_SHAPE_MULTICASTS = {
     "128x256b": ("",),
     "4x256b": ("",),
@@ -141,9 +138,8 @@ def _shape_dims(shape):
     return int(rows), int(bits[:-1])
 
 
-# Inference order for bare copies: widest atom first (a 256b-fitting source
-# also fits 128b at 2x the instructions); all other candidates are mutually
-# exclusive by (t lane, t replica) pattern, so order only matters there.
+# Inference order for bare copies: widest atom first (a 256b source also fits
+# 128b at 2x instructions); other candidates are mutually exclusive.
 _CP_SHAPE_CANDIDATES = (
     ("128x256b", ""),
     ("4x256b", ""),
@@ -378,9 +374,8 @@ def _plan_for_shape(op_call: TilePrimitiveCall, shape: str, multicast: str):
         s_swizzle_mode_from_layout = int(s.swizzle.swizzle_len)
         s = s.tile_layout
     elif isinstance(s, SwizzleLayout):
-        # A full-tile slice of a bare swizzle layout canonicalizes to the
-        # swizzle itself (identity linear part); recover the linear tile
-        # layout from the un-canonicalized slice.
+        # A full-tile slice of a bare swizzle canonicalizes to the swizzle
+        # itself; recover the linear tile layout from the un-canonicalized slice.
         s_swizzle_obj = s
         s_swizzle_mode_from_layout = int(s.swizzle_len)
         if not isinstance(s_sliced, ComposeLayout):
@@ -467,9 +462,8 @@ def _plan_for_shape(op_call: TilePrimitiveCall, shape: str, multicast: str):
     if not (int(ci.extent) == elem_per_atom and int(ci.stride) == 1 and ci.axis == TCol):
         raise ValueError(f"t_col must be ({elem_per_atom}, 1@TCol), got {ci}")
 
-    # F.2: s_lane → (atom_rows/8, 8) groups: atom_K = row stride within an
-    # 8-row descriptor core matrix (= swizzle atom row width), SDO = stride
-    # between 8-row groups (4x256b has one sub-8-row group: SDO unused, 0).
+    # F.2: s_lane → (atom_rows/8, 8) groups: atom_K = row stride within an 8-row
+    # core matrix, SDO = stride between 8-row groups (single group: SDO 0).
     s_lane_layout = TileLayout.from_iters(s_lane, [], {})
     rows_per_group = min(atom_rows, 8)
     n_row_groups = atom_rows // rows_per_group
@@ -508,8 +502,7 @@ def _plan_for_shape(op_call: TilePrimitiveCall, shape: str, multicast: str):
         )
     if s_swizzle_obj is not None:
         # The descriptor's address permutation assumes the canonical mma atom
-        # family (128-bit atoms of 8 rows); a SwizzleLayout with a different
-        # per_element/atom_len would be silently mis-planned.
+        # family (128-bit atoms of 8 rows); other per_element/atom_len mis-plans.
         expected_per_element = (128 // dtype_bits).bit_length() - 1
         if (
             int(s_swizzle_obj.per_element) != expected_per_element
@@ -522,9 +515,8 @@ def _plan_for_shape(op_call: TilePrimitiveCall, shape: str, multicast: str):
                 f"per_element={int(s_swizzle_obj.per_element)}, "
                 f"atom_len={int(s_swizzle_obj.atom_len)}"
             )
-        # The hardware walk is the swizzle_inner=True permutation (B200-pinned
-        # by the round-trip tests); an inner=False layout would be silently
-        # mis-copied. sw==0: both directions are identity, don't-care.
+        # The hardware walk is the swizzle_inner=True permutation; inner=False
+        # would be mis-copied. sw==0: both directions identity, don't-care.
         if int(s_swizzle_obj.swizzle_len) > 0 and not bool(s_swizzle_obj.swizzle_inner):
             raise ValueError(
                 "swizzle direction mismatch: the tcgen05.cp smem descriptor "
@@ -537,9 +529,8 @@ def _plan_for_shape(op_call: TilePrimitiveCall, shape: str, multicast: str):
                 "would be silently mis-copied"
             )
 
-    # F.3: s_col = one cp's per-lane columns. 128b atoms: one 16B unit, LDO
-    # never read (keep legacy 0). 256b atoms: two 16B units — adjacent when
-    # swizzled (hw assumes LBO=1), else their stride is the LDO field (16B units).
+    # F.3: s_col = one cp's per-lane columns. 128b: one 16B unit (LDO=0). 256b:
+    # two 16B units — adjacent when swizzled (LBO=1), else stride in LDO field.
     if atom_bits == 128:
         if len(s_col) != 1:
             raise ValueError(f"s_col must canonicalize to single iter, got {s_col}")
@@ -585,11 +576,8 @@ def _plan_for_shape(op_call: TilePrimitiveCall, shape: str, multicast: str):
     if not analyzer.can_prove_equal(t_col_offset_expr % elem_per_32b, 0):
         raise ValueError(f"t TCol offset {t_col_offset_expr} not provably 32b-aligned")
 
-    # G.1b: a region row offset folds into the taddr lane half-word
-    # ([31:16]), same as the lane-tiled middle steps. The full lane footprint
-    # (lane pattern + multicast replica + lane-tiled middles) must still fit
-    # the 128-lane space — e.g. a warpx2 mirror spans all 128 lanes, so any
-    # nonzero offset would write past lane 127.
+    # G.1b: a region row offset folds into the taddr lane half-word ([31:16]).
+    # The full lane footprint must still fit the 128-lane space.
     t_lane_offset_expr = 0
     for ax, val in t_iso.offset.items():
         if ax == TLane:
@@ -741,13 +729,11 @@ def _validate_smem_tmem_copy(op_call: TilePrimitiveCall, sctx: DispatchContext):
 # -----------------------------------------------------------------------------
 def copy_smem_tmem_impl(op_call: TilePrimitiveCall, sctx: DispatchContext) -> PrimFunc | None:
     if op_call.config.get("decompress"):
-        # A real hardware feature the planner cannot lower (fp4/fp6->fp8
-        # in-flight decompression needs dtype-pair plan derivation): reject
-        # loudly rather than silently copying without decompression.
+        # fp4/fp6->fp8 in-flight decompression needs dtype-pair plan derivation
+        # the planner can't lower; reject loudly rather than copy undecompressed.
         raise ValueError("tcgen05.cp planner does not support decompress")
-    # NOTE: descriptor templates are encoded with base_offset=0, so the smem
-    # buffer base must be aligned to the swizzle period (8 * atom_K bytes).
-    # alloc_tcgen05_mma_AB's align=1024 discharges this for all canonical sources.
+    # NOTE: descriptor templates use base_offset=0, so the smem buffer base must
+    # align to the swizzle period (8 * atom_K bytes); align=1024 discharges this.
     plan = _build_plan(op_call)
     s_buf = plan["s_buf"]
     t_buf = plan["t_buf"]

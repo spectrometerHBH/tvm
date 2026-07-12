@@ -516,14 +516,8 @@ def gemm_async_tcgen05_impl(op_call: TilePrimitiveCall, sctx: DispatchContext) -
 
     cta_group = op_call.config.get("cta_group", 1)
     assert cta_group in [1, 2], f"tcgen05 schedule expected cta_group=1 or 2, got {cta_group}"
-    # descI: pre-encoded instruction descriptor (uint32). The dense path no
-    # longer accepts it: a hand-passed descI performs zero cross-checks
-    # against the dispatcher-constructed descA/descB majorness (historically
-    # this masked a majorness/field desync) and the dispatcher folds the dense
-    # descriptor to a literal uint32 itself. Block-scaled callers may still
-    # hoist the encode above their loops and pass it in (the dispatcher
-    # rotates the per-ki sf_id on a local copy; see
-    # tirx-kernels deepgemm/mqa_logits_fp4.py).
+    # descI (pre-encoded uint32 instruction descriptor): rejected on the dense
+    # path (dispatcher encodes it); block-scaled callers may still pass it in.
     descI = op_call.config.get("descI", None)
     if descI is not None and not is_block_scaled:
         raise ValueError(
@@ -549,15 +543,8 @@ def gemm_async_tcgen05_impl(op_call: TilePrimitiveCall, sctx: DispatchContext) -
         B_slice_layout.tile_layout if isinstance(B_slice_layout, ComposeLayout) else B_slice_layout
     )
 
-    # C may be given in the honest batched form C[2, M, N]: the leading dim
-    # is the M=64 .ws Layout-E lane fold (two partials at lanes m and m+64),
-    # the explicit-batch spelling of what the packed C[M, 2, N] encodes
-    # implicitly. It is the *same physical tile*, so once
-    # validated it is normalized to the packed C_slice_layout and everything
-    # below runs byte-identically. A and B stay 2D.
-    # Leading unit dims (e.g. a staged view's point-indexed stage axis) carry
-    # no datapath meaning and canonicalize away in C_slice_layout — squeeze
-    # them from the extent too. The batched form keeps its leading 2.
+    # C may be batched C[2, M, N]: the M=64 .ws Layout-E lane fold (partials at
+    # lanes m, m+64), normalized to packed C_slice_layout. Squeeze leading unit dims.
     while len(C_extent) > 2 and int(C_extent[0]) == 1:
         C_extent = C_extent[1:]
     C_batched = len(C_extent) == 3 and int(C_extent[0]) == 2
@@ -586,9 +573,8 @@ def gemm_async_tcgen05_impl(op_call: TilePrimitiveCall, sctx: DispatchContext) -
         C_slice_layout = TileLayout.from_iters(
             packed_norm.shard, packed_norm.replica, C_slice_layout.offset
         ).canonicalize()
-        # The batched C[2, M, N] layout is unambiguously the M=64 .ws
-        # datapath fold, so .ws is inferred — the caller need not (and should
-        # not have to) pass weight_stationary=True for it.
+        # Batched C[2, M, N] is unambiguously the M=64 .ws fold, so .ws is
+        # inferred — the caller need not pass weight_stationary=True.
         if cta_group == 1:
             weight_stationary = True
     else:
@@ -596,16 +582,8 @@ def gemm_async_tcgen05_impl(op_call: TilePrimitiveCall, sctx: DispatchContext) -
         N = int(C_extent[-1])
     is_2x2 = M == 64 and cta_group == 2
 
-    # A may be given in the honest batched form A[2, M, K] for the M=64 .ws
-    # A-in-TMEM datapath, symmetric to the batched C above. The
-    # leading dim is the two 64-lane halves the .ws read consumes: an M=64 .ws
-    # sources A from BOTH lane-halves (lanes 0-63 and 64-127), and a flat 2D
-    # A[M, K] only describes lanes 0-63. The fold layout
-    # (2, M, K):(64@TLane, 1@TLane, 1@TCol) places batch b, row m at lane
-    # m + 64*b — the same physical tile, so once validated it normalizes to the
-    # 2D [M, K] extent (the batch dim is the lane fold, not an M or K multiplier)
-    # and every downstream step (K extraction, the emit) runs byte-identically
-    # to the flat path. Only meaningful for A in TMEM; SMEM A stays 2D.
+    # A may be batched A[2, M, K] for the M=64 .ws A-in-TMEM datapath: leading dim
+    # = the two 64-lane halves; normalized to 2D [M, K]. TMEM A only; SMEM A stays 2D.
     A_batched = a_is_tmem and len(A_extent) == 3 and int(A_extent[0]) == 2
     if A_batched:
         A_bM = int(A_extent[1])
@@ -666,17 +644,8 @@ def gemm_async_tcgen05_impl(op_call: TilePrimitiveCall, sctx: DispatchContext) -
                     return None
                 tiler_shape = [s // a for s, a in zip(shape_2d, atom_shape)]
                 tiler_grouped, seps = tiler.canonicalize().group(tiler_shape)
-                # Each tiler dimension must group into exactly one iter:
-                # the ldo/sdo fields below read shard[-1]/shard[-2], i.e.
-                # only the *innermost* iter of each dimension. A multi-iter
-                # group (non-uniform atom grid, e.g. an atom tiling with a
-                # stride gap between atom blocks) would silently take the
-                # local inner stride and drop the outer structure, so a
-                # single MMA spanning several atom groups would walk wrong
-                # addresses (same hazard class as the fixed
-                # majorness/field desync). mma_shared_layout-family layouts
-                # always produce single-iter groups; anything else falls
-                # through to the "no MMA SMEM descriptor matches" rejection.
+                # Each tiler dim must group into exactly one iter: ldo/sdo read only
+                # the innermost, so multi-iter groups walk wrong addresses — reject.
                 seps = list(seps)
                 if seps != list(range(len(tiler_shape) + 1)):
                     return None
@@ -813,14 +782,8 @@ def gemm_async_tcgen05_impl(op_call: TilePrimitiveCall, sctx: DispatchContext) -
                     and int(dim2.stride) == 1
                 )
                 if is_packed_16B:
-                    # SBO of the packed-16B no-swizzle layout is the 8-row
-                    # group pitch: 8 rows x 16B = 128B, i.e. a literal 8 in
-                    # 16B units regardless of dtype (PTX ISA §9.7.16.3.2).
-                    # The previous ``sdo = elem_per_16B`` expression only
-                    # equals 8 for 16-bit dtypes; that is also the only
-                    # domain this encoding has been hardware-validated on
-                    # (FlashMLA + unit tests, all bf16), so reject other
-                    # dtypes instead of silently extending the domain.
+                    # SBO = literal 8 (8-row group pitch = 128B) regardless of dtype
+                    # (PTX §9.7.16.3.2); only validated for 16-bit — reject others.
                     if elem_per_16B != 8:
                         raise ValueError(
                             f"gemm_async: no-swizzle packed-16B SMEM descriptors are "
@@ -838,13 +801,8 @@ def gemm_async_tcgen05_impl(op_call: TilePrimitiveCall, sctx: DispatchContext) -
                     "penultimate matrix dimension to be contiguous or 16B-packed"
                 )
             if shape_2d[0] != 8 * elem_per_16B:
-                # The SBO field emitted below is the literal 8 (128B row-group
-                # pitch); it only agrees with this view's packed ABI when the
-                # contiguous dimension spans exactly 8 x 16B = 128B, i.e.
-                # 8 * elem_per_16B elements (64 for bf16). A longer contiguous
-                # dim (e.g. M=128 col-major bf16) would need SBO 8 while the
-                # old ``shape_2d[0] // elem_per_16B`` expression encoded 16 —
-                # silently reading the wrong rows. Reject outside the domain.
+                # SBO=8 (128B row-group pitch) only agrees with the packed ABI when the
+                # contiguous dim spans exactly 128B (8*elem_per_16B, 64 for bf16) — reject else.
                 raise ValueError(
                     f"gemm_async: no-swizzle column-major-view SMEM descriptors "
                     f"require the contiguous matrix dimension to span exactly 128B "
@@ -852,32 +810,11 @@ def gemm_async_tcgen05_impl(op_call: TilePrimitiveCall, sctx: DispatchContext) -
                     f"{shape_2d[0]}. Use a swizzled or packed-16B layout for "
                     f"larger tiles."
                 )
-            # No-swizzle tcgen05 descriptors use byte-offset fields differently
-            # from the swizzled atom matcher below.  This branch reproduces the
-            # descriptor ABI used by FlashMLA's column-major S-tile *views*:
-            # ldo is the K-column stride in elements, while sdo advances one
-            # 16B group along the contiguous matrix dimension.
-            #
-            # The returned majorness must agree with this (ldo, sdo) encoding,
-            # and that encoding is K-major, NOT MN-major, despite the view's
-            # MN-contiguous strides.  The column-major view is a stride
-            # fiction: FlashMLA physically stores the S tile 16B-line packed
-            # along K (elem offset 8*m + 8*MN*(k//8) + k%8 — the same order as
-            # the packed-16B branch above), and the view's strides merely
-            # reproduce the byte offsets of that K-major layout (they coincide
-            # exactly when the contiguous dim is 64 elements of a 16-bit
-            # dtype).  Hardware consumes it with the instruction-descriptor
-            # transpose bit CLEAR (bit-exact-validated by FlashMLA head64 with
-            # hand trans_a=0 descriptors, and by the no_swizzle_col_major unit
-            # test); returning "MN-major" here pairs an MN-major instruction
-            # bit with K-major offsets and miscompiles once the dispatcher
-            # encodes descI locally.  Matching the packed-16B branch above,
-            # the flag is `is_transposed`.
+            # No-swizzle branch for FlashMLA's column-major S-tile views: ldo=K-column
+            # stride, sdo advances one 16B group. Encoding is K-major, so return is_transposed.
             ldo = int(dim1.stride)
-            # True SBO field: 8-row group pitch = 128B = literal 8 in 16B
-            # units (PTX ISA §9.7.16.3.2). Equal to the old
-            # ``shape_2d[0] // elem_per_16B`` expression exactly on the
-            # domain enforced above.
+            # SBO = literal 8 (8-row group pitch = 128B in 16B units,
+            # PTX §9.7.16.3.2), valid on the domain enforced above.
             sdo = 8
             return SwizzleMode.SWIZZLE_NONE, ldo, sdo, is_transposed
 
@@ -918,12 +855,8 @@ def gemm_async_tcgen05_impl(op_call: TilePrimitiveCall, sctx: DispatchContext) -
         B_buffer, B_buffer_region, B_type, transB
     )
 
-    # tf32 operands are only PTX-legal as MN-major with the 128B-32B-atomicity
-    # swizzle (layout_type=1, PTX ISA Table 52), a mode the atom matcher never
-    # produces. Any tf32 MN-major match here would therefore encode an illegal
-    # majorness/swizzle pairing that the hardware does not support — reject
-    # instead of silently emitting it. tf32 GEMMs must keep both operands
-    # K-major (contiguous along K).
+    # tf32 is only PTX-legal MN-major with the 128B-32B-atomicity swizzle (PTX Table
+    # 52), which the matcher never produces — reject tf32 MN-major; keep tf32 K-major.
     if A_sem in ("tf32", "tensor_float32") and not a_is_tmem and a_mn_major:
         raise ValueError(
             "gemm_async: tf32 A operand matched an MN-major SMEM layout, which is "
@@ -1010,33 +943,8 @@ def gemm_async_tcgen05_impl(op_call: TilePrimitiveCall, sctx: DispatchContext) -
         except (AssertionError, ValueError):
             packed_n2 = False
 
-    # Datapath x ws coupling: for cta_group::1 the packed
-    # (M, 2, N//2):(1@TLane, 64@TLane, 1@TCol) organization is the M=64
-    # weight-stationary datapath (PTX ISA 8.8 §9.7.16.10.5, Layout E); a
-    # non-ws cta_group::1 M=64 MMA writes the scattered Layout F instead. The
-    # packed Layout-E C is therefore *uniquely* the .ws datapath, so .ws is
-    # INFERRED from the layout — the caller never sets weight_stationary by
-    # hand (a non-ws M=64 output declares the Layout-F / identity layout, not
-    # this one). An explicit weight_stationary=False on a Layout-E C is a
-    # contradiction (the layout says .ws) and is rejected. The cta_group::2
-    # 2x2 path (Layout B) is a different, non-ws organization and is unaffected.
-    #
-    # An M=64 .ws produces the two Layout-E banks
-    # as bank_upper = A_upper·B_left, bank_lower = A_lower·B_right — two
-    # half-MMAs, not one gemm broadcast over N. What the halves are depends on
-    # A's scope, and the dispatch knows the scope (`a_is_tmem`):
-    #   * A in SMEM: A is one M=64 tile the hw applies to the folded N, so the
-    #     two banks are the two N-column halves of a genuine C[64,N]=A·Bᵀ
-    #     (FlashMLA O=P·V). The banks are distinct output columns.
-    #   * A in TMEM: A must physically occupy BOTH 64-lane halves (lanes 0-63
-    #     and 64-127); the two banks multiply the two A halves by the two B
-    #     halves independently (FlashMLA logits, whose two head-dim-half
-    #     partials the caller sums downstream). This second-half occupancy is
-    #     no longer an unchecked "caller contract": A must be declared in the
-    #     honest batched A[2, M, K] fold (validated as `A_batched` above), so
-    #     the two-half read is explicit and structurally verified — a flat 2D
-    #     A[M, K] (lanes 0-63 only) is rejected below (the A-side dual of the
-    #     Layout-E C requirement).
+    # Packed Layout-E C (M, 2, N//2) is uniquely the cta_group::1 M=64 .ws datapath
+    # (PTX §9.7.16.10.5), so .ws is inferred; weight_stationary=False on it is rejected.
     if packed_n2 and not is_2x2:
         if op_call.config.get("weight_stationary") is False:
             raise ValueError(
@@ -1049,14 +957,8 @@ def gemm_async_tcgen05_impl(op_call: TilePrimitiveCall, sctx: DispatchContext) -
             )
         weight_stationary = True
 
-    # Dual check: an M=64 cta_group::1 .ws writes
-    # its output in the Layout-E fold (packed_n2). If the caller forces .ws
-    # but declared C in the identity / Layout-F organization instead, the
-    # datapath writes the two banks to lanes {m, m+64} while the caller reads
-    # them at rows {m, m+1}, silently mis-placing the accumulator. Reject it —
-    # this is the converse of the packed-C weight_stationary=False rejection
-    # above, and closes the "ws + Layout-F C" hole that was previously left
-    # open.
+    # Converse check: .ws (M=64, cta_group::1) writes the Layout-E fold, so reject a
+    # C declared as identity/Layout-F (the two banks would land at the wrong lanes).
     if weight_stationary and cta_group == 1 and M == 64 and not packed_n2 and not is_2x2:
         raise ValueError(
             "gemm_async[tcgen05]: weight_stationary .ws (M=64, cta_group::1) writes "
@@ -1067,15 +969,8 @@ def gemm_async_tcgen05_impl(op_call: TilePrimitiveCall, sctx: DispatchContext) -
             "for a non-ws (Layout-F) M=64 MMA."
         )
 
-    # A-side check: an M=64 .ws with A
-    # in TMEM reads A from BOTH 64-lane halves. A flat 2D A[M, K] describes only
-    # lanes 0-63, so it can neither express nor let the dispatch verify the
-    # second-half occupancy the datapath consumes. Require the honest batched
-    # A[2, M, K] fold (validated as `A_batched`) so the two-half read is explicit
-    # and checkable — symmetric to the batched-C acceptance, and the A-side dual
-    # of the Layout-E C requirement. (M=128 a-in-tmem is a genuine 128-row
-    # identity and is unaffected; A in SMEM sources one tile via its descriptor
-    # and needs no batch, so only a_is_tmem M=64 .ws is constrained.)
+    # A-side check: an M=64 .ws A-in-TMEM reads both 64-lane halves, which flat 2D
+    # A[M, K] (lanes 0-63 only) can't express — require the batched A[2, M, K] fold.
     if a_is_tmem and weight_stationary and cta_group == 1 and M == 64 and not A_batched:
         raise ValueError(
             "gemm_async[tcgen05]: an M=64 cta_group::1 .ws GEMM with A in TMEM reads "
@@ -1086,19 +981,8 @@ def gemm_async_tcgen05_impl(op_call: TilePrimitiveCall, sctx: DispatchContext) -
             "occupancy is explicit and structurally checked."
         )
 
-    # Converse guard: the batched A[2, M, K] fold is *defined only* for the M=64
-    # cta_group::1 .ws A-in-TMEM datapath — its two banks are the two 64-lane
-    # halves the .ws reads. In any other datapath (M=128, cta_group::2, non-ws,
-    # ...) A[2, M, K] has no meaning: the `64@TLane` fold would place rows past
-    # lane 127, and the emit would be a plain MMA reading a lane range the fold
-    # never described. Accepting it (and skipping the flat identity check for it)
-    # would silently mis-declare A. The fold is valid in exactly two datapaths,
-    # both per-CTA M=64 with the two banks folded into the two 64-lane halves:
-    #   * Layout E: cta_group::1 .ws                 (head64 QK)
-    #   * Layout B: cta_group::2 dense (non-.ws)     (small_topk QK)
-    # Each bank produces the matching partial (A_bank_b · B_bank_b); the kernel
-    # reduces the two banks. Any other
-    # datapath has no such fold — reject.
+    # Converse guard: batched A[2, M, K] is valid only in the two per-CTA M=64 folds
+    # (Layout E: cta_group::1 .ws; Layout B: cta_group::2 dense) — reject any other.
     _batched_ok = (weight_stationary and cta_group == 1 and M == 64) or (
         not weight_stationary and cta_group == 2 and M == 64
     )
@@ -1112,9 +996,8 @@ def gemm_async_tcgen05_impl(op_call: TilePrimitiveCall, sctx: DispatchContext) -
         )
 
     if is_2x2 or packed_n2:
-        # Some FlashMLA cta_group::1 M=64 tiles use the same logical-N/physical-column
-        # packing as the cta_group::2 2x2 layout: N is split across two TLane
-        # banks, so an N=128 tile occupies 64 physical TMEM columns.
+        # Some cta_group::1 M=64 tiles use the 2x2 logical-N/physical-column packing:
+        # N is split across two TLane banks, so N=128 occupies 64 physical TMEM columns.
         base = TileLayout(S[(M, 2, N // 2) : (1 @ TLane, 64 @ TLane, 1 @ TCol)])
     elif (
         M == 64
@@ -1133,9 +1016,8 @@ def gemm_async_tcgen05_impl(op_call: TilePrimitiveCall, sctx: DispatchContext) -
     tmem_addr = C_buffer.allocated_addr[0]
     tmem_offset_32b = C_slice_layout.offset.get(TCol, 0)
 
-    # Validate TMEM A layout through the same semantic resolver used by
-    # tmem_pool.alloc_tcgen05_mma_A. `M` here is per-CTA rows; the resolver takes the
-    # PTX instruction M.
+    # Validate TMEM A via the same resolver as tmem_pool.alloc_tcgen05_mma_A.
+    # `M` here is per-CTA rows; the resolver takes the PTX instruction M.
     if a_is_tmem:
         if not A_batched:
             instruction_M = M * cta_group
@@ -1267,15 +1149,8 @@ def gemm_async_tcgen05_impl(op_call: TilePrimitiveCall, sctx: DispatchContext) -
         )
         return tvm.tirx.floordiv(A_slice_tile.apply(A_linear)["m"], A_elem_per_16B)
 
-    # smem_desc:
-    # - "hoist" (default): encode once after SMEM buffer allocation.
-    # - "local_hoist": encode at this gemm_async call site, under the caller's
-    #   control flow, then reuse via add_16B_offset.  FlashMLA uses this to
-    #   avoid all-thread descriptor setup in a single elected issue thread.
-    # - "encode": encode an exact shared pointer for each MMA.  This mirrors
-    #   hand-written FlashMLA descriptor code and avoids descriptor-add helper
-    #   calls in tight loops.
-    # - "recompute": synthesize the descriptor value per MMA.
+    # smem_desc modes: "hoist" (default, encode once after alloc), "local_hoist"
+    # (encode at call site, reuse via add_16B_offset), "encode"/"recompute" (per MMA).
     smem_desc_mode = op_call.config.get("smem_desc", "hoist")
     local_hoist = smem_desc_mode == "local_hoist"
     encode_per_mma = smem_desc_mode == "encode"
@@ -1306,10 +1181,8 @@ def gemm_async_tcgen05_impl(op_call: TilePrimitiveCall, sctx: DispatchContext) -
     def _get_tmem_addr_fast(base, row_offset, col_offset):
         row_offset = analyzer.simplify(row_offset)
         col_offset = analyzer.simplify(col_offset)
-        # get_tmem_addr(base, 0, col) is base + col for all tcgen05 layouts
-        # emitted here; their TMEM column offsets are small constants and never
-        # overflow the 16-bit column field.  Folding avoids one device helper
-        # call at every MMA issue in FlashMLA-style row-0 schedules.
+        # get_tmem_addr(base, 0, col) folds to base + col for all layouts here
+        # (small constant col, no 16-bit overflow), saving a device helper call.
         if analyzer.can_prove_equal(row_offset, 0):
             if analyzer.can_prove_equal(col_offset, 0):
                 return base
@@ -1490,10 +1363,8 @@ def gemm_async_tcgen05_impl(op_call: TilePrimitiveCall, sctx: DispatchContext) -
                 sdo=B_sdo,
                 swizzle=B_swizzle_mode.value,
             )
-            # local_hoist runs at the gemm_async call site.  The FlashMLA-style
-            # sites using it are already under elected-thread control, so the
-            # descriptor is consumed by the same issuing thread and does not
-            # need a warp shuffle to make its low bits uniform.
+            # local_hoist runs at the call site under elected-thread control, so the
+            # descriptor is consumed by the same thread and needs no warp shuffle.
             if A_use_add:
                 descA_local = T.alloc_local((1,), "uint64")
                 T.ptx.tcgen05.encode_matrix_descriptor(

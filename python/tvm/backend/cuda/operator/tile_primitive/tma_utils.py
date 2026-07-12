@@ -69,12 +69,8 @@ def mma_shared_layout(dtype: str, swizzle_mode: SwizzleMode | int, shape) -> Lay
     if isinstance(swizzle_mode, int):
         swizzle_mode = SwizzleMode(swizzle_mode)
     if swizzle_mode == SwizzleMode.SWIZZLE_NONE:
-        # No-swizzle MMA smem is the packed-16B atom, not a flat row tile: the
-        # innermost 16B line (e16 = 128/bits elements) is contiguous, rows
-        # advance by e16, and each 16B K-group advances by M*e16 -- physical
-        # offset e16*m + M*e16*(k//e16) + k%e16 (PTX ISA §9.7.16.3.2), the
-        # layout the gemm no-swizzle descriptor consumes. Falls back to the
-        # plain tile when K is not a multiple of the 16B line.
+        # No-swizzle MMA smem is the packed-16B atom: offset e16*m +
+        # M*e16*(k//e16) + k%e16 (e16=128/bits); plain tile if K % e16 != 0.
         bits = tvm.DataType(dtype).bits
         e16 = 128 // bits
         m, k = int(shape[-2]), int(shape[-1])

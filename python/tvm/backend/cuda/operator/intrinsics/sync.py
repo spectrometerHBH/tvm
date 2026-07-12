@@ -361,15 +361,8 @@ device_intrinsic(
 )
 
 
-# =============================================================================
 # mbarrier.complete_tx{.sem.scope}{.space}.b64 [addr], txCount;
-#   sem   = {.relaxed}
-#   scope = {.cta, .cluster}
-#   space = {.shared{::cta}, .shared::cluster}
-# Optional conveniences:
-#   remote: map addr with mapa.shared::cluster.u32 before complete_tx.
-#   pred:   predicate the complete_tx instruction with @p.
-# =============================================================================
+#   sem={.relaxed} scope={.cta,.cluster} space={.shared{::cta},.shared::cluster}
 def _ptx_mbarrier_complete_tx_parts(*args):
     sem, scope, space, has_remote, has_pred = args[-5:]
     sem = parse_str(sem)
@@ -439,9 +432,7 @@ device_intrinsic(
 )
 
 
-# =============================================================================
 # mbarrier.arrive.expect_tx{.sem.scope}{.space}.b64 _, [addr], txCount;
-# =============================================================================
 def _ptx_mbarrier_arrive_expect_tx_parts(*args):
     sem, scope, space, has_remote, has_pred = args[-5:]
     sem, scope, space = _check_mbarrier_arrive_attrs(sem, scope, space)

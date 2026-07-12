@@ -365,9 +365,8 @@ def _choose_vec_len(elem_bits: int, atoms, r_p, s_p) -> int:
     **post-vec-split** outer atom strides matter for the per-round delta.
     """
     t = _atoms_contiguous_tail_extent(atoms)
-    # Region-base offsets are real address contributions. Thread-iter
-    # strides on either side are partition-virtual, not storage-physical,
-    # so they don't enter the per-thread address — exclude them.
+    # Region-base offsets are real address contributions; thread-iter
+    # strides are partition-virtual, not storage-physical — exclude them.
     shared_terms = list(s_p.offset.values()) + list(r_p.offset.values())
     for n in _vec_len_candidates(elem_bits):
         if n == 1:
@@ -493,15 +492,13 @@ def _emit_reg(op_call: TilePrimitiveCall, sctx: DispatchContext) -> PrimFunc:
         per_thread_r_total *= int(it.extent)
     per_thread_r_shape = [per_thread_r_total or 1]
 
-    # Build the per-thread S offset OUTSIDE the impl using placeholder Vars
-    # (one per thread axis). Inside the impl we'll declare the real scope_ids
-    # via T.lane_id/T.thread_id_in_wg/... and substitute them in.
+    # Build the per-thread S offset outside the impl with placeholder Vars;
+    # inside the impl, real scope_ids are declared and substituted in.
     placeholders = _make_thread_placeholders(r_p)
     s_off_template = _s_thread_offset(r_p, s_p, placeholders)
 
-    # R-side base offset from slicing (e.g. ``R[i*8:i*8+8]`` ⇒ ``i*8``). The
-    # canonicalize() result lives in ``r_p.offset``; sum across axes (memory
-    # or thread — irrelevant once it's all on R's local stride-1 storage).
+    # R-side base offset from slicing (e.g. ``R[i*8:i*8+8]`` ⇒ ``i*8``), from
+    # ``r_p.offset``; sum across all axes on R's local stride-1 storage.
     r_off_base = _IntImm("int32", 0)
     for _ax, val in r_p.offset.items():
         r_off_base = r_off_base + val
@@ -511,10 +508,8 @@ def _emit_reg(op_call: TilePrimitiveCall, sctx: DispatchContext) -> PrimFunc:
     vec, ptx_type = copy_ptx_form(num_bytes)
     space = "shared" if s_is_shared else "global"
 
-    # Honor the load cache hint (cache="nc" + L1/L2 evict / prefetch), matching
-    # vec_forced. Applies only to a global -> register LOAD: ``nc`` is a
-    # global-memory qualifier, so register->global stores (r_is_src) and
-    # shared-side copies keep the plain form.
+    # Honor the load cache hint (cache="nc") only on global -> register loads;
+    # ``nc`` is a global qualifier, so stores and shared copies stay plain.
     _cache, _cache_hints = _ld_cache_config(op_call)
     _use_nc = _cache == "nc" and space == "global" and not r_is_src
     _l1_evict = _cache_hints.get("l1_evict", "")
@@ -525,9 +520,8 @@ def _emit_reg(op_call: TilePrimitiveCall, sctx: DispatchContext) -> PrimFunc:
     for a in outer:
         total_outer *= a[0]
 
-    # Swizzle handling: recognize the iter-pattern on S side from the atom
-    # extents/strides (atom = (extent, s_stride, r_mul); a[1] is the S-side
-    # stride per outer round, equivalent to outer_iter strides in gmem_smem).
+    # Recognize the S-side swizzle iter-pattern from atom extents/strides
+    # (atom = (extent, s_stride, r_mul); a[1] is the S stride per outer round).
     swizzle = get_swizzle(s_buf.layout)
     swizzle_pattern = None
     if swizzle is not None:
@@ -565,12 +559,8 @@ def _emit_reg(op_call: TilePrimitiveCall, sctx: DispatchContext) -> PrimFunc:
         s_off = _substitute_axes(s_off_template, placeholders, sctx)
         _setup_swizzle(s_off)
         r_local = r_buf.local(*per_thread_r_shape)
-        # Keep as a serial TIR loop and let ptxas unroll downstream. An
-        # explicit ``T.unroll`` materializes the per-iter scratch
-        # (ds/dr/s_ptr/r_ptr, swizzle ``v_<n>[]`` signed-strides) as N
-        # copies of each buffer declaration; on kernels with many R↔S copy
-        # sites and large ``total_outer`` (FA4 writeback) this floods the
-        # function with ``alignas(64) int`` arrays and pressures registers.
+        # Keep a serial TIR loop and let ptxas unroll; explicit ``T.unroll``
+        # replicates per-iter scratch arrays and pressures registers.
         for f in range(total_outer):
             ds, dr = _outer_const_offsets(outer, f)
             s_ptr = _ptr_off(s_buf.ptr_to(s_zero_indices), _s_iter_off(f, ds, s_off))

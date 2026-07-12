@@ -2205,18 +2205,13 @@ def test_gemm_tcgen05_no_swizzle_col_major_a_ws_local_idesc():
         if warp_id == 0:
             T.ptx.tcgen05.alloc(T.address_of(tmem_addr), n_cols=128, cta_group=1)
         T.cuda.cta_sync()
-        # M=64 .ws accumulates via datapath E: column halves folded across the
-        # two 64-lane halves (lane = m + 64*(n >= N/2), col = n % (N/2)) —
-        # the same packed C layout FlashMLA head64 uses for tmem_o.
+        # M=64 .ws accumulates via datapath E (FlashMLA head64's tmem_o layout):
+        # lane = m + 64*(n >= N/2), col = n % (N/2).
         tmem = T.decl_buffer((M, N), "float32", scope="tmem", allocated_addr=tmem_addr[0], layout=TileLayout(S[(M, 2, N // 2) : (1 @ TLane, 64 @ TLane, 1 @ TCol)]))  # noqa: E501
         # Identity overlay of the physical 128x128 TMEM footprint for readback.
         tmem_ldst = T.decl_buffer((128, N // 2), "float32", scope="tmem", allocated_addr=tmem_addr[0], layout=TileLayout(S[(128, N // 2) : (1 @ TLane, 1 @ TCol)]))  # noqa: E501
-        # Plain generic-proxy stores (the S tile in FlashMLA is likewise
-        # written by regular stores, not TMA).  A's physical bytes follow the
-        # FlashMLA S-tile ABI: 16B lines packed along K
-        # (phys = 8*m + 8*M*(k//8) + k%8); the column-major layout on A_smem
-        # is only the stride fiction handed to the descriptor builder, so the
-        # store maps the packed physical offset back through it.
+        # Plain generic-proxy stores; A's bytes follow the FlashMLA S-tile ABI
+        # (phys = 8*m + 8*M*(k//8) + k%8), col-major A_smem is descriptor fiction.
         for i in range(M * K // 128):
             a_idx = i * 128 + tid_in_wg
             a_m = a_idx % M
@@ -2253,9 +2248,8 @@ def test_gemm_tcgen05_no_swizzle_col_major_a_ws_local_idesc():
     # Descriptor construction: no-swizzle col-major A -> (ldo=64, sdo=8, swizzle=0).
     assert ", 64, 8, 0)" in src
     assert "tcgen05.mma.ws.cta_group::1.kind::f16" in src
-    # idesc literal: M=64, N=256, f32 <- bf16 x bf16, a_major=0 (K-major,
-    # bit15 clear -- consistent with the descA above), b_major=1.  This is the
-    # exact hand-encoded value FlashMLA head64 validated bit-exactly.
+    # idesc literal: M=64, N=256, f32 <- bf16 x bf16, a_major=0 (K-major, bit15
+    # clear), b_major=1 — hand-encoded value FlashMLA head64 validated bit-exactly.
     assert str(0x04410490) in src, "expected K-major (bit15=0) idesc literal"
     assert str(0x04418490) not in src, "MN-major idesc (bit15=1) mis-pairs the K-major descA"
 
@@ -3019,12 +3013,8 @@ def test_gemm_tcgen05_cta1_m64_packed_c_infers_weight_stationary():
             )
 
 
-# ---------------------------------------------------------------------------
-# Dispatch-level regression tests.
-# These call gemm_async_tcgen05_impl directly on a constructed
-# TilePrimitiveCall so rejection paths are pinned without full kernel
-# compilation.
-# ---------------------------------------------------------------------------
+# Dispatch-level regression tests: call gemm_async_tcgen05_impl directly on a
+# constructed TilePrimitiveCall to pin rejection paths without full compilation.
 
 
 def _make_gemm_tcgen05_call(

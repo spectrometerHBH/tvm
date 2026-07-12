@@ -248,9 +248,7 @@ def _emit_32x32b_path(
     op = T.ptx.tcgen05.ld if direction == "tmem2local" else T.ptx.tcgen05.st
 
     if elem_per_32b == 1:
-        # Keep 32-bit fragments in their source dtype. The PTX helper treats
-        # operands as b32 internally, and avoiding a call-site ``uint32`` view
-        # keeps generated CUDA identical to handwritten ``T.ptx.tcgen05`` calls.
+        # Keep 32-bit fragments in source dtype; b32 helper makes a uint32 view change codegen.
         # fmt: off
         @T.prim_func(check_well_formed=False)
         def impl():

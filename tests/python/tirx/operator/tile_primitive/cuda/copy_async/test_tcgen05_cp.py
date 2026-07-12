@@ -112,8 +112,7 @@ def _tmem_layout_for(shape, multicast, C):
                 [64, C],
             )
         # 01_23: rows 0-31 at lanes 0-31, rows 32-63 at lanes 64-95; +32 mirror.
-        # The 2x32 lane split lives in the layout iters; the buffer stays the
-        # natural (64, C) logical tile so the copy region matches the smem side.
+        # Lane split lives in the iters; buffer stays the natural (64, C) tile.
         return (
             TileLayout(S[(2, 32, C) : (64 @ TLane, 1 @ TLane, 1 @ TCol)] + R[2 : 32 @ TLane]),
             [64, C],
@@ -308,9 +307,7 @@ def _run_case(shape, multicast, sw, dtype, n_mid, s_row_off=0, t_col_off_e=0):
     check(_compile(kernel))
 
 
-# --------------------------------------------------------------------------
 # GPU round-trip: full shape x multicast x swizzle x dtype x size matrix
-# --------------------------------------------------------------------------
 
 
 @pytest.mark.gpu
@@ -357,9 +354,7 @@ def test_cp_shape_roundtrip_offsets(shape, multicast, sw, dtype, n_mid, s_row_of
     _run_case(shape, multicast, sw, dtype, n_mid, s_row_off=s_row_off, t_col_off_e=t_col_off_e)
 
 
-# --------------------------------------------------------------------------
 # Compile-level checks
-# --------------------------------------------------------------------------
 
 
 def test_cp_4x256b_compile_emits_shape_and_count():
@@ -685,9 +680,7 @@ def test_cp_default_32x128b_instruction_sequence_unchanged():
         assert "cp_desc[0] &" in cp_lines[i] and "16383" in cp_lines[i], cp_lines[i]
 
 
-# --------------------------------------------------------------------------
 # Negative tests: readable ValueErrors from the planner
-# --------------------------------------------------------------------------
 
 
 def _assert_compile_raises(kernel, fragment):
@@ -814,9 +807,8 @@ def test_cp_rejects_non_16b_aligned_row_group_stride():
     8-row-group stride is not 16B-divisible must be rejected."""
     bits = 16
     C = 128 // bits  # 8 bf16 = one 16B unit per row
-    # Non-swizzled (32, 8) tile: rows in (4, 8) groups; the 8-row blocks are
-    # atom_K = 8 elems (16B, sw=0) apart, but the group stride is 100 elems
-    # = 200B, which is not a multiple of 16B.
+    # Non-swizzled (32, 8) tile: 8-row blocks are atom_K=8 elems (16B) apart,
+    # but the group stride is 100 elems = 200B, not a multiple of 16B.
     s_full = TileLayout(S[(4, 8, C) : (100, C, 1)])
     t_full = TileLayout(S[(32, C) : (1 @ TLane, 1 @ TCol)] + R[4 : 32 @ TLane])
     kernel = _make_cp_kernel(
@@ -840,10 +832,8 @@ def test_cp_rejects_non_canonical_swizzle_family():
     per_element for the dtype) must be rejected."""
     bits = 16
     C = 128 // bits
-    # per_element=2 is the f32 family; using it with a bf16 source disagrees
-    # with the descriptor's assumed address permutation. The linear part is a
-    # valid 128-row SW128-style tiling (8-row blocks 1024B apart, atom_K=128B)
-    # so only the family check can reject it.
+    # per_element=2 is the f32 family; with a bf16 source it disagrees with the
+    # descriptor permutation. Linear part is valid, so only family check rejects.
     s_full = ComposeLayout(
         SwizzleLayout(2, 3, 3),
         TileLayout(S[(16, 8, 64) : (512, 64, 1)]),
@@ -875,10 +865,8 @@ def test_cp_rejects_flipped_swizzle_inner():
     chunk whose swizzle bits are nonzero."""
     bits = 16
     C = 128 // bits
-    # Same linear tiling as mma_shared_layout("bfloat16", SW128, [128, 64])
-    # and the correct (per_element=3, atom_len=3) bf16 family — only the
-    # permutation direction is flipped, so only a swizzle_inner check can
-    # reject it.
+    # Same linear tiling and correct (per_element=3, atom_len=3) bf16 family;
+    # only the permutation direction is flipped, so only swizzle_inner rejects.
     s_full = ComposeLayout(
         SwizzleLayout(3, 3, 3, swizzle_inner=False),
         TileLayout(S[(16, 8, 64) : (512, 64, 1)]),
@@ -900,9 +888,7 @@ def test_cp_rejects_flipped_swizzle_inner():
     _assert_compile_raises(kernel, "swizzle_inner")
 
 
-# --------------------------------------------------------------------------
 # Legacy 32x128b.warpx4 tests (predate the generic planner)
-# --------------------------------------------------------------------------
 
 # warpx4 requires the t buffer to declare the broadcast explicitly:
 # R[4 : 32@TLane] — t.shape[lane] = 32 with replica 4 → 128 physical lanes.
@@ -1168,9 +1154,7 @@ def test_align_middle_2_to_1_nvfp4_sfb():
     Layout shapes mirror SFB nvfp4 with PIPE=1, SFB_n_chunks=2,
     MMA_K_BLOCKS=4, sf_mma_k=4.
     """
-    # SMEM: (2, 4, 32, 4, 4) extents, strides (2048, 4, 16, 512, 1)
-    # — N_chunk outer (stride 2048), then sub-warp tile (4, stride 4), lane
-    # (32, stride 16), K_block (4, stride 512), sf_mma_k (4, stride 1).
+    # SMEM: (2, 4, 32, 4, 4) extents, strides (2048, 4, 16, 512, 1).
     # Mid post-canon = [(4, 512), (2, 2048)] — non-mergeable in this order.
     s_full = TileLayout(S[(2, 4, 32, 4, 4) : (2048, 4, 16, 512, 1)])
     # TMEM: SFB-style 5-axis layout. K_outer (4, 4@TCol) and N_chunk
@@ -1238,20 +1222,8 @@ def test_align_middle_2_to_1_nvfp4_sfb():
 
     A_np = (np.arange(256 * 16, dtype=np.int32) & 0xFF).astype(np.uint8).reshape(256, 16)
 
-    # Compute expected: for each (lane=L in 0..32, byte b in 0..15), the
-    # tcgen05.ld reads physical (TLane=L, TCol=b). We must invert the TMEM
-    # layout to find which logical (m, k) is at that physical position, then
-    # expected[L, b] = A[m, k].
-    # Layout shard iters (i0..i4) with extents (2, 4, 32, 4, 4) and TMEM
-    # strides (16, 4, 1@TLane, 32, 1) — only TLane and TCol contribute.
-    # For (TLane=L, TCol=p) with L in 0..32, replica r=0:
-    #   i2 = L; remaining iters (i0, i1, i3, i4) contribute to TCol:
-    #   p = 16*i0 + 4*i1 + 32*i3 + i4
-    # For p in 0..15 only i1 and i4 vary (i0 = i3 = 0):
-    #   i1 = p // 4, i4 = p % 4
-    # Logical buffer index: rev row-major over iter coords following shard order.
-    # Shard order outer→inner: (i0, i1, i2, i3, i4) with extents (2, 4, 32, 4, 4).
-    # Logical buffer index = i0*(4*32*4*4) + i1*(32*4*4) + i2*(4*4) + i3*4 + i4
+    # Invert TMEM layout to map physical (TLane=L, TCol=p) → logical index, then
+    # expected[L, b] = A[m, k]. i2 = L; TCol p: i1 = p // 4, i4 = p % 4 (i0=i3=0).
     expected = np.zeros((32, 16), dtype=np.uint8)
     for L in range(32):
         for p in range(16):

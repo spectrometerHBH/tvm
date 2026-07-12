@@ -137,13 +137,8 @@ def _emit_gmem_smem(op_call: TilePrimitiveCall, sctx: DispatchContext) -> PrimFu
     num_bytes = vec_bits // 8
     vec, ptx_type = copy_ptx_form(num_bytes)
 
-    # Partition guarantees ``prod(s_p.shard.extents) == prod(g_p.shard.extents)
-    # == n_elements`` (the total transfer count). Express the per-thread
-    # per-round address as a 3D coord ``(f, tid, 0)`` against shape
-    # ``[total_outer, thread_cnt, vec_len]``, and let ``layout.apply`` flatten
-    # it through whatever multi-iter T / outer-iter structure ``align_layouts_gs``
-    # picked. This makes the emit oblivious to how many iters the partition
-    # split T or outer across.
+    # Express the per-thread per-round address as a 3D coord ``(f, tid, 0)`` vs
+    # ``[total_outer, thread_cnt, vec_len]``; ``layout.apply`` flattens the rest.
     n_elements = 1
     for it in s_p.shard:
         n_elements *= int(it.extent)
@@ -163,11 +158,8 @@ def _emit_gmem_smem(op_call: TilePrimitiveCall, sctx: DispatchContext) -> PrimFu
 
     tid_axis_name = _TID_AXIS_FOR_SCOPE[sctx.scope_kind] if thread_cnt > 1 else None
 
-    # Walk shard from the vec iter backward to find the prefix that covers
-    # the T region exactly (∏ext == thread_cnt). The iters consumed are T
-    # iters; the leading prefix is the outer iter list — handed to
-    # ``try_recognize`` so the swizzle fast path can decide whether the
-    # outer iter strides match a pattern it can lower to signed_strides.
+    # Walk shard back from the vec iter to the prefix covering T exactly
+    # (∏ext == thread_cnt); the leading prefix is the outer iter list.
     if thread_cnt > 1:
         acc, _i = 1, len(s_p.shard) - 2
         while _i >= 0 and acc < thread_cnt:
@@ -180,11 +172,8 @@ def _emit_gmem_smem(op_call: TilePrimitiveCall, sctx: DispatchContext) -> PrimFu
     else:
         outer_iters_s = list(s_p.shard[:-1])
 
-    # SwizzleLayout on s_buf: try the closed-form signed-strides pattern
-    # (precomputed once per thread, then per-iter is a sum of register
-    # adds); fall back to per-iter ``swizzle.apply`` (one full XOR +
-    # decompose per iter). Closure picked at parse time so the TIRx parser
-    # doesn't AST-evaluate a "dead" ternary branch.
+    # SwizzleLayout on s_buf: try the closed-form signed-strides pattern, else
+    # fall back to per-iter ``swizzle.apply``; closure picked at parse time.
     swizzle = get_swizzle(s_buf.layout)
     swizzle_pattern = None
     if swizzle is not None and outer_iters_s:
@@ -198,11 +187,8 @@ def _emit_gmem_smem(op_call: TilePrimitiveCall, sctx: DispatchContext) -> PrimFu
             _IntImm("int32", 0),
             shape=apply_shape,
         )["m"]
-        # Bind the tid placeholder's range so the (C1) analyzer check can
-        # discharge ``bit_bj(s_off // C) == 0`` for high bj's. Outer iter
-        # stride here is ``thread_cnt * vec_len`` ⇒ bj ∈ [log2(thread_cnt),
-        # ...]; without bounds the analyzer can't prove the lane's high bits
-        # are 0 and rejects.
+        # Bind the tid range so the (C1) analyzer can discharge
+        # ``bit_bj(s_off // C) == 0``; without bounds it rejects.
         var_bounds = {}
         if tid_axis_name is not None:
             var_bounds[_tid_placeholder] = tvm.ir.Range.from_min_extent(0, thread_cnt)
@@ -268,17 +254,8 @@ def _emit_gmem_smem(op_call: TilePrimitiveCall, sctx: DispatchContext) -> PrimFu
         _setup_swizzle(tid)
         tmp = T.alloc_local((vec_len,), src.dtype)
         tmp_ptr = tmp.ptr_to([0])
-        # NB: pass typed ptr_to(...) directly to _ptr_off; caching in a
-        # local var turns it into void* + offset = byte arithmetic →
-        # misaligned vector ops.
-        #
-        # Use a serial TIR loop and let ptxas unroll downstream. Mirrors
-        # the vec_auto_reg.py rationale in commit ac7ecf70f0: explicit ``T.unroll``
-        # materializes the per-iter scratch (s_lin/g_lin/s_off/s_ptr/g_ptr)
-        # as N copies of each ``alignas(64)`` declaration. For large
-        # ``total_outer`` (e.g. thread-scope fp32 swizzled copies of 32x256
-        # at vec=4 ⇒ 2048 iters; ldgsts test4 ⇒ ~4k iters once both
-        # g2s/s2g sites add up) this floods the kernel and nvcc times out.
+        # Pass typed ptr_to(...) directly to _ptr_off (caching → byte math,
+        # misaligned vec ops); keep a serial loop, T.unroll floods the kernel.
         for f in range(total_outer):
             s_lin = s_p.apply(f, tid, v0, shape=apply_shape)["m"]
             g_lin = g_p.apply(f, tid, v0, shape=apply_shape)["m"]

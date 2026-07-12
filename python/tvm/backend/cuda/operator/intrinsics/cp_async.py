@@ -528,16 +528,8 @@ def _g2s_cluster_body(
     )
 
 
-# PTX cp.async.bulk.tensor global -> shared::cta form:
-#   cp.async.bulk.tensor.dim.dst.src{.load_mode}.completion_mechanism
-#       {.cta_group}{.level::cache_hint}
-#       [dstMem], [tensorMap, tensorCoords], [mbar] {, cache-policy}
-#   .dst = {.shared::cta}; .src = {.global}
-#   .completion_mechanism = {.mbarrier::complete_tx::bytes}
-#   .cta_group = {.cta_group::1, .cta_group::2}
-#   .load_mode = {.tile, .tile::gather4, .im2col, .im2col::w, .im2col::w::128}
-#   .level::cache_hint = {.L2::cache_hint}
-# This registration supports tile/tile::gather4 modes.
+# PTX cp.async.bulk.tensor global -> shared::cta; this registration supports
+# tile/tile::gather4 load modes.
 def _g2s_cta_parts(*args):
     attrs = args[-5:]
     dim = int(attrs[0])

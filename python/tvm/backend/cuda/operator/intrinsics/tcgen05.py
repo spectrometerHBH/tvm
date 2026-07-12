@@ -442,9 +442,8 @@ _TCGEN05_MMA_K = {
     "mxf4nvf4": (64, 128),
 }
 
-# Operand dtypes that admit a transposed (MN-major) SMEM read in dense
-# tcgen05.mma. Shared with the gemm_async dispatcher's compile-time
-# instruction-descriptor fold so both paths validate identically.
+# Operand dtypes admitting a transposed (MN-major) SMEM read in dense
+# tcgen05.mma; shared with the gemm_async instruction-descriptor fold.
 _TCGEN05_MMA_TRANS_DTYPES = frozenset(
     {
         PTXDataType.FLOAT8_E4M3FN,
@@ -835,11 +834,8 @@ def _mma_dense_parts(*args):
     pred_reg = ", p_issue" if has_pred else ""
     pred_setp = f'        "setp.ne.b32 p_issue, %{pred_idx}, 0;\\n"\n' if has_pred else ""
     if weight_stationary:
-        # The weight-stationary PTX ABI differs from the regular dense form:
-        # it takes the input-D predicate and a literal ``0`` instead of the
-        # disable-output-lane mask vector. FlashMLA head64's original inline
-        # PTX uses this form, so model it explicitly instead of reusing the
-        # regular MMA operand tail.
+        # Weight-stationary ABI takes the input-D predicate and a literal ``0``
+        # instead of the regular dense disable-output-lane mask vector.
         instr = f"tcgen05.mma.ws.cta_group::{cta_group}.kind::{kind} [%0], {a_str}, %2, %3"
         body = (
             "    asm volatile(\n"

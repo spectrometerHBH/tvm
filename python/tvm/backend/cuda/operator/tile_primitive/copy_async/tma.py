@@ -502,10 +502,8 @@ def _gmem_layout(g_buf: Buffer) -> TileLayout:
     if not isinstance(layout, TileLayout):
         # cuTensorMap requires a plain memory layout on gmem side.
         raise ValueError(f"TMA gmem layout must be a TileLayout; got {type(layout).__name__}")
-    # The cuTensorMap base address and global dims are fixed on the host, so
-    # a view-folded elem_offset on the gmem operand cannot be honored at
-    # issue time; silently ignoring it reads/writes the wrong bytes. Demand
-    # the full gmem buffer and express the offset through the copy region.
+    # A host-built cuTensorMap cannot honor a view-folded gmem elem_offset;
+    # demand the full buffer and express the offset via the copy region.
     offset = g_buf.elem_offset
     offset_c = offset.value if isinstance(offset, IntImm) else None
     if offset_c != 0 and not Analyzer().can_prove_equal(offset, 0):
@@ -1145,11 +1143,8 @@ def _merge_contig_full_box_dims(plan: TmaPlan, analyzer: Analyzer) -> TmaPlan:
             return None
         if not analyzer.can_prove_equal(tvm.tirx.floormod(inner.shape, 2), 0):
             return None
-        # The innermost box and coord_base are halved below, so both must be
-        # provably even; otherwise an odd box would silently drop the last
-        # (promoted) element and an odd coord_base would mis-address by one
-        # original element. Decline the promotion instead (the shrink search
-        # then falls back to other prefix lengths / variants).
+        # box and coord_base are halved below, so both must be provably even;
+        # otherwise decline the promotion (odd drops/mis-addresses an element).
         if not analyzer.can_prove_equal(tvm.tirx.floormod(inner.box, 2), 0):
             return None
         if not analyzer.can_prove_equal(tvm.tirx.floormod(inner.coord_base, 2), 0):
@@ -1265,11 +1260,8 @@ def _validate_hw_constraints(plan: TmaPlan) -> tuple:
             f"multiple of 16 B (cuTensorMap requirement)"
         )
 
-    # Non-innermost byte strides must be multiples of 16 (cuTensorMap
-    # requirement). The merge+promote rewrite tries to fix violating plans,
-    # but it can fail (e.g. partially-boxed dims cannot merge); re-checking
-    # here declines such plans at dispatch — enabling shrink/variant
-    # fallback — instead of failing late in the host wrapper's ICHECK.
+    # Non-innermost byte strides must be multiples of 16 (cuTensorMap); if
+    # merge+promote cannot fix it, decline at dispatch to allow fallback.
     if _plan_needs_alignment_fix(plan.dims, plan.elem_bytes, analyzer):
         return False, (
             "TMA non-innermost dim byte stride is not a provable multiple of 16 "
@@ -1371,20 +1363,15 @@ def copy_tma_impl(op_call: TilePrimitiveCall, sctx: DispatchContext) -> PrimFunc
 
     oob_mode = _normalize_oob_mode(s_buf.dtype, op_call.config.get("oob", None))
     oob_fill_kind = _oob_fill_kind(oob_mode)
-    # TMA writes the box into smem in plain box-linear order (descriptor dim 0
-    # fastest), so the descriptor dim order decides where each element lands.
-    # The plan orders the box>1 dims by the declared smem layout's contiguous
-    # chain, which makes the hardware fill match the declared placement for
-    # any faithful layout.
+    # TMA fills smem in box-linear order (descriptor dim 0 fastest); the plan
+    # orders box>1 dims by the smem layout's contiguous chain to match it.
 
     # L1 → L2 → L3
     l1 = _build_l1_result(s_buf, g_buf, g_st_plan, g_ext_plan, s_st, s_ext_plan)
     plan = _build_plan_with_shrink(l1, g_buf)
 
-    # Re-validate the oob contract against the *plan's* element dtype: a
-    # merge+promote rewrite re-types the descriptor as uintN, and the host
-    # wrapper rejects oob='nan' for non-float descriptors. Decline at
-    # dispatch instead of failing late in host init.
+    # Re-validate oob against the plan's dtype: merge+promote may re-type to
+    # uintN, and oob='nan' needs a float descriptor -- decline at dispatch.
     if oob_mode == "nan" and plan.elem_dtype not in ("float16", "float32", "float64", "bfloat16"):
         fail(
             f"TMA oob='nan' requires a floating-point tensormap dtype, but the "
@@ -1467,10 +1454,8 @@ def copy_tma_impl(op_call: TilePrimitiveCall, sctx: DispatchContext) -> PrimFunc
         coords = list(tma_coords)
         if plan.rank != 2:
             fail("copy_async(tma) gather4 currently supports rank-2 TensorMaps")
-        # PTX tile::gather4 for 2D takes the non-gather coordinate followed by
-        # the four runtime source-row coordinates.  Dense TMA coords are emitted
-        # in PTX order (inner -> outer), so gather_axis=0 corresponds to the
-        # second dense coordinate and is replaced by the indexer group.
+        # PTX 2D tile::gather4 takes the non-gather coord then 4 source-row
+        # coords; gather_axis=0 is the second dense coord (the indexer group).
         if len(coords) != 2:
             fail("copy_async(tma) gather4 expected two dense TMA coordinates")
         return [coords[0], *gather_indexer[chunk_idx * 4 : (chunk_idx + 1) * 4]]
@@ -1512,11 +1497,8 @@ def copy_tma_impl(op_call: TilePrimitiveCall, sctx: DispatchContext) -> PrimFunc
         return str(value)
 
     external_tensor_map = op_call.config.get("tensor_map", None)
-    # ``plan.elem_dtype`` must be part of the key: merge+promote re-types the
-    # descriptor, and two plans over the same buffer can otherwise collide on
-    # identical numeric fields while differing in promotion level (e.g. a
-    # uint8 box of 256 promoted once and a box of 512 promoted twice both
-    # encode innermost shape/box 256 — in different element units).
+    # ``plan.elem_dtype`` must be in the key: merge+promote re-types, so two
+    # plans differing only in promotion level would collide on numeric fields.
     tensormap_cache_key = (
         f"tensormap:{hash(plan.tensor_ptr)}:{g_buf.dtype}:{plan.elem_dtype}"
         f":{val_key(plan.rank)}"

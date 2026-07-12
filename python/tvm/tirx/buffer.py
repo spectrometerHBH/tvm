@@ -467,14 +467,8 @@ class Buffer(Object, Scriptable):
             new_layout = tvm.tirx.layout.ComposeLayout(swizzle, new_layout)
         return self._redecl(new_shape, new_layout)
 
-    # ------------------------------------------------------------------
-    # Dimension-surgery views: ``view`` / ``permute`` (reshape / transpose),
-    # the numpy-style ``sub`` indexer, ``tile`` (split+pick+merge), and
-    # ``chunk`` (equal contiguous split). All return derived views sharing
-    # this buffer's data; the physical placement (layout iters + swizzle) is
-    # carried, never restated, and data is never moved: an operation either
-    # yields a valid view or raises.
-    # ------------------------------------------------------------------
+    # Dimension-surgery views (view/permute/sub/tile/chunk): derived views
+    # sharing this buffer's data; placement is carried and data is never moved.
 
     def _normalized_dim(self, dim, name):
         ndim = len(self.shape)
@@ -593,9 +587,8 @@ class Buffer(Object, Scriptable):
         )
         new_layout = self._rewrap_swizzle(new_layout, swizzle)
         if is_tmem:
-            # tmem addresses by physical column: a narrowed column range shifts
-            # the allocated_addr (col base), not elem_offset/data. extra_offset
-            # is the narrowed dim's TCol-stride offset, i.e. a column count.
+            # tmem addresses by physical column: narrowing shifts allocated_addr
+            # (col base), not elem_offset; extra_offset is a TCol column count.
             return self._redecl(new_shape, new_layout, addr_offset=extra_offset)
         elem_offset = self.elem_offset
         if extra_offset is not None:

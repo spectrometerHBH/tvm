@@ -38,11 +38,8 @@ from ._schema import device_intrinsic
 from .registry import CODEGEN_REGISTRY, register_codegen
 from .utils import parse_str
 
-# =============================================================================
-# __ldg — typed read-only cached load. The source operand is accepted as
-# ``void*`` so callers may pass either a typed buffer pointer or a
-# ``T.handle_add_byte_offset`` result; the helper casts according to ``dtype``.
-# =============================================================================
+# __ldg — typed read-only cached load. Source is ``void*`` so callers may pass
+# a typed pointer or handle_add_byte_offset result; the helper casts per ``dtype``.
 _CUDA_LDG_CTYPES = {
     "int8": "signed char",
     "uint8": "unsigned char",

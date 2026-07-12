@@ -329,9 +329,8 @@ def _build_expected_impl(direction, dtype, s_shape, s_layout, impl_spec):
 
     # Build PTX call based on direction
     if direction == "g2s":
-        # g2s_cluster(dim, addr, mbar, tensormap, cta_mask, cta_group,
-        #             cache_policy, has_cache_policy, load_mode,
-        #             mbar_is_shared_addr, multicast, *coords)
+        # g2s_cluster(dim, addr, mbar, tensormap, cta_mask, cta_group, cache_policy,
+        #             has_cache_policy, load_mode, mbar_is_shared_addr, multicast, *coords)
         ptx_op = tvm.ir.Op.get("tirx.ptx.cp_async_bulk_tensor_g2s_cluster")
         ptx_args = [
             IntImm("int32", dim),
@@ -786,15 +785,8 @@ TMA_CASES = [
         ),
         encode_args=[5, 64, 8, 8, 4, 7, 1024, 128, 8192, 32768, 64, 8, 4, 2, 1, 1, 1, 1, 1, 1, 0, 3, 2, 0],  # noqa: E501
     ),
-    # ======================================================================
-    # G2S — transpose-like permuted layouts: DECLINED.
-    # A column-major smem tile makes the gmem-contiguous dim strided in smem,
-    # so the fastest TMA box collapses to a single element (boxDim[0]=1). For
-    # fp16 that is 2 B, which fails cuTensorMap's "boxDim[0]*elementSize must be
-    # a multiple of 16 B" rule — so these are declined at dispatch rather than
-    # emitting a descriptor the host wrapper would reject (they had no GPU
-    # round-trip and no production user; real transposes use a legal box).
-    # ======================================================================
+    # G2S transpose-like permuted layouts DECLINED: a column-major smem tile
+    # collapses the fastest box to boxDim[0]=1, failing the 16B rule for fp16.
     _tma_case(
         id="g2s-transpose-32x64",
         g_shape=(32, 64), g_region=((0, 32), (0, 64)),
@@ -968,8 +960,7 @@ TMA_CASES = [
         gmem_layout=TileLayout(S[3, 8, 256]),
         smem_layout=mma_shared_layout("float16", 0, (8, 256)),
         # SWIZZLE_NONE now yields the 8x128b packed-16B atom (3-axis), so the
-        # descriptor gains one box dim (rank 3 -> 4) like the swizzled variants
-        # (62f57feda6).
+        # descriptor gains one box dim (rank 3 -> 4) like swizzled variants.
         impl_spec=dict(loop_extents=[1], dim=4, coord_fn=lambda lv: _zeros(4)),
         encode_args=[4, 8, 8, 32, 3, 512, 16, 4096, 8, 8, 32, 1, 1, 1, 1, 1, 0, 0, 2, 0],
     ),
@@ -2516,24 +2507,17 @@ def test_copy_tma_rejects_flipped_swizzle_inner():
         )
 
 
-# FlashMLA 5D Q fold: gmem is a (64, h_q, 2, D_QK//128, s_q) strided view of a
-# (s_q, h_q, D_QK) tensor.  Logical element (a, b, c, d, e) sits at linear
-# gmem offset a + 512*b + 256*c + 64*d + 65536*e; head-dim index is
-# k = a + 64*d + 256*c (c = 256-half, d = 64-chunk within the half).
+# FlashMLA 5D Q fold: (64, h_q, 2, D_QK//128, s_q) view of (s_q, h_q, D_QK);
+# element (a,b,c,d,e) at gmem offset a + 512*b + 256*c + 64*d + 65536*e.
 _FLASHMLA_Q_GMEM_LAYOUT = TileLayout(S[(64, 128, 2, 4, 3) : (1, 512, 256, 64, 65536)])
 _FLASHMLA_Q_G_REGION = ((0, 64), (64, 128), (0, 2), (0, 4), (1, 2))
 
-# TMA writes the box into smem in plain box-linear order (descriptor dim 0
-# fastest).  The default ("optimized") planner orders the box>1 descriptor
-# dims by the declared smem layout's contiguous chain, so the hardware fill
-# lands every element exactly where the declared layout says.  Two different
-# declared placements of the same fold must therefore yield two different
-# descriptor dim orders, and both must be element-exact on hardware.
+# The planner orders box>1 descriptor dims by the smem layout's contiguous
+# chain, so two placements of one fold yield two exact descriptor dim orders.
 _FLASHMLA_Q_SMEM_CASES = [
     pytest.param(
-        # Interleaved halves (chunk order d0 c0 d1 c1 ...): the true FlashMLA
-        # Q placement.  The derived descriptor is the FlashMLA 5D Q ABI, i.e.
-        # identical to the historical FlashMLA ABI order for this gmem view.
+        # Interleaved halves (chunk order d0 c0 d1 c1 ...): the true FlashMLA Q
+        # placement; the derived descriptor is the FlashMLA 5D Q ABI order.
         (1, 64, 4096, 8192),
         [5, 64, 128, 2, 4, 3, 1024, 512, 128, 131072, 64, 64, 2, 4, 1],
         id="interleaved-halves-abi",
@@ -2650,11 +2634,8 @@ def test_copy_tma_optimized_folded_view_placement_matches_declared_layout(
     np.testing.assert_array_equal(B_ref, B_t.numpy())
 
 
-# ---------------------------------------------------------------------------
-# Regression tests: merge+promote
-# soundness, promoted-unit validation, unfixable-alignment declines, and the
-# tensormap cache key.
-# ---------------------------------------------------------------------------
+# Regression tests: merge+promote soundness, promoted-unit validation,
+# unfixable-alignment declines, and the tensormap cache key.
 
 
 def _tensormap_encode_calls(stmt):
@@ -2724,9 +2705,8 @@ def test_copy_tma_promote_declines_odd_box_and_coord():
     from tvm.tirx.cuda.operator.tile_primitive.tma_utils import SwizzleMode
 
     def _plan(inner_box, inner_coord):
-        # d1's byte stride (8) violates the 16B rule -> merge machinery runs;
-        # (d0, d1) merge is blocked only by box (8*64 = 512 > 256) -> promote
-        # is attempted on the innermost dim.
+        # d1's byte stride (8) violates the 16B rule -> merge runs but is blocked
+        # by box (8*64 = 512 > 256), so promote is attempted on the innermost dim.
         return TmaPlan(
             swizzle_mode=SwizzleMode.SWIZZLE_NONE,
             dims=[
