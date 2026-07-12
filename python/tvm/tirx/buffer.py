@@ -281,13 +281,19 @@ class Buffer(Object, Scriptable):
     def _redecl(self, shape, layout, *, dtype=None, elem_offset=None, addr_offset=None):
         """Re-declare a derived view over this buffer's storage.
 
-        Routes the buffer identity by storage kind: an ``allocated_addr``
-        buffer (tmem) aliases by column address — ``addr_offset`` (a column
-        count) adds onto it, and ``decl_buffer`` rejects ``data`` for tmem
-        scope — while a pointer buffer carries ``data``/``strides``/
-        ``elem_offset`` through.
+        Routes the buffer identity by storage kind: a ``tmem`` buffer aliases
+        by column address — ``addr_offset`` (a column count) adds onto its
+        ``allocated_addr``, and ``decl_buffer`` requires ``allocated_addr``
+        (and rejects ``data``) only for tmem scope — while every other scope
+        (including an sbuf buffer that the allocator later stamps with an
+        ``allocated_addr``) carries ``data``/``strides``/``elem_offset``
+        through, since ``decl_buffer`` does not accept ``allocated_addr`` there.
         """
-        if self.allocated_addr is not None and len(self.allocated_addr) > 0:
+        if (
+            self.scope() == "tmem"
+            and self.allocated_addr is not None
+            and len(self.allocated_addr) > 0
+        ):
             addr = self.allocated_addr[0]
             if addr_offset is not None:
                 addr = addr + addr_offset
@@ -568,7 +574,11 @@ class Buffer(Object, Scriptable):
         otherwise it stays inside the tile layout's offset so the swizzle
         keeps applying to it and the view addresses the same bytes."""
         offset_map = dict(grouped.offset.items())
-        is_tmem = self.allocated_addr is not None and len(self.allocated_addr) > 0
+        is_tmem = (
+            self.scope() == "tmem"
+            and self.allocated_addr is not None
+            and len(self.allocated_addr) > 0
+        )
         if (
             not is_tmem
             and extra_offset is not None
