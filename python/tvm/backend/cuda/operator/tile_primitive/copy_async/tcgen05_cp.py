@@ -727,7 +727,9 @@ def _validate_smem_tmem_copy(op_call: TilePrimitiveCall, sctx: DispatchContext):
         and dst.scope() == "tmem"
         and src.layout is not None
         and dst.layout is not None
-        and src.dtype == dst.dtype
+        # Byte reinterpret is legal (nvfp4 stages sf as uint8, reads fp8); a
+        # true width change needs decompress, rejected in copy_smem_tmem_impl.
+        and DataType(src.dtype).bits == DataType(dst.dtype).bits
         and dst.allocated_addr is not None
     )
 
