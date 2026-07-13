@@ -44,18 +44,20 @@ def strip_swizzle_to_tile(layout, get_extents):
 
     ``get_extents`` is a no-arg callable returning the per-axis extent list
     (buffer shape or region extents). It is only invoked for a bare swizzle, so
-    callers with symbolic regions pay no int()-coercion for plain TileLayouts;
-    symbolic extents fall back to the rebuilt identity rather than raising.
+    callers with symbolic regions pay no int()-coercion for plain TileLayouts.
+    If the extents or tile size can't be coerced to int (symbolic/dynamic
+    region), fall back to the period tile -- the pre-refactor behavior -- so
+    dynamic swizzled copies keep compiling instead of raising.
     """
     if isinstance(layout, ComposeLayout):
         tile = layout.tile_layout
         if tile.is_trivial():
-            extents = get_extents()
             try:
+                extents = get_extents()
                 tile_size = int(tile.size())
                 buf_size = math.prod(int(s) for s in extents)
             except (TypeError, ValueError):
-                return TileLayout(S[tuple(extents)])
+                return tile
             if tile_size != buf_size:
                 return TileLayout(S[tuple(extents)])
         return tile
