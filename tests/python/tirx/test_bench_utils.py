@@ -16,6 +16,8 @@
 # under the License.
 """Tests for tvm.tirx.bench utilities."""
 
+import importlib
+
 import pytest
 import torch
 
@@ -29,6 +31,8 @@ from tvm.tirx.bench import (
     bench_tk,
     tensor_bytes,
 )
+
+bench_module = importlib.import_module("tvm.tirx.bench")
 
 # ── _parse_proton_tree ──────────────────────────────────────────────────────
 
@@ -97,6 +101,35 @@ def test_parse_proton_tree_empty():
 # ── bench_tk (ThunderKittens group-input protocol) ──────────────────────────
 
 
+def test_bench_tk_cooldown_precedes_every_impl(monkeypatch):
+    calls = []
+    sleeps = []
+
+    class FakeEvent:
+        def record(self):
+            pass
+
+        def elapsed_time(self, _other):
+            return 1.0
+
+    monkeypatch.setattr(bench_module.torch.cuda, "Event", lambda **_kwargs: FakeEvent())
+    monkeypatch.setattr(bench_module.torch.cuda, "synchronize", lambda: None)
+    monkeypatch.setattr(bench_module.time, "sleep", sleeps.append)
+
+    funcs = {"a": lambda _case: calls.append("a"), "b": lambda _case: calls.append("b")}
+    for _ in range(2):
+        bench_module._bench_event_groups(
+            funcs,
+            [None],
+            warmup=0,
+            repeat=1,
+            cooldown_s=1.0,
+        )
+
+    assert calls == ["a", "b", "a", "b"]
+    assert sleeps == [1.0, 1.0, 1.0, 1.0]
+
+
 @pytest.mark.gpu
 @pytest.mark.skipif(not env.has_cuda(), reason="need cuda")
 def test_bench_tk_basic():
@@ -159,6 +192,32 @@ def test_bench_tk_multiple_input_groups():
 
 
 # ── bench (Triton-standard, pure-launch) ─────────────────────────────────────
+
+
+def test_bench_cooldown_precedes_every_impl(monkeypatch):
+    calls = []
+    sleeps = []
+
+    def fake_timer(fn, warmup=25, rep=100):
+        del warmup, rep
+        fn()
+        return 0.001
+
+    monkeypatch.setattr(bench_module, "_do_bench_event", fake_timer)
+    monkeypatch.setattr(bench_module.time, "sleep", sleeps.append)
+
+    results = bench(
+        {"a": lambda: calls.append("a"), "b": lambda: calls.append("b")},
+        warmup=0,
+        repeat=1,
+        timer="event",
+        cooldown_s=1.0,
+        rounds=2,
+    )
+
+    assert calls == ["a", "b", "a", "b"]
+    assert sleeps == [1.0, 1.0, 1.0, 1.0]
+    assert results["benchmark_protocol"]["cooldown_s"] == 1.0
 
 
 @pytest.mark.gpu
