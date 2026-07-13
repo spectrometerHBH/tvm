@@ -306,13 +306,17 @@ def prepare_input_groups(input_factory, l2_bytes=None):
     }
 
 
+def _sleep_before_impl(cooldown_s):
+    if cooldown_s > 0:
+        time.sleep(cooldown_s)
+
+
 def _bench_event_groups(funcs, groups, warmup, repeat, cooldown_s):
     num_groups = len(groups)
     results = {}
 
-    for idx, (name, func) in enumerate(funcs.items()):
-        if idx > 0:
-            time.sleep(cooldown_s)
+    for name, func in funcs.items():
+        _sleep_before_impl(cooldown_s)
 
         for i in range(warmup):
             func(groups[i % num_groups])
@@ -329,19 +333,25 @@ def _bench_event_groups(funcs, groups, warmup, repeat, cooldown_s):
         torch.cuda.synchronize()
         results[name] = start_event.elapsed_time(end_event) / repeat * 1000.0
 
-        time.sleep(cooldown_s)
-
     return results
 
 
 def _bench_proton_groups(
-    funcs, groups, warmup, repeat, cooldown_s, proton_name, debug, nsight, *, kernel=""
+    funcs,
+    groups,
+    warmup,
+    repeat,
+    cooldown_s,
+    proton_name,
+    debug,
+    nsight,
+    *,
+    kernel="",
 ):
     num_groups = len(groups)
     with ProtonContext(proton_name, debug=debug, nsight=nsight, kernel=kernel) as ctx:
-        for idx, (name, func) in enumerate(funcs.items()):
-            if idx > 0:
-                time.sleep(cooldown_s)
+        for name, func in funcs.items():
+            _sleep_before_impl(cooldown_s)
 
             for i in range(warmup):
                 func(groups[i % num_groups])
@@ -357,8 +367,6 @@ def _bench_proton_groups(
                 for i in range(repeat):
                     func(groups[i % num_groups])
             torch.cuda.synchronize()
-
-            time.sleep(cooldown_s)
 
     return ctx.get_impl_times(), ctx.get_baseline_errors()
 
@@ -409,7 +417,6 @@ def bench_tk(
     flush_l2_size=int(8e8 // 4),
     references=None,
     rounds=1,
-    round_cooldown_s=1.0,
     validate_case=None,
 ):
     """Benchmark implementations with a factory-owned input footprint.
@@ -441,12 +448,11 @@ def bench_tk(
     repeat : int
         Number of timed iterations per round.
     cooldown_s : float
-        Seconds to sleep between impls for thermal cooldown.
+        Seconds to sleep immediately before each implementation's warmup and
+        measurement. The first implementation in the first round is included.
     rounds : int
         Independent benchmark rounds (compile + inputs once; each round runs
         warmup + repeat for every selected impl).
-    round_cooldown_s : float
-        Seconds to sleep between rounds (ignored when ``rounds == 1``).
     validate_case : callable, optional
         Called once on the first prepared ``case`` (after ``prepare_input_groups``,
         before warmup/repeat rounds). Under tir-bench, ``run_kernel_bench`` holds
@@ -466,8 +472,8 @@ def bench_tk(
         raise ValueError("warmup must be non-negative")
     if rounds < 1:
         raise ValueError("rounds must be >= 1")
-    if round_cooldown_s < 0:
-        raise ValueError("round_cooldown_s must be non-negative")
+    if cooldown_s < 0:
+        raise ValueError("cooldown_s must be non-negative")
     if timer not in {"event", "proton"}:
         raise ValueError(f"unsupported timer {timer!r}; expected event or proton")
 
@@ -525,7 +531,6 @@ def bench_tk(
                 "repeat": repeat,
                 "cooldown_s": cooldown_s,
                 "rounds": rounds,
-                "round_cooldown_s": round_cooldown_s,
                 "order": list(funcs.keys()),
             },
         }
@@ -535,9 +540,7 @@ def bench_tk(
 
     errors = dict(build_errors)
     round_samples: dict[str, list[float]] = {}
-    for round_idx in range(rounds):
-        if round_idx > 0:
-            time.sleep(round_cooldown_s)
+    for _ in range(rounds):
         if timer == "event":
             impls = _bench_event_groups(funcs, inputs, warmup, repeat, cooldown_s)
             proton_errors = {}
@@ -573,7 +576,6 @@ def bench_tk(
             "repeat": repeat,
             "cooldown_s": cooldown_s,
             "rounds": rounds,
-            "round_cooldown_s": round_cooldown_s,
             "order": list(funcs.keys()),
         },
     }
@@ -934,8 +936,8 @@ def bench(
     cudagraph_rep=None,
     timer=None,
     references=None,
+    cooldown_s=1.0,
     rounds=1,
-    round_cooldown_s=1.0,
 ):
     """Benchmark pure-launch implementations using Triton-standard timing.
 
@@ -987,13 +989,13 @@ def bench(
         Prefer ``proton`` when the reference has heavy host dispatch (flashinfer,
         CuTeDSL) -- ``event`` would over/under-credit us by measuring the wall, not the
         kernel. (Plain no-flush ``do_bench_cudagraph`` is intentionally NOT offered.)
+    cooldown_s : float
+        Seconds to sleep immediately before each implementation's warmup and
+        measurement. The first implementation in the first round is included.
     rounds : int
         Independent measurement rounds; per-impl times are averaged across
         rounds. (Triton times a single fn with no rounds; this is our sampling
         layer on top.)
-    round_cooldown_s : float
-        Seconds to sleep between rounds (ignored when ``rounds == 1``).
-
     Returns
     -------
     dict
@@ -1011,8 +1013,8 @@ def bench(
         raise ValueError("warmup must be non-negative")
     if rounds < 1:
         raise ValueError("rounds must be >= 1")
-    if round_cooldown_s < 0:
-        raise ValueError("round_cooldown_s must be non-negative")
+    if cooldown_s < 0:
+        raise ValueError("cooldown_s must be non-negative")
     # ``timer=None`` means "use the default timer". The default lives in exactly one
     # place -- here -- so kernels forward ``timer=None`` to inherit it and a future
     # change is a one-line edit. proton = pure per-kernel GPU time; it is honest for
@@ -1083,16 +1085,15 @@ def bench(
 
     protocol = {
         **_eff,
+        "cooldown_s": cooldown_s,
         "rounds": rounds,
-        "round_cooldown_s": round_cooldown_s,
         "order": list(funcs.keys()),
     }
 
     round_samples: dict[str, list[float]] = {}
-    for round_idx in range(rounds):
-        if round_idx > 0:
-            time.sleep(round_cooldown_s)
+    for _ in range(rounds):
         for name, func in funcs.items():
+            _sleep_before_impl(cooldown_s)
             ms = _timer_fn(func, **_timer_kwargs)
             # ms -> microseconds (matches bench_tk unit and pinned baselines).
             round_samples.setdefault(name, []).append(ms * 1000.0)
