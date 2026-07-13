@@ -411,13 +411,13 @@ def test_reg_copy_wg_local_to_swizzled_shared_uses_swizzle_fastpath():
     ``tvm_builtin_pointer_offset`` swizzle XOR ends up recomputed every
     iteration. Loop must be ``T.unroll``.
     """
-    from tvm.tirx.layout import SwizzleLayout, wg_local_layout
+    from tvm.tirx.layout import ComposeLayout, wg_local_layout
 
     N_THREADS, EPI_N = 128, 64
     g_shape = (N_THREADS, EPI_N)
     g_layout = TileLayout(S[g_shape])
     # 128b swizzle on the SMEM side (per_element=3 ⇒ 8 fp16 atom width).
-    smem_layout = SwizzleLayout(per_element=3, swizzle_len=3, atom_len=3)
+    smem_layout = ComposeLayout(3, 3, 3, TileLayout(S[(512,)]))
 
     @T.prim_func
     def kernel(A_ptr: T.handle, B_ptr: T.handle) -> None:
@@ -554,12 +554,9 @@ def test_copy_forced_vec_width_codegen(variant, dtype, n_elements, expected_st, 
 @pytest.mark.gpu
 @pytest.mark.skipif(not env.has_cuda_compute(9), reason="need cuda compute >= 9.0")
 def test_copy_forced_vec_dynamic_swizzled_shared_uses_vector_ptx():
-    from tvm.tirx.layout import ComposeLayout, SwizzleLayout
+    from tvm.tirx.layout import ComposeLayout
 
-    smem_layout = ComposeLayout(
-        SwizzleLayout(2, 3, 3, swizzle_inner=True),
-        TileLayout(S[(64, 8, 32) : (32, 2048, 1)]),
-    )
+    smem_layout = ComposeLayout(2, 3, 3, TileLayout(S[(64, 8, 32) : (32, 2048, 1)]))
 
     @T.prim_func
     def kernel(B_ptr: T.handle) -> None:

@@ -29,7 +29,7 @@ import tvm.testing
 from tvm.script import tirx as T
 from tvm.script.tirx import tile as Tx
 from tvm.testing import env
-from tvm.tirx.layout import ComposeLayout, S, SwizzleLayout, TileLayout
+from tvm.tirx.layout import ComposeLayout, S, TileLayout
 
 
 def _build_kernel(scope, n_threads, shape, dtype):
@@ -189,7 +189,7 @@ def test_gmem_smem_roundtrip(scope, n_threads, shape, dtype):
             32,
             TileLayout(S[96, 512]),
             TileLayout(S[96, 512]),
-            ComposeLayout(SwizzleLayout(3, 3, 3), TileLayout(S[8, 64]))
+            ComposeLayout(3, 3, 3, TileLayout(S[8, 64]))
             .tile_to((16, 128), (8, 64))
             .tile_to((32, 256), (16, 128)),
             tvm.cuda(0),
@@ -284,17 +284,17 @@ def _align(
 )
 @pytest.mark.parametrize("per_element,expected_max_vec", [(2, 4), (1, 2), (0, 1)])
 def test_swizzled_smem_vec_len_must_fit_chunk(per_element, expected_max_vec):
-    """``SwizzleLayout(per_element, ...)`` keeps the bottom ``per_element``
+    """A swizzled ``ComposeLayout`` keeps the bottom ``per_element``
     bits unswizzled. vec must stay within that chunk or it crosses an XOR
     boundary and reads/writes the wrong physical bytes."""
     shape = (32, 32)  # 1024 fp16 elements total
     g_layout = TileLayout(S[shape])
-    s_layout = ComposeLayout(SwizzleLayout(per_element, 3, 3), TileLayout(S[shape]))
+    s_layout = ComposeLayout(per_element, 3, 3, TileLayout(S[shape]))
     _g, _s, vec_len = _align(g_layout, shape, s_layout, shape, elem_bits=16, thread_cnt=32)
     chunk_elems = 1 << per_element
     assert vec_len <= chunk_elems, (
         f"vec_len={vec_len} crosses swizzle chunk size={chunk_elems} "
-        f"(SwizzleLayout(per_element={per_element}, ...))"
+        f"(swizzle per_element={per_element}, ...)"
     )
 
 
@@ -345,16 +345,16 @@ def test_unaligned_region_offset_must_clamp_vec_len():
 
 
 def test_swizzled_smem_emit_must_be_swizzle_aware():
-    """Codegen-level: emitted S address should go through the SwizzleLayout's
+    """Codegen-level: emitted S address should go through the swizzle's
     Apply so the XOR scrambling is honored. Currently emit uses
     ``s_buf.ptr_to([0,..,0]) + linear_offset`` which only matches a
     non-swizzled storage layout."""
     import tvm
     from tvm.script import tirx as T
-    from tvm.tirx.layout import ComposeLayout, S, SwizzleLayout, TileLayout
+    from tvm.tirx.layout import ComposeLayout, S, TileLayout
 
     shape = (128, 32)
-    s_layout = ComposeLayout(SwizzleLayout(3, 3, 3), TileLayout(S[shape]))
+    s_layout = ComposeLayout(3, 3, 3, TileLayout(S[shape]))
 
     @T.prim_func
     def kernel(A_ptr: T.handle) -> None:
@@ -522,10 +522,16 @@ def test_gmem_smem_swizzle_fast_path_fires_with_var_bounds():
     per outer iter, no per-iter ``swizzle.apply`` XOR splice in the hot path."""
     import re
 
-    swizzle = SwizzleLayout(3, 3, 3)
+    swizzle = ComposeLayout(3, 3, 3, TileLayout(S[(512,)]))
     shape = (32, 64)
     g_layout = TileLayout(S[shape])
-    s_layout = ComposeLayout(swizzle, TileLayout(S[shape]))
+    s_layout = ComposeLayout(
+        swizzle.per_element,
+        swizzle.swizzle_len,
+        swizzle.atom_len,
+        TileLayout(S[shape]),
+        swizzle.swizzle_inner,
+    )
 
     @T.prim_func
     def kernel(A_ptr: T.handle, B_ptr: T.handle) -> None:

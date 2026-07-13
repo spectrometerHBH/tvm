@@ -34,7 +34,7 @@ from tvm.tirx.cuda.operator.tile_primitive.tma_utils import (
     mma_shared_layout,
 )
 from tvm.tirx.exec_scope import ExecScope
-from tvm.tirx.layout import ComposeLayout, Iter, S, SwizzleLayout, TileLayout
+from tvm.tirx.layout import ComposeLayout, Iter, S, TileLayout
 from tvm.tirx.operator.tile_primitive.ops import CopyAsync
 from tvm.tirx.stmt import DeclBuffer
 from tvm.tirx.stmt_functor import StmtExprVisitor
@@ -271,7 +271,7 @@ def _build_expected_impl(direction, dtype, s_shape, s_layout, impl_spec):
         coord_fn: callable(loop_vars) -> list[PrimExpr]  (dim coordinate args)
         s_start: optional list[int]  — starting index for address_of (default all zeros)
     """
-    from tvm.tirx.layout import ComposeLayout, SwizzleLayout
+    from tvm.tirx.layout import ComposeLayout
 
     loop_extents = impl_spec["loop_extents"]
     dim = impl_spec["dim"]
@@ -279,13 +279,10 @@ def _build_expected_impl(direction, dtype, s_shape, s_layout, impl_spec):
     coord_fn = impl_spec["coord_fn"]
 
     # Mirror _to_tile_layout() in copy_async/tma.py:
-    #   ComposeLayout → tile_layout
-    #   SwizzleLayout → identity TileLayout(S[shape])
+    #   ComposeLayout → tile_layout (a bare swizzle carries a trivial identity tile)
     #   TileLayout    → as-is
     if isinstance(s_layout, ComposeLayout):
         buf_layout = s_layout.tile_layout
-    elif isinstance(s_layout, SwizzleLayout):
-        buf_layout = TileLayout(S[tuple(s_shape)])
     else:
         buf_layout = s_layout
 
@@ -1293,7 +1290,9 @@ def test_copy_tma_gather4_indexer_issue_axes_emit_chunks_outermost():
         s_region=((0, 16), (0, 256)),
         gmem_layout=TileLayout(S[(8192, 512) : (512, 1)]),
         smem_layout=ComposeLayout(
-            SwizzleLayout(3, 3, 3, swizzle_inner=True),
+            3,
+            3,
+            3,
             TileLayout.from_iters(
                 [
                     Iter(4, 16 * 64, "m"),
@@ -1396,9 +1395,8 @@ def _build_tma_gather4_multi_iter_kernel(dtype="float16"):
     gather_rows = 8
     cols = 128
     thread_cnt = 128
-    shared_layout = T.ComposeLayout(
-        T.SwizzleLayout(3, 3, 3, swizzle_inner=True),
-        T.TileLayout(T.S[(gather_rows, cols // 64, 64) : (64, gather_rows * 64, 1)]),
+    shared_layout = ComposeLayout(
+        3, 3, 3, T.TileLayout(T.S[(gather_rows, cols // 64, 64) : (64, gather_rows * 64, 1)])
     )
     smem_bytes = gather_rows * cols * tvm.DataType(dtype).bits // 8
 
@@ -1675,8 +1673,10 @@ def test_copy_tma_symbolic_dimension(dtype, swizzle_len):
     dev = tvm.cuda(0)
 
     # Shared memory layout with swizzle
-    shared_layout = T.ComposeLayout(
-        T.SwizzleLayout(3, swizzle_len, 3, swizzle_inner=True),
+    shared_layout = ComposeLayout(
+        3,
+        swizzle_len,
+        3,
         T.TileLayout(T.S[(SMEM_PIPE_DEPTH, BLK_M, BLK_K) : (BLK_M * BLK_K, BLK_K, 1)]),
     )
 
@@ -1768,9 +1768,8 @@ def test_copy_tma_3d_with_view(dtype, swizzle_len):
     copy_bytes_per_blk = 32 * 4 * 64 * tvm.DataType(dtype).bits // 8
 
     # Shared memory layout with swizzle
-    shared_layout = T.ComposeLayout(
-        T.SwizzleLayout(3, swizzle_len, 3, swizzle_inner=True),
-        T.TileLayout(T.S[(2, 128, 128) : (128 * 128, 128, 1)]),
+    shared_layout = ComposeLayout(
+        3, swizzle_len, 3, T.TileLayout(T.S[(2, 128, 128) : (128 * 128, 128, 1)])
     )
 
     # fmt: off
@@ -2117,9 +2116,7 @@ def test_copy_tma_dynamic_cta_mask(dtype):
     thread_cnt = 128
 
     smem_shape = (BLK_M, BLK_K)
-    shared_layout = T.ComposeLayout(
-        T.SwizzleLayout(3, 3, 3, swizzle_inner=True), T.TileLayout(T.S[smem_shape : (BLK_K, 1)])
-    )
+    shared_layout = ComposeLayout(3, 3, 3, T.TileLayout(T.S[smem_shape : (BLK_K, 1)]))
     smem_bytes = BLK_M * BLK_K * tvm.DataType(dtype).bits // 8
     copy_bytes = smem_bytes
 
@@ -2243,10 +2240,7 @@ def test_copy_tma_dynamic_cache_hint_g2s_keeps_rank_coords():
     dtype = "float16"
     M, H, K = 64, 4, 64
     smem_shape = (M, H, K)
-    A_layout = T.ComposeLayout(
-        T.SwizzleLayout(3, 3, 3, swizzle_inner=True),
-        T.TileLayout(T.S[smem_shape : (H * K, K, 1)]),
-    )
+    A_layout = ComposeLayout(3, 3, 3, T.TileLayout(T.S[smem_shape : (H * K, K, 1)]))
 
     @T.prim_func
     def tma_dynamic_cache_hint(a_ptr: T.handle) -> None:
@@ -2442,10 +2436,7 @@ def test_copy_tma_declines_non_derivable_fold_layout():
 
     dtype = "bfloat16"
     D_QK, D_V, H, S_Q = 576, 512, 64, 4
-    q_rope_layout = ComposeLayout(
-        SwizzleLayout(3, 2, 3, swizzle_inner=True),
-        TileLayout(S[(64, 2, 32) : (32, 2048, 1)]),
-    )
+    q_rope_layout = ComposeLayout(3, 2, 3, TileLayout(S[(64, 2, 32) : (32, 2048, 1)]))
 
     with pytest.raises(Exception, match="identical regions"):
 
@@ -2479,7 +2470,7 @@ def test_copy_tma_declines_non_derivable_fold_layout():
 
 
 def test_copy_tma_rejects_flipped_swizzle_inner():
-    """A canonical-family SwizzleLayout with ``swizzle_inner=False`` must be
+    """A canonical-family swizzled layout with ``swizzle_inner=False`` must be
     rejected at planning: the TMA hardware swizzle modes implement the
     ``swizzle_inner=True`` permutation ``x ^ ((x & outer_mask) >> atom_len)``
     (pinned bit-exactly on hardware by the GPU smoke tests in this file),
@@ -2491,10 +2482,7 @@ def test_copy_tma_rejects_flipped_swizzle_inner():
     canonical = mma_shared_layout("float16", 3, (8, 256))
     # Identical linear tiling and swizzle family; only the permutation
     # direction is flipped, so only a swizzle_inner check can reject it.
-    flipped = ComposeLayout(
-        SwizzleLayout(3, 3, 3, swizzle_inner=False),
-        canonical.tile_layout,
-    )
+    flipped = ComposeLayout(3, 3, 3, canonical.tile_layout, swizzle_inner=False)
     with pytest.raises(Exception, match="swizzle_inner"):
         _make_tma_call(
             g_shape=(8, 256),
@@ -2536,10 +2524,7 @@ _FLASHMLA_Q_SMEM_CASES = [
 def test_copy_tma_optimized_dim_order_derives_from_declared_smem_layout(smem_strides, encode_head):
     """Default dim order follows the declared smem placement, not gmem order."""
 
-    smem_layout = ComposeLayout(
-        SwizzleLayout(3, 3, 3, swizzle_inner=True),
-        TileLayout(S[(64, 64, 2, 4) : smem_strides]),
-    )
+    smem_layout = ComposeLayout(3, 3, 3, TileLayout(S[(64, 64, 2, 4) : smem_strides]))
     _, host_init_stmts = _make_tma_call(
         g_shape=(64, 128, 2, 4, 3),
         g_region=_FLASHMLA_Q_G_REGION,
@@ -2576,10 +2561,7 @@ def test_copy_tma_optimized_folded_view_placement_matches_declared_layout(
     smem_bytes = n_elems * 2
     dev = tvm.cuda(0)
 
-    smem_layout = ComposeLayout(
-        SwizzleLayout(3, 3, 3, swizzle_inner=True),
-        TileLayout(S[(64, 64, 2, 4) : smem_strides]),
-    )
+    smem_layout = ComposeLayout(3, 3, 3, TileLayout(S[(64, 64, 2, 4) : smem_strides]))
     gmem_layout = _FLASHMLA_Q_GMEM_LAYOUT
 
     # fmt: off

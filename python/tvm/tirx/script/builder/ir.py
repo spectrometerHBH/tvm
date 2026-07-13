@@ -91,7 +91,6 @@ from tvm.tirx.layout import (
     Layout,
     R,
     S,
-    SwizzleLayout,
     TileLayout,
     wg_local_layout,
 )
@@ -3611,7 +3610,6 @@ __all__ += [
     "R",
     "S",
     "ScopeIdDef",
-    "SwizzleLayout",
     "TensorMap",
     "TileLayout",
     "Var",

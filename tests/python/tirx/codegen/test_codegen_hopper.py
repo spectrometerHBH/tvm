@@ -614,8 +614,11 @@ def test_cp_async_bulk_tensor_global_to_shared_swizzle(swizzle, dtype):
     B = tvm.runtime.tensor(B_np, device=DEV)
     mod(A, B)
     dtype = tvm.DataType(dtype)
-    layout = T.SwizzleLayout(
-        per_element=int(math.log2(128 // dtype.bits)), swizzle_len=swizzle, atom_len=3
+    layout = T.ComposeLayout(
+        int(math.log2(128 // dtype.bits)),
+        swizzle,
+        3,
+        T.TileLayout(T.S[(1 << (int(math.log2(128 // dtype.bits)) + swizzle + 3),)]),
     )
     B_np = B.numpy()
     B_swizzle = [B_np[int(layout.apply(i)["m"])] for i in range(total_elems)]

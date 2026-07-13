@@ -276,34 +276,16 @@ def test_tcgen05_mma_ss_no_tma(swizzle):
         B_layout = T.TileLayout(T.S[(N, K // 8, 8) : (8, N * 8, 1)])
         ldo, sdo = 128, 8
     elif SWIZZLE == 1:
-        A_layout = T.ComposeLayout(
-            T.SwizzleLayout(3, 1, 3, swizzle_inner=True),
-            T.TileLayout(T.S[(M, K // 16, 16) : (16, M * 16, 1)]),
-        )
-        B_layout = T.ComposeLayout(
-            T.SwizzleLayout(3, 1, 3, swizzle_inner=True),
-            T.TileLayout(T.S[(N, K // 16, 16) : (16, N * 16, 1)]),
-        )
+        A_layout = T.ComposeLayout(3, 1, 3, T.TileLayout(T.S[(M, K // 16, 16) : (16, M * 16, 1)]))
+        B_layout = T.ComposeLayout(3, 1, 3, T.TileLayout(T.S[(N, K // 16, 16) : (16, N * 16, 1)]))
         ldo, sdo = 256, 16
     elif SWIZZLE == 2:
-        A_layout = T.ComposeLayout(
-            T.SwizzleLayout(3, 2, 3, swizzle_inner=True),
-            T.TileLayout(T.S[(M, K // 32, 32) : (32, M * 32, 1)]),
-        )
-        B_layout = T.ComposeLayout(
-            T.SwizzleLayout(3, 2, 3, swizzle_inner=True),
-            T.TileLayout(T.S[(N, K // 32, 32) : (32, N * 32, 1)]),
-        )
+        A_layout = T.ComposeLayout(3, 2, 3, T.TileLayout(T.S[(M, K // 32, 32) : (32, M * 32, 1)]))
+        B_layout = T.ComposeLayout(3, 2, 3, T.TileLayout(T.S[(N, K // 32, 32) : (32, N * 32, 1)]))
         ldo, sdo = 512, 32
     elif SWIZZLE == 3:
-        A_layout = T.ComposeLayout(
-            T.SwizzleLayout(3, 3, 3, swizzle_inner=True),
-            T.TileLayout(T.S[(M, 1, 64) : (64, M * 64, 1)]),
-        )
-        B_layout = T.ComposeLayout(
-            T.SwizzleLayout(3, 3, 3, swizzle_inner=True),
-            T.TileLayout(T.S[(N, 1, 64) : (64, N * 64, 1)]),
-        )
+        A_layout = T.ComposeLayout(3, 3, 3, T.TileLayout(T.S[(M, 1, 64) : (64, M * 64, 1)]))
+        B_layout = T.ComposeLayout(3, 3, 3, T.TileLayout(T.S[(N, 1, 64) : (64, N * 64, 1)]))
         ldo, sdo = 1, 64
     else:
         raise ValueError(f"Invalid swizzle: {SWIZZLE}")

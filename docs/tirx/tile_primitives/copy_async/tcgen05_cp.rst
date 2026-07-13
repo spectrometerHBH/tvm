@@ -105,7 +105,7 @@ shape/layout validation happens in the planner with readable errors:
    * - smem layout
      - rows in 8-row descriptor core-matrix groups; the atom row width derives
        the swizzle mode (K-byte ∈ {16, 32, 64, 128} → sw 0..3) and must match
-       the buffer's ``SwizzleLayout`` (if any)
+       the buffer's swizzle (if any)
 
 Demonstration program
 ----------------------

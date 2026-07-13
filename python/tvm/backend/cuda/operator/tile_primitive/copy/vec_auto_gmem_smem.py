@@ -172,7 +172,7 @@ def _emit_gmem_smem(op_call: TilePrimitiveCall, sctx: DispatchContext) -> PrimFu
     else:
         outer_iters_s = list(s_p.shard[:-1])
 
-    # SwizzleLayout on s_buf: try the closed-form signed-strides pattern, else
+    # Swizzle on s_buf: try the closed-form signed-strides pattern, else
     # fall back to per-iter ``swizzle.apply``; closure picked at parse time.
     swizzle = get_swizzle(s_buf.layout)
     swizzle_pattern = None

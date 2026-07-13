@@ -670,11 +670,17 @@ def gemm_async_tcgen05_impl(op_call: TilePrimitiveCall, sctx: DispatchContext) -
                 base_shape = mma_atom_shape(dtype, mode)  # [8, T*s]
                 swapped_shape = [base_shape[1], base_shape[0]]  # [T*s, 8]
 
-                # MN-major atom: compose SwizzleLayout with stride-reversed TileLayout
-                # so the first dim (T*s) is contiguous instead of the second.
-                # Needed when the penultimate dim is physically contiguous.
+                # MN-major atom: carry the swizzle params over a stride-reversed
+                # TileLayout so the first dim (T*s) is contiguous instead of the
+                # second. Needed when the penultimate dim is physically contiguous.
                 mn_tile = TileLayout(S[tuple(swapped_shape) : (1, swapped_shape[0])])
-                mn_atom = ComposeLayout(swizzle_atom, mn_tile)
+                mn_atom = ComposeLayout(
+                    swizzle_atom.per_element,
+                    swizzle_atom.swizzle_len,
+                    swizzle_atom.atom_len,
+                    mn_tile,
+                    swizzle_atom.swizzle_inner,
+                )
 
                 # Determine K-major vs MN-major based on which dim is contiguous.
                 # K-major: K dim contiguous (last dim for [MN,K], first dim for [K,MN])

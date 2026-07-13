@@ -23,11 +23,43 @@ variable resolution. Used by cast.py, unary.py, and binary.py.
 """
 
 import functools
+import math
 import operator
 from collections import defaultdict
 
 from tvm.arith import Analyzer
-from tvm.tirx.layout import TileLayout
+from tvm.tirx.layout import ComposeLayout, S, TileLayout
+
+
+def strip_swizzle_to_tile(layout, get_extents):
+    """Strip swizzle off ``layout`` to a TileLayout for perm/group/slice.
+
+    For a plain TileLayout, returns it unchanged. For a ComposeLayout, returns
+    the inner tile. For a *bare* swizzle (ComposeLayout with a trivial tile),
+    the tile carries only the swizzle period, which may not match the buffer or
+    region extents: rebuild an identity tile over the extents so downstream
+    group/slice sees the real per-axis sizes. When the trivial tile already
+    spans the extents (wrapped identity, or a bare swizzle whose period equals
+    the product), keep it as-is to preserve its dimension structure.
+
+    ``get_extents`` is a no-arg callable returning the per-axis extent list
+    (buffer shape or region extents). It is only invoked for a bare swizzle, so
+    callers with symbolic regions pay no int()-coercion for plain TileLayouts;
+    symbolic extents fall back to the rebuilt identity rather than raising.
+    """
+    if isinstance(layout, ComposeLayout):
+        tile = layout.tile_layout
+        if tile.is_trivial():
+            extents = get_extents()
+            try:
+                tile_size = int(tile.size())
+                buf_size = math.prod(int(s) for s in extents)
+            except (TypeError, ValueError):
+                return TileLayout(S[tuple(extents)])
+            if tile_size != buf_size:
+                return TileLayout(S[tuple(extents)])
+        return tile
+    return layout
 
 
 def get_sublayout_from_region(layout, buffer_shape, region_st, region_extent):

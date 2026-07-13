@@ -453,18 +453,14 @@ class Buffer(Object, Scriptable):
         # plus seps over *that* layout — permute the regrouped one, not
         # ``self.layout``. For a simple layout (one shard iter per axis) this
         # reduces to ``permute_dims(dims)``.
-        layout = self.layout
-        swizzle = None
-        if isinstance(layout, tvm.tirx.layout.ComposeLayout):
-            # The swizzle permutes the flat offset, so it commutes with a
-            # permutation of the logical dims: permute the inner tile layout
-            # and re-compose.
-            swizzle = layout.swizzle
-            layout = layout.tile_layout
+        # The swizzle permutes the flat offset, so it commutes with a
+        # permutation of the logical dims: permute the inner tile layout
+        # and re-compose.
+        layout, swizzle = self._surgery_parts()
         grouped, seps = layout.group(list(self.shape))
         new_layout = grouped.permute_by_groups(seps, list(dims))
         if swizzle is not None:
-            new_layout = tvm.tirx.layout.ComposeLayout(swizzle, new_layout)
+            new_layout = self._rewrap_swizzle(new_layout, swizzle)
         return self._redecl(new_shape, new_layout)
 
     # Dimension-surgery views (view/permute/sub/tile/chunk): derived views
@@ -490,18 +486,31 @@ class Buffer(Object, Scriptable):
         return None
 
     def _surgery_parts(self):
-        """Split ``self.layout`` into (inner tile layout, optional swizzle)."""
+        """Split ``self.layout`` into (inner tile layout, optional swizzle params).
+
+        The swizzle is returned as a ``(per_element, swizzle_len, atom_len,
+        swizzle_inner)`` tuple consumed by ``_rewrap_swizzle`` /
+        ``_swizzle_offset_commutes``.
+        """
         layout = self.layout
         swizzle = None
         if isinstance(layout, tvm.tirx.layout.ComposeLayout):
-            swizzle = layout.swizzle
+            swizzle = (
+                layout.per_element,
+                layout.swizzle_len,
+                layout.atom_len,
+                layout.swizzle_inner,
+            )
             layout = layout.tile_layout
         return layout, swizzle
 
     @staticmethod
     def _rewrap_swizzle(layout, swizzle):
         if swizzle is not None:
-            return tvm.tirx.layout.ComposeLayout(swizzle, layout)
+            per_element, swizzle_len, atom_len, swizzle_inner = swizzle
+            return tvm.tirx.layout.ComposeLayout(
+                per_element, swizzle_len, atom_len, layout, swizzle_inner
+            )
         return layout
 
     @staticmethod
@@ -551,10 +560,10 @@ class Buffer(Object, Scriptable):
         """
         if swizzle is None or extra_offset is None:
             return True
-        sw_len = int(swizzle.swizzle_len)
+        per_element, sw_len, atom_len, _ = swizzle
         if sw_len == 0:
             return True  # identity permutation, everything commutes
-        period = 1 << (int(swizzle.per_element) + int(swizzle.atom_len) + sw_len)
+        period = 1 << (int(per_element) + int(atom_len) + sw_len)
         offset_c = self._concrete_int(extra_offset)
         if offset_c is not None:
             return offset_c % period == 0
@@ -602,7 +611,7 @@ class Buffer(Object, Scriptable):
         an einops pattern. Lowers to ``view`` (split lhs groups) → ``permute``
         (reorder to rhs atom order) → ``view`` (merge rhs groups), so it inherits
         whatever the underlying axis machinery does: a plain (unswizzled) buffer
-        collapses to a flat layout, a swizzled buffer keeps its ``SwizzleLayout``,
+        collapses to a flat layout, a swizzled buffer keeps its swizzle,
         and a tmem buffer carries ``allocated_addr`` through. It therefore does
         NOT flatten a swizzle atom — the same pattern on a swizzled SMEM buffer
         vs an unswizzled TMEM buffer legitimately yields different physical
