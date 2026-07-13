@@ -15,16 +15,25 @@
 # specific language governing permissions and limitations
 # under the License.
 
-"""Implementation of copy_async operator dispatches for CUDA targets.
+"""copy_async dispatch variant: non-bulk-copy (cp.async)."""
 
-Registered op: copy_async (4 variants).
-See the @register_dispatch blocks in each submodule for detailed documentation
-with before/after IR examples.
-"""
+from tvm.tirx import PrimFunc
+from tvm.tirx.operator.tile_primitive import DispatchContext, predicate, register_dispatch
+from tvm.tirx.tile_primitive import TilePrimitiveCall
 
-from .cp_async import *
-from .dsmem import *
-from .ldgsts import *
-from .tcgen05_cp import *
-from .tcgen05_ldst import *
-from .tma import *
+from ..common import CopyInstType, copy_vec_load_impl, validate_copy_op
+
+
+@register_dispatch(
+    "copy_async",
+    "cuda",
+    variant="non-bulk-copy",
+    priority=20,
+    when=[
+        predicate(
+            "validate_copy_op", lambda op, sctx: (validate_copy_op(op, sctx), "not a valid copy op")
+        )
+    ],
+)
+def copy_async_dispatch_cp_async(op: TilePrimitiveCall, sctx: DispatchContext) -> PrimFunc:
+    return copy_vec_load_impl(op, sctx, CopyInstType.CP_ASYNC)
