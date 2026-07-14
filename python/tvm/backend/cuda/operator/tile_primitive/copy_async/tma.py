@@ -50,7 +50,7 @@ import tvm
 from tvm.arith import Analyzer
 from tvm.script import tirx as T
 from tvm.tirx import Buffer, IntImm, PrimFunc
-from tvm.tirx.layout import ComposeLayout, Layout, S, SwizzleLayout, TileLayout
+from tvm.tirx.layout import Layout, TileLayout
 from tvm.tirx.operator.tile_primitive import (
     DispatchContext,
     fail,
@@ -60,6 +60,7 @@ from tvm.tirx.operator.tile_primitive import (
 from tvm.tirx.tile_primitive import TilePrimitiveCall
 
 from ..exec_scope_utils import single_thread
+from ..layout_utils import strip_swizzle_to_tile
 from ..tma_utils import SwizzleMode, get_swizzle_mode_from_layout, mma_atom_shape
 
 # ==============================================================================
@@ -225,11 +226,7 @@ class TmaPlan:
 def _to_tile_layout(layout: Layout, shape: list) -> TileLayout:
     """Normalize the shared layout so pointer arithmetic always sees a TileLayout."""
 
-    if isinstance(layout, ComposeLayout):
-        return layout.tile_layout
-    if isinstance(layout, SwizzleLayout):
-        return TileLayout(S[tuple(shape)])
-    return layout
+    return strip_swizzle_to_tile(layout, lambda: shape)
 
 
 def _assert_memory_only(layout: TileLayout, label: str) -> None:

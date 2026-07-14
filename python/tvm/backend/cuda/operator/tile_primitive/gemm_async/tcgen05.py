@@ -54,6 +54,7 @@ from ...intrinsics.tcgen05 import (
 from ...intrinsics.types import PTXDataType
 from ..common import get_st_extent, smem_desc_add_16B_offset
 from ..exec_scope_utils import single_thread
+from ..layout_utils import strip_swizzle_to_tile
 from ..tma_utils import (
     SwizzleMode,
     get_swizzle_mode_from_layout,
@@ -532,16 +533,13 @@ def gemm_async_tcgen05_impl(op_call: TilePrimitiveCall, sctx: DispatchContext) -
     A_slice_layout = A_buffer.layout.slice(A_buffer.shape, A_buffer_region.region)
     B_slice_layout = B_buffer.layout.slice(B_buffer.shape, B_buffer_region.region)
     C_slice_layout = C_buffer.layout.slice(C_buffer.shape, C_buffer_region.region)
-    # Extract pre-swizzle tile layout for descriptor offset computation
+    # Extract pre-swizzle tile layout for descriptor offset computation.
+    # strip_swizzle_to_tile rebuilds an identity tile over the slice extents for
+    # a bare swizzle (ComposeLayout with a trivial tile), so .apply() maps over
+    # the full operand extent instead of wrapping inside one swizzle period.
     if not a_is_tmem:
-        A_slice_tile = (
-            A_slice_layout.tile_layout
-            if isinstance(A_slice_layout, ComposeLayout)
-            else A_slice_layout
-        )
-    B_slice_tile = (
-        B_slice_layout.tile_layout if isinstance(B_slice_layout, ComposeLayout) else B_slice_layout
-    )
+        A_slice_tile = strip_swizzle_to_tile(A_slice_layout, lambda: A_extent)
+    B_slice_tile = strip_swizzle_to_tile(B_slice_layout, lambda: B_extent)
 
     # C may be batched C[2, M, N]: the M=64 .ws Layout-E lane fold (partials at
     # lanes m, m+64), normalized to packed C_slice_layout. Squeeze leading unit dims.
@@ -670,11 +668,17 @@ def gemm_async_tcgen05_impl(op_call: TilePrimitiveCall, sctx: DispatchContext) -
                 base_shape = mma_atom_shape(dtype, mode)  # [8, T*s]
                 swapped_shape = [base_shape[1], base_shape[0]]  # [T*s, 8]
 
-                # MN-major atom: compose SwizzleLayout with stride-reversed TileLayout
-                # so the first dim (T*s) is contiguous instead of the second.
-                # Needed when the penultimate dim is physically contiguous.
+                # MN-major atom: carry the swizzle params over a stride-reversed
+                # TileLayout so the first dim (T*s) is contiguous instead of the
+                # second. Needed when the penultimate dim is physically contiguous.
                 mn_tile = TileLayout(S[tuple(swapped_shape) : (1, swapped_shape[0])])
-                mn_atom = ComposeLayout(swizzle_atom, mn_tile)
+                mn_atom = ComposeLayout(
+                    swizzle_atom.per_element,
+                    swizzle_atom.swizzle_len,
+                    swizzle_atom.atom_len,
+                    mn_tile,
+                    swizzle_atom.swizzle_inner,
+                )
 
                 # Determine K-major vs MN-major based on which dim is contiguous.
                 # K-major: K dim contiguous (last dim for [MN,K], first dim for [K,MN])

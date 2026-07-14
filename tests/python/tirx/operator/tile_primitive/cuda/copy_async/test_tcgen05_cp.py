@@ -63,7 +63,7 @@ from tvm.script import tirx as T
 from tvm.script.tirx import tile as Tx
 from tvm.testing import env
 from tvm.tirx.cuda.operator.tile_primitive.tma_utils import SwizzleMode, mma_shared_layout
-from tvm.tirx.layout import ComposeLayout, R, S, SwizzleLayout, TCol, TileLayout, TLane
+from tvm.tirx.layout import ComposeLayout, R, S, TCol, TileLayout, TLane
 
 # Multicast replica lane offsets: (extent, stride) pairs on TLane. These are
 # the warp-slab offsets receiving copies of the data (see module docstring).
@@ -828,16 +828,13 @@ def test_cp_rejects_non_16b_aligned_row_group_stride():
 
 
 def test_cp_rejects_non_canonical_swizzle_family():
-    """A SwizzleLayout outside the canonical mma atom family (wrong
+    """A swizzled layout outside the canonical mma atom family (wrong
     per_element for the dtype) must be rejected."""
     bits = 16
     C = 128 // bits
     # per_element=2 is the f32 family; with a bf16 source it disagrees with the
     # descriptor permutation. Linear part is valid, so only family check rejects.
-    s_full = ComposeLayout(
-        SwizzleLayout(2, 3, 3),
-        TileLayout(S[(16, 8, 64) : (512, 64, 1)]),
-    )
+    s_full = ComposeLayout(2, 3, 3, TileLayout(S[(16, 8, 64) : (512, 64, 1)]))
     t_full = TileLayout(S[(128, C) : (1 @ TLane, 1 @ TCol)])
     kernel = _make_cp_kernel(
         s_full,
@@ -856,7 +853,7 @@ def test_cp_rejects_non_canonical_swizzle_family():
 
 
 def test_cp_rejects_flipped_swizzle_inner():
-    """A canonical-family SwizzleLayout with ``swizzle_inner=False`` must be
+    """A canonical-family swizzled layout with ``swizzle_inner=False`` must be
     rejected: the descriptor's hardware walk implements the
     ``swizzle_inner=True`` permutation ``x ^ ((x & outer_mask) >> atom_len)``
     (pinned bit-exactly on B200 by the round-trip tests above), while
@@ -867,10 +864,7 @@ def test_cp_rejects_flipped_swizzle_inner():
     C = 128 // bits
     # Same linear tiling and correct (per_element=3, atom_len=3) bf16 family;
     # only the permutation direction is flipped, so only swizzle_inner rejects.
-    s_full = ComposeLayout(
-        SwizzleLayout(3, 3, 3, swizzle_inner=False),
-        TileLayout(S[(16, 8, 64) : (512, 64, 1)]),
-    )
+    s_full = ComposeLayout(3, 3, 3, TileLayout(S[(16, 8, 64) : (512, 64, 1)]), swizzle_inner=False)
     t_full = TileLayout(S[(128, C) : (1 @ TLane, 1 @ TCol)])
     kernel = _make_cp_kernel(
         s_full,

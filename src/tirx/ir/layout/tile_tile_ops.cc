@@ -373,7 +373,9 @@ ffi::Optional<Layout> TileLayoutNode::IsTileOuter(const Layout& tile_layout,
     if (auto comp = tile_layout.as<ComposeLayout>()) {
       auto inner_layout = IsTileOuter(comp.value()->tile_layout, tiled_shape, outer_shape);
       if (!inner_layout) return std::nullopt;
-      return ComposeLayout(comp.value()->swizzle, inner_layout.value().as<TileLayout>().value());
+      return ComposeLayout(comp.value()->per_element, comp.value()->swizzle_len,
+                           comp.value()->atom_len, inner_layout.value().as<TileLayout>().value(),
+                           comp.value()->swizzle_inner);
     }
     return std::nullopt;
   }

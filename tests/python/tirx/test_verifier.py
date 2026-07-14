@@ -177,7 +177,7 @@ def test_layout():
         # fmt: on
     verify(test1)
 
-    ### SwizzleLayout
+    ### ComposeLayout (bare swizzle)
     # fmt: off
     @T.prim_func(check_well_formed=False)
     def test2():
@@ -185,7 +185,9 @@ def test_layout():
         T.cta_id([32])
         T.warp_id([4])
         T.lane_id([32])
-        A = T.alloc_buffer((512,), scope="shared", layout=T.SwizzleLayout(3, 3, 3))
+        A = T.alloc_buffer(
+            (512,), scope="shared", layout=T.ComposeLayout(3, 3, 3, T.TileLayout(T.S[(512,)]))
+        )
 
         A[0] = 0
         # fmt: on

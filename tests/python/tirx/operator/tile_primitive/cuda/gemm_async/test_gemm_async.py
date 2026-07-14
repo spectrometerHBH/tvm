@@ -68,7 +68,7 @@ def _mn_major_layout(dtype, swizzle_mode, shape):
 
     For shape (..., M, K), the standard K-major atom is [8, T*s] with K contiguous.
     MN-major swaps this: atom becomes [T*s, 8] with M contiguous.
-    This is achieved by composing the SwizzleLayout with a stride-reversed TileLayout.
+    This is achieved by composing the swizzle with a stride-reversed TileLayout.
     """
     from tvm.tirx.layout import ComposeLayout
 
@@ -77,7 +77,13 @@ def _mn_major_layout(dtype, swizzle_mode, shape):
     swapped = [base_shape[1], base_shape[0]]  # [T*s, 8]
     # Stride-reversed tile: first dim (T*s) contiguous, second dim (8) has stride T*s
     mn_tile = TileLayout(S[tuple(swapped) : (1, swapped[0])])
-    mn_atom = ComposeLayout(swizzle_atom, mn_tile)
+    mn_atom = ComposeLayout(
+        swizzle_atom.per_element,
+        swizzle_atom.swizzle_len,
+        swizzle_atom.atom_len,
+        mn_tile,
+        swizzle_atom.swizzle_inner,
+    )
     # Tile up: first expand penultimate dim, then full shape
     tile_step = [1] * (len(shape) - 2) + [shape[-2], swapped[1]]
     atom_nd = [1] * (len(shape) - 2) + swapped
@@ -3155,23 +3161,17 @@ def test_gemm_tcgen05_rejects_non_uniform_atom_grid():
     stride gap (atoms (2,4) with outer stride 4096 instead of 2048) used to
     match with fields taken from the local inner stride, silently dropping
     the gap; it must now be rejected."""
-    from tvm.tirx.layout import ComposeLayout, SwizzleLayout
+    from tvm.tirx.layout import ComposeLayout
 
     M, N, K = 64, 256, 64
     dtype = "bfloat16"
-    exotic_A = ComposeLayout(
-        SwizzleLayout(3, 3, 3),
-        TileLayout(S[(2, 4, 8, 64) : (4096, 512, 64, 1)]),
-    )
+    exotic_A = ComposeLayout(3, 3, 3, TileLayout(S[(2, 4, 8, 64) : (4096, 512, 64, 1)]))
     B_layout = mma_shared_layout(dtype, SwizzleMode.SWIZZLE_128B_ATOM, (K, N))
     with pytest.raises(ValueError, match="no MMA SMEM descriptor matches"):
         _make_gemm_tcgen05_call(M, N, K, dtype, exotic_A, B_layout)
 
     # The uniform version of the same tiling (outer stride 2048) is accepted.
-    uniform_A = ComposeLayout(
-        SwizzleLayout(3, 3, 3),
-        TileLayout(S[(2, 4, 8, 64) : (2048, 512, 64, 1)]),
-    )
+    uniform_A = ComposeLayout(3, 3, 3, TileLayout(S[(2, 4, 8, 64) : (2048, 512, 64, 1)]))
     impl = _make_gemm_tcgen05_call(M, N, K, dtype, uniform_A, B_layout)
     assert impl is not None
 
