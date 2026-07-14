@@ -2341,6 +2341,10 @@ def _build_tma_gather4_cta2_kernel(cta_mask):
     rows, copy_rows, cols, thread_cnt = 256, 16, 64, 128
     shared_layout = mma_shared_layout(dtype, 3, (copy_rows, cols))
     smem_bytes = copy_rows * cols * tvm.DataType(dtype).bits // 8
+    # Multicast completions for cta_group::2 aggregate on the CTA named by the
+    # mbarrier address (rank 0). expect_tx must cover every destination.
+    num_destinations = max(1, int(cta_mask).bit_count())
+    expect_tx_bytes = smem_bytes * num_destinations
 
     # fmt: off
     @T.prim_func
@@ -2358,6 +2362,10 @@ def _build_tma_gather4_cta2_kernel(cta_mask):
         )
         mbarrier = T.decl_buffer([1], "uint64", dyn.data, elem_offset=smem_bytes // 8)
         mbar_ptr = T.meta_var(mbarrier.ptr_to([0]))
+        # Pin mbarrier to cluster rank 0 (FlashMLA / gemm_async cta_group=2).
+        leader_mbar = T.meta_var(
+            T.reinterpret("handle", T.ptx.map_shared_rank(mbar_ptr, 0))
+        )
 
         if tid == 0:
             T.ptx.mbarrier.init(mbar_ptr, 1)
@@ -2371,13 +2379,13 @@ def _build_tma_gather4_cta2_kernel(cta_mask):
         if cbx == 0:
             if tid == 0:
                 Tx.copy_async(
-                    A_smem[:, :], A[:, :], dispatch="tma", mbar=mbar_ptr,
+                    A_smem[:, :], A[:, :], dispatch="tma", mbar=leader_mbar,
                     cta_group=2, cta_mask=T.uint16(cta_mask),
                     cache_hint=T.uint64(0x14F0000000000000),
                     gather_axis=0, dst_gather_axis=0, indexer=[Idx[i] for i in range(copy_rows)],
                 )
-                T.ptx.mbarrier.arrive.expect_tx(mbar_ptr, smem_bytes)
-            T.ptx.mbarrier.try_wait(mbar_ptr, 0)
+                T.ptx.mbarrier.arrive.expect_tx(leader_mbar, expect_tx_bytes)
+            T.ptx.mbarrier.try_wait(leader_mbar, 0)
         T.cuda.cta_sync()
         T.cuda.cluster_sync()
         Tx.cta.copy(B[cbx, :, :], A_smem[:, :])
@@ -2421,6 +2429,45 @@ def test_copy_tma_gather4_cta_group2_gpu_roundtrip():
     exp, leader = _run_tma_gather4_cta2(cta_mask=1)
     np.testing.assert_array_equal(leader[0], exp, err_msg="cta_mask=1 cta0")
     assert not leader[1].any(), "cta_mask=1 must leave CTA 1 un-multicast (all-zero)"
+
+
+class _ExpectTxAndMapaCollector(StmtExprVisitor):
+    """Collect ``expect_tx`` byte counts and ``mapa`` (map_shared_rank) ranks."""
+
+    def __init__(self):
+        super().__init__()
+        self.expect_tx_bytes = []
+        self.map_shared_ranks = []
+
+    def visit_call_(self, op):
+        name = getattr(op.op, "name", None)
+        if name == "tirx.ptx.mbarrier_arrive_expect_tx" and len(op.args) >= 2:
+            self.expect_tx_bytes.append(int(op.args[1]))
+        elif name == "tirx.ptx.mapa" and len(op.args) >= 2:
+            self.map_shared_ranks.append(int(op.args[1]))
+        super().visit_call_(op)
+
+
+def test_copy_tma_gather4_cta_group2_expect_tx_accounts_for_multicast():
+    """Deterministic IR pin: multicast expect_tx and rank-0 mbarrier mapping.
+
+    A single GPU round-trip can miss the undercounted-tx hang; the old kernel
+    used ``expect_tx(smem_bytes)`` (== 2048) for ``cta_mask=3`` and could pass
+    intermittently. Pin the lowered counts instead.
+    """
+    target = tvm.target.Target({"kind": "cuda", "arch": "sm_100a"})
+    for cta_mask, expect_tx in ((3, 4096), (1, 2048)):
+        mod = tvm.IRModule({"main": _build_tma_gather4_cta2_kernel(cta_mask)})
+        with target:
+            lowered = tvm.tirx.transform.LowerTIRx()(mod)
+        collector = _ExpectTxAndMapaCollector()
+        collector.visit_stmt(lowered["main"].body)
+        assert collector.expect_tx_bytes == [expect_tx], (
+            f"cta_mask={cta_mask}: expect_tx={collector.expect_tx_bytes}, want [{expect_tx}]"
+        )
+        assert collector.map_shared_ranks and all(r == 0 for r in collector.map_shared_ranks), (
+            f"cta_mask={cta_mask}: mapa ranks={collector.map_shared_ranks}, want all 0"
+        )
 
 
 def test_copy_tma_declines_non_derivable_fold_layout():
