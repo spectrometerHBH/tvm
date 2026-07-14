@@ -22,7 +22,7 @@ from enum import Enum
 
 import tvm
 from tvm.arith.analyzer import Analyzer
-from tvm.tirx.layout import ComposeLayout, Layout, S, SwizzleLayout, TileLayout
+from tvm.tirx.layout import ComposeLayout, Layout, S, TileLayout
 
 
 class SwizzleMode(Enum):
@@ -34,14 +34,16 @@ class SwizzleMode(Enum):
     SWIZZLE_128B_ATOM = 3
 
 
-def mma_atom_layout(dtype: str, swizzle_mode: SwizzleMode | int) -> SwizzleLayout:
+def mma_atom_layout(dtype: str, swizzle_mode: SwizzleMode | int) -> ComposeLayout:
     """Generate the MMA-compatible shared-memory atom layout."""
     bits = tvm.DataType(dtype).bits
     if isinstance(swizzle_mode, int):
         swizzle_mode = SwizzleMode(swizzle_mode)
-    return SwizzleLayout(
-        per_element=(128 // bits).bit_length() - 1, swizzle_len=swizzle_mode.value, atom_len=3
-    )
+    per_element = (128 // bits).bit_length() - 1
+    swizzle_len = swizzle_mode.value
+    atom_len = 3
+    period = 1 << (per_element + swizzle_len + atom_len)
+    return ComposeLayout(per_element, swizzle_len, atom_len, TileLayout(S[(period,)]))
 
 
 def mma_atom_shape(dtype: str, swizzle_mode: SwizzleMode | int, shape: list[int] | None = None):
@@ -122,11 +124,9 @@ def get_swizzle_mode_from_layout(layout: Layout) -> SwizzleMode | None:
     identity, so ``swizzle_inner`` is a don't-care there.
     """
     if isinstance(layout, ComposeLayout):
-        swizzle = layout.swizzle  # SwizzleLayout is named 'swizzle' in ComposeLayout
-    elif isinstance(layout, SwizzleLayout):
-        swizzle = layout
+        swizzle = layout  # ComposeLayout carries the swizzle params directly
     elif isinstance(layout, TileLayout):
-        # TileLayout without SwizzleLayout means no swizzle (mode 0)
+        # TileLayout alone means no swizzle (mode 0)
         return SwizzleMode.SWIZZLE_NONE
     else:
         return None
@@ -136,7 +136,7 @@ def get_swizzle_mode_from_layout(layout: Layout) -> SwizzleMode | None:
         raise ValueError(
             "swizzle direction mismatch: the hardware swizzle modes implement "
             "the swizzle_inner=True address permutation "
-            "(x ^ ((x & outer_mask) >> atom_len)); got a SwizzleLayout with "
+            "(x ^ ((x & outer_mask) >> atom_len)); got a ComposeLayout with "
             f"swizzle_inner=False (per_element={int(swizzle.per_element)}, "
             f"swizzle_len={int(swizzle_len)}, atom_len={int(swizzle.atom_len)}), "
             "whose mirrored permutation would be silently misplaced"

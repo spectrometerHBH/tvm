@@ -107,10 +107,8 @@ def _emit(op_call: TilePrimitiveCall, sctx: DispatchContext) -> PrimFunc:
     # TileLayout. The ComposeLayout doesn't have ``.replica`` / ``.shard``,
     # so we must peel *before* the structural checks below. Capture the
     # swizzle separately for use at emit time.
-    # NB: read swizzle from the *buffer* layout, not the post-canon ``s``.
-    # When the underlying tile is trivial, ``ComposeLayoutNode::Canonicalize``
-    # returns a bare ``SwizzleLayout``; isinstance(s, ComposeLayout) is then
-    # False and we'd miss the swizzle here.
+    # NB: read swizzle from the *buffer* layout, not the post-canon ``s`` --
+    # the buffer layout is the reliable source for the swizzle params.
     s_swizzle = get_swizzle(s_buf.layout)
     if s_swizzle is not None and s_swizzle.per_element < 3:
         # ldmatrix/stmatrix .b16 reads/writes 8 fp16 = 128b per lane in one

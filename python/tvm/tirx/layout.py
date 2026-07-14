@@ -343,8 +343,8 @@ class Layout(Object):
         return list(reversed(res))
 
     def is_swizzle(self) -> bool:
-        """Check if the layout is swizzle."""
-        return isinstance(self, SwizzleLayout)
+        """Check if the layout is a bare swizzle (ComposeLayout over a trivial tile)."""
+        return isinstance(self, ComposeLayout) and self.tile_layout.is_trivial()
 
     def is_trivial(self) -> bool:
         """Check if the layout is trivial."""
@@ -364,10 +364,14 @@ class Layout(Object):
             exclude = {axis: offset for axis, offset in self.offset.items() if not axis.is_thread()}
             return TileLayout.from_iters(shard, replicate, exclude)  # pylint: disable=no-member
 
-        elif isinstance(self, SwizzleLayout):
-            return self
         elif isinstance(self, ComposeLayout):
-            return ComposeLayout(self.swizzle.storage(), self.tile_layout.storage())
+            return ComposeLayout(
+                self.per_element,
+                self.swizzle_len,
+                self.atom_len,
+                self.tile_layout.storage(),
+                self.swizzle_inner,
+            )
         else:
             raise ValueError(f"Unsupported layout type: {type(self)}")
 
@@ -388,16 +392,15 @@ class Layout(Object):
             shard = [Iter(iter.extent, iter.stride * num, iter.axis) for iter in self.shard]
             shard.append(Iter(num, 1, Axis.get("m")))
             return TileLayout.from_iters(shard, self.replica, self.offset)
-        elif isinstance(self, SwizzleLayout):
+        elif isinstance(self, ComposeLayout):
             assert num & (num - 1) == 0, "num must be a power of 2"
-            return SwizzleLayout(
+            return ComposeLayout(
                 self.per_element + (num.bit_length() - 1),
                 self.swizzle_len,
                 self.atom_len,
+                self.tile_layout.unpack(num),
                 self.swizzle_inner,
             )
-        elif isinstance(self, ComposeLayout):
-            return ComposeLayout(self.swizzle.unpack(num), self.tile_layout.unpack(num))
         else:
             raise ValueError(f"Unsupported layout type: {type(self)}")
 
@@ -421,7 +424,13 @@ class Layout(Object):
             shard.insert(insert_at, new_iter)
             return TileLayout.from_iters(shard, self.replica, self.offset)
         elif isinstance(self, ComposeLayout):
-            return ComposeLayout(self.swizzle, self.tile_layout.broadcast(num, position, axis))
+            return ComposeLayout(
+                self.per_element,
+                self.swizzle_len,
+                self.atom_len,
+                self.tile_layout.broadcast(num, position, axis),
+                self.swizzle_inner,
+            )
         else:
             raise ValueError(f"broadcast not supported for {type(self)}")
 
@@ -448,19 +457,18 @@ class Layout(Object):
             shard = [Iter(iter.extent, iter.stride // num, iter.axis) for iter in self.shard[:-1]]
             shard.append(Iter(inner_iter.extent // num, 1, inner_iter.axis))
             return TileLayout.from_iters(shard, self.replica, self.offset)
-        elif isinstance(self, SwizzleLayout):
+        elif isinstance(self, ComposeLayout):
             assert num & (num - 1) == 0, "num must be a power of 2"
             assert self.per_element >= num.bit_length() - 1, (
                 "per_element must be greater than or equal to num.bit_length() - 1"
             )
-            return SwizzleLayout(
+            return ComposeLayout(
                 self.per_element - (num.bit_length() - 1),
                 self.swizzle_len,
                 self.atom_len,
+                self.tile_layout.pack(num),
                 self.swizzle_inner,
             )
-        elif isinstance(self, ComposeLayout):
-            return ComposeLayout(self.swizzle.pack(num), self.tile_layout.pack(num))
         else:
             raise ValueError(f"Unsupported layout type: {type(self)}")
 
@@ -1436,34 +1444,35 @@ class TileLayout(Layout):
         return self.permute_dims(flat)
 
 
-@tvm_ffi.register_object("tirx.SwizzleLayout")
-class SwizzleLayout(Layout):
-    """A memory layout that swizzles elements to improve memory access patterns."""
+@tvm_ffi.register_object("tirx.ComposeLayout")
+class ComposeLayout(Layout):
+    """A memory layout that swizzles a tile layout.
+
+    ``per_element`` / ``swizzle_len`` / ``atom_len`` / ``swizzle_inner`` carry the
+    swizzle (formerly the standalone ``SwizzleLayout``); ``tile_layout`` is the
+    tiled memory map the swizzle is applied to. A bare swizzle is a
+    ``ComposeLayout`` over a trivial identity tile.
+    """
 
     per_element: int
     swizzle_len: int
     atom_len: int
     swizzle_inner: bool
+    tile_layout: "TileLayout"
 
     def __init__(
-        self, per_element: int, swizzle_len: int, atom_len: int, swizzle_inner: bool = True
+        self,
+        per_element: int,
+        swizzle_len: int,
+        atom_len: int,
+        tile_layout: "TileLayout",
+        swizzle_inner: bool = True,
     ):
         self.__init_handle_by_constructor__(
-            _ffi_api.SwizzleLayout,  # pylint: disable=no-member
+            _ffi_api.ComposeLayout,  # pylint: disable=no-member
             per_element,
             swizzle_len,
             atom_len,
+            tile_layout,
             swizzle_inner,
-        )
-
-
-@tvm_ffi.register_object("tirx.ComposeLayout")
-class ComposeLayout(Layout):
-    """A memory layout that composes 2 layouts."""
-
-    def __init__(self, layout_A: "SwizzleLayout", layout_B: "TileLayout"):
-        self.__init_handle_by_constructor__(
-            _ffi_api.ComposeLayout,  # pylint: disable=no-member
-            layout_A,
-            layout_B,
         )

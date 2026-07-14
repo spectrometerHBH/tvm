@@ -21,198 +21,20 @@ import importlib
 import pytest
 import torch
 
-import tvm.testing
-
 pytest.importorskip("triton")  # tvm.tirx.bench imports triton.profiler
 
 from tvm.testing import env
-from tvm.tirx.bench import (
-    _compute_group_count,
-    _parse_proton_tree,
-    bench,
-    bench_tk,
-    tensor_bytes,
-)
+from tvm.tirx.bench import bench
 
 bench_module = importlib.import_module("tvm.tirx.bench")
 
-# ── _parse_proton_tree ──────────────────────────────────────────────────────
-
-
-SAMPLE_TREE = """\
-├─ 1.500 tir
-│  ├─ 1.500 my_kernel_fn
-│  └─ 0.001 vectorized_elementwise_kernel
-└─ 0.800 cublas
-   └─ 0.800 sm90_xmma_gemm_f16f16
-"""
-
-
-def test_parse_proton_tree_basic():
-    impls, errors = _parse_proton_tree(SAMPLE_TREE)
-    assert impls == {"tir": 1.5, "cublas": 0.8}
-    assert errors == {}
-
-
-def test_parse_proton_tree_filters_elementwise():
-    """vectorized_elementwise_kernel and elementwise_kernel_with_index are skipped."""
-    tree = """\
-├─ 0.500 tir
-│  ├─ 0.500 real_kernel
-│  └─ 0.001 elementwise_kernel_with_index
-"""
-    impls, _ = _parse_proton_tree(tree)
-    assert impls == {"tir": 0.5}
-
-
-def test_parse_proton_tree_slowest_child():
-    """Takes the slowest depth-2 child per impl."""
-    tree = """\
-├─ 2.000 tir
-│  ├─ 0.300 kernel_a
-│  └─ 0.700 kernel_b
-"""
-    impls, _ = _parse_proton_tree(tree)
-    assert impls == {"tir": 0.7}
-
-
-def test_parse_proton_tree_baseline_errors():
-    tree = """\
-BASELINE_ERROR: cublas: CUDA OOM
-├─ 1.000 tir
-│  └─ 1.000 my_kernel
-"""
-    impls, errors = _parse_proton_tree(tree)
-    assert impls == {"tir": 1.0}
-    assert errors == {"cublas": "CUDA OOM"}
-
-
-def test_parse_proton_tree_ansi_stripped():
-    """ANSI color codes are stripped before parsing."""
-    tree = "\x1b[32m├─ 1.000 tir\x1b[0m\n│  └─ 1.000 k\n"
-    impls, _ = _parse_proton_tree(tree)
-    assert impls == {"tir": 1.0}
-
-
-def test_parse_proton_tree_empty():
-    impls, errors = _parse_proton_tree("")
-    assert impls == {}
-    assert errors == {}
-
-
-# ── bench_tk (ThunderKittens group-input protocol) ──────────────────────────
-
-
-def test_bench_tk_cooldown_precedes_every_impl(monkeypatch):
-    calls = []
-    sleeps = []
-
-    class FakeEvent:
-        def record(self):
-            pass
-
-        def elapsed_time(self, _other):
-            return 1.0
-
-    monkeypatch.setattr(bench_module.torch.cuda, "Event", lambda **_kwargs: FakeEvent())
-    monkeypatch.setattr(bench_module.torch.cuda, "synchronize", lambda: None)
-    monkeypatch.setattr(bench_module.time, "sleep", sleeps.append)
-
-    funcs = {"a": lambda _case: calls.append("a"), "b": lambda _case: calls.append("b")}
-    for _ in range(2):
-        bench_module._bench_event_groups(
-            funcs,
-            [None],
-            warmup=0,
-            repeat=1,
-            cooldown_s=1.0,
-        )
-
-    assert calls == ["a", "b", "a", "b"]
-    assert sleeps == [1.0, 1.0, 1.0, 1.0]
-
-
-@pytest.mark.gpu
-@pytest.mark.skipif(not env.has_cuda(), reason="need cuda")
-def test_bench_tk_basic():
-    """bench_tk returns positive times for each impl."""
-    M, N = 256, 256
-
-    funcs = {"matmul": lambda case: torch.mm(case[0], case[1])}
-
-    def make_input():
-        A = torch.randn(M, N, device="cuda", dtype=torch.float16)
-        B = torch.randn(M, N, device="cuda", dtype=torch.float16)
-        return (A, B), tensor_bytes(A, B)
-
-    def run_and_check():
-        results = bench(funcs, make_input, warmup=5, repeat=10, cooldown_s=0.0, timer="event")
-        assert "matmul" in results["impls"]
-        assert results["impls"]["matmul"] > 0
-
-    tvm.testing.run_with_gpu_lock(run_and_check)
-
-
-@pytest.mark.gpu
-@pytest.mark.skipif(not env.has_cuda(), reason="need cuda")
-def test_bench_tk_multiple_impls():
-    """Multiple impls each get their own timing."""
-    M, N = 128, 128
-    funcs = {
-        "mm": lambda case: torch.mm(case[0], case[1]),
-        "addmm": lambda case: torch.addmm(
-            torch.zeros(M, N, device="cuda", dtype=torch.float16), case[0], case[1]
-        ),
-    }
-
-    def make_input():
-        A = torch.randn(M, N, device="cuda", dtype=torch.float16)
-        B = torch.randn(M, N, device="cuda", dtype=torch.float16)
-        return (A, B), tensor_bytes(A, B)
-
-    def run_and_check():
-        results = bench(funcs, make_input, warmup=5, repeat=10, cooldown_s=0.0, timer="event")
-        assert set(results["impls"].keys()) == {"mm", "addmm"}
-        assert all(v > 0 for v in results["impls"].values())
-
-    tvm.testing.run_with_gpu_lock(run_and_check)
-
-
-@pytest.mark.gpu
-@pytest.mark.skipif(not env.has_cuda(), reason="need cuda")
-def test_bench_tk_multiple_input_groups():
-    """Multiple input groups cycle correctly (L2 eviction)."""
-    M, N = 128, 128
-    call_count = [0]
-
-    def make_input():
-        call_count[0] += 1
-        A = torch.randn(M, N, device="cuda", dtype=torch.float16)
-        B = torch.randn(M, N, device="cuda", dtype=torch.float16)
-        return (A, B), tensor_bytes(A, B)
-
-    funcs = {"mm": lambda case: torch.mm(case[0], case[1])}
-
-    def run_and_check():
-        results = bench(
-            funcs,
-            make_input,
-            warmup=5,
-            repeat=20,
-            cooldown_s=0.0,
-            timer="event",
-            l2_bytes=64 * 1024,
-        )
-        assert results["impls"]["mm"] > 0
-        assert call_count[0] > 1
-
-    tvm.testing.run_with_gpu_lock(run_and_check)
-
-
-# ── bench (Triton-standard, pure-launch) ─────────────────────────────────────
-
 
 def test_bench_cooldown_precedes_every_impl(monkeypatch):
+    """cooldown_s sleeps immediately before each impl's warmup+measurement.
+
+    2 impls x 2 rounds = 4 timed calls, so 4 sleeps (the first impl in the
+    first round is included). Pins the #29 per-impl cooldown semantics.
+    """
     calls = []
     sleeps = []
 
@@ -236,6 +58,40 @@ def test_bench_cooldown_precedes_every_impl(monkeypatch):
     assert calls == ["a", "b", "a", "b"]
     assert sleeps == [1.0, 1.0, 1.0, 1.0]
     assert results["benchmark_protocol"]["cooldown_s"] == 1.0
+    assert results["benchmark_protocol"]["round_aggregate"] == "mean"
+
+
+def test_bench_retains_round_samples_and_uses_arithmetic_mean(monkeypatch):
+    values = iter([0.001, 0.002, 0.100])
+
+    def fake_timer(_fn, warmup=25, rep=100):
+        del warmup, rep
+        return next(values)
+
+    monkeypatch.setattr(bench_module, "_do_bench_event", fake_timer)
+
+    results = bench({"tir": lambda: None}, timer="event", cooldown_s=0, rounds=3)
+
+    assert results["round_samples"] == {"tir": [1.0, 2.0, 100.0]}
+    assert results["impls"] == {"tir": 103.0 / 3.0}
+
+
+def test_bench_l2_flush_buffer_matches_triton_256_mib(monkeypatch):
+    captured = {}
+
+    def fake_empty(size, *, dtype, device):
+        captured.update(size=size, dtype=dtype, device=device)
+        return object()
+
+    monkeypatch.setattr(bench_module.torch, "empty", fake_empty)
+
+    bench_module._empty_cache_for_benchmark()
+
+    assert captured == {
+        "size": 256 * 1024 * 1024 // 4,
+        "dtype": torch.int,
+        "device": "cuda",
+    }
 
 
 @pytest.mark.gpu
@@ -253,41 +109,61 @@ def test_bench_event_pure_launch():
     assert results["timer"] == "event"
 
 
-@pytest.mark.gpu
-@pytest.mark.skipif(not env.has_cuda(), reason="need cuda")
-def test_bench_default_timer_is_proton():
-    """Omitting timer resolves to the proton default (recorded as timer='proton').
+def test_bench_default_timer_is_proton(monkeypatch):
+    """Omitting timer resolves to Proton and invokes only the Proton timer."""
+    calls = []
 
-    Under pytest _do_bench_proton falls back to event timing, but bench() still
-    records the resolved timer name, so this pins the timer=None -> 'proton' default.
-    """
-    M, N = 256, 256
-    A = torch.randn(M, N, device="cuda", dtype=torch.float16)
-    B = torch.randn(M, N, device="cuda", dtype=torch.float16)
+    def fake_proton(fn, warmup=25, rep=100):
+        calls.append((warmup, rep))
+        fn()
+        return 0.001
 
-    funcs = {"mm": lambda: torch.mm(A, B)}
-    results = bench(funcs, warmup=5, repeat=10)
+    monkeypatch.setattr(bench_module, "_do_bench_proton", fake_proton)
+
+    results = bench({"noop": lambda: None}, cooldown_s=0)
+
     assert results["timer"] == "proton"
-    assert results["impls"]["mm"] > 0
+    assert results["impls"] == {"noop": 1.0}
+    assert calls == [(25, 100)]
 
 
-@pytest.mark.gpu
-@pytest.mark.skipif(not env.has_cuda(), reason="need cuda")
-def test_bench_cudagraph_proton_pure_launch():
-    """New Triton-standard bench(): cudagraph_proton timer.
+def test_bench_cudagraph_proton_wiring(monkeypatch):
+    calls = []
 
-    Under pytest, _do_bench_cudagraph_proton falls back to event-based cudagraph
-    timing (no CUPTI/Proton required in CI), so this exercises the mode wiring and
-    the fallback path rather than the real Proton attribution.
-    """
-    M, N = 256, 256
-    A = torch.randn(M, N, device="cuda", dtype=torch.float16)
-    B = torch.randn(M, N, device="cuda", dtype=torch.float16)
+    def fake_cudagraph_proton(fn, rep=20):
+        calls.append(rep)
+        fn()
+        return 0.002
 
-    funcs = {"mm": lambda: torch.mm(A, B)}
-    results = bench(funcs, warmup=5, repeat=10, timer="cudagraph_proton")
-    assert results["impls"]["mm"] > 0
+    monkeypatch.setattr(bench_module, "_do_bench_cudagraph_proton", fake_cudagraph_proton)
+
+    results = bench({"noop": lambda: None}, timer="cudagraph_proton", cudagraph_rep=7, cooldown_s=0)
+
+    assert results["impls"] == {"noop": 2.0}
     assert results["timer"] == "cudagraph_proton"
+    assert calls == [7]
+
+
+def test_bench_never_silently_falls_back_from_proton(monkeypatch):
+    def unavailable(_fn, warmup=25, rep=100):
+        del warmup, rep
+        raise RuntimeError("Proton profiler session could not be created")
+
+    monkeypatch.setattr(bench_module, "_do_bench_proton", unavailable)
+
+    with pytest.raises(RuntimeError, match="Proton profiler session"):
+        bench({"noop": lambda: None}, timer="proton", cooldown_s=0)
+
+
+@pytest.mark.parametrize(
+    ("timer", "alternative"),
+    [("proton", "event"), ("cudagraph_proton", "event")],
+)
+def test_missing_proton_session_is_an_explicit_error(monkeypatch, timer, alternative):
+    monkeypatch.setattr(bench_module.proton, "start", lambda *_args, **_kwargs: None)
+
+    with pytest.raises(RuntimeError, match=rf"{timer}.*timer='{alternative}'"):
+        bench_module._start_proton_session("profile", timer=timer, explicit_alternative=alternative)
 
 
 @pytest.mark.gpu
@@ -312,82 +188,10 @@ def test_bench_references_pure_launch():
 @pytest.mark.gpu
 @pytest.mark.skipif(not env.has_cuda(), reason="need cuda")
 def test_bench_rejects_unknown_timer():
-    """New bench() only accepts event / proton / cudagraph_proton (plain cudagraph
-    was removed)."""
+    """Unknown timer names fail instead of changing measurement method."""
     A = torch.randn(8, 8, device="cuda", dtype=torch.float16)
     with pytest.raises(ValueError):
-        bench({"mm": lambda: torch.mm(A, A)}, timer="cudagraph")
-
-
-# ── _compute_group_count ───────────────────────────────────────────────────
-
-
-def test_compute_groups_small_tensors():
-    """Small tensors need many groups to fill 3x L2."""
-    # 128x128 fp16 = 32KB.  3*128MB / 32KB = 12288, +1 = 12289
-    input_bytes = tensor_bytes(torch.empty(128, 128, dtype=torch.float16))
-    n = _compute_group_count(input_bytes, l2_bytes=128 * 1024 * 1024)
-    assert n == 12289
-
-
-def test_compute_groups_large_tensors():
-    """Inputs >= 3x L2 need only 1 group."""
-    # 16384x16384 fp32 = 1GB >> 3*128MB = 384MB
-    input_bytes = tensor_bytes(torch.empty(16384, 16384, dtype=torch.float32))
-    n = _compute_group_count(input_bytes, l2_bytes=128 * 1024 * 1024)
-    assert n == 1
-
-
-def test_compute_groups_moderate_tensors():
-    """Moderate tensors: floor(3*L2 / input) + 1."""
-    # 8192x8192 bf16 = 128MB.  floor(384M / 128M) + 1 = 4
-    input_bytes = tensor_bytes(torch.empty(8192, 8192, dtype=torch.bfloat16))
-    n = _compute_group_count(input_bytes, l2_bytes=128 * 1024 * 1024)
-    assert n == 4
-
-
-@pytest.mark.gpu
-@pytest.mark.skipif(not env.has_cuda(), reason="need cuda")
-def test_bench_tk_legacy_callable_api():
-    """bench_tk still accepts the existing single-callable API used by TIRx tests."""
-    M, N = 128, 128
-
-    def run_and_check():
-        A = torch.randn(M, N, device="cuda", dtype=torch.float16)
-        B = torch.randn(M, N, device="cuda", dtype=torch.float16)
-        result = bench(
-            lambda: torch.mm(A, B), warmup=1, repeat=2, proton_name="legacy", flush_l2_size=1
-        )
-        assert result > 0
-
-    tvm.testing.run_with_gpu_lock(run_and_check)
-
-
-@pytest.mark.gpu
-@pytest.mark.skipif(not env.has_cuda(), reason="need cuda")
-def test_bench_tk_callable_inputs():
-    """bench_tk accepts a factory callable and auto-computes groups."""
-    M, N = 256, 256
-
-    call_count = [0]
-
-    def make_input():
-        call_count[0] += 1
-        case = (
-            torch.randn(M, N, device="cuda", dtype=torch.float16),
-            torch.randn(M, N, device="cuda", dtype=torch.float16),
-        )
-        return case, tensor_bytes(*case)
-
-    funcs = {"mm": lambda case: torch.mm(case[0], case[1])}
-
-    def run_and_check():
-        results = bench(funcs, make_input, warmup=5, repeat=10, cooldown_s=0.0, timer="event")
-        assert "mm" in results["impls"]
-        assert results["impls"]["mm"] > 0
-        assert call_count[0] >= 2  # at least 2 groups created
-
-    tvm.testing.run_with_gpu_lock(run_and_check)
+        bench({"mm": lambda: torch.mm(A, A)}, timer="unknown")
 
 
 if __name__ == "__main__":

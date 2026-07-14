@@ -142,13 +142,10 @@ def test_roundtrip_layout():
         return T.TileLayout(T.S[(8, 16, 8, 16) : (1024, 16, 128, 1)])
 
     def get_layout4():
-        return T.SwizzleLayout(per_element=3, swizzle_len=3, atom_len=3)
+        return T.ComposeLayout(3, 3, 3, T.TileLayout(T.S[(512,)]))
 
     def get_layout5():
-        return T.ComposeLayout(
-            T.SwizzleLayout(per_element=3, swizzle_len=3, atom_len=3),
-            T.TileLayout(T.S[(64, 64, 4) : (64, 1, 64 * 64)]),
-        )
+        return T.ComposeLayout(3, 3, 3, T.TileLayout(T.S[(64, 64, 4) : (64, 1, 64 * 64)]))
 
     # fmt: off
     @T.prim_func
@@ -1418,10 +1415,7 @@ def test_buffer_permute_compose_layout_ir():
         T.device_entry()
         A = T.alloc_buffer(
             [4, 4, 4, 64], dtype="bfloat16", scope="shared.dyn",
-            layout=T.ComposeLayout(
-                T.SwizzleLayout(3, 3, 3, swizzle_inner=True),
-                T.TileLayout(T.S[(4, 4, 4, 64) : (1024, 256, 64, 1)]),
-            ),
+            layout=T.ComposeLayout(3, 3, 3, T.TileLayout(T.S[(4, 4, 4, 64) : (1024, 256, 64, 1)])),
         )
         B = A.permute(1, 0, 2, 3)
         B[0, 0, 0, 0] = T.bfloat16(0)
@@ -1434,8 +1428,11 @@ def test_buffer_permute_compose_layout_ir():
     assert b_buf.data.same_as(a_buf.data)
     assert [int(s) for s in b_buf.shape] == [4, 4, 4, 64]
     expected = tvm.tirx.layout.ComposeLayout(
-        a_buf.layout.swizzle,
+        a_buf.layout.per_element,
+        a_buf.layout.swizzle_len,
+        a_buf.layout.atom_len,
         a_buf.layout.tile_layout.permute_dims([1, 0, 2, 3]),
+        a_buf.layout.swizzle_inner,
     )
     assert_structural_equal(b_buf.layout, expected)
 
@@ -1559,8 +1556,7 @@ def test_buffer_sub_swizzle_commutation():
 
     analyzer = tvm.arith.Analyzer()
     compose = T.ComposeLayout(
-        T.SwizzleLayout(3, 3, 3, swizzle_inner=True),
-        T.TileLayout(T.S[(4, 1024) : (1024, 1)]),
+        3, 3, 3, T.TileLayout(T.S[(4, 1024) : (1024, 1)])
     )  # period = 2^(3+3+3) = 512 elements
 
     # fmt: off
@@ -1588,10 +1584,7 @@ def test_buffer_sub_swizzle_commutation():
 
     # Sub-period offsets do not commute: they stay inside the tile layout's
     # offset (elem_offset unchanged) and every address matches the parent.
-    compose2 = T.ComposeLayout(
-        T.SwizzleLayout(3, 3, 3, swizzle_inner=True),
-        T.TileLayout(T.S[(2, 16, 8) : (128, 8, 1)]),
-    )
+    compose2 = T.ComposeLayout(3, 3, 3, T.TileLayout(T.S[(2, 16, 8) : (128, 8, 1)]))
 
     # fmt: off
     @T.prim_func
@@ -1639,10 +1632,7 @@ def test_buffer_sub_swizzle_commutation():
 
     # fixed-point windows (all touched addresses below 2^(per_element +
     # atom_len)) are correct through the same layout-offset placement
-    compose3 = T.ComposeLayout(
-        T.SwizzleLayout(3, 3, 3, swizzle_inner=True),
-        T.TileLayout(T.S[(64,) : (1,)]),
-    )
+    compose3 = T.ComposeLayout(3, 3, 3, T.TileLayout(T.S[(64,) : (1,)]))
 
     # fmt: off
     @T.prim_func
@@ -1757,10 +1747,7 @@ def test_buffer_chunk_ir():
 
     from tvm.tirx.stmt import BufferRegion
 
-    compose = T.ComposeLayout(
-        T.SwizzleLayout(3, 3, 3, swizzle_inner=True),
-        T.TileLayout(T.S[(4, 512) : (512, 1)]),
-    )
+    compose = T.ComposeLayout(3, 3, 3, T.TileLayout(T.S[(4, 512) : (512, 1)]))
     A = tvm.tirx.decl_buffer(
         (4, 8, 16), "float16", layout=tvm.tirx.layout.TileLayout(T.S[(4, 8, 16) : (128, 16, 1)])
     )

@@ -91,7 +91,7 @@ F. Split each side's iters into three segments by grouping the flattened
    - s_lane: rows sit in smem as (atom_rows/8, 8) groups with strides
      (SDO_stride, atom_K_stride); 4x256b is a single 4-row group (SDO=0)
    - atom_K_byte ∈ {16, 32, 64, 128} → swizzle_mode 0..3, which must match
-     s_buf.layout's SwizzleLayout (if any)
+     s_buf.layout's swizzle (if any)
 G. Alignment checks:
    - t_iso TCol offset ≡ 0 (mod 32-bit)
    - t_iso TLane offset folds into the taddr lane half-word
@@ -113,7 +113,7 @@ from tvm.arith import Analyzer
 from tvm.runtime import DataType
 from tvm.script import tirx as T
 from tvm.tirx import Buffer, PrimFunc
-from tvm.tirx.layout import ComposeLayout, SwizzleLayout, TCol, TileLayout, TLane
+from tvm.tirx.layout import ComposeLayout, TCol, TileLayout, TLane
 from tvm.tirx.layout import m as m_axis
 from tvm.tirx.operator.tile_primitive import DispatchContext, predicate, register_dispatch
 from tvm.tirx.stmt import AllocBuffer, Evaluate, SeqStmt
@@ -365,22 +365,14 @@ def _plan_for_shape(op_call: TilePrimitiveCall, shape: str, multicast: str):
     s = s_sliced.canonicalize()
     t = t_buf.layout.slice(list(t_buf.shape), t_region).canonicalize()
 
-    # If s is ComposeLayout (SwizzleLayout∘TileLayout), peel off the swizzle
-    # for stride analysis; record the swizzle object for cross-checks.
+    # If s is ComposeLayout (swizzle over a tile), peel off the swizzle for
+    # stride analysis; record the swizzle object for cross-checks.
     s_swizzle_mode_from_layout = 0
     s_swizzle_obj = None
     if isinstance(s, ComposeLayout):
-        s_swizzle_obj = s.swizzle
-        s_swizzle_mode_from_layout = int(s.swizzle.swizzle_len)
-        s = s.tile_layout
-    elif isinstance(s, SwizzleLayout):
-        # A full-tile slice of a bare swizzle canonicalizes to the swizzle
-        # itself; recover the linear tile layout from the un-canonicalized slice.
         s_swizzle_obj = s
         s_swizzle_mode_from_layout = int(s.swizzle_len)
-        if not isinstance(s_sliced, ComposeLayout):
-            raise ValueError("s slice produced bare SwizzleLayout (unexpected)")
-        s = s_sliced.tile_layout.canonicalize()
+        s = s.tile_layout
 
     # B: replica router check per (shape, multicast).
     lane_pattern, replica_pattern = _cp_lane_replica_pattern(shape, multicast)
@@ -510,7 +502,7 @@ def _plan_for_shape(op_call: TilePrimitiveCall, shape: str, multicast: str):
         ):
             raise ValueError(
                 "swizzle family mismatch: expected canonical mma atom "
-                f"SwizzleLayout(per_element={expected_per_element}, "
+                f"ComposeLayout(per_element={expected_per_element}, "
                 f"swizzle_len={derived_sw}, atom_len=3); got "
                 f"per_element={int(s_swizzle_obj.per_element)}, "
                 f"atom_len={int(s_swizzle_obj.atom_len)}"
@@ -521,7 +513,7 @@ def _plan_for_shape(op_call: TilePrimitiveCall, shape: str, multicast: str):
             raise ValueError(
                 "swizzle direction mismatch: the tcgen05.cp smem descriptor "
                 "implements the swizzle_inner=True address permutation "
-                "(x ^ ((x & outer_mask) >> atom_len)); got a SwizzleLayout "
+                "(x ^ ((x & outer_mask) >> atom_len)); got a ComposeLayout "
                 f"with swizzle_inner=False (per_element="
                 f"{int(s_swizzle_obj.per_element)}, swizzle_len="
                 f"{int(s_swizzle_obj.swizzle_len)}, atom_len="

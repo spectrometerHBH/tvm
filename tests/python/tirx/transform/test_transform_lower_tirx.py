@@ -510,7 +510,10 @@ def test_lower_layout():
         T.lane_id([32])
         tid = T.thread_id([128])
         A_smem = T.alloc_buffer(
-            [128, 32], dtype="float16", scope="shared", layout=T.SwizzleLayout(3, 3, 3)
+            [128, 32],
+            dtype="float16",
+            scope="shared",
+            layout=T.ComposeLayout(3, 3, 3, T.TileLayout(T.S[(512,)])),
         )
         thread_col = T.meta_var(4)
         thread_row = T.meta_var(32)

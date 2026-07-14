@@ -41,7 +41,6 @@ from tvm.tirx.layout import (
     P,
     R,
     S,
-    SwizzleLayout,
     TCol,
     TileLayout,
     TLane,
@@ -760,15 +759,10 @@ def test_tile_layout():
 
     def case_tile_compose_layout():
         # tile(TileLayout, ComposeLayout)
-        compose = ComposeLayout(
-            layout_A=SwizzleLayout(per_element=3, swizzle_len=3, atom_len=3),
-            layout_B=TileLayout(S[(8, 64) : (64, 1)]),
-        )
+        compose = ComposeLayout(3, 3, 3, TileLayout(S[(8, 64) : (64, 1)]))
         layout = TileLayout(S[(8, 1) : (1, 1)])
         layout_tile = compose.tile(layout, (8, 1), (8, 64))
-        layout_expected = ComposeLayout(
-            SwizzleLayout(3, 3, 3, swizzle_inner=True), TileLayout(S[4096:1])
-        )
+        layout_expected = ComposeLayout(3, 3, 3, TileLayout(S[4096:1]))
         assert_structural_equal(layout_tile.canonicalize(), layout_expected.canonicalize())
 
         outer_res = compose.is_tile_inner(layout_tile, (4096,), (512,))
@@ -786,12 +780,10 @@ def test_tile_layout():
 
     def case_tile_swizzle_layout():
         # swizzle_128B_atom
-        swizzle = SwizzleLayout(per_element=3, swizzle_len=3, atom_len=3)
+        swizzle = ComposeLayout(3, 3, 3, TileLayout(S[(512,)]))
         layout = TileLayout(S[(8, 4) : (1, 8)])
         layout_tile = swizzle.tile(layout, (8, 4), (8, 64))
-        layout_expected = ComposeLayout(
-            SwizzleLayout(3, 3, 3, swizzle_inner=True), TileLayout(S[(64, 4, 64) : (64, 4096, 1)])
-        )
+        layout_expected = ComposeLayout(3, 3, 3, TileLayout(S[(64, 4, 64) : (64, 4096, 1)]))
         assert_structural_equal(layout_tile.canonicalize(), layout_expected)
 
         outer_res = swizzle.is_tile_inner(layout_tile, (64, 256), (8, 64))
@@ -806,11 +798,15 @@ def test_tile_layout():
 
     def case_tile_swizzle_layout2():
         # swizzle_128B_atom
-        swizzle = SwizzleLayout(per_element=3, swizzle_len=3, atom_len=3)
+        swizzle = ComposeLayout(3, 3, 3, TileLayout(S[(512,)]))
         tile = TileLayout(S[(3, 8, 4) : (8 * 4, 1, 8)])
         layout_tile = swizzle.tile(tile, (3, 8, 4), (1, 8, 64))
         layout_expected = ComposeLayout(
-            swizzle, TileLayout(S[(3, 64, 4, 64) : (16384, 64, 4096, 1)])
+            swizzle.per_element,
+            swizzle.swizzle_len,
+            swizzle.atom_len,
+            TileLayout(S[(3, 64, 4, 64) : (16384, 64, 4096, 1)]),
+            swizzle.swizzle_inner,
         )
         assert_structural_equal(layout_tile.canonicalize(), layout_expected.canonicalize())
 
@@ -826,10 +822,16 @@ def test_tile_layout():
 
     def case_tile_swizzle_layout3():
         # swizzle_64B_atom
-        swizzle = SwizzleLayout(per_element=3, swizzle_len=2, atom_len=3)
+        swizzle = ComposeLayout(3, 2, 3, TileLayout(S[(256,)]))
         tile = TileLayout(S[(8, 8) : (1, 8)])
         layout_tile = swizzle.tile(tile, (8, 8), (8, 32))
-        layout_expected = ComposeLayout(swizzle, TileLayout(S[(64, 8, 32) : (32, 2048, 1)]))
+        layout_expected = ComposeLayout(
+            swizzle.per_element,
+            swizzle.swizzle_len,
+            swizzle.atom_len,
+            TileLayout(S[(64, 8, 32) : (32, 2048, 1)]),
+            swizzle.swizzle_inner,
+        )
         assert_structural_equal(layout_tile.canonicalize(), layout_expected.canonicalize())
 
         outer_res = swizzle.is_tile_inner(layout_tile, (64, 256), (8, 32))
@@ -844,7 +846,7 @@ def test_tile_layout():
 
     def case_tile_swizzle_layout4():
         # swizzle_64B_atom
-        swizzle = SwizzleLayout(per_element=3, swizzle_len=2, atom_len=3)
+        swizzle = ComposeLayout(3, 2, 3, TileLayout(S[(256,)]))
         outer = swizzle.is_tile_inner(swizzle, (64, 256), (8, 32))
         assert outer is None
 
@@ -857,7 +859,7 @@ def test_tile_layout():
 
     def case_tile_swizzle_layout5():
         # swizzle_128B_atom
-        swizzle = SwizzleLayout(per_element=3, swizzle_len=2, atom_len=3)
+        swizzle = ComposeLayout(3, 2, 3, TileLayout(S[(256,)]))
         tile1 = TileLayout(S[(8, 8) : (1, 8)])
         tile2 = TileLayout(S[(2, 2) : (1, 2)])
         layout_tile = swizzle.tile(tile1, (8, 8), (8, 32))
@@ -990,18 +992,15 @@ def test_size_span():
     tile_layout_size()
 
     def swizzle_layout_size():
-        layout = SwizzleLayout(per_element=3, swizzle_len=3, atom_len=3)
+        layout = ComposeLayout(3, 3, 3, TileLayout(S[(512,)]))
         assert layout.size() == 512
-        layout = SwizzleLayout(per_element=4, swizzle_len=3, atom_len=3)
+        layout = ComposeLayout(4, 3, 3, TileLayout(S[(1024,)]))
         assert layout.size() == 1024
 
     swizzle_layout_size()
 
     def compose_layout_size():
-        layout = ComposeLayout(
-            SwizzleLayout(per_element=3, swizzle_len=3, atom_len=3),
-            TileLayout(S[(8, 64) : (64, 1)]),
-        )
+        layout = ComposeLayout(3, 3, 3, TileLayout(S[(8, 64) : (64, 1)]))
         assert layout.size() == 512
 
     compose_layout_size()
@@ -1017,18 +1016,15 @@ def test_size_span():
     tile_layout_span()
 
     def swizzle_layout_span():
-        layout = SwizzleLayout(per_element=3, swizzle_len=3, atom_len=3)
+        layout = ComposeLayout(3, 3, 3, TileLayout(S[(512,)]))
         assert layout.span() == 512
-        layout = SwizzleLayout(per_element=4, swizzle_len=3, atom_len=3)
+        layout = ComposeLayout(4, 3, 3, TileLayout(S[(1024,)]))
         assert layout.span() == 1024
 
     swizzle_layout_span()
 
     def compose_layout_span():
-        layout = ComposeLayout(
-            SwizzleLayout(per_element=3, swizzle_len=3, atom_len=3),
-            TileLayout(S[(8, 64) : (64, 1)]),
-        )
+        layout = ComposeLayout(3, 3, 3, TileLayout(S[(8, 64) : (64, 1)]))
         assert layout.span() == 512
 
     compose_layout_span()
@@ -1146,7 +1142,7 @@ def test_apply():
 
     ################ Swizzle Layout
     def test_swizzle_layout_0():
-        layout = SwizzleLayout(per_element=0, swizzle_len=3, atom_len=3)
+        layout = ComposeLayout(0, 3, 3, TileLayout(S[(64,)]))
         # assert layout.size == 64
         for i, j in itertools.product(range(8), range(8)):
             assert layout.apply(i * 8 + j)["m"] == i * 8 + i ^ j
@@ -1154,7 +1150,7 @@ def test_apply():
     test_swizzle_layout_0()
 
     def test_swizzle_layout_1():
-        layout = SwizzleLayout(per_element=3, swizzle_len=3, atom_len=3)
+        layout = ComposeLayout(3, 3, 3, TileLayout(S[(512,)]))
         assert layout.size() == 512
         for i, j, k in itertools.product(range(8), range(8), range(8)):
             assert layout.apply((i * 8 + j) * 8 + k)["m"] == (i * 8 + (i ^ j)) * 8 + k
@@ -1168,7 +1164,7 @@ def test_apply():
     test_swizzle_layout_1()
 
     def test_swizzle_layout_2():
-        layout = SwizzleLayout(per_element=0, swizzle_len=3, atom_len=3, swizzle_inner=False)
+        layout = ComposeLayout(0, 3, 3, TileLayout(S[(64,)]), swizzle_inner=False)
         assert layout.size() == 64
         for i, j in itertools.product(range(8), range(8)):
             assert layout.apply(i * 8 + j)["m"] == (i ^ j) * 8 + j
@@ -1176,7 +1172,7 @@ def test_apply():
     test_swizzle_layout_2()
 
     def test_swizzle_layout_3():
-        layout = SwizzleLayout(per_element=0, swizzle_len=2, atom_len=3)
+        layout = ComposeLayout(0, 2, 3, TileLayout(S[(32,)]))
         for i, j in itertools.product(range(8), range(8)):
             _outer_i, inner_i = i // 4, i % 4
             outer_j, inner_j = j // 4, j % 4
@@ -1186,9 +1182,15 @@ def test_apply():
 
     ################ Compose Layout
     def test_compose_layout_0():
-        layoutA = SwizzleLayout(per_element=3, swizzle_len=3, atom_len=3)
+        layoutA = ComposeLayout(3, 3, 3, TileLayout(S[(512,)]))
         layoutB = TileLayout(S[(8, 64) : (64, 1)])
-        layout = ComposeLayout(layoutA, layoutB)
+        layout = ComposeLayout(
+            layoutA.per_element,
+            layoutA.swizzle_len,
+            layoutA.atom_len,
+            layoutB,
+            layoutA.swizzle_inner,
+        )
         assert layout.size() == 512
         assert layout.span() == 512
         for i, j in itertools.product(range(8), range(64)):
@@ -1199,9 +1201,15 @@ def test_apply():
     test_compose_layout_0()
 
     def test_compose_layout_1():
-        layoutA = SwizzleLayout(per_element=3, swizzle_len=3, atom_len=3)
+        layoutA = ComposeLayout(3, 3, 3, TileLayout(S[(512,)]))
         layoutB = TileLayout(S[(16, 64, 8) : (64, 1, 1024)])
-        layout = ComposeLayout(layoutA, layoutB)
+        layout = ComposeLayout(
+            layoutA.per_element,
+            layoutA.swizzle_len,
+            layoutA.atom_len,
+            layoutB,
+            layoutA.swizzle_inner,
+        )
         assert layout.size() == 16 * 64 * 8
         assert layout.span() == 16 * 64 * 8
         for i, j, k in itertools.product(range(16), range(64), range(8)):
@@ -1256,17 +1264,29 @@ def test_apply():
 
 def test_normalize_compose_layout():
     def case1():
-        layoutA = SwizzleLayout(per_element=3, swizzle_len=3, atom_len=3)
+        layoutA = ComposeLayout(3, 3, 3, TileLayout(S[(512,)]))
         layoutB = TileLayout(S[(8, 64) : (64, 1)])
-        layout = ComposeLayout(layoutA, layoutB.canonicalize())
+        layout = ComposeLayout(
+            layoutA.per_element,
+            layoutA.swizzle_len,
+            layoutA.atom_len,
+            layoutB.canonicalize(),
+            layoutA.swizzle_inner,
+        )
         assert_structural_equal(layout.canonicalize(), layoutA)
 
     case1()
 
     def case2():
-        layoutA = SwizzleLayout(per_element=3, swizzle_len=3, atom_len=3)
+        layoutA = ComposeLayout(3, 3, 3, TileLayout(S[(512,)]))
         layoutB = TileLayout(S[(64, 4, 64) : (64, 4096, 1)])
-        layout = ComposeLayout(layoutA, layoutB.canonicalize())
+        layout = ComposeLayout(
+            layoutA.per_element,
+            layoutA.swizzle_len,
+            layoutA.atom_len,
+            layoutB.canonicalize(),
+            layoutA.swizzle_inner,
+        )
         assert_structural_equal(layout.canonicalize(), layout)
 
     case2()
@@ -1387,9 +1407,7 @@ def test_tile_to():
 def test_mma_shared_layout():
     def case1():
         layout = mma_shared_layout("float16", SwizzleMode.SWIZZLE_128B_ATOM, (64, 256))
-        layout_expected = ComposeLayout(
-            SwizzleLayout(3, 3, 3, swizzle_inner=True), TileLayout(S[(64, 4, 64) : (64, 4096, 1)])
-        )
+        layout_expected = ComposeLayout(3, 3, 3, TileLayout(S[(64, 4, 64) : (64, 4096, 1)]))
         assert_structural_equal(layout, layout_expected)
 
     case1()
@@ -1397,8 +1415,7 @@ def test_mma_shared_layout():
     def case2():
         layout = mma_shared_layout("float16", SwizzleMode.SWIZZLE_128B_ATOM, (3, 64, 256))
         layout_expected = ComposeLayout(
-            SwizzleLayout(3, 3, 3, swizzle_inner=True),
-            TileLayout(S[(3, 64, 4, 64) : (16384, 64, 4096, 1)]),
+            3, 3, 3, TileLayout(S[(3, 64, 4, 64) : (16384, 64, 4096, 1)])
         )
         assert_structural_equal(layout, layout_expected)
 
@@ -1407,8 +1424,7 @@ def test_mma_shared_layout():
     def case3():
         layout = mma_shared_layout("float16", SwizzleMode.SWIZZLE_64B_ATOM, (3, 64, 256))
         layout_expected = ComposeLayout(
-            SwizzleLayout(3, 2, 3, swizzle_inner=True),
-            TileLayout(S[(3, 64, 8, 32) : (16384, 32, 2048, 1)]),
+            3, 2, 3, TileLayout(S[(3, 64, 8, 32) : (16384, 32, 2048, 1)])
         )
         assert_structural_equal(layout, layout_expected)
 
@@ -1491,7 +1507,7 @@ def test_storage():
     case2()
 
     def case3():
-        layout = SwizzleLayout(per_element=3, swizzle_len=3, atom_len=3)
+        layout = ComposeLayout(3, 3, 3, TileLayout(S[(512,)]))
         assert_structural_equal(layout.storage(), layout)
 
     case3()
@@ -1522,21 +1538,15 @@ def test_unpack():
     case1()
 
     def case2():
-        layout = SwizzleLayout(per_element=3, swizzle_len=3, atom_len=3)
-        layout_expected = SwizzleLayout(per_element=4, swizzle_len=3, atom_len=3)
+        layout = ComposeLayout(3, 3, 3, TileLayout(S[(512,)]))
+        layout_expected = ComposeLayout(4, 3, 3, TileLayout(S[(1024,)]))
         assert_structural_equal(layout.unpack(2).canonicalize(), layout_expected.canonicalize())
 
     case2()
 
     def case3():
-        layout = ComposeLayout(
-            SwizzleLayout(per_element=3, swizzle_len=3, atom_len=3),
-            TileLayout(S[(8, 64) : (64, 1)]),
-        )
-        layout_expected = ComposeLayout(
-            SwizzleLayout(per_element=4, swizzle_len=3, atom_len=3),
-            TileLayout(S[(8, 128) : (128, 1)]),
-        )
+        layout = ComposeLayout(3, 3, 3, TileLayout(S[(8, 64) : (64, 1)]))
+        layout_expected = ComposeLayout(4, 3, 3, TileLayout(S[(8, 128) : (128, 1)]))
         assert_structural_equal(layout.unpack(2).canonicalize(), layout_expected.canonicalize())
 
     case3()
@@ -1551,21 +1561,15 @@ def test_pack():
     case1()
 
     def case2():
-        layout = SwizzleLayout(per_element=4, swizzle_len=3, atom_len=3)
-        layout_expected = SwizzleLayout(per_element=3, swizzle_len=3, atom_len=3)
+        layout = ComposeLayout(4, 3, 3, TileLayout(S[(1024,)]))
+        layout_expected = ComposeLayout(3, 3, 3, TileLayout(S[(512,)]))
         assert_structural_equal(layout.pack(2).canonicalize(), layout_expected.canonicalize())
 
     case2()
 
     def case3():
-        layout = ComposeLayout(
-            SwizzleLayout(per_element=4, swizzle_len=3, atom_len=3),
-            TileLayout(S[(8, 128) : (128, 1)]),
-        )
-        layout_expected = ComposeLayout(
-            SwizzleLayout(per_element=3, swizzle_len=3, atom_len=3),
-            TileLayout(S[(8, 64) : (64, 1)]),
-        )
+        layout = ComposeLayout(4, 3, 3, TileLayout(S[(8, 128) : (128, 1)]))
+        layout_expected = ComposeLayout(3, 3, 3, TileLayout(S[(8, 64) : (64, 1)]))
         assert_structural_equal(layout.pack(2).canonicalize(), layout_expected.canonicalize())
 
     case3()
@@ -1642,8 +1646,8 @@ def test_slice():
     case4()
 
     def case_swizzle_slice():
-        # SwizzleLayout slice - delegates to ComposeLayout
-        swizzle = SwizzleLayout(per_element=3, swizzle_len=3, atom_len=3)
+        # bare-swizzle ComposeLayout slice - delegates to ComposeLayout
+        swizzle = ComposeLayout(3, 3, 3, TileLayout(S[(512,)]))
         shape = [512]
         region = [(64, 128)]
         sliced = swizzle.slice(shape, region)
@@ -1654,10 +1658,7 @@ def test_slice():
 
     def case_compose_slice():
         # ComposeLayout slice
-        compose = ComposeLayout(
-            SwizzleLayout(per_element=3, swizzle_len=3, atom_len=3),
-            TileLayout(S[(8, 64) : (64, 1)]),
-        )
+        compose = ComposeLayout(3, 3, 3, TileLayout(S[(8, 64) : (64, 1)]))
         shape = [512]
         region = [(64, 128)]
         sliced = compose.slice(shape, region)
@@ -1668,10 +1669,7 @@ def test_slice():
 
     def case_compose_slice_2d():
         # ComposeLayout slice with 2D shape
-        compose = ComposeLayout(
-            SwizzleLayout(per_element=3, swizzle_len=3, atom_len=3),
-            TileLayout(S[(8, 64) : (64, 1)]),
-        )
+        compose = ComposeLayout(3, 3, 3, TileLayout(S[(8, 64) : (64, 1)]))
         shape = [8, 64]
         region = [(2, 4), (0, 64)]
         sliced = compose.slice(shape, region)

@@ -86,7 +86,7 @@ from .op import ignore_loop_partition
 
 # TIRX-specific imports (must come before subpackage imports to avoid circular imports)
 from .exec_scope import ExecScope, ScopeIdDef
-from .layout import TileLayout, Layout, SwizzleLayout, ComposeLayout
+from .layout import TileLayout, Layout, ComposeLayout
 from .expr_functor import ExprFunctor
 
 from . import transform
