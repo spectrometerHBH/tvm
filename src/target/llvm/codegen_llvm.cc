@@ -636,6 +636,8 @@ llvm::Type* CodeGenLLVM::GetLLVMType(const Type& type) const {
       }
     } else if (ptr->element_type->IsInstance<TensorMapTypeNode>()) {
       return llvmGetPointerTo(t_tvm_tensormap_, 0);
+    } else if (ptr->element_type->IsInstance<SymBufferTypeNode>()) {
+      return llvmGetPointerTo(llvm::ArrayType::get(t_char_, 592), 0);
     }
     // TODO(tvm-team) consider put storage scope into the pointer type.
     return llvmGetPointerTo(GetLLVMType(ptr->element_type), GetGlobalAddressSpace());
@@ -643,6 +645,8 @@ llvm::Type* CodeGenLLVM::GetLLVMType(const Type& type) const {
     return t_void_;
   } else if (type->IsInstance<TensorMapTypeNode>()) {
     return t_tvm_tensormap_;
+  } else if (type->IsInstance<SymBufferTypeNode>()) {
+    return llvm::ArrayType::get(t_char_, 592);
   } else {
     TVM_FFI_THROW(InternalError) << "Type " << type << " does not have a corresponding LLVM Type";
   }
@@ -2322,7 +2326,8 @@ llvm::DIType* CodeGenLLVM::GetDebugType(const Type& ty_tir) {
   return GetDebugType(ty_tir, GetLLVMType(ty_tir));
 }
 llvm::DIType* CodeGenLLVM::GetDebugType(const Type& ty_tir, llvm::Type* ty_llvm) {
-  if (ty_llvm == nullptr || ty_llvm == t_void_ || ty_llvm == t_tvm_tensormap_) {
+  if (ty_llvm == nullptr || ty_llvm == t_void_ || ty_llvm == t_tvm_tensormap_ ||
+      ty_tir->IsInstance<SymBufferTypeNode>()) {
     return nullptr;
 
   } else if (ty_llvm->isPointerTy()) {

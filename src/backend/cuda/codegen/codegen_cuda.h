@@ -85,6 +85,8 @@ class CodeGenCUDA final : public CodeGenC {
   Target target;
 
  protected:
+  std::string GetBufferRef(const PrimType& t, const BufferNode* buffer, PrimExpr index) final;
+  void VisitExpr_(const VarNode* op, std::ostream& os) final;  // NOLINT(*)
   void PrintCallExtern(Type ret_type, ffi::String global_symbol, const ffi::Array<PrimExpr>& args,
                        bool skip_first_arg, std::ostream& os) final;  // NOLINT(*)
 
@@ -118,6 +120,10 @@ class CodeGenCUDA final : public CodeGenC {
   const std::string barrier_name_ = "barrier";
   // The size of the barrier array in shared memory
   std::unordered_map<int, int> barrier_count_;
+  // One-element local buffers are emitted as CUDA scalar variables instead of
+  // one-element C arrays.  This preserves register-shaped source and still
+  // permits address_of(buffer[0]) to produce &scalar.
+  std::unordered_set<const VarNode*> local_scalar_buffers_;
   // The alignment of the barrier array in shared memory
   // Set to 16 to maintain minimum alignment requirements for async bulk copy
   const int barrier_alignment_bytes_ = 16;

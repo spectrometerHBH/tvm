@@ -46,6 +46,7 @@ TAGS = {
     "get_time_stamp",
     "nvshmem",
     "elect_one_sync",
+    "sym_buffer",
 }
 
 
@@ -111,6 +112,16 @@ def header_generator(tags):
   #include <type_traits>
   #include <cuda.h>
 #endif
+"""
+
+    if "sym_buffer" in tags:
+        header += R"""
+struct alignas(8) TVMSymBuffer {
+  int64_t base;
+  int64_t offsets[72];
+  uint32_t rank_idx;
+};
+static_assert(sizeof(TVMSymBuffer) == 592, "unexpected TVMSymBuffer ABI");
 """
 
     if "fp16" in tags:

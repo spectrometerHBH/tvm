@@ -51,15 +51,20 @@ inline ffi::Map<ffi::String, runtime::FunctionInfo> ExtractFuncInfo(const IRModu
     ffi::Array<runtime::ArgExtraTags> arg_extra_tags;
     for (size_t i = 0; i < f->params.size(); ++i) {
       arg_types.push_back(f->params[i].ty()->dtype);
-      auto is_tensormap = [](const tirx::Var& var) -> bool {
+      auto get_by_value_tag = [](const tirx::Var& var) -> runtime::ArgExtraTags {
         const auto* type = var->type_annotation.as<PointerTypeNode>();
         if (type == nullptr) {
-          return false;
+          return runtime::ArgExtraTags::kNone;
         }
-        return type->element_type.as<TensorMapTypeNode>() != nullptr;
+        if (type->element_type.as<TensorMapTypeNode>() != nullptr) {
+          return runtime::ArgExtraTags::kTensorMap;
+        }
+        if (type->element_type.as<SymBufferTypeNode>() != nullptr) {
+          return runtime::ArgExtraTags::kSymBuffer;
+        }
+        return runtime::ArgExtraTags::kNone;
       };
-      arg_extra_tags.push_back(is_tensormap(f->params[i]) ? runtime::ArgExtraTags::kTensorMap
-                                                          : runtime::ArgExtraTags::kNone);
+      arg_extra_tags.push_back(get_by_value_tag(f->params[i]));
     }
     ffi::Array<ffi::String> launch_param_tags;
     if (auto opt = f->GetAttr<ffi::Array<ffi::String>>(tirx::attr::kKernelLaunchParams)) {

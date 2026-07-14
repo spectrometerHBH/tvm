@@ -76,6 +76,14 @@ device_intrinsic(
         '    asm volatile("bar.sync %0, %1;" : : "r"(name_bar_id), "r"(thread_count) : "memory");'
     ),
 )
+device_intrinsic(
+    "ptx_barrier_sync",
+    c_signature="(int name_bar_id, int thread_count)",
+    body=(
+        '    asm volatile("barrier.sync %0, %1;" : : "r"(name_bar_id), '
+        '"r"(thread_count) : "memory");'
+    ),
+)
 
 
 # =============================================================================

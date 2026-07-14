@@ -55,6 +55,19 @@ def _ptxas_option_flags():
     return flags
 
 
+def _cuda_use_fast_math():
+    """Whether CUDA compilation should add the global ``--use_fast_math`` flag."""
+    value = os.environ.get("TVM_CUDA_USE_FAST_MATH", "1").strip().lower()
+    if value in ("1", "true", "on", "yes"):
+        return True
+    if value in ("0", "false", "off", "no"):
+        return False
+    raise ValueError(
+        "TVM_CUDA_USE_FAST_MATH must be a boolean value, "
+        f"but received {os.environ['TVM_CUDA_USE_FAST_MATH']!r}"
+    )
+
+
 def compile_cuda(
     code, target_format=None, arch=None, options=None, path_target=None, compiler="nvrtc"
 ):
@@ -90,6 +103,7 @@ def compile_cuda(
     -----
     - NVRTC is a "runtime" compilation library and can be faster for JIT compilation.
     - NVRTC requires cuda-bindings: pip install cuda-bindings
+    - ``TVM_CUDA_USE_FAST_MATH=0`` disables the default global ``--use_fast_math`` flag.
     """
     use_nvshmem = "#include <nvshmem.h>" in code or "#include <nvshmemx.h>" in code
 
@@ -213,9 +227,10 @@ def _compile_cuda_nvcc(
         "-U__CUDA_NO_BFLOAT162_CONVERSIONS__",
         "--expt-relaxed-constexpr",
         "--expt-extended-lambda",
-        "--use_fast_math",
-        f"--ptxas-options={','.join(_ptxas_option_flags())}",
     ]
+    if _cuda_use_fast_math():
+        cmd.append("--use_fast_math")
+    cmd.append(f"--ptxas-options={','.join(_ptxas_option_flags())}")
 
     major, _ = parse_compute_version(get_target_compute_version(Target.current(allow_none=True)))
 
@@ -534,9 +549,10 @@ namespace std {
             b"-U__CUDA_NO_BFLOAT16_CONVERSIONS__",
             b"-U__CUDA_NO_BFLOAT162_OPERATORS__",
             b"-U__CUDA_NO_BFLOAT162_CONVERSIONS__",
-            b"--use_fast_math",
         ]
     )
+    if _cuda_use_fast_math():
+        compile_opts.append(b"--use_fast_math")
 
     # Mirror the nvcc path's ptxas options. register-usage-level drives ptxas
     # register allocation / instruction scheduling and is perf-relevant (FA4 was

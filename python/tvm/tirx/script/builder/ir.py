@@ -1183,7 +1183,7 @@ def serial(
     *,
     annotations: dict[str, Any] | None = None,
     step: PrimExpr | None = None,
-    unroll: bool | None = None,
+    unroll: bool | int | None = None,
 ) -> frame.ForFrame:
     """The serial For statement.
 
@@ -1201,9 +1201,10 @@ def serial(
     step : PrimExpr
         The optional step value of iteration.
 
-    unroll : bool, optional
+    unroll : bool or int, optional
         If True, adds ``{"pragma_unroll": True}`` annotation, which asks CUDA codegen
         to emit ``#pragma unroll`` while preserving the loop as a C++ ``for``.
+        A positive integer emits ``#pragma unroll N`` with that explicit factor.
         If False, adds ``{"disable_unroll": True}`` annotation.
         Shorthand for ``annotations={"disable_unroll": True}``.
 
@@ -1214,10 +1215,17 @@ def serial(
     """
     if unroll is not None:
         annotations = dict(annotations) if annotations else {}
-        if unroll:
+        if isinstance(unroll, bool) and unroll:
             annotations["pragma_unroll"] = True
-        else:
+        elif isinstance(unroll, bool):
             annotations["disable_unroll"] = True
+        elif isinstance(unroll, int) and unroll > 0:
+            # Keep the factor as an integer PrimExpr.  A bare Python integer
+            # passed through the generic annotation map is normalized to a
+            # boolean, which loses every factor greater than one.
+            annotations["pragma_unroll"] = IntImm(DataType("int32"), unroll)
+        else:
+            raise ValueError(f"unroll must be bool or a positive integer, got {unroll!r}")
     if stop is None:
         stop = start
         if isinstance(start, PrimExpr):
@@ -2630,6 +2638,8 @@ def handle(
     """
     if dtype in ("TensorMap", "tensormap", "CUtensorMap", "cuTensorMap"):
         return _ffi_api.TensorMap()  # type: ignore[attr-defined] # pylint: disable=no-member
+    if dtype in ("SymBuffer", "symbuffer"):
+        return _ffi_api.SymBuffer()  # type: ignore[attr-defined] # pylint: disable=no-member
     is_unknown_type = dtype is None
     if dtype is None:
         dtype = "void"
@@ -2649,6 +2659,11 @@ def TensorMap() -> Var:  # pylint: disable=invalid-name
     appears as a kernel parameter.
     """
     return _ffi_api.TensorMap()  # type: ignore[attr-defined] # pylint: disable=no-member
+
+
+def SymBuffer() -> Var:  # pylint: disable=invalid-name
+    """Create a CUDA by-value grid-constant symmetric-buffer descriptor var."""
+    return _ffi_api.SymBuffer()  # type: ignore[attr-defined] # pylint: disable=no-member
 
 
 def void(expr: PrimExpr | None = None, *, is_size_var: bool = False) -> PrimExpr:
@@ -3610,6 +3625,7 @@ __all__ += [
     "R",
     "S",
     "ScopeIdDef",
+    "SymBuffer",
     "TensorMap",
     "TileLayout",
     "Var",

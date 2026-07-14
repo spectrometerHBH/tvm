@@ -223,5 +223,23 @@ class TensorMapType : public Type {
   TVM_FFI_DEFINE_OBJECT_REF_METHODS_NOTNULLABLE(TensorMapType, Type, TensorMapTypeNode);
 };
 
+/*! \brief The by-value CUDA grid-constant symmetric-buffer descriptor type. */
+class SymBufferTypeNode : public TypeNode {
+ public:
+  static void RegisterReflection() {
+    namespace refl = tvm::ffi::reflection;
+    refl::ObjectDef<SymBufferTypeNode>();
+  }
+  TVM_FFI_DECLARE_OBJECT_INFO_FINAL("ir.SymBufferType", SymBufferTypeNode, TypeNode);
+};
+
+/*! \brief Managed reference to SymBufferTypeNode. */
+class SymBufferType : public Type {
+ public:
+  TVM_DLL SymBufferType(Span span = Span());
+
+  TVM_FFI_DEFINE_OBJECT_REF_METHODS_NOTNULLABLE(SymBufferType, Type, SymBufferTypeNode);
+};
+
 }  // namespace tvm
 #endif  // TVM_IR_TYPE_H_

@@ -419,6 +419,19 @@ def test_roundtrip_tensormap_kernel_param():
     assert_structural_equal(func1, from_source(code))
 
 
+def test_roundtrip_sym_buffer_kernel_param():
+    # fmt: off
+    @T.prim_func
+    def func1(sym_buffer: T.SymBuffer()):
+        T.func_attr({"global_symbol": "func"})
+        T.evaluate(T.cuda.sym_buffer_offset(sym_buffer, T.uint32(0)))
+    # fmt: on
+    code = func1.script()
+    assert "T.SymBuffer()" in code
+    assert from_source(code).script() == code
+    assert_structural_equal(func1, from_source(code))
+
+
 def test_roundtrip_break_for():
     # fmt: off
     @T.prim_func
@@ -1869,6 +1882,20 @@ def test_roundtrip_serial_unroll_true():
     assert "unroll=True" in code, f"printer should emit unroll=True, got:\n{code}"
     assert "annotations" not in code, "printer should NOT emit annotations dict"
     assert from_source(code).script() == code
+    assert_structural_equal(test, from_source(code))
+
+
+def test_roundtrip_serial_unroll_factor():
+    @T.prim_func
+    def test(A_ptr: T.handle) -> None:
+        A = T.match_buffer(A_ptr, (128,), "float32", scope="global")
+        T.device_entry()
+        T.thread_id([32])
+        for i in T.serial(10, unroll=2):
+            A[i] = T.float32(0)
+
+    code = test.script()
+    assert "unroll=2" in code
     assert_structural_equal(test, from_source(code))
 
 

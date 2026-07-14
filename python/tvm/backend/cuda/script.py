@@ -333,6 +333,7 @@ class BarrierNamespace:
     """The Barrier instruction submodule."""
 
     def __init__(self):
+        self.sync = _op_wrapper(_cuda_op.ptx_barrier_sync)
         self.cluster = BarrierClusterNamespace()
 
 
@@ -411,6 +412,11 @@ class CUDANamespace:
         self.reduce_add_sync_u32 = _op_wrapper(_cuda_op.cuda_reduce_add_sync_u32)
         self.reduce_min_sync_u32 = _op_wrapper(_cuda_op.cuda_reduce_min_sync_u32)
         self.clock64 = _op_wrapper(_cuda_op.cuda_clock64)
+        self.fast_expf = _op_wrapper(_cuda_op.cuda_fast_expf)
+        self.builtin_assume = _op_wrapper(_cuda_op.cuda_builtin_assume)
+        self.sym_buffer_base = _op_wrapper(_cuda_op.cuda_sym_buffer_base)
+        self.sym_buffer_offset = _op_wrapper(_cuda_op.cuda_sym_buffer_offset)
+        self.sym_buffer_rank_idx = _op_wrapper(_cuda_op.cuda_sym_buffer_rank_idx)
         self.make_float2 = _op_wrapper(_cuda_op.cuda_make_float2)
         self.float2_x = _op_wrapper(_cuda_op.cuda_float2_x)
         self.float2_y = _op_wrapper(_cuda_op.cuda_float2_y)

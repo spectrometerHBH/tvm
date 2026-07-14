@@ -116,7 +116,7 @@ TVM_STATIC_IR_FUNCTOR(IRDocsifier, vtable)
       if (annotations.defined()) {
         // Check for the special cases:
         // - annotations == {"disable_unroll": True}: print as unroll=False
-        // - annotations == {"pragma_unroll": True}: print as unroll=True
+        // - annotations == {"pragma_unroll": True|N}: print as unroll=True|N
         bool printed_as_unroll = false;
         if (loop->annotations.size() == 1 && loop->annotations.count("disable_unroll")) {
           kwargs_keys.push_back("unroll");
@@ -124,7 +124,12 @@ TVM_STATIC_IR_FUNCTOR(IRDocsifier, vtable)
           printed_as_unroll = true;
         } else if (loop->annotations.size() == 1 && loop->annotations.count("pragma_unroll")) {
           kwargs_keys.push_back("unroll");
-          kwargs_values.push_back(LiteralDoc::Boolean(true, loop_p->Attr("annotations")));
+          const auto* factor = loop->annotations["pragma_unroll"].as<IntImmNode>();
+          if (factor && factor->value > 1) {
+            kwargs_values.push_back(LiteralDoc::Int(factor->value, loop_p->Attr("annotations")));
+          } else {
+            kwargs_values.push_back(LiteralDoc::Boolean(true, loop_p->Attr("annotations")));
+          }
           printed_as_unroll = true;
         }
         if (!printed_as_unroll) {

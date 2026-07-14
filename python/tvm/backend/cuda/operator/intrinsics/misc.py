@@ -251,3 +251,18 @@ device_intrinsic(
     return_type="unsigned long long",
     body="    return clock64();",
 )
+
+device_intrinsic(
+    "cuda_fast_expf",
+    helper_name="tvm_builtin_fast_expf",
+    c_signature="(float value)",
+    return_type="float",
+    body="    return __expf(value);",
+)
+
+device_intrinsic(
+    "cuda_builtin_assume",
+    helper_name="tvm_builtin_assume",
+    c_signature="(bool cond)",
+    body="    __builtin_assume(cond);",
+)

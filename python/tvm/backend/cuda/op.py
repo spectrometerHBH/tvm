@@ -85,6 +85,55 @@ def cuda_func_call(func_name, *args, source_code, return_type="void"):
     return call_intrin(return_type, "tirx.cuda.func_call", func_name, *args, source_code)
 
 
+def cuda_sym_buffer_offset(sym_buffer, rank_idx):
+    """Load one dynamically indexed offset from a grid-constant SymBuffer."""
+    source_code = R"""
+__forceinline__ __device__ int64_t tvm_builtin_sym_buffer_offset(
+    const TVMSymBuffer& sym_buffer, uint32_t rank_idx) {
+  return sym_buffer.offsets[rank_idx];
+}
+"""
+    return cuda_func_call(
+        "tvm_builtin_sym_buffer_offset",
+        sym_buffer,
+        rank_idx,
+        source_code=source_code,
+        return_type="int64",
+    )
+
+
+def cuda_sym_buffer_base(sym_buffer):
+    """Load the local base pointer value from a grid-constant SymBuffer."""
+    source_code = R"""
+__forceinline__ __device__ int64_t tvm_builtin_sym_buffer_base(
+    const TVMSymBuffer& sym_buffer) {
+  return sym_buffer.base;
+}
+"""
+    return cuda_func_call(
+        "tvm_builtin_sym_buffer_base",
+        sym_buffer,
+        source_code=source_code,
+        return_type="int64",
+    )
+
+
+def cuda_sym_buffer_rank_idx(sym_buffer):
+    """Load the local rank index from a grid-constant SymBuffer."""
+    source_code = R"""
+__forceinline__ __device__ uint32_t tvm_builtin_sym_buffer_rank_idx(
+    const TVMSymBuffer& sym_buffer) {
+  return sym_buffer.rank_idx;
+}
+"""
+    return cuda_func_call(
+        "tvm_builtin_sym_buffer_rank_idx",
+        sym_buffer,
+        source_code=source_code,
+        return_type="uint32",
+    )
+
+
 def cuda_warp_reduce(value, op, width=32):
     """Warp-level butterfly shuffle-XOR reduction.
 
@@ -882,6 +931,11 @@ def ptx_bar_sync(name_bar_id, thread_count):
         The call expression.
     """
     return call_intrin("", "tirx.ptx.bar_sync", name_bar_id, thread_count)
+
+
+def ptx_barrier_sync(name_bar_id, thread_count):
+    """TVM intrinsic to call the unqualified ``barrier.sync a, b`` form."""
+    return call_intrin("", "tirx.ptx.barrier_sync", name_bar_id, thread_count)
 
 
 def ptx_cp_async(
@@ -2559,6 +2613,7 @@ def ptx_tcgen05_mma_block_scale(
     use_a_tmem,
     cta_group,
     enable_input_d=1,
+    explicit_scale_vec=True,
 ):
     """TVM intrinsic to call tcgen05.mma.cta_group.kind.block_scale
         Performs matrix multiplication with block scaling:
@@ -2609,6 +2664,9 @@ def ptx_tcgen05_mma_block_scale(
     enable_input_d : PrimExpr
         Scale operand for the input accumulator C/D. Zero means D = A*B,
         non-zero means D = A*B + D.
+
+    explicit_scale_vec : bool
+        Whether to spell the optional ``.scale_vec::NX`` PTX qualifier.
     """
 
     _choice("cta_group", cta_group, _TCGEN05_CTA_GROUP)
@@ -2629,6 +2687,7 @@ def ptx_tcgen05_mma_block_scale(
         use_a_tmem,
         cta_group,
         enable_input_d,
+        explicit_scale_vec,
     )
 
 
@@ -4520,6 +4579,16 @@ def cuda_reduce_min_sync_u32(mask, value):
 
 def cuda_clock64():
     return call_intrin("uint64", "tirx.cuda.clock64")
+
+
+def cuda_fast_expf(value):
+    """Evaluate the CUDA fast single-precision exponential builtin."""
+    return call_intrin("float32", "tirx.cuda.fast_expf", value)
+
+
+def cuda_builtin_assume(cond):
+    """Emit CUDA's compiler assumption builtin."""
+    return call_intrin("", "tirx.cuda.builtin_assume", cond)
 
 
 def cuda_make_float2(x, y):

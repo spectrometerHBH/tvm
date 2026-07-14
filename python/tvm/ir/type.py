@@ -155,3 +155,14 @@ class TensorMapType(Type):
             _ffi_api.TensorMapType,
             span,  # pylint: disable=no-member
         )
+
+
+@tvm_ffi.register_object("ir.SymBufferType")
+class SymBufferType(Type):
+    """By-value CUDA grid-constant symmetric-buffer descriptor type."""
+
+    def __init__(self, span=None):
+        self.__init_handle_by_constructor__(
+            _ffi_api.SymBufferType,
+            span,  # pylint: disable=no-member
+        )

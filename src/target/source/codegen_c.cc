@@ -102,8 +102,16 @@ void CodeGenC::PrintFunctionSignature(const ffi::String& function_name, const Pr
       }
       return false;
     };
+    auto is_symbuffer_ptr = [&]() -> bool {
+      if (auto* ptr = v->type_annotation.as<PointerTypeNode>()) {
+        return ptr->element_type.as<SymBufferTypeNode>();
+      }
+      return false;
+    };
     if (is_tensormap_ptr()) {
       os << "const __grid_constant__ CUtensorMap";
+    } else if (is_symbuffer_ptr()) {
+      os << "const __grid_constant__ TVMSymBuffer";
     } else {
       PrintType(GetType(v), os);
     }
@@ -112,6 +120,8 @@ void CodeGenC::PrintFunctionSignature(const ffi::String& function_name, const Pr
     bool is_handle = v.ty().IsHandle();
     auto* ptr = v->type_annotation.as<PointerTypeNode>();
     if (ptr && ptr->element_type.as<TensorMapTypeNode>()) {
+      is_handle = false;
+    } else if (ptr && ptr->element_type.as<SymBufferTypeNode>()) {
       is_handle = false;
     }
     if (no_alias && is_handle) {

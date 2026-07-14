@@ -1049,8 +1049,8 @@ def _get_tcgen05_mma_scale_vec_size(kind, scale_dtype):
 def _mma_block_scaled_parts(*args):
     """Args layout: (d_tmem_addr, a_operand, b_desc[, sp_tmem_addr], i_desc,
     enable_input_d, sfa_tmem_addr, sfb_tmem_addr,
-    kind, scale_vec_size, sparse, use_a_tmem, cta_group)."""
-    attrs = args[-5:]
+    kind, scale_vec_size, sparse, use_a_tmem, cta_group, explicit_scale_vec)."""
+    attrs = args[-6:]
     kind = parse_str(attrs[0])
     scale_vec_size = int(attrs[1])
     sparse_raw = attrs[2]
@@ -1060,6 +1060,12 @@ def _mma_block_scaled_parts(*args):
         bool(int(use_a_tmem_raw)) if hasattr(use_a_tmem_raw, "value") else bool(use_a_tmem_raw)
     )
     cta_group = int(attrs[4])
+    explicit_scale_vec_raw = attrs[5]
+    explicit_scale_vec = (
+        bool(int(explicit_scale_vec_raw))
+        if hasattr(explicit_scale_vec_raw, "value")
+        else bool(explicit_scale_vec_raw)
+    )
 
     a_type = "uint32_t" if use_a_tmem else "uint64_t"
     a_constraint = "r" if use_a_tmem else "l"
@@ -1074,6 +1080,7 @@ def _mma_block_scaled_parts(*args):
 
     name = (
         f"ptx_tcgen05_mma_block_scaled_cta_{cta_group}_kind_{kind}_scale_vec_{scale_vec_size}"
+        f"{'_explicit_scale_vec' if explicit_scale_vec else ''}"
         f"{'_sp' if sparse else ''}{'_TS' if use_a_tmem else '_SS'}"
     )
 
@@ -1083,7 +1090,7 @@ def _mma_block_scaled_parts(*args):
     sp_input = ', "r"(sp_tmem_addr)' if sparse else ""
     instr = (
         f"tcgen05.mma{sparse_suffix}.cta_group::{cta_group}.kind::{kind}"
-        f".block_scale.scale_vec::{scale_vec_size}X"
+        f".block_scale{f'.scale_vec::{scale_vec_size}X' if explicit_scale_vec else ''}"
     )
     asm_inputs = (
         f'"r"(d_tmem_addr), "{a_constraint}"(a_operand), "l"(b_desc),'
@@ -1107,7 +1114,7 @@ def _mma_block_scaled_parts(*args):
 
 device_intrinsic(
     "_ptx_tcgen05_mma_block_scaled_form",
-    n_attrs=5,
+    n_attrs=6,
     helper_name=lambda *a: _mma_block_scaled_parts(*a)[0],
     c_signature=lambda *a: _mma_block_scaled_parts(*a)[1],
     body=lambda *a: _mma_block_scaled_parts(*a)[2],
@@ -1131,6 +1138,7 @@ def _dispatch_tcgen05_mma_block_scaled(
     enable_input_d,
     sparse=False,
     sp_tmem_addr=None,
+    explicit_scale_vec=True,
 ):
     d_dtype_s = parse_str(d_dtype)
     a_dtype_s = parse_str(a_dtype)
@@ -1155,7 +1163,7 @@ def _dispatch_tcgen05_mma_block_scaled(
         operand_args.append(sp_tmem_addr)
     operand_args.extend([i_desc, enable_input_d, sfa_tmem_addr, sfb_tmem_addr])
 
-    attr_args = [kind, scale_vec_size, sparse, use_a_tmem_b, cta_group_i]
+    attr_args = [kind, scale_vec_size, sparse, use_a_tmem_b, cta_group_i, explicit_scale_vec]
     return CODEGEN_REGISTRY["tirx._ptx_tcgen05_mma_block_scaled_form"](operand_args + attr_args)
 
 
@@ -1175,6 +1183,7 @@ def codegen_ptx_tcgen05_mma_block_scale(
     use_a_tmem,
     cta_group,
     enable_input_d=1,
+    explicit_scale_vec=True,
 ):
     return _dispatch_tcgen05_mma_block_scaled(
         d_dtype,
@@ -1191,6 +1200,7 @@ def codegen_ptx_tcgen05_mma_block_scale(
         use_a_tmem,
         cta_group,
         enable_input_d,
+        explicit_scale_vec=explicit_scale_vec,
     )
 
 

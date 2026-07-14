@@ -1148,6 +1148,7 @@ TVM_FFI_STATIC_INIT_BLOCK() {
       .def("script.ir_builder.tirx.Boolean", Boolean)
       .def("script.ir_builder.tirx.Handle", Handle)
       .def("script.ir_builder.tirx.TensorMap", TensorMap)
+      .def("script.ir_builder.tirx.SymBuffer", SymBuffer)
       .def("script.ir_builder.tirx.Void", Void)
       .def("script.ir_builder.tirx.min",
            [](PrimExpr a, PrimExpr b) -> PrimExpr { return tvm::min(a, b); })

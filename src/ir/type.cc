@@ -78,6 +78,7 @@ TVM_FFI_STATIC_INIT_BLOCK() {
   TupleTypeNode::RegisterReflection();
   FuncTypeNode::RegisterReflection();
   TensorMapTypeNode::RegisterReflection();
+  SymBufferTypeNode::RegisterReflection();
 }
 
 PrimType::PrimType(DLDataType dtype) { data_ = GetCachedPrimTypeNode(dtype); }
@@ -187,11 +188,18 @@ TVM_FFI_STATIC_INIT_BLOCK() {
   refl::GlobalDef()
       .def("ir.TupleType",
            [](ffi::Array<Type> fields, Span span) { return TupleType(fields, span); })
-      .def("ir.TensorMapType", [](Span span) { return TensorMapType(span); });
+      .def("ir.TensorMapType", [](Span span) { return TensorMapType(span); })
+      .def("ir.SymBufferType", [](Span span) { return SymBufferType(span); });
 }
 
 TensorMapType::TensorMapType(Span span) {
   ffi::ObjectPtr<TensorMapTypeNode> n = ffi::make_object<TensorMapTypeNode>();
+  n->span = std::move(span);
+  data_ = std::move(n);
+}
+
+SymBufferType::SymBufferType(Span span) {
+  ffi::ObjectPtr<SymBufferTypeNode> n = ffi::make_object<SymBufferTypeNode>();
   n->span = std::move(span);
   data_ = std::move(n);
 }

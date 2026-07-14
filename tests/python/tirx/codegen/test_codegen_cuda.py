@@ -173,6 +173,36 @@ def test_serial_pragma_unroll_codegen():
     assert "break;" in src
 
 
+def test_serial_pragma_unroll_factor_codegen():
+    @T.prim_func
+    def main(A: T.Buffer((4,), "int32")):
+        T.device_entry()
+        tx = T.thread_id([32])
+        if tx == 0:
+            for i in T.serial(4, unroll=2):
+                A[i] = A[i] + 1
+
+    src, _ = _get_source(main)
+    assert "#pragma unroll 2\n" in src
+
+
+def test_local_scalar_codegen_uses_scalar_variable():
+    @T.prim_func
+    def main(A: T.Buffer((1,), "uint64")):
+        T.device_entry()
+        tx = T.thread_id([32])
+        value = T.alloc_local((1,), "uint64")
+        if tx == 0:
+            value[0] = A[0]
+            T.ptx.tcgen05.encode_matrix_descriptor(value.data, A.data, 1, 32, 2)
+            A[0] = value[0] + T.uint64(1)
+
+    src, _ = _get_source(main)
+    assert "uint64_t value_ptr;" in src
+    assert "value_ptr[1]" not in src
+    assert "tvm_builtin_ptx_tcgen05_encode_matrix_descriptor((&value_ptr)," in src
+
+
 def test_cluster_cta_id_codegen_uses_coordinate_sregs():
     @T.prim_func
     def main(A: T.Buffer((1,), "int32")):
@@ -357,6 +387,8 @@ def test_megamoe_extracted_intrinsics_codegen():
             U32[0] = T.cuda.reduce_add_sync_u32(T.uint32(0xFFFFFFFF), U32[0])
             U32[0] = T.cuda.reduce_min_sync_u32(T.uint32(0xFFFFFFFF), U32[0])
             U64[0] = T.cuda.clock64()
+            F32[0] = T.cuda.fast_expf(F32[0])
+            T.cuda.builtin_assume(U32[0] < T.uint32(32))
             U32[0] = T.cuda.float22bfloat162_rn(F32[0], F32[1])
 
     src, _ = _get_source(main)
@@ -383,6 +415,8 @@ def test_megamoe_extracted_intrinsics_codegen():
         "__reduce_add_sync",
         "__reduce_min_sync",
         "clock64()",
+        "__expf",
+        "__builtin_assume",
         "__float22bfloat162_rn",
     ]:
         assert snippet in src
@@ -632,6 +666,54 @@ def test_tensor_map_param_codegen():
     src, _ = _get_source(main)
     assert "const __grid_constant__ CUtensorMap A_map" in src
     assert "((unsigned long long)(&(A_map)))" in src
+
+
+def test_sym_buffer_param_codegen():
+    @T.prim_func
+    def main(sym_buffer: T.SymBuffer(), out: T.Buffer((3,), "int64")):
+        T.device_entry()
+        tx = T.thread_id([32])
+        if tx == 0:
+            out[0] = T.cuda.sym_buffer_base(sym_buffer)
+            out[1] = T.cuda.sym_buffer_offset(sym_buffer, T.uint32(7))
+            out[2] = T.cast(T.cuda.sym_buffer_rank_idx(sym_buffer), "int64")
+
+    src, _ = _get_source(main)
+    assert "struct alignas(8) TVMSymBuffer" in src
+    assert 'static_assert(sizeof(TVMSymBuffer) == 592, "unexpected TVMSymBuffer ABI")' in src
+    assert "const __grid_constant__ TVMSymBuffer sym_buffer" in src
+    assert "return sym_buffer.base;" in src
+    assert "return sym_buffer.offsets[rank_idx];" in src
+    assert "return sym_buffer.rank_idx;" in src
+    assert "tvm_builtin_sym_buffer_offset(sym_buffer, (uint)7)" in src
+
+
+def test_cuda_kernel_param_order_can_match_primfunc_order():
+    @T.prim_func
+    def main(
+        out: T.Buffer((1,), "int64"),
+        n: T.int32,
+        sym_buffer: T.SymBuffer(),
+        A_map: T.TensorMap(),
+    ):
+        T.device_entry()
+        tx = T.thread_id([32])
+        if tx == 0:
+            out[0] = (
+                T.cuda.sym_buffer_base(sym_buffer)
+                + T.cast(n, "int64")
+                + T.reinterpret("int64", T.address_of(A_map))
+            )
+
+    main = main.with_attr("tirx.preserve_kernel_param_order", True)
+    src, _ = _get_source(main)
+    signature = next(
+        line for line in src.splitlines() if "main_kernel(" in line and line.endswith(");")
+    )
+    params = signature.split("main_kernel(", maxsplit=1)[1][:-2]
+    assert params.index("out") < params.index("int n")
+    assert params.index("int n") < params.index("TVMSymBuffer sym_buffer")
+    assert params.index("TVMSymBuffer sym_buffer") < params.index("CUtensorMap A_map")
 
 
 def test_tma_cache_policy_operand_codegen():

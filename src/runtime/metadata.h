@@ -58,7 +58,7 @@ constexpr const char* kUseCooperativeLaunch = "tirx.use_cooperative_launch";
 }  // namespace launch_param
 
 /*! \brief Extra tags for function arguments */
-enum class ArgExtraTags : int { kNone = 0, kTensorMap = 1 };
+enum class ArgExtraTags : int { kNone = 0, kTensorMap = 1, kSymBuffer = 2 };
 
 /*! \brief function information needed by device */
 class FunctionInfoObj : public ffi::Object {

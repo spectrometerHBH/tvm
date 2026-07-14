@@ -137,7 +137,32 @@ class HostDeviceSplitter : public StmtMutator {
 
       // Sort first by variable type, then by variable name
       std::vector<Var> params{use_def.undefined_.begin(), use_def.undefined_.end()};
-      if (device_target->kind->name != "trn") {
+      if (cur_func_->GetAttr<bool>("tirx.preserve_kernel_param_order", false).value()) {
+        std::unordered_map<Var, size_t, ffi::ObjectPtrHash, ffi::ObjectPtrEqual> param_order;
+        for (size_t i = 0; i < cur_func_->params.size(); ++i) {
+          const Var& param = cur_func_->params[i];
+          param_order[param] = i;
+          if (cur_func_->buffer_map.count(param)) {
+            param_order[cur_func_->buffer_map[param]->data] = i;
+          }
+        }
+        auto fallback_key = [](const Var& var) {
+          return std::tuple{
+              !var->ty().IsHandle(),
+              var->name_hint,
+          };
+        };
+        std::stable_sort(params.begin(), params.end(), [&](const Var& a, const Var& b) {
+          auto a_it = param_order.find(a);
+          auto b_it = param_order.find(b);
+          if (a_it != param_order.end() && b_it != param_order.end()) {
+            return a_it->second < b_it->second;
+          }
+          if (a_it != param_order.end()) return true;
+          if (b_it != param_order.end()) return false;
+          return fallback_key(a) < fallback_key(b);
+        });
+      } else if (device_target->kind->name != "trn") {
         std::sort(params.begin(), params.end(), [](const Var& a, const Var& b) {
           auto sort_key = [](const Var& var) {
             return std::tuple{

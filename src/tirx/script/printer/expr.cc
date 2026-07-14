@@ -52,6 +52,8 @@ ExprDoc PrintVarCreation(const tirx::Var& var, const AccessPath& var_p, const IR
       }
     } else if (ptr_type->element_type->IsInstance<TensorMapTypeNode>()) {
       rhs = TIR(d, "TensorMap")->Call({}, {}, {});
+    } else if (ptr_type->element_type->IsInstance<SymBufferTypeNode>()) {
+      rhs = TIR(d, "SymBuffer")->Call({}, {}, {});
     }
   } else {
     rhs = TIR(d, DType2Str(var.ty()->dtype));

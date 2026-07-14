@@ -313,7 +313,8 @@ inline ffi::Function PackFuncVoidAddr(F f, const ffi::Array<DLDataType>& arg_typ
                                       const ffi::Array<ArgExtraTags>& arg_extra_tags) {
   std::vector<detail::ArgConvertCode> codes(arg_types.size());
   for (size_t i = 0; i < arg_types.size(); ++i) {
-    if (arg_extra_tags.size() > i && arg_extra_tags[i] == ArgExtraTags::kTensorMap) {
+    if (arg_extra_tags.size() > i && (arg_extra_tags[i] == ArgExtraTags::kTensorMap ||
+                                      arg_extra_tags[i] == ArgExtraTags::kSymBuffer)) {
       codes[i] = detail::HANDLE_TO_TENSORMAP;
     } else {
       codes[i] = detail::GetArgConvertCode(arg_types[i]);

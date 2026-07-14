@@ -515,6 +515,8 @@ inline Var Handle(PrimType dtype = PrimType::Handle(), ffi::String storage_scope
 
 inline Var TensorMap() { return tvm::tirx::Var("", PointerType(TensorMapType())); }
 
+inline Var SymBuffer() { return tvm::tirx::Var("", PointerType(SymBufferType())); }
+
 #define TVM_TIRX_IR_BUILDER_DEF_DTYPE_CAST(FuncName, DType)                                 \
   inline PrimExpr FuncName(ffi::Optional<PrimExpr> expr = std::nullopt,                     \
                            bool is_size_var = false) {                                      \

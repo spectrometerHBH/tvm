@@ -33,5 +33,5 @@ except ImportError:
 from tvm.tirx.lang.alloc_pool import SMEMPool, TMEMPool
 
 from . import tile
-from .builder.ir import TensorMap, meta_class
+from .builder.ir import SymBuffer, TensorMap, meta_class
 from .tile import cluster, cta, thread, warp, warpgroup, wg

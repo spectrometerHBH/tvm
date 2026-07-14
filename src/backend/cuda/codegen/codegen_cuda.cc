@@ -179,6 +179,13 @@ void CodeGenCUDA::Init(bool output_ssa) {
 
 void CodeGenCUDA::PrintFunctionSignature(const ffi::String& function_name, const PrimFunc& func,
                                          std::ostream& os) {
+  for (const tirx::Var& param : func->params) {
+    if (const auto* ptr = param->type_annotation.as<PointerTypeNode>();
+        ptr && ptr->element_type.as<SymBufferTypeNode>()) {
+      codegen_tags_.insert("sym_buffer");
+      break;
+    }
+  }
   CallingConv calling_conv =
       func->GetAttr<CallingConv>(tvm::attr::kCallingConv, CallingConv::kDefault).value();
   if (calling_conv == CallingConv::kDeviceKernelLaunch) {
@@ -281,7 +288,14 @@ void CodeGenCUDA::VisitStmt_(const tirx::ForNode* op) {
     stream << "#pragma unroll 1\n";
   } else if (op->kind == tirx::ForKind::kUnrolled || op->annotations.count("pragma_unroll")) {
     PrintIndent();
-    stream << "#pragma unroll\n";
+    stream << "#pragma unroll";
+    auto it = op->annotations.find("pragma_unroll");
+    if (it != op->annotations.end()) {
+      if (const auto* factor = (*it).second.as<IntImmNode>(); factor && factor->value > 1) {
+        stream << " " << factor->value;
+      }
+    }
+    stream << "\n";
   }
   CodeGenC::VisitStmt_(op);
 }
@@ -1600,7 +1614,11 @@ void CodeGenCUDA::VisitStmt_(const AttrStmtNode* op) {
     return;
   } else if (op->attr_key == "pragma_unroll") {
     PrintIndent();
-    stream << "#pragma unroll\n";
+    stream << "#pragma unroll";
+    if (const auto* factor = op->value.as<IntImmNode>(); factor && factor->value > 1) {
+      stream << " " << factor->value;
+    }
+    stream << "\n";
     this->VisitStmt(op->body);
     return;
   } else if (op->attr_key == tirx::attr::thread_extent) {
@@ -1616,6 +1634,14 @@ void CodeGenCUDA::VisitStmt_(const AllocBufferNode* op) {
   std::string scope = GetPtrStorageScope(op->buffer->data);
   const VarNode* buffer = op->buffer->data.as<VarNode>();
   PrimType dtype = op->buffer->dtype;
+
+  if (scope == "local" && op->buffer->shape.size() == 1 && is_one(op->buffer->shape[0])) {
+    PrintType(dtype, stream);
+    stream << ' ' << vid << ";\n";
+    local_scalar_buffers_.insert(buffer);
+    RegisterHandleType(op->buffer->data.get(), dtype);
+    return;
+  }
 
   if (scope.find("wmma.") == 0) {
     if (scope == "wmma.matrix_a" || scope == "wmma.matrix_b") {
@@ -1681,6 +1707,30 @@ void CodeGenCUDA::VisitStmt_(const AllocBufferNode* op) {
   if (op->annotations.count(tirx::attr::kVolatile)) {
     MarkVolatile(op->buffer->data.get());
   }
+}
+
+std::string CodeGenCUDA::GetBufferRef(const PrimType& t, const BufferNode* buffer, PrimExpr index) {
+  if (!local_scalar_buffers_.count(buffer->data.get())) {
+    return CodeGenC::GetBufferRef(t, buffer, std::move(index));
+  }
+  TVM_FFI_ICHECK(is_zero(index)) << "A local scalar can only be accessed at index zero";
+  std::string vid = GetVarID(buffer->data.get());
+  if (t == buffer->dtype) {
+    return vid;
+  }
+  std::ostringstream os;
+  os << "*(reinterpret_cast<";
+  PrintType(t, os);
+  os << "*>(&" << vid << "))";
+  return os.str();
+}
+
+void CodeGenCUDA::VisitExpr_(const VarNode* op, std::ostream& os) {  // NOLINT(*)
+  if (local_scalar_buffers_.count(op)) {
+    os << "(&" << GetVarID(op) << ")";
+    return;
+  }
+  CodeGenC::VisitExpr_(op, os);
 }
 
 void CodeGenCUDA::VisitStmt_(const EvaluateNode* op) {
