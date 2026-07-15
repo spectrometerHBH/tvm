@@ -137,7 +137,7 @@ def unbalanced_stack(out: T.Buffer((32,), "int32")):
 def payload_kernel(out: T.Buffer((32,), "int32")):
     T.device_entry()
     tx = T.thread_id([32])
-    T.evaluate(tvm.tirx.call_intrin("", "tirx.iket.mark", "payload", tx))
+    T.evaluate(tvm.tirx.call_intrin("", "tirx.cuda.iket_mark", "payload", tx))
     out[tx] = tx
 
 
@@ -283,11 +283,26 @@ def test_public_interface_is_official_only():
     assert not hasattr(profiler, "capture")
     assert not hasattr(profiler, "export")
 
+    script = serial_a.script()
+    assert 'T.cuda.iket.mark("a")' in script
+    assert "T.tirx.iket" not in script
+    assert tvm.script.from_source(script).script() == script
+
+
+@pytest.mark.parametrize(
+    "name",
+    ("mark", "range_start", "range_end", "range_push", "range_pop", "sentinel_token"),
+)
+def test_annotation_ops_are_cuda_owned(name):
+    op = tvm.ir.Op.get(f"tirx.cuda.iket_{name}")
+    assert op.get_attr("TIRxOpCategory") == "device_intrin"
+    assert op.get_attr("TDeviceIntrinsicNamespace") == "cuda"
+
 
 def test_regular_lowering_strips_annotations_and_tokens():
     stripped = tvm.tirx.transform.LowerIket()(tvm.IRModule({"main": token_loop}))
     script = stripped.script()
-    assert "tirx.iket" not in script
+    assert "cuda.iket" not in script
     assert "sentinel" not in script
     assert "token:" not in script
 

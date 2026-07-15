@@ -63,32 +63,32 @@ enum class DeclarationKind : int {
 };
 
 const Op& IketMarkOp() {
-  static const Op& op = Op::Get("tirx.iket.mark");
+  static const Op& op = Op::Get("tirx.cuda.iket_mark");
   return op;
 }
 
 const Op& IketRangeStartOp() {
-  static const Op& op = Op::Get("tirx.iket.range_start");
+  static const Op& op = Op::Get("tirx.cuda.iket_range_start");
   return op;
 }
 
 const Op& IketRangeEndOp() {
-  static const Op& op = Op::Get("tirx.iket.range_end");
+  static const Op& op = Op::Get("tirx.cuda.iket_range_end");
   return op;
 }
 
 const Op& IketRangePushOp() {
-  static const Op& op = Op::Get("tirx.iket.range_push");
+  static const Op& op = Op::Get("tirx.cuda.iket_range_push");
   return op;
 }
 
 const Op& IketRangePopOp() {
-  static const Op& op = Op::Get("tirx.iket.range_pop");
+  static const Op& op = Op::Get("tirx.cuda.iket_range_pop");
   return op;
 }
 
 const Op& IketSentinelOp() {
-  static const Op& op = Op::Get("tirx.iket.sentinel_token");
+  static const Op& op = Op::Get("tirx.cuda.iket_sentinel_token");
   return op;
 }
 

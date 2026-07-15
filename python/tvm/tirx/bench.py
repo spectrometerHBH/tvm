@@ -838,22 +838,22 @@ class IketProfiler:
     """
 
     def mark(self, name: str):
-        T.evaluate(tvm.tirx.call_intrin("", "tirx.iket.mark", name))
+        T.evaluate(T.cuda.iket.mark(name))
 
     def range_start(self, name: str):
-        return tvm.tirx.call_intrin("uint32", "tirx.iket.range_start", name)
+        return T.cuda.iket.range_start(name)
 
     def range_end(self, token: tvm.tirx.PrimExpr):
-        T.evaluate(tvm.tirx.call_intrin("", "tirx.iket.range_end", token))
+        T.evaluate(T.cuda.iket.range_end(token))
 
     def range_push(self, name: str):
-        T.evaluate(tvm.tirx.call_intrin("", "tirx.iket.range_push", name))
+        T.evaluate(T.cuda.iket.range_push(name))
 
     def range_pop(self):
-        T.evaluate(tvm.tirx.call_intrin("", "tirx.iket.range_pop"))
+        T.evaluate(T.cuda.iket.range_pop())
 
     def sentinel_token(self, name: str):
-        return tvm.tirx.call_intrin("uint32", "tirx.iket.sentinel_token", name)
+        return T.cuda.iket.sentinel_token(name)
 
     def compile(self, mod, target=None, *, tir_pipeline="tirx"):
         """Compile official IKET metadata and NativeDump placeholders."""
