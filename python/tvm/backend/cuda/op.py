@@ -65,6 +65,36 @@ tir = tirx
 ########################################################
 
 
+def cuda_iket_mark(name):
+    """Create an NVIDIA IKET marker annotation."""
+    return call_intrin("", "tirx.cuda.iket_mark", name)
+
+
+def cuda_iket_range_start(name):
+    """Create an NVIDIA IKET token-range start annotation."""
+    return call_intrin("uint32", "tirx.cuda.iket_range_start", name)
+
+
+def cuda_iket_range_end(token):
+    """Create an NVIDIA IKET token-range end annotation."""
+    return call_intrin("", "tirx.cuda.iket_range_end", token)
+
+
+def cuda_iket_range_push(name):
+    """Create an NVIDIA IKET stack-range push annotation."""
+    return call_intrin("", "tirx.cuda.iket_range_push", name)
+
+
+def cuda_iket_range_pop():
+    """Create an NVIDIA IKET stack-range pop annotation."""
+    return call_intrin("", "tirx.cuda.iket_range_pop")
+
+
+def cuda_iket_sentinel_token(name):
+    """Create a no-op NVIDIA IKET range token for warp-uniform control flow."""
+    return call_intrin("uint32", "tirx.cuda.iket_sentinel_token", name)
+
+
 def cuda_func_call(func_name, *args, source_code, return_type="void"):
     """TVM intrinsic to call a CUDA function. Source code is provided as a string.
 
