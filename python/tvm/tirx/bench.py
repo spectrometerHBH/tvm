@@ -66,13 +66,15 @@ def setup():
 # ---------------------------------------------------------------------------
 # Triton-standard benchmark path.
 #
-# Faithful in-repo port of triton.testing.do_bench / do_bench_cudagraph
+# Faithful in-repo port of triton.testing.do_bench / do_bench_proton /
+# do_bench_cudagraph_proton
 # (see https://github.com/triton-lang/triton, python/triton/testing.py). This is
-# torch-only and does NOT import or call into triton at runtime: Triton driver
-# calls (get_device_interface / get_empty_cache_for_benchmark / clear_cache) are
-# replaced with direct torch.cuda + a torch L2-flush buffer. The timed function
-# is a *pure no-arg launch closure* (inputs captured once, allocated outside the
-# timed region) -- exactly how Triton times a function.
+# a torch CUDA timer port: Triton runtime-driver calls (get_device_interface /
+# get_empty_cache_for_benchmark / clear_cache) are replaced with torch.cuda and
+# a torch L2-flush buffer. The Proton variants still use triton.profiler for
+# attribution. The timed function is a *pure no-arg launch closure* (inputs
+# captured once, allocated outside the timed region) -- exactly how Triton
+# times a function.
 # ---------------------------------------------------------------------------
 
 
@@ -131,8 +133,8 @@ def _cuda_graph_without_gc(*args, **kwargs):
 
 def _empty_cache_for_benchmark():
     # torch equivalent of triton's driver.get_empty_cache_for_benchmark(): a
-    # 256 MB buffer whose .zero_() evicts the L2 cache between measured iters.
-    return torch.empty(int(256e6 // 4), dtype=torch.int, device="cuda")
+    # 256 MiB buffer whose .zero_() evicts the L2 cache between measured iters.
+    return torch.empty(256 * 1024 * 1024 // 4, dtype=torch.int, device="cuda")
 
 
 def _do_bench_event(
@@ -167,12 +169,10 @@ def _do_bench_event(
     estimate_ms = start_event.elapsed_time(end_event) / 5
 
     # Compute number of warmup and repeat iterations from the ms budgets.
-    if estimate_ms == 0:
-        n_warmup = 1000
-        n_repeat = 1000
-    else:
-        n_warmup = max(1, int(warmup / estimate_ms))
-        n_repeat = max(1, int(rep / estimate_ms))
+    # Keep this identical to triton.testing.do_bench. Unlike Triton's Proton
+    # and CUDA-graph helpers, do_bench deliberately has no zero-time fallback.
+    n_warmup = max(1, int(warmup / estimate_ms))
+    n_repeat = max(1, int(rep / estimate_ms))
     start_event = [torch.cuda.Event(enable_timing=True) for _ in range(n_repeat)]
     end_event = [torch.cuda.Event(enable_timing=True) for _ in range(n_repeat)]
     # Warm-up.
@@ -226,6 +226,17 @@ def _collect_proton_scope_times(database, prefix):
     return [t for _, t in sorted(scope_times)]
 
 
+def _start_proton_session(profile_path, *, timer, explicit_alternative):
+    """Start Proton or fail without changing the requested measurement method."""
+    session = proton.start(profile_path, context="shadow", data="tree")
+    if session is None:
+        raise RuntimeError(
+            f"{timer}: Proton profiler session could not be created. "
+            f"Use timer={explicit_alternative!r} explicitly if that timing is intended."
+        )
+    return session
+
+
 def _do_bench_proton(
     fn,
     warmup=25,
@@ -243,20 +254,10 @@ def _do_bench_proton(
     Cold cache. NVIDIA + Proton only. No CUDA graph (so it works for references that
     can't be graph-captured, e.g. CuTeDSL flash-attention).
 
-    Falls back to ``_do_bench_event`` under pytest or when a Proton session cannot be
-    created.
+    A missing Proton session is an error. Silently switching to event timing would
+    leave the result labelled ``proton`` while changing the measured quantity.
     """
     assert return_mode in ["min", "max", "mean", "median", "all"]
-
-    if is_running_under_pytest():
-        return _do_bench_event(
-            fn,
-            warmup=warmup,
-            rep=rep,
-            grad_to_none=grad_to_none,
-            quantiles=quantiles,
-            return_mode=return_mode,
-        )
 
     fn()
     torch.cuda.synchronize()
@@ -288,19 +289,7 @@ def _do_bench_proton(
 
     with tempfile.TemporaryDirectory(prefix=f"tirx-proton-{uuid.uuid4().hex}-") as tmpdir:
         profile_path = os.path.join(tmpdir, "profile")
-        session = proton.start(profile_path, context="shadow", data="tree")
-        if session is None:
-            print(
-                "proton: Proton session unavailable; falling back to event timing", file=sys.stderr
-            )
-            return _do_bench_event(
-                fn,
-                warmup=warmup,
-                rep=rep,
-                grad_to_none=grad_to_none,
-                quantiles=quantiles,
-                return_mode=return_mode,
-            )
+        session = _start_proton_session(profile_path, timer="proton", explicit_alternative="event")
         scope_prefix = f"proton.{uuid.uuid4().hex}."
         # finalize() MUST run even if fn() raises mid-loop; otherwise the global
         # Proton profiler stays active and the next session in this process starts
@@ -344,18 +333,15 @@ def _do_bench_cudagraph_proton(fn, rep=20, grad_to_none=None, quantiles=None, re
     ``deactivate(flushing=True)`` here, so we read the ``.hatchet`` JSON that
     ``finalize`` writes (the same tree the in-memory getter would return).
 
-    Falls back to ``_do_bench_event`` (cold-cache CUDA-event timing) under pytest or
-    when a Proton session cannot be created -- staying on a cold-cache timer keeps it
-    consistent with the rest of the baseline.
+    A missing Proton session is an error; this timer never changes measurement
+    method while retaining the ``cudagraph_proton`` label.
     """
     assert return_mode in ["min", "max", "mean", "median", "all"]
 
-    if is_running_under_pytest():
-        return _do_bench_event(
-            fn,
-            grad_to_none=grad_to_none,
-            quantiles=quantiles,
-            return_mode=return_mode,
+    if torch.version.hip is not None:
+        raise RuntimeError(
+            "cudagraph_proton requires the NVIDIA backend because Proton does not "
+            "reliably attribute CUDA graph replay launches to scopes on HIP."
         )
 
     with torch.cuda.stream(torch.cuda.Stream()):
@@ -381,18 +367,11 @@ def _do_bench_cudagraph_proton(fn, rep=20, grad_to_none=None, quantiles=None, re
             profile_path = os.path.join(tmpdir, "profile")
             # shadow/CUPTI captures kernel GPU activity itself; the triton launch
             # hook only adds flops/bytes metadata, so it is omitted here.
-            session = proton.start(profile_path, context="shadow", data="tree")
-            if session is None:
-                print(
-                    "cudagraph_proton: Proton session unavailable; falling back to event timing",
-                    file=sys.stderr,
-                )
-                return _do_bench_event(
-                    fn,
-                    grad_to_none=grad_to_none,
-                    quantiles=quantiles,
-                    return_mode=return_mode,
-                )
+            session = _start_proton_session(
+                profile_path,
+                timer="cudagraph_proton",
+                explicit_alternative="event",
+            )
 
             cache = _empty_cache_for_benchmark()
             scope_prefix = f"proton.{uuid.uuid4().hex}."
@@ -450,9 +429,10 @@ def bench(
 
     Each callable in ``funcs`` is a *no-arg launch closure* (inputs allocated
     once and captured in the closure), timed exactly the way
-    ``triton.testing.do_bench`` / ``do_bench_cudagraph_proton`` time a function. The
-    timing core is a faithful in-repo port (torch-only, no triton dependency);
-    see ``_do_bench_event`` / ``_do_bench_cudagraph_proton``.
+    ``triton.testing.do_bench`` / ``do_bench_proton`` /
+    ``do_bench_cudagraph_proton`` time a function.
+    The timing core is a faithful in-repo port (torch-only, no Triton runtime
+    driver dependency); see the corresponding ``_do_bench_*`` functions.
 
     Parameters
     ----------
@@ -465,34 +445,34 @@ def bench(
         import/setup and returns the no-arg run callable.  A builder that raises
         is recorded as a ``BASELINE_ERROR`` instead of failing the workload.
     warmup : int, optional
-        Warmup time budget (ms) for the ``event`` timer. ``None`` (default) defers
-        to ``_do_bench_event``'s own default; pass a value only to override. Ignored
-        by the graph timers (which have no warmup).
+        Warmup time budget (ms) for the ``event`` and ``proton`` timers. ``None``
+        (default) defers to the selected timer's own default; pass a value only
+        to override. Ignored by ``cudagraph_proton``, which has no warmup argument.
     repeat : int, optional
-        Rep time budget (ms) for the ``event`` timer. ``None`` (default) defers to
-        ``_do_bench_event``'s own default; pass a value only to override.
+        Rep time budget (ms) for the ``event`` and ``proton`` timers. ``None``
+        (default) defers to the selected timer's own default.
     cudagraph_rep : int, optional
-        ``rep`` (ms) for the graph timers (graph unroll length). ``None`` (default)
-        defers to ``_do_bench_cudagraph_proton``'s own default. Each timer default
-        lives only in its own signature (Triton: do_bench 25/100, graph 20); nothing
-        is hardcoded here.
+        ``rep`` (ms) for ``cudagraph_proton`` (graph unroll length). ``None``
+        (default) defers to that timer's own default. Each timer default lives only
+        in its own signature (Triton: do_bench 25/100, graph 20); nothing is hardcoded
+        here.
     timer : {None, "event", "proton", "cudagraph_proton"}
         ``None`` (default) resolves to ``proton`` -- see the resolution in the body;
         the default is defined in exactly one place so kernels pass ``None`` to inherit.
-        All three are **cold-cache** (per-iter L2 flush) so results are comparable.
         ``event`` -> ported ``do_bench`` (CUDA-event wall of each call).
         ``proton`` -> ported ``do_bench_proton``: same setup as ``event``, differs
         ONLY in timing -- Proton per-kernel GPU time instead of the event wall (so
         launch/host overhead of the ref is excluded). No graph, so it works for
         references that can't be CUDA-graph-captured (e.g. CuTeDSL flash-attention).
         NVIDIA + Proton only.
-        ``cudagraph_proton`` -> ``do_bench_cudagraph_proton`` (graph replay + Proton +
-        L2 flush); like ``proton`` but also removes launch overhead via graph replay --
-        best for tiny back-to-back kernels, but the graph capture fails/misattributes
-        for some references (CuTeDSL) so it is not universal.
+        ``cudagraph_proton`` -> ported ``do_bench_cudagraph_proton`` (graph replay +
+        Proton kernel time, with L2 flushes captured outside Proton scopes); like
+        ``proton`` it reports kernel time, but also removes launch overhead via
+        graph replay. Graph capture or attribution is not universal.
         Prefer ``proton`` when the reference has heavy host dispatch (flashinfer,
         CuTeDSL) -- ``event`` would over/under-credit us by measuring the wall, not the
-        kernel. (Plain no-flush ``do_bench_cudagraph`` is intentionally NOT offered.)
+        kernel. Timer failures are propagated; a result is never silently relabelled
+        after falling back to a different measurement method.
     rounds : int
         Independent measurement rounds; per-impl times are averaged across
         rounds. (Triton times a single fn with no rounds; this is our sampling
@@ -505,8 +485,7 @@ def bench(
     -------
     dict
         ``{"impls": {name: us}, "round_samples": {name: [us, ...]}, ...}``.
-        Times are stored in microseconds (same unit as the pinned tir-bench
-        baselines).
+        Times are stored in microseconds (same unit as the pinned tir-bench baselines).
     """
     # warmup/repeat/cudagraph_rep default to None = "use the timer function's own
     # (Triton-aligned) default". They are only forwarded to the timer below when a
@@ -525,8 +504,8 @@ def bench(
     # change is a one-line edit. proton = pure per-kernel GPU time; it is honest for
     # references with heavy host dispatch (flashinfer, CuTeDSL) where the ``event``
     # wall would over/under-credit us, and matches event within a few % on
-    # compute-bound kernels. It auto-falls back to ``event`` when Proton/CUPTI is
-    # unavailable (non-NVIDIA, or under pytest).
+    # compute-bound kernels. A Proton failure is explicit so the recorded timer
+    # always names the quantity that was actually measured.
     if timer is None:
         timer = "proton"
     if timer not in {"event", "proton", "cudagraph_proton"}:
@@ -581,7 +560,7 @@ def bench(
             "warmup": _timer_kwargs.get("warmup", _sig_default(_timer_fn, "warmup")),
             "repeat": _timer_kwargs.get("rep", _sig_default(_timer_fn, "rep")),
         }
-    else:  # cudagraph_proton -- no warmup; rep is the graph unroll budget
+    else:  # cudagraph_proton has no warmup; rep is the graph-unroll budget
         _timer_fn = _do_bench_cudagraph_proton
         _timer_kwargs = {}
         if cudagraph_rep is not None:
@@ -592,6 +571,7 @@ def bench(
         **_eff,
         "cooldown_s": cooldown_s,
         "rounds": rounds,
+        "round_aggregate": "mean",
         "order": list(funcs.keys()),
     }
 
