@@ -24,7 +24,6 @@ import os
 import statistics
 import sys
 import tempfile
-import threading
 import time
 import uuid
 from collections.abc import Mapping
@@ -782,85 +781,3 @@ class CudaProfiler:
                 self.write_stride,
                 self._leader(leader),
             )
-
-
-class _OfficialIketExecutable:
-    """Executable whose CUDA image is patched and decoded by NVIDIA run-iket."""
-
-    def __init__(self, executable):
-        self._executable = executable
-        self._jitted_module = None
-        self._jit_lock = threading.Lock()
-
-    @property
-    def mod(self):
-        """Return the offline module without loading its CUDA image."""
-        return self._executable.mod
-
-    @staticmethod
-    def _validate_environment():
-        from ._iket_official import validate_official_environment
-
-        validate_official_environment()
-
-    def jit(self, *args, **kwargs):
-        """Validate run-iket before the first load and every forced recompile."""
-        force_recompile = bool(kwargs.get("force_recompile", False))
-        with self._jit_lock:
-            if self._jitted_module is None or force_recompile:
-                self._validate_environment()
-                self._jitted_module = self._executable.jit(*args, **kwargs)
-            return self._jitted_module
-
-    def export_library(self, *_args, **_kwargs):
-        raise RuntimeError(
-            "Official IKET executables cannot be exported; run-iket must patch the "
-            "JIT-loaded CUDA image in the profiling process"
-        )
-
-    def __getitem__(self, name):
-        def invoke(*args, **kwargs):
-            return self.jit().get_function(name, query_imports=True)(*args, **kwargs)
-
-        return invoke
-
-    def __call__(self, *args, **kwargs):
-        return self.jit().main(*args, **kwargs)
-
-
-@T.meta_class
-class IketProfiler:
-    """TIRx annotations compiled for NVIDIA's official IKET runtime.
-
-    Compilation is available offline.  Before JIT loading or invocation, run
-    the workload under the locked ``run-iket profile`` environment documented
-    by :mod:`tvm.tirx._iket_official`.
-    """
-
-    def mark(self, name: str):
-        T.evaluate(T.cuda.iket.mark(name))
-
-    def range_start(self, name: str):
-        return T.cuda.iket.range_start(name)
-
-    def range_end(self, token: tvm.tirx.PrimExpr):
-        T.evaluate(T.cuda.iket.range_end(token))
-
-    def range_push(self, name: str):
-        T.evaluate(T.cuda.iket.range_push(name))
-
-    def range_pop(self):
-        T.evaluate(T.cuda.iket.range_pop())
-
-    def sentinel_token(self, name: str):
-        return T.cuda.iket.sentinel_token(name)
-
-    def compile(self, mod, target=None, *, tir_pipeline="tirx"):
-        """Compile official IKET metadata and NativeDump placeholders."""
-        if isinstance(mod, tvm.tirx.PrimFunc):
-            mod = tvm.IRModule.from_expr(mod)
-        if not isinstance(mod, tvm.IRModule):
-            raise TypeError("IketProfiler.compile expects a TIRx PrimFunc or IRModule")
-        enabled_mod = mod.with_attr("tirx.iket.enabled", True)
-        executable = tvm.compile(enabled_mod, target=target, tir_pipeline=tir_pipeline)
-        return _OfficialIketExecutable(executable)

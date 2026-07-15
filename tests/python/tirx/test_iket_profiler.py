@@ -30,9 +30,10 @@ import pytest
 import tvm
 from tvm.backend.cuda import transforms as cuda_transforms
 from tvm.script import tirx as T
-from tvm.tirx.bench import IketProfiler
+from tvm.tirx.cuda.iket import IketProfiler
 
 TARGET = tvm.target.Target({"kind": "cuda", "arch": "sm_100a"})
+ORACLE_PATH = Path(__file__).with_name("iket_official_cutlass_4_6_1_oracle.json")
 
 
 @T.prim_func
@@ -508,7 +509,7 @@ def test_proxy_fails_closed_and_forbids_export(tmp_path, monkeypatch):
 
 
 def test_environment_validation_is_not_process_cached(tmp_path, monkeypatch):
-    from tvm.tirx import _iket_official
+    from tvm.tirx.cuda import iket as _iket_official
 
     injection_path = tmp_path / "libsmodel_injection.so"
     injection_path.write_bytes(b"locked")
@@ -545,7 +546,7 @@ def test_environment_validation_is_not_process_cached(tmp_path, monkeypatch):
 
 
 def test_injection_environment_accepts_run_iket_two_passes(tmp_path, monkeypatch):
-    from tvm.tirx import _iket_official
+    from tvm.tirx.cuda import iket as _iket_official
 
     injection = tmp_path / "libsmodel_injection.so"
     injection.write_bytes(b"locked-injection")
@@ -577,6 +578,37 @@ def test_injection_environment_accepts_run_iket_two_passes(tmp_path, monkeypatch
         _iket_official._validate_injection_environment(  # pylint: disable=protected-access
             expected_digest
         )
+
+
+def test_cutlass_4_6_1_oracle_manifest_integrity():
+    oracle = json.loads(ORACLE_PATH.read_text(encoding="utf-8"))
+    assert oracle["schema_version"] == 2
+    assert oracle["profile"]["cutlass_dsl"] == "4.6.1"
+    assert oracle["profile"]["instrument_method"] == "NativeDump"
+    assert "--dump-dir=<output>" in oracle["profile"]["compiler_flags"]
+    metadata_bytes = json.dumps(oracle["metadata"], sort_keys=True, separators=(",", ":")).encode()
+    assert hashlib.sha256(metadata_bytes).hexdigest() == oracle["metadata_sha256"]
+    abi = oracle["native_dump_abi"]
+    assert abi["sentinel_event_id"] == 0
+    assert abi["range_pop_event_id"] == 31
+    assert (
+        abi["meta_info_bytes"],
+        abi["event_attributes_bytes"],
+        abi["range_attributes_bytes"],
+    ) == (48, 60, 72)
+    assert abi["patched_hot_path"] == [
+        "GLOBALTIMERLO",
+        "ENCODE_EVENT_ID",
+        "STORE_GLOBAL_32",
+        "ADD_WRITE_PTR_64_4",
+    ]
+    all_hashes = [
+        *oracle["artifact_sha256"].values(),
+        *oracle["patch_artifact_sha256"].values(),
+        *oracle["wheels"].values(),
+        oracle["metadata_sha256"],
+    ]
+    assert all(re.fullmatch(r"[0-9a-f]{64}", value) for value in all_hashes)
 
 
 def test_external_trace_contract():
@@ -629,12 +661,8 @@ def test_external_patch_contract(tmp_path):
         check=True,
     )
     report = json.loads((tmp_path / "verification.json").read_text(encoding="utf-8"))
+    oracle = json.loads(ORACLE_PATH.read_text(encoding="utf-8"))
     assert report["schema_version"] == 1
     assert report["site_count"] > 0
-    assert report["normalized_signature"] == [
-        "GLOBALTIMERLO",
-        "ENCODE_EVENT_ID",
-        "STORE_GLOBAL_32",
-        "ADD_WRITE_PTR_64_4",
-    ]
+    assert report["normalized_signature"] == oracle["native_dump_abi"]["patched_hot_path"]
     assert all(re.fullmatch(r"[0-9a-f]{64}", value) for value in report["sha256"].values())

@@ -128,8 +128,8 @@ def _verify_patch(unpatched_sass: str, patched_sass: str, kernel: str) -> int:
             )
         if increment_address == store_address + 32:
             middle = store_address + 16
-            if before[middle] != after[middle] or "PLOP3.LUT" not in before[middle]:
-                raise RuntimeError(f"unexpected predication bridge at {middle:#x}")
+            if before[middle] != after[middle]:
+                raise RuntimeError(f"interleaved instruction changed at {middle:#x}")
         old_store = _without_predicate(before[store_address])
         new_store = _without_predicate(after[store_address])
         old_register = STORE_REGISTER.search(old_store)

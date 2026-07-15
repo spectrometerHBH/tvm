@@ -23,7 +23,7 @@ from tvm_ffi.libinfo import load_lib_ctypes
 
 from tvm.base import _LOADED_LIBS
 
-_LAZY_SUBMODULES = {"lang", "op", "operator", "script", "target_tags", "transforms"}
+_LAZY_SUBMODULES = {"iket", "lang", "op", "operator", "script", "target_tags", "transforms"}
 
 
 def _detect_target_from_device(dev):
@@ -92,6 +92,7 @@ def __getattr__(name: str):
 
 
 __all__ = [
+    "iket",
     "lang",
     "op",
     "operator",
