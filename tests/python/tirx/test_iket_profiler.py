@@ -320,17 +320,27 @@ def test_regular_lowering_strips_annotations_and_tokens():
     [
         ("tvm.tirx.compilation_pipeline", "default_tir_pipeline"),
         ("tvm.tirx.compilation_pipeline", "tirx_pipeline"),
-        ("tvm.s_tir.pipeline", "default_s_tir_pipeline"),
-        ("tvm.s_tir.backend.adreno.pipeline", "default_tir_pipeline"),
-        ("tvm.backend.trn.pipeline", "trn_pipeline"),
     ],
 )
-def test_every_split_host_device_pipeline_immediately_lowers_iket(module_name, factory_name):
+def test_tirx_pipelines_immediately_lower_iket(module_name, factory_name):
     factory = getattr(importlib.import_module(module_name), factory_name)
     source = inspect.getsource(factory)
     assert re.search(
         r"tirx\.transform\.SplitHostDevice\(\),\s+tirx\.transform\.LowerIket\(\)", source
     )
+
+
+@pytest.mark.parametrize(
+    ("module_name", "factory_name"),
+    [
+        ("tvm.s_tir.pipeline", "default_s_tir_pipeline"),
+        ("tvm.s_tir.backend.adreno.pipeline", "default_tir_pipeline"),
+        ("tvm.backend.trn.pipeline", "trn_pipeline"),
+    ],
+)
+def test_non_tirx_pipelines_do_not_lower_iket(module_name, factory_name):
+    factory = getattr(importlib.import_module(module_name), factory_name)
+    assert "LowerIket" not in inspect.getsource(factory)
 
 
 def test_lowering_emits_native_dump_metadata_without_control_abi():

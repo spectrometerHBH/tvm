@@ -43,7 +43,6 @@ def trn_pipeline():
             tirx.transform.RemoveNoOp(),
             tirx.transform.AnnotateEntryFunc(),
             tirx.transform.SplitHostDevice(),
-            tirx.transform.LowerIket(),
             tirx.transform.MakePackedAPI(),
         ]
         return tvm.ir.transform.Sequential(passes)(mod)
