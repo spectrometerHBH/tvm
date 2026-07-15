@@ -18,7 +18,7 @@
  */
 
 /*!
- * \file lower_iket.cc
+ * \file backend/cuda/transforms/lower_iket.cc
  * \brief Lower frontend-only TIRx IKET annotations to CUDA tracing helpers.
  */
 
