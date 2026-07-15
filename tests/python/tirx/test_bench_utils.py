@@ -58,6 +58,40 @@ def test_bench_cooldown_precedes_every_impl(monkeypatch):
     assert calls == ["a", "b", "a", "b"]
     assert sleeps == [1.0, 1.0, 1.0, 1.0]
     assert results["benchmark_protocol"]["cooldown_s"] == 1.0
+    assert results["benchmark_protocol"]["round_aggregate"] == "mean"
+
+
+def test_bench_retains_round_samples_and_uses_arithmetic_mean(monkeypatch):
+    values = iter([0.001, 0.002, 0.100])
+
+    def fake_timer(_fn, warmup=25, rep=100):
+        del warmup, rep
+        return next(values)
+
+    monkeypatch.setattr(bench_module, "_do_bench_event", fake_timer)
+
+    results = bench({"tir": lambda: None}, timer="event", cooldown_s=0, rounds=3)
+
+    assert results["round_samples"] == {"tir": [1.0, 2.0, 100.0]}
+    assert results["impls"] == {"tir": 103.0 / 3.0}
+
+
+def test_bench_l2_flush_buffer_matches_triton_256_mib(monkeypatch):
+    captured = {}
+
+    def fake_empty(size, *, dtype, device):
+        captured.update(size=size, dtype=dtype, device=device)
+        return object()
+
+    monkeypatch.setattr(bench_module.torch, "empty", fake_empty)
+
+    bench_module._empty_cache_for_benchmark()
+
+    assert captured == {
+        "size": 256 * 1024 * 1024 // 4,
+        "dtype": torch.int,
+        "device": "cuda",
+    }
 
 
 @pytest.mark.gpu
@@ -75,41 +109,61 @@ def test_bench_event_pure_launch():
     assert results["timer"] == "event"
 
 
-@pytest.mark.gpu
-@pytest.mark.skipif(not env.has_cuda(), reason="need cuda")
-def test_bench_default_timer_is_proton():
-    """Omitting timer resolves to the proton default (recorded as timer='proton').
+def test_bench_default_timer_is_proton(monkeypatch):
+    """Omitting timer resolves to Proton and invokes only the Proton timer."""
+    calls = []
 
-    Under pytest _do_bench_proton falls back to event timing, but bench() still
-    records the resolved timer name, so this pins the timer=None -> 'proton' default.
-    """
-    M, N = 256, 256
-    A = torch.randn(M, N, device="cuda", dtype=torch.float16)
-    B = torch.randn(M, N, device="cuda", dtype=torch.float16)
+    def fake_proton(fn, warmup=25, rep=100):
+        calls.append((warmup, rep))
+        fn()
+        return 0.001
 
-    funcs = {"mm": lambda: torch.mm(A, B)}
-    results = bench(funcs, warmup=5, repeat=10)
+    monkeypatch.setattr(bench_module, "_do_bench_proton", fake_proton)
+
+    results = bench({"noop": lambda: None}, cooldown_s=0)
+
     assert results["timer"] == "proton"
-    assert results["impls"]["mm"] > 0
+    assert results["impls"] == {"noop": 1.0}
+    assert calls == [(25, 100)]
 
 
-@pytest.mark.gpu
-@pytest.mark.skipif(not env.has_cuda(), reason="need cuda")
-def test_bench_cudagraph_proton_pure_launch():
-    """New Triton-standard bench(): cudagraph_proton timer.
+def test_bench_cudagraph_proton_wiring(monkeypatch):
+    calls = []
 
-    Under pytest, _do_bench_cudagraph_proton falls back to event-based cudagraph
-    timing (no CUPTI/Proton required in CI), so this exercises the mode wiring and
-    the fallback path rather than the real Proton attribution.
-    """
-    M, N = 256, 256
-    A = torch.randn(M, N, device="cuda", dtype=torch.float16)
-    B = torch.randn(M, N, device="cuda", dtype=torch.float16)
+    def fake_cudagraph_proton(fn, rep=20):
+        calls.append(rep)
+        fn()
+        return 0.002
 
-    funcs = {"mm": lambda: torch.mm(A, B)}
-    results = bench(funcs, warmup=5, repeat=10, timer="cudagraph_proton")
-    assert results["impls"]["mm"] > 0
+    monkeypatch.setattr(bench_module, "_do_bench_cudagraph_proton", fake_cudagraph_proton)
+
+    results = bench({"noop": lambda: None}, timer="cudagraph_proton", cudagraph_rep=7, cooldown_s=0)
+
+    assert results["impls"] == {"noop": 2.0}
     assert results["timer"] == "cudagraph_proton"
+    assert calls == [7]
+
+
+def test_bench_never_silently_falls_back_from_proton(monkeypatch):
+    def unavailable(_fn, warmup=25, rep=100):
+        del warmup, rep
+        raise RuntimeError("Proton profiler session could not be created")
+
+    monkeypatch.setattr(bench_module, "_do_bench_proton", unavailable)
+
+    with pytest.raises(RuntimeError, match="Proton profiler session"):
+        bench({"noop": lambda: None}, timer="proton", cooldown_s=0)
+
+
+@pytest.mark.parametrize(
+    ("timer", "alternative"),
+    [("proton", "event"), ("cudagraph_proton", "event")],
+)
+def test_missing_proton_session_is_an_explicit_error(monkeypatch, timer, alternative):
+    monkeypatch.setattr(bench_module.proton, "start", lambda *_args, **_kwargs: None)
+
+    with pytest.raises(RuntimeError, match=rf"{timer}.*timer='{alternative}'"):
+        bench_module._start_proton_session("profile", timer=timer, explicit_alternative=alternative)
 
 
 @pytest.mark.gpu
@@ -134,11 +188,10 @@ def test_bench_references_pure_launch():
 @pytest.mark.gpu
 @pytest.mark.skipif(not env.has_cuda(), reason="need cuda")
 def test_bench_rejects_unknown_timer():
-    """New bench() only accepts event / proton / cudagraph_proton (plain cudagraph
-    was removed)."""
+    """Unknown timer names fail instead of changing measurement method."""
     A = torch.randn(8, 8, device="cuda", dtype=torch.float16)
     with pytest.raises(ValueError):
-        bench({"mm": lambda: torch.mm(A, A)}, timer="cudagraph")
+        bench({"mm": lambda: torch.mm(A, A)}, timer="unknown")
 
 
 if __name__ == "__main__":
