@@ -35,7 +35,7 @@ from tvm.script import tirx as T
 from tvm.tirx.cuda.iket import IketProfiler
 
 TARGET = tvm.target.Target({"kind": "cuda", "arch": "sm_100a"})
-ORACLE_PATH = Path(__file__).with_name("iket_official_cutlass_4_6_1_oracle.json")
+ORACLE_PATH = Path(__file__).parent / "oracle" / "iket_official_cutlass_4_6_1_oracle.json"
 
 
 @T.prim_func
