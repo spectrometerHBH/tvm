@@ -14,7 +14,7 @@
 # KIND, either express or implied.  See the License for the
 # specific language governing permissions and limitations
 # under the License.
-"""Parser-style action lowering for logical megakernel specifications."""
+"""Parser-style physical-program lowering for logical megakernel specifications."""
 
 from __future__ import annotations
 
@@ -30,27 +30,22 @@ from tvm.tirx import PrimFunc
 
 from ..dsl import EventSpec, KernelSpec, TensorSpec, VarSpec
 from .model import (
-    Action,
-    BarrierAction,
+    BarrierStep,
     DeviceRegionPlan,
-    EmissionContext,
     ExecutionPlan,
-    FetchGuardAction,
-    HookAction,
-    HostCallAction,
-    HostEdgeAction,
-    MegakernelBackend,
-    MidBodyPortAction,
-    NotifyAction,
-    ProfileAction,
-    QueuePushAction,
-    RunAction,
-    RuntimeEventInitAction,
-    SmemEnterAction,
-    SmemExitAction,
-    TileActionProgram,
-    TileEmitter,
-    WaitAction,
+    ExecutionPlanBackend,
+    FetchGuardStep,
+    HookStep,
+    HostCallStep,
+    HostSyncStep,
+    MidBodyPortStep,
+    NotifyStep,
+    ProgramStep,
+    QueuePushStep,
+    RunStep,
+    RuntimeEventInitStep,
+    TileProgram,
+    WaitStep,
     make_static_execution_plan,
 )
 from .scheduler import StaticTileScheduler, TIRXSemaphore
@@ -88,7 +83,7 @@ class LoweringOptions:
     schedule: str = "static"
     attrs: dict[str, Any] = field(default_factory=dict)
     execution_plan: ExecutionPlan | None = None
-    backend: MegakernelBackend | None = None
+    backend: ExecutionPlanBackend | None = None
 
 
 @dataclass
@@ -128,23 +123,17 @@ def _megakernel_entry(*, emitter: T.constexpr):
     emitter.emit()
 
 
-class TIRXStaticBackend(MegakernelBackend):
+class TIRXStaticBackend(ExecutionPlanBackend):
     """Default parser backend for one static persistent device region."""
 
     def __init__(self, options: LoweringOptions):
         self.options = options
-        self._visited_actions: list[tuple[Action, EmissionContext]] = []
 
-    def begin_execution(self, plan: ExecutionPlan) -> None:
+    def lower(self, plan: ExecutionPlan) -> PrimFunc:
         if self.options.schedule != "static":
             raise NotImplementedError("the default backend supports only static scheduling")
         if len(plan.device_regions) != 1 or plan.host_regions:
             raise ValueError("the default backend requires exactly one device region")
-
-    def emit_action(self, action: Action, context: EmissionContext) -> None:
-        self._visited_actions.append((action, context))
-
-    def end_execution(self, plan: ExecutionPlan) -> PrimFunc:
         state = self._prepare_state(plan)
         try:
             return _megakernel_entry.specialize(emitter=_ParserEmitter(self, state))
@@ -180,8 +169,8 @@ class TIRXStaticBackend(MegakernelBackend):
         )
         self._bind_event_buffers(state)
         runtime = {"state": state, "region": region, "indices": (None, None, None)}
-        for action in region.prologue:
-            self._emit_tirx_action(action, runtime)
+        for step in region.prologue_steps:
+            self._emit_tirx_step(step, runtime)
 
         state.scheduler = StaticTileScheduler(
             state.queue,
@@ -203,8 +192,8 @@ class TIRXStaticBackend(MegakernelBackend):
             self._emit_dispatch(state, region, runtime)
             state.scheduler.next_tile()
 
-        for action in region.epilogue:
-            self._emit_tirx_action(action, runtime)
+        for step in region.epilogue_steps:
+            self._emit_tirx_step(step, runtime)
 
     def _emit_var_args(self, state: _BuildState) -> None:
         used_names: set[str] = set()
@@ -256,7 +245,7 @@ class TIRXStaticBackend(MegakernelBackend):
             offset += state.event_sizes[id(event)]
 
     def _emit_dispatch(self, state: _BuildState, region: DeviceRegionPlan, runtime) -> None:
-        items: list[tuple[int, str | TileActionProgram]] = []
+        items: list[tuple[int, str | TileProgram]] = []
         if state.event_buffers:
             items.extend(
                 [
@@ -279,8 +268,7 @@ class TIRXStaticBackend(MegakernelBackend):
                 elif item == "wait_event_init":
                     self._emit_wait_event_init_task(state)
                 else:
-                    for action in item.actions:
-                        self._emit_tirx_action(action, runtime)
+                    self._emit_tile_program(item, runtime)
             else_frames[index].__enter__()
         T.evaluate(T.cuda.trap_when_assert_failed(False))
         for index in range(len(items) - 1, -1, -1):
@@ -293,98 +281,109 @@ class TIRXStaticBackend(MegakernelBackend):
             raise TypeError("event coordinate map must return a tuple or list")
         return tuple(coord)
 
-    def _emit_tirx_action(self, action: Action, runtime) -> None:
+    def _emit_tile_program(self, program: TileProgram, runtime) -> None:
+        smem = runtime["state"].smem_manager
+        entered_smem = False
+        if program.smem_scope == "program":
+            smem.enter_tile_runtime(program.tile)
+            entered_smem = True
+        for step in program.steps:
+            if (
+                program.smem_scope == "run_to_end"
+                and isinstance(step, RunStep)
+                and not entered_smem
+            ):
+                smem.enter_tile_runtime(program.tile)
+                entered_smem = True
+            self._emit_tirx_step(step, runtime, program.tile)
+        if entered_smem:
+            smem.exit_tile_runtime()
+
+    def _emit_tirx_step(self, step: ProgramStep, runtime, tile=None) -> None:
         state: _BuildState = runtime["state"]
         indices = runtime["indices"]
         smem = state.smem_manager
         scheduler = state.scheduler
-        if isinstance(action, SmemEnterAction):
-            smem.enter_tile_runtime(action.tile)
-        elif isinstance(action, SmemExitAction):
-            smem.exit_tile_runtime()
-        elif isinstance(action, HookAction):
-            if action.hook == "init_shared_resources":
+        if isinstance(step, HookStep):
+            if step.hook == "init_shared_resources":
                 smem.set_tile(None)
-                action.target.init_shared_resources(smem)
-            elif action.hook == "finalize_shared_resources":
-                action.target.finalize_shared_resources(smem)
-            elif action.hook == "device_init":
-                smem.set_tile(action.target)
-                action.target.device_init(smem, *indices)
-            elif action.hook == "prefetch":
-                action.target.prefetch(*indices)
-            elif action.hook == "smem_commit":
+                step.target.init_shared_resources(smem)
+            elif step.hook == "finalize_shared_resources":
+                step.target.finalize_shared_resources(smem)
+            elif step.hook == "device_init":
+                smem.set_tile(step.target)
+                step.target.device_init(smem, *indices)
+            elif step.hook == "prefetch":
+                step.target.prefetch(*indices)
+            elif step.hook == "smem_commit":
                 smem.commit()
-            elif callable(action.target):
-                action.target(*action.args, **action.kwargs)
+            elif callable(step.target):
+                step.target(*step.args, **step.kwargs)
             else:
-                raise ValueError(f"unsupported hook action {action.hook!r}")
-        elif isinstance(action, WaitAction):
-            coord = self._event_coord(action.coord_map, indices)
-            semaphore = TIRXSemaphore(state.event_buffers[id(action.event)])
-            scheduler.wait(semaphore, *coord, wait_level=action.level, mask=action.mask)
-        elif isinstance(action, NotifyAction):
-            coord = self._event_coord(action.coord_map, indices)
-            semaphore = TIRXSemaphore(state.event_buffers[id(action.event)])
+                raise ValueError(f"unsupported hook step {step.hook!r}")
+        elif isinstance(step, WaitStep):
+            coord = self._event_coord(step.coord_map, indices)
+            semaphore = TIRXSemaphore(state.event_buffers[id(step.event)])
+            scheduler.wait(semaphore, *coord, wait_level=step.level, mask=step.mask)
+        elif isinstance(step, NotifyStep):
+            coord = self._event_coord(step.coord_map, indices)
+            semaphore = TIRXSemaphore(state.event_buffers[id(step.event)])
 
             def notify_func(_notify_idx):
-                return (action.count, action.rank, *coord)
+                return (step.count, step.rank, *coord)
 
             scheduler.notify(
                 semaphore,
                 notify_func,
-                scope=action.scope,
-                scope_id=action.scope_id,
-                release=action.release,
+                scope=step.scope,
+                scope_id=step.scope_id,
+                release=step.release,
             )
-        elif isinstance(action, RunAction):
-            self._emit_run(action, indices)
-        elif isinstance(action, BarrierAction):
-            if action.kind == "cta":
+        elif isinstance(step, RunStep):
+            self._emit_run(step, tile, indices)
+        elif isinstance(step, BarrierStep):
+            if step.kind == "cta":
                 T.cuda.cta_sync()
-            elif action.kind == "warp":
+            elif step.kind == "warp":
                 T.cuda.warp_sync()
-            elif callable(action.payload):
-                action.payload(runtime)
             else:
-                raise ValueError(f"unsupported barrier kind {action.kind!r}")
-        elif isinstance(action, RuntimeEventInitAction):
-            if callable(action.payload):
-                action.payload(runtime)
-            elif isinstance(action.event, EventSpec):
-                buffer = state.event_buffers[id(action.event)]
-                if action.predicate is None:
-                    T.buffer_store(buffer, action.value, [0])
-                elif action.predicate:
-                    T.buffer_store(buffer, action.value, [0])
+                raise ValueError(f"unsupported barrier kind {step.kind!r}")
+        elif isinstance(step, RuntimeEventInitStep):
+            if not isinstance(step.event, EventSpec):
+                raise ValueError("default backend runtime event init requires an EventSpec")
+            if step.scope != "thread":
+                raise ValueError(
+                    f"default backend runtime event init does not support {step.scope!r} scope"
+                )
+            buffer = state.event_buffers[id(step.event)]
+            if step.scope_id == -1:
+                T.buffer_store(buffer, step.value, [0])
             else:
-                raise ValueError("runtime event init requires an EventSpec or backend payload")
-        elif isinstance(action, ProfileAction):
-            if callable(action.payload):
-                action.payload(runtime)
-        elif isinstance(action, QueuePushAction | FetchGuardAction | MidBodyPortAction):
-            if not callable(action.payload):
-                raise NotImplementedError(f"default backend cannot emit {type(action).__name__}")
-            action.payload(runtime)
-        elif isinstance(action, HostCallAction | HostEdgeAction):
-            raise ValueError("host actions cannot appear in the default device backend")
+                tid = T.thread_id([scheduler.num_threads])
+                with T.If(tid == step.scope_id):
+                    with T.Then():
+                        T.buffer_store(buffer, step.value, [0])
+        elif isinstance(step, QueuePushStep | FetchGuardStep | MidBodyPortStep):
+            raise NotImplementedError(f"default backend cannot emit {type(step).__name__}")
+        elif isinstance(step, HostCallStep | HostSyncStep):
+            raise ValueError("host steps cannot appear in the default device backend")
         else:
-            raise TypeError(f"unknown megakernel action {type(action).__name__}")
+            raise TypeError(f"unknown megakernel program step {type(step).__name__}")
 
-    def _emit_run(self, action: RunAction, indices) -> None:
-        predicate = action.predicate(*indices) if callable(action.predicate) else action.predicate
+    def _emit_run(self, step: RunStep, tile, indices) -> None:
+        predicate = step.predicate(*indices) if callable(step.predicate) else step.predicate
 
         def run_once(repeat_idx=0):
             mapped = indices
-            if action.index_map is not None:
-                mapped = action.index_map(*indices, repeat_idx)
-            action.tile.impl.run(*mapped)
+            if step.index_map is not None:
+                mapped = step.index_map(*indices, repeat_idx)
+            tile.impl.run(*mapped)
 
         def run_body():
-            if action.repeat == 1:
+            if step.repeat == 1:
                 run_once()
             else:
-                with T.serial(action.repeat) as repeat_idx:
+                with T.serial(step.repeat) as repeat_idx:
                     run_once(repeat_idx)
 
         if predicate is None or predicate is True:
@@ -589,14 +588,15 @@ def _resolve_options(options: LoweringOptions | None) -> LoweringOptions:
 
 def lower_execution_plan(
     plan: ExecutionPlan,
-    backend: MegakernelBackend | None = None,
+    backend: ExecutionPlanBackend | None = None,
     options: LoweringOptions | None = None,
 ):
     """Validate and lower an explicit execution plan through a backend."""
 
+    plan.validate()
     resolved = _resolve_options(options)
     selected_backend = backend or resolved.backend or TIRXStaticBackend(resolved)
-    return TileEmitter(selected_backend).emit(plan)
+    return selected_backend.lower(plan)
 
 
 def lower_to_tirx(kernel: KernelSpec, options: LoweringOptions | None = None) -> PrimFunc:
@@ -612,7 +612,7 @@ def lower_to_tirx(kernel: KernelSpec, options: LoweringOptions | None = None) ->
 def lower_static_queue_init_to_tirx(
     kernel: KernelSpec, options: LoweringOptions | None = None
 ) -> PrimFunc:
-    """Build the queue initializer matching the default static action plan."""
+    """Build the queue initializer matching the default static physical plan."""
 
     resolved = _resolve_options(options)
     plan = resolved.execution_plan or make_static_execution_plan(kernel)
@@ -636,7 +636,7 @@ def lower_to_tirx_module(kernel: KernelSpec, options: LoweringOptions | None = N
 
 @tvm.transform.module_pass(opt_level=0, name="LowerMegakernelDSL")
 class LowerMegakernelDSL:
-    """Module pass wrapper around parser-style action lowering."""
+    """Module pass wrapper around parser-style physical-program lowering."""
 
     def __init__(self, kernel: KernelSpec, options: LoweringOptions | None = None):
         self.kernel = kernel

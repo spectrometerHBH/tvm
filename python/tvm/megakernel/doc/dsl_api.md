@@ -340,6 +340,42 @@ stage2 = kernel.tile(
 ).wait(row_ready, lambda m, n, k: (m,))
 ```
 
+## Physical Execution Plan
+
+Lowering policies produce one `ExecutionPlan`.  Its device regions contain
+ordered `TileProgram` objects, and each program contains the `ProgramStep`
+sequence that a backend lowers.  For example, the default static policy emits
+`HookStep`, `WaitStep`, `RunStep`, and `NotifyStep` values in source order:
+
+```python
+from tvm.megakernel.transform import make_static_execution_plan
+
+plan = make_static_execution_plan(kernel)
+for program in plan.device_regions[0].tile_programs:
+    print(program.tile.name, program.smem_scope, program.steps)
+```
+
+`TileProgram.smem_scope` is one of `"none"`, `"program"`, or `"run_to_end"`.
+Logical edge locations are not stored separately.  `plan.edge_placements()`
+validates the programs and returns the read-only `EdgePlacement` values derived
+from the steps carrying each edge.
+
+A custom backend implements a single entry point and owns traversal of regions
+and programs:
+
+```python
+from tvm.megakernel.transform import ExecutionPlanBackend, lower_execution_plan
+
+
+class MyBackend(ExecutionPlanBackend):
+    def lower(self, plan):
+        for region in plan.regions_in_dependency_order():
+            ...
+
+
+result = lower_execution_plan(plan, backend=MyBackend())
+```
+
 ## `KernelSpec.lower`
 
 ```python

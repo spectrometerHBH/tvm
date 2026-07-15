@@ -14,18 +14,19 @@
 # KIND, either express or implied.  See the License for the
 # specific language governing permissions and limitations
 # under the License.
-"""Execution-plan and action-program contracts for megakernel lowering."""
+"""Execution-plan and physical-program contracts for megakernel lowering."""
 
 from __future__ import annotations
 
-from collections import Counter, defaultdict
+from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
 from ..dsl import CoordMapType, EventSpec, KernelSpec, TileSpec
 
-EdgeLocation = Literal["tile_action", "fetch_guard", "host_runtime", "mid_body_port"]
+EdgeLocation = Literal["prologue", "fetch", "tile", "host", "epilogue"]
 RegionDependencyKind = Literal["launch_order", "completion"]
+SmemScope = Literal["none", "program", "run_to_end"]
 
 
 @dataclass(frozen=True, eq=False)
@@ -50,12 +51,15 @@ class LogicalEdge:
         return f"{self.producer}-[{self.event.name}]->{self.consumer}"
 
 
-class Action:
-    """Marker base class for physical lowering actions."""
+@dataclass(frozen=True, kw_only=True)
+class ProgramStep:
+    """Base class for one physical lowering step."""
+
+    edges: tuple[LogicalEdge, ...] = ()
 
 
 @dataclass(frozen=True)
-class HookAction(Action):
+class HookStep(ProgramStep):
     """Invoke a lifecycle or implementation hook selected by the backend."""
 
     hook: str
@@ -65,22 +69,19 @@ class HookAction(Action):
 
 
 @dataclass(frozen=True)
-class WaitAction(Action):
+class WaitStep(ProgramStep):
     """Wait for one physical event endpoint."""
 
-    edges: tuple[LogicalEdge, ...]
     event: EventSpec
     coord_map: CoordMapType
     level: str = "cta"
     mask: int = 0xFFFFFFFF
-    payload: Any = None
 
 
 @dataclass(frozen=True)
-class NotifyAction(Action):
+class NotifyStep(ProgramStep):
     """Notify one physical event endpoint."""
 
-    edges: tuple[LogicalEdge, ...]
     event: EventSpec
     coord_map: CoordMapType
     scope: str = "cta"
@@ -88,118 +89,75 @@ class NotifyAction(Action):
     count: Any = 1
     rank: int = -1
     release: bool = False
-    payload: Any = None
 
 
 @dataclass(frozen=True)
-class QueuePushAction(Action):
+class QueuePushStep(ProgramStep):
     """Push scheduler work, optionally as part of a logical edge binding."""
 
-    edges: tuple[LogicalEdge, ...] = ()
-    payload: Any = None
-
 
 @dataclass(frozen=True)
-class BarrierAction(Action):
+class BarrierStep(ProgramStep):
     """Emit a barrier at its exact source-order position."""
 
     kind: str
-    payload: Any = None
 
 
 @dataclass(frozen=True)
-class RuntimeEventInitAction(Action):
+class RuntimeEventInitStep(ProgramStep):
     """Initialize a runtime-sized physical event."""
 
     event: Any
     value: Any
-    predicate: Any = None
-    payload: Any = None
+    scope: str = "thread"
+    scope_id: int = 0
 
 
 @dataclass(frozen=True)
-class ProfileAction(Action):
-    """Emit one profiling lifecycle operation."""
-
-    phase: Literal["init", "begin", "end", "finalize"]
-    event: Any = None
-    predicate: Any = None
-    payload: Any = None
-
-
-@dataclass(frozen=True)
-class SmemEnterAction(Action):
-    """Enter a tile's managed shared-memory runtime scope."""
-
-    tile: TileSpec
-
-
-@dataclass(frozen=True)
-class SmemExitAction(Action):
-    """Exit a tile's managed shared-memory runtime scope."""
-
-    tile: TileSpec
-
-
-@dataclass(frozen=True)
-class RunAction(Action):
+class RunStep(ProgramStep):
     """Run a tile under an optional predicate, repeat, and index mapping."""
 
-    tile: TileSpec
     predicate: Any = None
     repeat: Any = 1
     index_map: Any = None
-    payload: Any = None
+    profile_event: Any = None
 
 
 @dataclass(frozen=True)
-class FetchGuardAction(Action):
+class FetchGuardStep(ProgramStep):
     """Guard publication of one scheduler fetch result."""
 
-    edges: tuple[LogicalEdge, ...]
     predicate: Any = None
-    payload: Any = None
 
 
 @dataclass(frozen=True)
-class MidBodyPortAction(Action):
+class MidBodyPortStep(ProgramStep):
     """Bind an edge to a backend-approved location inside a tile body."""
 
-    edges: tuple[LogicalEdge, ...]
     port: str
-    payload: Any = None
 
 
 @dataclass(frozen=True)
-class HostEdgeAction(Action):
-    """Realize a logical edge in a host or runtime region."""
-
-    edges: tuple[LogicalEdge, ...]
-    kind: RegionDependencyKind
-    payload: Any = None
-
-
-@dataclass(frozen=True)
-class HostCallAction(Action):
+class HostCallStep(ProgramStep):
     """Invoke a backend-owned host operation."""
 
     name: str
-    payload: Any = None
 
 
 @dataclass(frozen=True)
-class SchedulerFetchProgram:
-    """Ordered actions that fetch and publish scheduler work."""
+class HostSyncStep(ProgramStep):
+    """Synchronize host/runtime work at this exact program position."""
 
-    actions: tuple[Action, ...] = ()
+    kind: str
 
 
 @dataclass(frozen=True)
-class TileActionProgram:
-    """Ordered physical actions for one logical tile."""
+class TileProgram:
+    """Ordered physical steps for one logical tile."""
 
     tile: TileSpec
-    actions: tuple[Action, ...]
+    steps: tuple[ProgramStep, ...]
+    smem_scope: SmemScope = "none"
 
 
 @dataclass(frozen=True)
@@ -207,10 +165,10 @@ class DeviceRegionPlan:
     """One device region with lifecycle, fetch, and per-tile programs."""
 
     name: str
-    prologue: tuple[Action, ...] = ()
-    fetch_program: SchedulerFetchProgram = field(default_factory=SchedulerFetchProgram)
-    tile_programs: tuple[TileActionProgram, ...] = ()
-    epilogue: tuple[Action, ...] = ()
+    prologue_steps: tuple[ProgramStep, ...] = ()
+    fetch_steps: tuple[ProgramStep, ...] = ()
+    tile_programs: tuple[TileProgram, ...] = ()
+    epilogue_steps: tuple[ProgramStep, ...] = ()
     attrs: dict[str, Any] = field(default_factory=dict)
 
 
@@ -219,7 +177,7 @@ class HostRegionPlan:
     """One host/runtime region in the execution DAG."""
 
     name: str
-    actions: tuple[Action, ...]
+    steps: tuple[ProgramStep, ...]
     attrs: dict[str, Any] = field(default_factory=dict)
 
 
@@ -230,12 +188,11 @@ class RegionDependencyPlan:
     source: str
     target: str
     kind: RegionDependencyKind
-    payload: Any = None
 
 
 @dataclass(frozen=True)
-class EdgeBindingPlan:
-    """The single approved physical location for one logical edge."""
+class EdgePlacement:
+    """The physical location derived for one logical edge."""
 
     edge: LogicalEdge
     location: EdgeLocation
@@ -266,11 +223,6 @@ def logical_edges(kernel: KernelSpec) -> tuple[LogicalEdge, ...]:
     return tuple(result)
 
 
-def _action_edges(action: Action) -> tuple[LogicalEdge, ...]:
-    edges = getattr(action, "edges", ())
-    return tuple(edges)
-
-
 @dataclass(frozen=True)
 class ExecutionPlan:
     """Complete physical plan for one logical ``KernelSpec``."""
@@ -279,7 +231,6 @@ class ExecutionPlan:
     device_regions: tuple[DeviceRegionPlan, ...] = ()
     host_regions: tuple[HostRegionPlan, ...] = ()
     region_dependencies: tuple[RegionDependencyPlan, ...] = ()
-    edge_bindings: tuple[EdgeBindingPlan, ...] = ()
     attrs: dict[str, Any] = field(default_factory=dict)
 
     def regions_in_dependency_order(self) -> tuple[DeviceRegionPlan | HostRegionPlan, ...]:
@@ -308,7 +259,7 @@ class ExecutionPlan:
         return tuple(result)
 
     def validate(self) -> ExecutionPlan:
-        """Validate region topology, action placement, and exact edge coverage."""
+        """Validate region topology, step placement, and exact edge coverage."""
 
         self.kernel.validate()
         if not isinstance(self.attrs, dict):
@@ -328,230 +279,151 @@ class ExecutionPlan:
                 raise ValueError(f"unsupported region dependency kind {dependency.kind!r}")
         self.regions_in_dependency_order()
 
+        self._derive_edge_placements()
+        return self
+
+    def edge_placements(self) -> tuple[EdgePlacement, ...]:
+        """Return the validated physical placement derived for every logical edge."""
+
+        self.validate()
+        return self._derive_edge_placements()
+
+    def _derive_edge_placements(self) -> tuple[EdgePlacement, ...]:
+        """Validate physical programs and derive edge placements without storing a copy."""
+
         expected_edges = logical_edges(self.kernel)
         expected_by_key = {edge.key: edge for edge in expected_edges}
-        binding_counts = Counter(binding.edge.key for binding in self.edge_bindings)
-        missing = [str(edge) for edge in expected_edges if binding_counts[edge.key] == 0]
-        duplicate = [
-            str(expected_by_key[key]) for key, count in binding_counts.items() if count > 1
-        ]
-        unknown = [
-            binding.edge
-            for binding in self.edge_bindings
-            if binding.edge.key not in expected_by_key
-        ]
-        if missing:
-            raise ValueError(f"logical edges are unbound: {', '.join(missing)}")
-        if duplicate:
-            raise ValueError(f"logical edges have duplicate bindings: {', '.join(duplicate)}")
-        if unknown:
-            raise ValueError(f"edge binding references an unknown logical edge: {unknown[0]}")
-
-        binding_by_key = {binding.edge.key: binding for binding in self.edge_bindings}
-        occurrences: dict[tuple[int, str, str], list[tuple[str, Action, str | None]]] = defaultdict(
-            list
+        occurrences: dict[tuple[int, str, str], list[tuple[EdgePlacement, ProgramStep]]] = (
+            defaultdict(list)
         )
+        unknown_edges: list[LogicalEdge] = []
+
+        def place_step(
+            step: ProgramStep,
+            location: EdgeLocation,
+            region_name: str,
+            tile: TileSpec | None = None,
+        ) -> None:
+            if not isinstance(step, ProgramStep):
+                raise TypeError(f"physical program contains non-step value {step!r}")
+            if not isinstance(step.edges, tuple):
+                raise TypeError(f"{type(step).__name__}.edges must be a tuple")
+            if isinstance(step, RunStep | WaitStep | NotifyStep | QueuePushStep | MidBodyPortStep):
+                if location != "tile" or tile is None:
+                    raise ValueError(f"{type(step).__name__} must appear in a tile program")
+            if isinstance(step, FetchGuardStep) and location != "fetch":
+                raise ValueError("FetchGuardStep must appear in device fetch_steps")
+            if isinstance(step, HostCallStep | HostSyncStep) and location != "host":
+                raise ValueError(f"{type(step).__name__} must appear in a host region")
+            if isinstance(step, WaitStep):
+                for edge in step.edges:
+                    if edge.consumer != tile.name:
+                        raise ValueError("WaitStep is not in its logical consumer tile")
+            if isinstance(step, NotifyStep | QueuePushStep | MidBodyPortStep):
+                for edge in step.edges:
+                    if edge.producer != tile.name:
+                        raise ValueError(
+                            f"{type(step).__name__} is not in its logical producer tile"
+                        )
+            if isinstance(step, MidBodyPortStep):
+                if not isinstance(step.port, str) or not step.port:
+                    raise ValueError("MidBodyPortStep.port must be a non-empty string")
+                port = step.port
+            else:
+                port = None
+            for edge in step.edges:
+                if not isinstance(edge, LogicalEdge):
+                    raise TypeError(f"{type(step).__name__}.edges must contain LogicalEdge values")
+                placement = EdgePlacement(edge, location, region_name, port)
+                occurrences[edge.key].append((placement, step))
+                if edge.key not in expected_by_key:
+                    unknown_edges.append(edge)
+
         kernel_tile_ids = {id(tile) for tile in self.kernel.tiles}
         for region in self.device_regions:
             if not isinstance(region.attrs, dict):
                 raise TypeError(f"device region {region.name!r} attrs must be a dict")
-            for action in (*region.prologue, *region.epilogue):
-                for edge in _action_edges(action):
-                    occurrences[edge.key].append(("region_lifecycle", action, region.name))
-            for action in region.fetch_program.actions:
-                for edge in _action_edges(action):
-                    occurrences[edge.key].append(("fetch_guard", action, region.name))
+            if not isinstance(region.prologue_steps, tuple):
+                raise TypeError(f"device region {region.name!r} prologue_steps must be a tuple")
+            if not isinstance(region.fetch_steps, tuple):
+                raise TypeError(f"device region {region.name!r} fetch_steps must be a tuple")
+            if not isinstance(region.tile_programs, tuple):
+                raise TypeError(f"device region {region.name!r} tile_programs must be a tuple")
+            if not isinstance(region.epilogue_steps, tuple):
+                raise TypeError(f"device region {region.name!r} epilogue_steps must be a tuple")
+            for step in region.prologue_steps:
+                place_step(step, "prologue", region.name)
+            for step in region.fetch_steps:
+                place_step(step, "fetch", region.name)
             seen_tiles: set[int] = set()
             for program in region.tile_programs:
                 if id(program.tile) not in kernel_tile_ids:
-                    raise ValueError("tile action program references a tile outside this kernel")
+                    raise ValueError("tile program references a tile outside this kernel")
                 if id(program.tile) in seen_tiles:
                     raise ValueError(
                         f"device region {region.name!r} repeats tile program {program.tile.name!r}"
                     )
                 seen_tiles.add(id(program.tile))
-                for action in program.actions:
-                    if isinstance(action, SmemEnterAction | SmemExitAction | RunAction):
-                        if action.tile is not program.tile:
-                            raise ValueError(
-                                f"tile action in {program.tile.name!r} references another tile"
-                            )
-                    if isinstance(action, WaitAction):
-                        for edge in action.edges:
-                            if edge.consumer != program.tile.name:
-                                raise ValueError("wait action is not in its logical consumer tile")
-                    if isinstance(action, NotifyAction | QueuePushAction | MidBodyPortAction):
-                        for edge in _action_edges(action):
-                            if edge.producer != program.tile.name:
-                                raise ValueError(
-                                    "producer-side action is not in its logical producer tile"
-                                )
-                    placement = (
-                        "mid_body_port" if isinstance(action, MidBodyPortAction) else "tile_action"
+                if not isinstance(program.steps, tuple):
+                    raise TypeError(f"tile program {program.tile.name!r} steps must be a tuple")
+                if program.smem_scope not in ("none", "program", "run_to_end"):
+                    raise ValueError(
+                        f"tile program {program.tile.name!r} has invalid smem_scope "
+                        f"{program.smem_scope!r}"
                     )
-                    for edge in _action_edges(action):
-                        occurrences[edge.key].append((placement, action, region.name))
+                for step in program.steps:
+                    place_step(step, "tile", region.name, program.tile)
+            for step in region.epilogue_steps:
+                place_step(step, "epilogue", region.name)
 
         for region in self.host_regions:
             if not isinstance(region.attrs, dict):
                 raise TypeError(f"host region {region.name!r} attrs must be a dict")
-            for action in region.actions:
-                for edge in _action_edges(action):
-                    occurrences[edge.key].append(("host_runtime", action, region.name))
+            if not isinstance(region.steps, tuple):
+                raise TypeError(f"host region {region.name!r} steps must be a tuple")
+            for step in region.steps:
+                place_step(step, "host", region.name)
 
-        for key, binding in binding_by_key.items():
-            if binding.region not in region_name_set:
-                raise ValueError(f"edge binding references unknown region {binding.region!r}")
-            placed = occurrences.get(key, [])
-            if not placed:
-                raise ValueError(f"edge binding {binding.edge} has no physical action")
-            for placement, action, region_name in placed:
-                if placement != binding.location or region_name != binding.region:
+        if unknown_edges:
+            raise ValueError(
+                f"physical step references an unknown logical edge: {unknown_edges[0]}"
+            )
+        missing = [edge for edge in expected_edges if edge.key not in occurrences]
+        if missing:
+            raise ValueError(
+                f"logical edges are missing physical steps: {', '.join(map(str, missing))}"
+            )
+
+        result = []
+        for edge in expected_edges:
+            placed = occurrences[edge.key]
+            first = placed[0][0]
+            for placement, _ in placed[1:]:
+                if (
+                    placement.location,
+                    placement.region,
+                    placement.port,
+                ) != (first.location, first.region, first.port):
                     raise ValueError(
-                        f"edge {binding.edge} is placed at {placement} in {region_name!r}, "
-                        f"not {binding.location} in {binding.region!r}"
+                        f"edge {edge} spans physical placements "
+                        f"({first.location}, {first.region!r}, {first.port!r}) and "
+                        f"({placement.location}, {placement.region!r}, {placement.port!r})"
                     )
-                if binding.location == "fetch_guard" and not isinstance(action, FetchGuardAction):
-                    raise ValueError("fetch-guard edge must use FetchGuardAction")
-                if binding.location == "host_runtime" and not isinstance(action, HostEdgeAction):
-                    raise ValueError("host/runtime edge must use HostEdgeAction")
-                if binding.location == "mid_body_port":
-                    if not isinstance(action, MidBodyPortAction) or action.port != binding.port:
-                        raise ValueError("mid-body edge must use its approved port")
-
-        for key, placed in occurrences.items():
-            if key not in binding_by_key:
-                raise ValueError(f"physical action references unbound logical edge: {placed[0][1]}")
-        return self
+            result.append(EdgePlacement(edge, first.location, first.region, first.port))
+        return tuple(result)
 
 
-@dataclass(frozen=True)
-class EmissionContext:
-    """Current traversal position supplied to a backend."""
+class ExecutionPlanBackend:
+    """Backend that directly lowers a validated physical execution plan."""
 
-    plan: ExecutionPlan
-    region: DeviceRegionPlan | HostRegionPlan
-    program: str
-    tile: TileSpec | None = None
-
-
-class MegakernelBackend:
-    """Backend protocol consumed by ``TileEmitter``."""
-
-    def begin_execution(self, plan: ExecutionPlan) -> None:
-        """Begin an execution plan."""
-
-    def bind_region_dependency(self, plan: ExecutionPlan, dependency: RegionDependencyPlan) -> None:
-        """Bind one launch-order or completion dependency."""
-
-        if dependency.kind == "launch_order":
-            self.bind_launch_order(plan, dependency)
-        else:
-            self.bind_completion(plan, dependency)
-
-    def bind_launch_order(self, plan: ExecutionPlan, dependency: RegionDependencyPlan) -> None:
-        """Bind ordering between asynchronous region launches."""
-
-    def bind_completion(self, plan: ExecutionPlan, dependency: RegionDependencyPlan) -> None:
-        """Bind a dependency that requires source-region completion."""
-
-    def begin_region(self, plan: ExecutionPlan, region: DeviceRegionPlan | HostRegionPlan) -> None:
-        """Begin one region."""
-
-        if isinstance(region, DeviceRegionPlan):
-            self.begin_device_region(plan, region)
-        else:
-            self.begin_host_region(plan, region)
-
-    def begin_device_region(self, plan: ExecutionPlan, region: DeviceRegionPlan) -> None:
-        """Begin one device region."""
-
-    def begin_host_region(self, plan: ExecutionPlan, region: HostRegionPlan) -> None:
-        """Begin one host/runtime region."""
-
-    def begin_action_program(self, context: EmissionContext) -> None:
-        """Begin one ordered action program."""
-
-    def emit_action(self, action: Action, context: EmissionContext) -> None:
-        """Emit one action at its exact program position."""
-
-        if isinstance(context.region, DeviceRegionPlan):
-            self.emit_device_action(action, context)
-        else:
-            self.emit_host_action(action, context)
-
-    def emit_device_action(self, action: Action, context: EmissionContext) -> None:
-        """Emit an action owned by a device region."""
+    def lower(self, plan: ExecutionPlan):
+        """Lower ``plan`` and return the backend-owned result."""
 
         raise NotImplementedError
-
-    def emit_host_action(self, action: Action, context: EmissionContext) -> None:
-        """Emit an action owned by a host/runtime region."""
-
-        raise NotImplementedError
-
-    def end_action_program(self, context: EmissionContext) -> None:
-        """End one ordered action program."""
-
-    def end_region(self, plan: ExecutionPlan, region: DeviceRegionPlan | HostRegionPlan) -> None:
-        """End one region."""
-
-        if isinstance(region, DeviceRegionPlan):
-            self.end_device_region(plan, region)
-        else:
-            self.end_host_region(plan, region)
-
-    def end_device_region(self, plan: ExecutionPlan, region: DeviceRegionPlan) -> None:
-        """End one device region."""
-
-    def end_host_region(self, plan: ExecutionPlan, region: HostRegionPlan) -> None:
-        """End one host/runtime region."""
-
-    def end_execution(self, plan: ExecutionPlan):
-        """Finish the plan and return the backend result."""
-
-
-class TileEmitter:
-    """Generic traversal of region lifecycle, fetch, and tile action programs."""
-
-    def __init__(self, backend: MegakernelBackend):
-        self.backend = backend
-
-    def emit_program(self, context: EmissionContext, actions: tuple[Action, ...]) -> None:
-        """Emit one already-validated program inside a backend-owned control scope."""
-
-        self.backend.begin_action_program(context)
-        for action in actions:
-            self.backend.emit_action(action, context)
-        self.backend.end_action_program(context)
-
-    def emit(self, plan: ExecutionPlan):
-        plan.validate()
-        self.backend.begin_execution(plan)
-        for dependency in plan.region_dependencies:
-            self.backend.bind_region_dependency(plan, dependency)
-        for region in plan.regions_in_dependency_order():
-            self.backend.begin_region(plan, region)
-            if isinstance(region, DeviceRegionPlan):
-                self.emit_program(EmissionContext(plan, region, "region_prologue"), region.prologue)
-                self.emit_program(
-                    EmissionContext(plan, region, "scheduler_fetch"),
-                    region.fetch_program.actions,
-                )
-                for tile_program in region.tile_programs:
-                    self.emit_program(
-                        EmissionContext(plan, region, "tile_action", tile_program.tile),
-                        tile_program.actions,
-                    )
-                self.emit_program(EmissionContext(plan, region, "region_epilogue"), region.epilogue)
-            else:
-                self.emit_program(EmissionContext(plan, region, "host"), region.actions)
-            self.backend.end_region(plan, region)
-        return self.backend.end_execution(plan)
 
 
 def make_static_execution_plan(kernel: KernelSpec) -> ExecutionPlan:
-    """Create the default single-device static action program."""
+    """Create the default single-device static physical program."""
 
     kernel.validate()
     edges = logical_edges(kernel)
@@ -567,28 +439,24 @@ def make_static_execution_plan(kernel: KernelSpec) -> ExecutionPlan:
         if type(tile.impl) not in seen_classes:
             seen_classes.add(type(tile.impl))
             unique_classes.append(type(tile.impl))
-    prologue = tuple(HookAction("init_shared_resources", target=cls) for cls in unique_classes)
+    prologue = tuple(HookStep("init_shared_resources", target=cls) for cls in unique_classes)
     epilogue = (
-        *(HookAction("finalize_shared_resources", target=cls) for cls in reversed(unique_classes)),
-        HookAction("smem_commit"),
+        *(HookStep("finalize_shared_resources", target=cls) for cls in reversed(unique_classes)),
+        HookStep("smem_commit"),
     )
 
     programs = []
     for tile in kernel.tiles:
-        actions: list[Action] = [
-            SmemEnterAction(tile),
-            HookAction("device_init", target=tile.impl),
-        ]
+        steps: list[ProgramStep] = [HookStep("device_init", target=tile.impl)]
         for event, coord_map in tile.waits:
             event_edges = tuple(by_consumer_event[(tile.name, id(event))])
-            actions.append(WaitAction(event_edges, event, coord_map))
-        actions.append(HookAction("prefetch", target=tile.impl))
-        actions.append(RunAction(tile))
+            steps.append(WaitStep(event, coord_map, edges=event_edges))
+        steps.append(HookStep("prefetch", target=tile.impl))
+        steps.append(RunStep())
         for event, coord_map in tile.notifies:
             event_edges = tuple(by_producer_event[(tile.name, id(event))])
-            actions.append(NotifyAction(event_edges, event, coord_map))
-        actions.append(SmemExitAction(tile))
-        programs.append(TileActionProgram(tile, tuple(actions)))
+            steps.append(NotifyStep(event, coord_map, edges=event_edges))
+        programs.append(TileProgram(tile, tuple(steps), smem_scope="program"))
 
     region_name = "device"
     return ExecutionPlan(
@@ -596,43 +464,36 @@ def make_static_execution_plan(kernel: KernelSpec) -> ExecutionPlan:
         device_regions=(
             DeviceRegionPlan(
                 region_name,
-                prologue=prologue,
+                prologue_steps=prologue,
                 tile_programs=tuple(programs),
-                epilogue=epilogue,
+                epilogue_steps=epilogue,
                 attrs={"schedule": "static"},
             ),
         ),
-        edge_bindings=tuple(EdgeBindingPlan(edge, "tile_action", region_name) for edge in edges),
     ).validate()
 
 
 __all__ = [
-    "Action",
-    "BarrierAction",
+    "BarrierStep",
     "DeviceRegionPlan",
-    "EdgeBindingPlan",
-    "EmissionContext",
+    "EdgePlacement",
     "ExecutionPlan",
-    "FetchGuardAction",
-    "HookAction",
-    "HostCallAction",
-    "HostEdgeAction",
+    "ExecutionPlanBackend",
+    "FetchGuardStep",
+    "HookStep",
+    "HostCallStep",
     "HostRegionPlan",
+    "HostSyncStep",
     "LogicalEdge",
-    "MegakernelBackend",
-    "MidBodyPortAction",
-    "NotifyAction",
-    "ProfileAction",
-    "QueuePushAction",
+    "MidBodyPortStep",
+    "NotifyStep",
+    "ProgramStep",
+    "QueuePushStep",
     "RegionDependencyPlan",
-    "RunAction",
-    "RuntimeEventInitAction",
-    "SchedulerFetchProgram",
-    "SmemEnterAction",
-    "SmemExitAction",
-    "TileActionProgram",
-    "TileEmitter",
-    "WaitAction",
+    "RunStep",
+    "RuntimeEventInitStep",
+    "TileProgram",
+    "WaitStep",
     "logical_edges",
     "make_static_execution_plan",
 ]

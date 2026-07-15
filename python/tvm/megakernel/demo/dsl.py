@@ -16,6 +16,7 @@
 # under the License.
 
 from tvm.megakernel.dsl import KernelSpec, SmemManager, TileImpl
+from tvm.megakernel.transform import make_static_execution_plan
 from tvm.tirx.script import tile as Tx
 
 # Configuration parameters
@@ -180,3 +181,7 @@ stage2 = kernel.tile(
         "source_stage": "C = reduce_all_n_blocks(B)",
     },
 ).wait(row_ready, coord_map=lambda m, n, k: (m,))
+
+# The physical lowering contract is one ordered step program per tile.  Edge
+# placement is derived from those programs rather than declared a second time.
+execution = make_static_execution_plan(kernel)

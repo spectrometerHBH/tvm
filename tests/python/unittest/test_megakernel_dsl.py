@@ -14,7 +14,7 @@
 # KIND, either express or implied.  See the License for the
 # specific language governing permissions and limitations
 # under the License.
-"""Tests for logical megakernel specs and action-program lowering."""
+"""Tests for logical megakernel specs and physical-program lowering."""
 
 import inspect
 from dataclasses import replace
@@ -25,20 +25,22 @@ import tvm
 from tvm.megakernel.dsl import EventSpec, KernelSpec, TensorSpec, TileImpl, TileSpec, VarSpec
 from tvm.megakernel.transform import (
     DeviceRegionPlan,
-    EdgeBindingPlan,
+    EdgePlacement,
     ExecutionPlan,
-    FetchGuardAction,
-    HookAction,
-    HostCallAction,
-    HostEdgeAction,
+    ExecutionPlanBackend,
+    FetchGuardStep,
+    HookStep,
+    HostCallStep,
     HostRegionPlan,
-    MegakernelBackend,
-    MidBodyPortAction,
+    HostSyncStep,
+    LoweringOptions,
+    MidBodyPortStep,
+    NotifyStep,
     RegionDependencyPlan,
-    SchedulerFetchProgram,
-    TileActionProgram,
-    TileEmitter,
+    TileProgram,
+    WaitStep,
     logical_edges,
+    lower_execution_plan,
     make_static_execution_plan,
 )
 from tvm.script import tirx as T
@@ -117,6 +119,28 @@ def test_api_matches_parser_style_contract():
     assert RecordingTile.class_name() == "RecordingTile"
 
 
+def test_transform_exports_only_physical_step_contract():
+    from tvm.megakernel import transform
+
+    for old_name in (
+        "Action",
+        "EdgeBindingPlan",
+        "EmissionContext",
+        "MegakernelBackend",
+        "SchedulerFetchProgram",
+        "TileActionProgram",
+        "TileEmitter",
+    ):
+        assert not hasattr(transform, old_name)
+    for old_name in (
+        "HookAction",
+        "RunAction",
+        "SmemEnterAction",
+        "SmemExitAction",
+    ):
+        assert not hasattr(transform, old_name)
+
+
 def test_demo_uses_current_parser_style_api_and_lowers():
     from tvm.megakernel.demo import dsl as demo
 
@@ -128,6 +152,11 @@ def test_demo_uses_current_parser_style_api_and_lowers():
     assert [tensor.name for tensor in demo.stage2.writes] == ["C"]
     assert not hasattr(demo.kernel, "input")
     assert not hasattr(demo.stage1, "read")
+    assert [program.tile.name for program in demo.execution.device_regions[0].tile_programs] == [
+        demo.stage1.name,
+        demo.stage2.name,
+    ]
+    assert demo.execution.edge_placements()[0].location == "tile"
 
     lowered = demo.kernel.lower()
     assert lowered.attrs["global_symbol"] == "two_stage_reduce"
@@ -259,7 +288,7 @@ def test_validate_rejects_invalid_event_init_count(init_count, error):
         kernel.validate()
 
 
-def test_default_policy_is_an_ordered_action_program():
+def test_default_policy_is_an_ordered_physical_program():
     kernel, producer, consumer, _ = _two_stage_kernel()
     plan = make_static_execution_plan(kernel)
     assert plan.validate() is plan
@@ -267,101 +296,137 @@ def test_default_policy_is_an_ordered_action_program():
         "producer",
         "consumer",
     ]
-    producer_actions = plan.device_regions[0].tile_programs[0].actions
-    assert [type(action).__name__ for action in producer_actions] == [
-        "SmemEnterAction",
-        "HookAction",
-        "HookAction",
-        "RunAction",
-        "NotifyAction",
-        "SmemExitAction",
+    producer_program = plan.device_regions[0].tile_programs[0]
+    assert producer_program.smem_scope == "program"
+    assert [type(step).__name__ for step in producer_program.steps] == [
+        "HookStep",
+        "HookStep",
+        "RunStep",
+        "NotifyStep",
     ]
-    consumer_actions = plan.device_regions[0].tile_programs[1].actions
-    assert [type(action).__name__ for action in consumer_actions] == [
-        "SmemEnterAction",
-        "HookAction",
-        "WaitAction",
-        "HookAction",
-        "RunAction",
-        "SmemExitAction",
+    consumer_program = plan.device_regions[0].tile_programs[1]
+    assert consumer_program.smem_scope == "program"
+    assert [type(step).__name__ for step in consumer_program.steps] == [
+        "HookStep",
+        "WaitStep",
+        "HookStep",
+        "RunStep",
     ]
-    assert len(plan.edge_bindings) == 1
-    assert plan.edge_bindings[0].location == "tile_action"
-    assert plan.edge_bindings[0].edge.producer == producer.name
-    assert plan.edge_bindings[0].edge.consumer == consumer.name
+    placements = plan.edge_placements()
+    assert len(placements) == 1
+    assert isinstance(placements[0], EdgePlacement)
+    assert placements[0].location == "tile"
+    assert placements[0].region == "device"
+    assert placements[0].port is None
+    assert placements[0].edge.producer == producer.name
+    assert placements[0].edge.consumer == consumer.name
 
 
-def test_edge_coverage_rejects_missing_duplicate_and_wrong_location():
-    kernel, _, _, _ = _two_stage_kernel()
+def test_edge_placement_rejects_missing_cross_location_and_cross_region():
+    kernel, producer, consumer, _ = _two_stage_kernel()
     plan = make_static_execution_plan(kernel)
-    with pytest.raises(ValueError, match="unbound"):
-        replace(plan, edge_bindings=()).validate()
-    with pytest.raises(ValueError, match="duplicate"):
-        replace(plan, edge_bindings=plan.edge_bindings * 2).validate()
-    wrong = replace(plan.edge_bindings[0], location="fetch_guard")
-    with pytest.raises(ValueError, match="placed at tile_action"):
-        replace(plan, edge_bindings=(wrong,)).validate()
+    region = plan.device_regions[0]
+    stripped_programs = tuple(
+        replace(
+            program,
+            steps=tuple(replace(step, edges=()) if step.edges else step for step in program.steps),
+        )
+        for program in region.tile_programs
+    )
+    with pytest.raises(ValueError, match="missing physical steps"):
+        replace(plan, device_regions=(replace(region, tile_programs=stripped_programs),)).validate()
+
+    edge = logical_edges(kernel)[0]
+    fetch_and_tile = DeviceRegionPlan(
+        "device",
+        fetch_steps=(FetchGuardStep(edges=(edge,)),),
+        tile_programs=(TileProgram(producer, (NotifyStep(edge.event, (0,), edges=(edge,)),)),),
+    )
+    with pytest.raises(ValueError, match="spans physical placements"):
+        ExecutionPlan(kernel, device_regions=(fetch_and_tile,)).validate()
+
+    producer_region = DeviceRegionPlan(
+        "producer_region",
+        tile_programs=(TileProgram(producer, (NotifyStep(edge.event, (0,), edges=(edge,)),)),),
+    )
+    consumer_region = DeviceRegionPlan(
+        "consumer_region",
+        tile_programs=(TileProgram(consumer, (WaitStep(edge.event, (0,), edges=(edge,)),)),),
+    )
+    with pytest.raises(ValueError, match="spans physical placements"):
+        ExecutionPlan(kernel, device_regions=(producer_region, consumer_region)).validate()
 
 
-def test_fetch_mid_body_and_host_edge_locations_are_explicit():
+def test_edge_placement_rejects_unknown_wrong_endpoint_and_wrong_port():
+    kernel, producer, consumer, _ = _two_stage_kernel()
+    edge = logical_edges(kernel)[0]
+    unknown = type(edge)(edge.event, "unknown", edge.consumer)
+    with pytest.raises(ValueError, match="unknown logical edge"):
+        ExecutionPlan(
+            kernel,
+            host_regions=(HostRegionPlan("host", (HostSyncStep("completion", edges=(unknown,)),)),),
+        ).validate()
+
+    wrong_producer = DeviceRegionPlan(
+        "device",
+        tile_programs=(TileProgram(consumer, (NotifyStep(edge.event, (0,), edges=(edge,)),)),),
+    )
+    with pytest.raises(ValueError, match="logical producer tile"):
+        ExecutionPlan(kernel, device_regions=(wrong_producer,)).validate()
+
+    wrong_consumer = DeviceRegionPlan(
+        "device",
+        tile_programs=(TileProgram(producer, (WaitStep(edge.event, (0,), edges=(edge,)),)),),
+    )
+    with pytest.raises(ValueError, match="logical consumer tile"):
+        ExecutionPlan(kernel, device_regions=(wrong_consumer,)).validate()
+
+    wrong_port = DeviceRegionPlan(
+        "device",
+        tile_programs=(
+            TileProgram(
+                producer,
+                (
+                    MidBodyPortStep("after_store", edges=(edge,)),
+                    MidBodyPortStep("after_advance", edges=(edge,)),
+                ),
+            ),
+        ),
+    )
+    with pytest.raises(ValueError, match="spans physical placements"):
+        ExecutionPlan(kernel, device_regions=(wrong_port,)).validate()
+
+
+def test_fetch_mid_body_and_host_edge_locations_are_derived():
     kernel, producer, _, _ = _two_stage_kernel()
     edge = logical_edges(kernel)[0]
     fetch_region = DeviceRegionPlan(
         "fetch_device",
-        fetch_program=SchedulerFetchProgram((FetchGuardAction((edge,)),)),
-        tile_programs=(TileActionProgram(producer, ()),),
+        fetch_steps=(FetchGuardStep(edges=(edge,)),),
+        tile_programs=(TileProgram(producer, ()),),
     )
-    ExecutionPlan(
-        kernel,
-        device_regions=(fetch_region,),
-        edge_bindings=(EdgeBindingPlan(edge, "fetch_guard", fetch_region.name),),
-    ).validate()
+    fetch = ExecutionPlan(kernel, device_regions=(fetch_region,)).edge_placements()[0]
+    assert (fetch.location, fetch.region, fetch.port) == ("fetch", "fetch_device", None)
 
     port_region = DeviceRegionPlan(
         "port_device",
-        tile_programs=(TileActionProgram(producer, (MidBodyPortAction((edge,), "after_store"),)),),
+        tile_programs=(TileProgram(producer, (MidBodyPortStep("after_store", edges=(edge,)),)),),
     )
-    ExecutionPlan(
-        kernel,
-        device_regions=(port_region,),
-        edge_bindings=(EdgeBindingPlan(edge, "mid_body_port", port_region.name, "after_store"),),
-    ).validate()
+    port = ExecutionPlan(kernel, device_regions=(port_region,)).edge_placements()[0]
+    assert (port.location, port.region, port.port) == ("tile", "port_device", "after_store")
 
     host_region = HostRegionPlan(
-        "runtime", (HostEdgeAction((edge,), "completion"), HostCallAction("collective"))
+        "runtime", (HostSyncStep("completion", edges=(edge,)), HostCallStep("collective"))
     )
-    ExecutionPlan(
-        kernel,
-        host_regions=(host_region,),
-        edge_bindings=(EdgeBindingPlan(edge, "host_runtime", host_region.name),),
-    ).validate()
-
-
-class _RecordingBackend(MegakernelBackend):
-    def __init__(self):
-        self.trace = []
-
-    def bind_region_dependency(self, plan, dependency):
-        self.trace.append(("dependency", dependency.kind))
-
-    def begin_region(self, plan, region):
-        self.trace.append(("begin", region.name))
-
-    def emit_action(self, action, context):
-        self.trace.append((context.program, type(action).__name__))
-
-    def end_region(self, plan, region):
-        self.trace.append(("end", region.name))
-
-    def end_execution(self, plan):
-        return tuple(self.trace)
+    host = ExecutionPlan(kernel, host_regions=(host_region,)).edge_placements()[0]
+    assert (host.location, host.region, host.port) == ("host", "runtime", None)
 
 
 def test_region_dag_distinguishes_launch_order_and_completion():
     kernel = KernelSpec("regions")
-    producer = HostRegionPlan("producer", (HostCallAction("launch"),))
-    overlap = HostRegionPlan("overlap", (HostCallAction("launch"),))
-    consumer = HostRegionPlan("consumer", (HostCallAction("launch"),))
+    producer = HostRegionPlan("producer", (HostCallStep("launch"),))
+    overlap = HostRegionPlan("overlap", (HostCallStep("launch"),))
+    consumer = HostRegionPlan("consumer", (HostCallStep("launch"),))
     plan = ExecutionPlan(
         kernel,
         host_regions=(consumer, overlap, producer),
@@ -370,52 +435,49 @@ def test_region_dag_distinguishes_launch_order_and_completion():
             RegionDependencyPlan("overlap", "consumer", "completion"),
         ),
     )
-    trace = TileEmitter(_RecordingBackend()).emit(plan)
-    assert [item for item in trace if item[0] == "begin"] == [
-        ("begin", "producer"),
-        ("begin", "overlap"),
-        ("begin", "consumer"),
+    plan.validate()
+    assert [region.name for region in plan.regions_in_dependency_order()] == [
+        "producer",
+        "overlap",
+        "consumer",
     ]
-    assert trace[:2] == (("dependency", "launch_order"), ("dependency", "completion"))
+    assert [dependency.kind for dependency in plan.region_dependencies] == [
+        "launch_order",
+        "completion",
+    ]
 
 
-class _RegionProtocolBackend(MegakernelBackend):
+class _RecordingBackend(ExecutionPlanBackend):
     def __init__(self):
         self.trace = []
+        self.calls = 0
 
-    def bind_launch_order(self, plan, dependency):
-        self.trace.append(("launch_order", dependency.source, dependency.target))
-
-    def bind_completion(self, plan, dependency):
-        self.trace.append(("completion", dependency.source, dependency.target))
-
-    def begin_device_region(self, plan, region):
-        self.trace.append(("begin_device", region.name))
-
-    def begin_host_region(self, plan, region):
-        self.trace.append(("begin_host", region.name))
-
-    def emit_device_action(self, action, context):
-        self.trace.append(("device", context.region.name, type(action).__name__))
-
-    def emit_host_action(self, action, context):
-        self.trace.append(("host", context.region.name, type(action).__name__))
-
-    def end_device_region(self, plan, region):
-        self.trace.append(("end_device", region.name))
-
-    def end_host_region(self, plan, region):
-        self.trace.append(("end_host", region.name))
-
-    def end_execution(self, plan):
+    def lower(self, plan):
+        self.calls += 1
+        for dependency in plan.region_dependencies:
+            self.trace.append((dependency.kind, dependency.source, dependency.target))
+        for region in plan.regions_in_dependency_order():
+            if isinstance(region, DeviceRegionPlan):
+                for step in region.prologue_steps:
+                    self.trace.append(("device", region.name, type(step).__name__))
+                for step in region.fetch_steps:
+                    self.trace.append(("device", region.name, type(step).__name__))
+                for program in region.tile_programs:
+                    for step in program.steps:
+                        self.trace.append(("device", region.name, type(step).__name__))
+                for step in region.epilogue_steps:
+                    self.trace.append(("device", region.name, type(step).__name__))
+            else:
+                for step in region.steps:
+                    self.trace.append(("host", region.name, type(step).__name__))
         return tuple(self.trace)
 
 
-def test_region_backend_protocol_dispatches_region_and_dependency_kinds():
+def test_execution_plan_backend_owns_traversal_and_backend_selection():
     kernel = KernelSpec("region_protocol")
-    partial = DeviceRegionPlan("partial", prologue=(HookAction("launch"),))
-    collective = HostRegionPlan("collective", (HostCallAction("reduce_scatter"),))
-    reduce = DeviceRegionPlan("reduce", epilogue=(HookAction("finish"),))
+    partial = DeviceRegionPlan("partial", prologue_steps=(HookStep("launch"),))
+    collective = HostRegionPlan("collective", (HostCallStep("reduce_scatter"),))
+    reduce = DeviceRegionPlan("reduce", epilogue_steps=(HookStep("finish"),))
     plan = ExecutionPlan(
         kernel,
         device_regions=(partial, reduce),
@@ -426,20 +488,24 @@ def test_region_backend_protocol_dispatches_region_and_dependency_kinds():
         ),
     )
 
-    trace = TileEmitter(_RegionProtocolBackend()).emit(plan)
+    selected = _RecordingBackend()
+    options_backend = _RecordingBackend()
+    trace = lower_execution_plan(
+        plan, backend=selected, options=LoweringOptions(backend=options_backend)
+    )
+    assert selected.calls == 1
+    assert options_backend.calls == 0
     assert trace == (
         ("launch_order", "partial", "collective"),
         ("completion", "collective", "reduce"),
-        ("begin_device", "partial"),
-        ("device", "partial", "HookAction"),
-        ("end_device", "partial"),
-        ("begin_host", "collective"),
-        ("host", "collective", "HostCallAction"),
-        ("end_host", "collective"),
-        ("begin_device", "reduce"),
-        ("device", "reduce", "HookAction"),
-        ("end_device", "reduce"),
+        ("device", "partial", "HookStep"),
+        ("host", "collective", "HostCallStep"),
+        ("device", "reduce", "HookStep"),
     )
+
+    from_options = _RecordingBackend()
+    assert lower_execution_plan(plan, options=LoweringOptions(backend=from_options))
+    assert from_options.calls == 1
 
 
 def test_region_dag_rejects_cycle():
@@ -456,7 +522,7 @@ def test_region_dag_rejects_cycle():
         plan.validate()
 
 
-def test_kernel_lower_uses_default_static_action_backend():
+def test_kernel_lower_uses_default_static_execution_plan_backend():
     kernel = KernelSpec("empty")
     lowered = kernel.lower()
     assert isinstance(lowered, tvm.tirx.PrimFunc)
