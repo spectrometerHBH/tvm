@@ -132,8 +132,8 @@ TensorSpec:
 EventSpec:
   logical event name, shape, init_count, dtype, attrs
 
-DependencySpec:
-  wait/notify endpoint with an event and coord_map
+Dependency tuple:
+  (EventSpec, coord_map) wait/notify endpoint
 
 TileSpec:
   tile name, TileImpl, tile_num, reads, writes, waits, notifies, attrs
@@ -151,27 +151,21 @@ row_ready = kernel.event(
     init_count=NUM_BLOCK_N,
 )
 
-stage1 = (
-    kernel.tile(
-        "stage1_partial_reduce",
-        Stage1ReduceTile(),
-        tile_num=(NUM_BLOCK_M, NUM_BLOCK_N, 1),
-    )
-    .read(A)
-    .write(B)
-    .notify(row_ready, coord_map=lambda m, n, k: (m,))
-)
+stage1 = kernel.tile(
+    "stage1_partial_reduce",
+    Stage1ReduceTile(),
+    tile_num=(NUM_BLOCK_M, NUM_BLOCK_N, 1),
+    reads=[A],
+    writes=[B],
+).notify(row_ready, coord_map=lambda m, n, k: (m,))
 
-stage2 = (
-    kernel.tile(
-        "stage2_final_reduce",
-        Stage2ReduceTile(),
-        tile_num=(NUM_BLOCK_M, 1, 1),
-    )
-    .read(B)
-    .write(C)
-    .wait(row_ready, coord_map=lambda m, n, k: (m,))
-)
+stage2 = kernel.tile(
+    "stage2_final_reduce",
+    Stage2ReduceTile(),
+    tile_num=(NUM_BLOCK_M, 1, 1),
+    reads=[B],
+    writes=[C],
+).wait(row_ready, coord_map=lambda m, n, k: (m,))
 ```
 
 ## Step 4: Fill Impl Layer

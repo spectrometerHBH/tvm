@@ -117,6 +117,22 @@ def test_api_matches_parser_style_contract():
     assert RecordingTile.class_name() == "RecordingTile"
 
 
+def test_demo_uses_current_parser_style_api_and_lowers():
+    from tvm.megakernel.demo import dsl as demo
+
+    assert demo.kernel.validate() is demo.kernel
+    assert set(demo.kernel.tensors) == {"A", "B", "C"}
+    assert [tensor.name for tensor in demo.stage1.reads] == ["A"]
+    assert [tensor.name for tensor in demo.stage1.writes] == ["B"]
+    assert [tensor.name for tensor in demo.stage2.reads] == ["B"]
+    assert [tensor.name for tensor in demo.stage2.writes] == ["C"]
+    assert not hasattr(demo.kernel, "input")
+    assert not hasattr(demo.stage1, "read")
+
+    lowered = demo.kernel.lower()
+    assert lowered.attrs["global_symbol"] == "two_stage_reduce"
+
+
 @pytest.mark.parametrize("shape,error", [((4, object()), "extents"), ((4, 0), "positive")])
 def test_validate_rejects_invalid_shapes(shape, error):
     kernel = KernelSpec("invalid_shape")

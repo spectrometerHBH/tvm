@@ -15,8 +15,7 @@
 # specific language governing permissions and limitations
 # under the License.
 
-import tvm.tirx.script as T
-from tvm.megakernel.dsl import KernelSpec, TileImpl
+from tvm.megakernel.dsl import KernelSpec, SmemManager, TileImpl
 from tvm.tirx.script import tile as Tx
 
 # Configuration parameters
@@ -48,10 +47,9 @@ class Stage1ReduceTile(TileImpl):
         self.A_smem = None
         self.P_smem = None
 
-    def device_init(self):
-        # The concrete allocation API is selected by the later lowering pass.
-        self.A_smem = T.alloc_buffer((self.block_m, self.block_n), "float32", scope="shared")
-        self.P_smem = T.alloc_buffer((self.block_m, 1), "float32", scope="shared")
+    def device_init(self, smem_manager: SmemManager, m_idx, n_idx, k_idx):
+        self.A_smem = smem_manager.alloc((self.block_m, self.block_n), "float32")
+        self.P_smem = smem_manager.alloc((self.block_m, 1), "float32")
 
     def run(self, m_idx, n_idx, k_idx):
         Tx.copy(
@@ -87,10 +85,9 @@ class Stage2ReduceTile(TileImpl):
         self.B_smem = None
         self.C_smem = None
 
-    def device_init(self):
-        # The concrete allocation API is selected by the later lowering pass.
-        self.B_smem = T.alloc_buffer((self.block_m, self.num_block_n), "float32", scope="shared")
-        self.C_smem = T.alloc_buffer((self.block_m, 1), "float32", scope="shared")
+    def device_init(self, smem_manager: SmemManager, m_idx, n_idx, k_idx):
+        self.B_smem = smem_manager.alloc((self.block_m, self.num_block_n), "float32")
+        self.C_smem = smem_manager.alloc((self.block_m, 1), "float32")
 
     def run(self, m_idx, n_idx, k_idx):
         Tx.copy(
@@ -125,19 +122,19 @@ kernel = KernelSpec(
     },
 )
 
-A = kernel.input(
+A = kernel.tensor(
     "A",
     shape=(M, N),
     dtype="float32",
 )
 
-B = kernel.intermediate(
+B = kernel.tensor(
     "B",
     shape=(M, NUM_BLOCK_N),
     dtype="float32",
 )
 
-C = kernel.output(
+C = kernel.tensor(
     "C",
     shape=(M, 1),
     dtype="float32",
@@ -152,40 +149,34 @@ row_ready = kernel.event(
     },
 )
 
-stage1 = (
-    kernel.tile(
-        name="stage1_partial_reduce",
-        impl=Stage1ReduceTile(
-            A,
-            B,
-            block_m=BLOCK_M,
-            block_n=BLOCK_N,
-        ),
-        tile_num=(NUM_BLOCK_M, NUM_BLOCK_N, 1),
-        attrs={
-            "source_stage": "B = reduce_each_n_block(A)",
-        },
-    )
-    .read(A)
-    .write(B)
-    .notify(row_ready, coord_map=lambda m, n, k: (m,))
-)
+stage1 = kernel.tile(
+    name="stage1_partial_reduce",
+    impl=Stage1ReduceTile(
+        A,
+        B,
+        block_m=BLOCK_M,
+        block_n=BLOCK_N,
+    ),
+    tile_num=(NUM_BLOCK_M, NUM_BLOCK_N, 1),
+    reads=[A],
+    writes=[B],
+    attrs={
+        "source_stage": "B = reduce_each_n_block(A)",
+    },
+).notify(row_ready, coord_map=lambda m, n, k: (m,))
 
-stage2 = (
-    kernel.tile(
-        name="stage2_final_reduce",
-        impl=Stage2ReduceTile(
-            B,
-            C,
-            block_m=BLOCK_M,
-            num_block_n=NUM_BLOCK_N,
-        ),
-        tile_num=(NUM_BLOCK_M, 1, 1),
-        attrs={
-            "source_stage": "C = reduce_all_n_blocks(B)",
-        },
-    )
-    .read(B)
-    .write(C)
-    .wait(row_ready, coord_map=lambda m, n, k: (m,))
-)
+stage2 = kernel.tile(
+    name="stage2_final_reduce",
+    impl=Stage2ReduceTile(
+        B,
+        C,
+        block_m=BLOCK_M,
+        num_block_n=NUM_BLOCK_N,
+    ),
+    tile_num=(NUM_BLOCK_M, 1, 1),
+    reads=[B],
+    writes=[C],
+    attrs={
+        "source_stage": "C = reduce_all_n_blocks(B)",
+    },
+).wait(row_ready, coord_map=lambda m, n, k: (m,))

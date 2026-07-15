@@ -23,9 +23,9 @@ This document lists the user-facing API in `tvm.megakernel.dsl`.
 
 The DSL has two layers:
 
-- Spec layer: `KernelSpec`, `TensorSpec`, `EventSpec`, `DependencySpec`, and
-  `TileSpec`.  This layer describes tile stages, tensor inputs/outputs, logical
-  events, and wait/notify dependencies.
+- Spec layer: `KernelSpec`, `VarSpec`, `TensorSpec`, `EventSpec`, and
+  `TileSpec`.  This layer describes tile stages, tensors, logical events, and
+  tuple-form wait/notify dependencies.
 - Impl layer: `TileImpl`.  This layer connects a logical tile to the concrete
   implementation of that tile.
 
@@ -53,6 +53,21 @@ Example:
 kernel = KernelSpec("two_stage_reduce", attrs={"target": "sm90"})
 ```
 
+## `KernelSpec.var`
+
+```python
+var = kernel.var(name: str, dtype: str = "int32")
+```
+
+Registers a symbolic variable owned by this kernel.  Shapes and three-axis
+tile counts may reference the returned `VarSpec`.
+
+Example:
+
+```python
+rows = kernel.var("rows", "int32")
+```
+
 ## `KernelSpec.tensor`
 
 ```python
@@ -72,51 +87,8 @@ Returns: `TensorSpec`.
 Example:
 
 ```python
-bs = VarSpec("bs")
-A = kernel.tensor("A", shape=(bs, 1024), dtype="float32")
-```
-
-## `KernelSpec.input`
-
-```python
-tensor = kernel.input(name: str, shape: ShapeType, dtype: str)
-```
-
-Registers an input tensor.  This is currently an alias of `tensor()`, provided
-for readability at call sites.
-
-Example:
-
-```python
-A = kernel.input("A", shape=(1024, 1024), dtype="float32")
-```
-
-## `KernelSpec.intermediate`
-
-```python
-tensor = kernel.intermediate(name: str, shape: ShapeType, dtype: str)
-```
-
-Registers an intermediate tensor.  This is currently an alias of `tensor()`.
-
-Example:
-
-```python
-B = kernel.intermediate("B", shape=(1024, 16), dtype="float32")
-```
-
-## `KernelSpec.output`
-
-```python
-tensor = kernel.output(name: str, shape: ShapeType, dtype: str)
-```
-
-Registers an output tensor.  This is currently an alias of `tensor()`.
-
-Example:
-
-```python
-C = kernel.output("C", shape=(1024, 1), dtype="float32")
+rows = kernel.var("rows")
+A = kernel.tensor("A", shape=(rows, 1024), dtype="float32")
 ```
 
 ## `KernelSpec.event`
@@ -168,6 +140,8 @@ tile = kernel.tile(
     name: str,
     impl: TileImpl,
     tile_num: TileNumType,
+    reads: list[TensorSpec] | None = None,
+    writes: list[TensorSpec] | None = None,
     attrs: dict[str, Any] | None = None,
 )
 ```
@@ -179,6 +153,8 @@ Parameters:
 - `name`: tile stage name, unique inside the kernel.
 - `impl`: local tile implementation object.
 - `tile_num`: tile count on `(m, n, k)` axes.  Use `1` for unused axes.
+- `reads`: logical tensors read by this tile.
+- `writes`: logical tensors written by this tile.
 - `attrs`: optional metadata reserved for later passes.
 
 Returns: `TileSpec`.
@@ -186,41 +162,14 @@ Returns: `TileSpec`.
 Example:
 
 ```python
-bs = VarSpec("bs")
+bs = kernel.var("bs")
 tile_a = kernel.tile(
     "tile_a",
     tile_a_impl,
     tile_num=(bs, 16, 1),
+    reads=[A],
+    writes=[B],
 )
-```
-
-## `TileSpec.read`
-
-```python
-tile.read(*tensors: TensorSpec)
-```
-
-Declares tensors read by this tile.  Returns the same `TileSpec`, so calls can
-be chained.
-
-Example:
-
-```python
-tile_a.read(A)
-```
-
-## `TileSpec.write`
-
-```python
-tile.write(*tensors: TensorSpec)
-```
-
-Declares tensors written by this tile.  Returns the same `TileSpec`.
-
-Example:
-
-```python
-tile_a.write(B)
 ```
 
 ## `TileSpec.wait`
@@ -292,7 +241,7 @@ class MyTile(TileImpl):
 
 ```python
 @classmethod
-def init_shared_resources(cls): ...
+def init_shared_resources(cls, smem_manager: SmemManager): ...
 ```
 
 Optional.  Initializes resources shared by all instances of this tile class.
@@ -303,44 +252,37 @@ Example:
 
 ```python
 @classmethod
-def init_shared_resources(cls):
-    warp_id = T.warp_id([...])
-    if warp_id == 0:
-        T.ptx.tcgen05.alloc(...)
+def init_shared_resources(cls, smem_manager):
+    cls.workspace = smem_manager.alloc((128,), "uint8", policy="persistent")
 ```
 
 ### `TileImpl.finalize_shared_resources`
 
 ```python
 @classmethod
-def finalize_shared_resources(cls): ...
+def finalize_shared_resources(cls, smem_manager: SmemManager): ...
 ```
 
-Optional.  Releases resources created by `init_shared_resources()`.  For
-example, this hook can release tensor memory shared by all tile instances of
-the same class.
-
-Example:
-
-```python
-@classmethod
-def finalize_shared_resources(cls):
-    warp_id = T.warp_id([...])
-    T.tvm_storage_sync("shared")
-    if warp_id == 0:
-        T.ptx.tcgen05.relinquish_alloc_permit(...)
-        T.ptx.tcgen05.dealloc(...)
-```
+Optional.  Finalizes class-level resource declarations after every tile class
+has run `init_shared_resources()` and before the shared-memory manager commits
+its allocation plan.
 
 
 ### `TileImpl.device_init`
 
 ```python
-def device_init(self): ...
+def device_init(
+    self,
+    smem_manager: SmemManager,
+    m_idx,
+    n_idx,
+    k_idx,
+): ...
 ```
 
 Optional.  Initializes device-side state owned by one tile instance.  For
-example, this hook can allocate buffers used by that tile instance.
+example, this hook can allocate managed shared-memory buffers used by that tile
+instance.
 
 ### `TileImpl.host_init`
 
@@ -381,17 +323,28 @@ Required.  Defines the computation for one logical tile instance at index
 ## DSL Example
 
 ```python
-stage1 = (
-    kernel.tile("stage1", Stage1Tile(), (NUM_BLOCK_M, NUM_BLOCK_N, 1))
-    .read(A)
-    .write(B)
-    .notify(row_ready, lambda m, n, k: (m,))
-)
+stage1 = kernel.tile(
+    "stage1",
+    Stage1Tile(),
+    (NUM_BLOCK_M, NUM_BLOCK_N, 1),
+    reads=[A],
+    writes=[B],
+).notify(row_ready, lambda m, n, k: (m,))
 
-stage2 = (
-    kernel.tile("stage2", Stage2Tile(), (NUM_BLOCK_M, 1, 1))
-    .read(B)
-    .write(C)
-    .wait(row_ready, lambda m, n, k: (m,))
-)
+stage2 = kernel.tile(
+    "stage2",
+    Stage2Tile(),
+    (NUM_BLOCK_M, 1, 1),
+    reads=[B],
+    writes=[C],
+).wait(row_ready, lambda m, n, k: (m,))
 ```
+
+## `KernelSpec.lower`
+
+```python
+prim_func = kernel.lower(options=None)
+```
+
+Validates and lowers the graph with the default single-device static policy,
+or with the execution plan and backend supplied through `LoweringOptions`.
