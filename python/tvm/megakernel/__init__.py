@@ -14,4 +14,24 @@
 # KIND, either express or implied.  See the License for the
 # specific language governing permissions and limitations
 # under the License.
-"""Logical megakernel specifications and tile implementations."""
+"""Logical megakernel specifications and execution-plan lowering."""
+
+from .transform import (
+    LoweringOptions,
+    LowerMegakernelDSL,
+    MegakernelLowerer,
+    lower_execution_plan,
+    lower_static_queue_init_to_tirx,
+    lower_to_tirx,
+    lower_to_tirx_module,
+)
+
+__all__ = [
+    "LowerMegakernelDSL",
+    "LoweringOptions",
+    "MegakernelLowerer",
+    "lower_execution_plan",
+    "lower_static_queue_init_to_tirx",
+    "lower_to_tirx",
+    "lower_to_tirx_module",
+]

@@ -36,6 +36,7 @@ class VarSpec:
     """Symbolic variable used in shapes, tile counts, and event counts."""
 
     name: str
+    dtype: str = "int32"
 
 
 ExprLike = int | VarSpec
@@ -64,13 +65,7 @@ class EventSpec:
     attrs: dict[str, Any] = field(default_factory=dict)
 
 
-@dataclass(frozen=True)
-class DependencySpec:
-    """Wait or notify endpoint attached to a tile."""
-
-    event: EventSpec
-    coord_map: CoordMapType
-    attrs: dict[str, Any] = field(default_factory=dict)
+DependencyType = tuple[EventSpec, CoordMapType]
 
 
 @dataclass
@@ -86,32 +81,20 @@ class TileSpec:
     tile_num: TileNumType
     reads: list[TensorSpec] = field(default_factory=list)
     writes: list[TensorSpec] = field(default_factory=list)
-    waits: list[DependencySpec] = field(default_factory=list)
-    notifies: list[DependencySpec] = field(default_factory=list)
+    waits: list[DependencyType] = field(default_factory=list)
+    notifies: list[DependencyType] = field(default_factory=list)
     attrs: dict[str, Any] = field(default_factory=dict)
-
-    def read(self, *tensors: TensorSpec):
-        """Declare tensors read by this tile."""
-
-        self.reads.extend(tensors)
-        return self
-
-    def write(self, *tensors: TensorSpec):
-        """Declare tensors written by this tile."""
-
-        self.writes.extend(tensors)
-        return self
 
     def wait(self, event: EventSpec, coord_map: CoordMapType):
         """Declare that this tile waits on ``event`` at ``coord_map``."""
 
-        self.waits.append(DependencySpec(event=event, coord_map=coord_map))
+        self.waits.append((event, coord_map))
         return self
 
     def notify(self, event: EventSpec, coord_map: CoordMapType):
         """Declare that this tile notifies ``event`` at ``coord_map``."""
 
-        self.notifies.append(DependencySpec(event=event, coord_map=coord_map))
+        self.notifies.append((event, coord_map))
         return self
 
 
@@ -119,7 +102,12 @@ def _is_int(value: Any) -> bool:
     return isinstance(value, int) and not isinstance(value, bool)
 
 
-def _shape_items(shape: ShapeType, *, label: str) -> tuple[ExprLike, ...]:
+def _shape_items(
+    shape: ShapeType,
+    *,
+    label: str,
+    var_ids: set[int] | None = None,
+) -> tuple[ExprLike, ...]:
     if isinstance(shape, int | VarSpec) and not isinstance(shape, bool):
         values = (shape,)
     elif isinstance(shape, tuple | list):
@@ -134,6 +122,8 @@ def _shape_items(shape: ShapeType, *, label: str) -> tuple[ExprLike, ...]:
         elif isinstance(extent, VarSpec):
             if not extent.name:
                 raise ValueError(f"{label} VarSpec names must be non-empty")
+            if var_ids is not None and id(extent) not in var_ids:
+                raise ValueError(f"{label} references a VarSpec outside this kernel")
         else:
             raise TypeError(f"{label} extents must be int or VarSpec")
     return values
@@ -201,9 +191,19 @@ class KernelSpec:
     def __init__(self, name: str, attrs: dict[str, Any] | None = None):
         self.name = name
         self.attrs = attrs or {}
+        self.vars: dict[str, VarSpec] = {}
         self.tensors: dict[str, TensorSpec] = {}
         self.events: dict[str, EventSpec] = {}
         self.tiles: list[TileSpec] = []
+
+    def var(self, name: str, dtype: str = "int32"):
+        """Register a symbolic variable."""
+
+        if name in self.vars:
+            raise ValueError(f"Duplicate var: {name}")
+        var = VarSpec(name=name, dtype=dtype)
+        self.vars[name] = var
+        return var
 
     def tensor(self, name: str, shape: ShapeType, dtype: str):
         """Register a logical tensor."""
@@ -213,21 +213,6 @@ class KernelSpec:
         tensor = TensorSpec(name=name, shape=shape, dtype=dtype)
         self.tensors[name] = tensor
         return tensor
-
-    def input(self, name: str, shape: ShapeType, dtype: str):
-        """Register an input tensor."""
-
-        return self.tensor(name, shape=shape, dtype=dtype)
-
-    def intermediate(self, name: str, shape: ShapeType, dtype: str):
-        """Register an intermediate tensor."""
-
-        return self.tensor(name, shape=shape, dtype=dtype)
-
-    def output(self, name: str, shape: ShapeType, dtype: str):
-        """Register an output tensor."""
-
-        return self.tensor(name, shape=shape, dtype=dtype)
 
     def event(
         self,
@@ -258,13 +243,22 @@ class KernelSpec:
         name: str,
         impl: TileImpl,
         tile_num: TileNumType,
+        reads: list[TensorSpec] | None = None,
+        writes: list[TensorSpec] | None = None,
         attrs: dict[str, Any] | None = None,
     ):
         """Register one tile stage."""
 
         if any(tile.name == name for tile in self.tiles):
             raise ValueError(f"Duplicate tile: {name}")
-        tile = TileSpec(name=name, impl=impl, tile_num=tile_num, attrs=attrs or {})
+        tile = TileSpec(
+            name=name,
+            impl=impl,
+            tile_num=tile_num,
+            reads=list(reads or ()),
+            writes=list(writes or ()),
+            attrs=attrs or {},
+        )
         self.tiles.append(tile)
         return tile
 
@@ -274,18 +268,27 @@ class KernelSpec:
         if not isinstance(self.attrs, dict):
             raise TypeError("kernel attrs must be a dict")
 
+        var_ids = {id(var) for var in self.vars.values()}
         tensor_ids = {id(tensor) for tensor in self.tensors.values()}
         event_ids = {id(event) for event in self.events.values()}
         event_ranks: dict[int, int] = {}
+        for name, var in self.vars.items():
+            if var.name != name:
+                raise ValueError(f"var registry name mismatch: {name}")
+            if not var.name:
+                raise ValueError("VarSpec names must be non-empty")
+            if not isinstance(var.dtype, str) or not var.dtype:
+                raise TypeError(f"var {name!r} dtype must be a non-empty string")
+
         for name, tensor in self.tensors.items():
             if tensor.name != name:
                 raise ValueError(f"tensor registry name mismatch: {name}")
-            _shape_items(tensor.shape, label=f"tensor {name!r} shape")
+            _shape_items(tensor.shape, label=f"tensor {name!r} shape", var_ids=var_ids)
 
         for name, event in self.events.items():
             if event.name != name:
                 raise ValueError(f"event registry name mismatch: {name}")
-            rank = len(_shape_items(event.shape, label=f"event {name!r} shape"))
+            rank = len(_shape_items(event.shape, label=f"event {name!r} shape", var_ids=var_ids))
             event_ranks[id(event)] = rank
             _validate_init_count(event, rank=rank)
             if not isinstance(event.attrs, dict):
@@ -294,6 +297,8 @@ class KernelSpec:
         tile_names: set[str] = set()
         notifiers: dict[int, list[str]] = {event_id: [] for event_id in event_ids}
         waiters: list[tuple[str, EventSpec]] = []
+        tensor_producers: dict[int, str] = {}
+        tensor_consumers: dict[int, list[str]] = {tensor_id: [] for tensor_id in tensor_ids}
         for tile in self.tiles:
             if tile.name in tile_names:
                 raise ValueError(f"Duplicate tile: {tile.name}")
@@ -302,32 +307,42 @@ class KernelSpec:
                 raise TypeError(f"tile {tile.name!r} impl must be a concrete TileImpl instance")
             if not isinstance(tile.tile_num, tuple | list) or len(tile.tile_num) != 3:
                 raise ValueError(f"tile {tile.name!r} tile_num must contain exactly three axes")
-            _shape_items(tile.tile_num, label=f"tile {tile.name!r} tile_num")
+            _shape_items(
+                tile.tile_num,
+                label=f"tile {tile.name!r} tile_num",
+                var_ids=var_ids,
+            )
             if not isinstance(tile.attrs, dict):
                 raise TypeError(f"tile {tile.name!r} attrs must be a dict")
 
-            for tensor in (*tile.reads, *tile.writes):
+            for tensor in tile.reads:
                 if not isinstance(tensor, TensorSpec) or id(tensor) not in tensor_ids:
                     raise ValueError(f"tile {tile.name!r} references a tensor outside this kernel")
+                tensor_consumers[id(tensor)].append(tile.name)
+            for tensor in tile.writes:
+                if not isinstance(tensor, TensorSpec) or id(tensor) not in tensor_ids:
+                    raise ValueError(f"tile {tile.name!r} references a tensor outside this kernel")
+                previous = tensor_producers.setdefault(id(tensor), tile.name)
+                if previous != tile.name:
+                    raise ValueError(f"tensor {tensor.name!r} has multiple producers")
             for kind, dependencies in (("wait", tile.waits), ("notify", tile.notifies)):
                 for dependency in dependencies:
-                    if not isinstance(dependency, DependencySpec):
+                    if not isinstance(dependency, tuple) or len(dependency) != 2:
                         raise TypeError(f"tile {tile.name!r} has an invalid {kind} dependency")
-                    if id(dependency.event) not in event_ids:
+                    event, coord_map = dependency
+                    if not isinstance(event, EventSpec) or id(event) not in event_ids:
                         raise ValueError(
                             f"tile {tile.name!r} references an event outside this kernel"
                         )
-                    if not isinstance(dependency.attrs, dict):
-                        raise TypeError(f"tile {tile.name!r} {kind} attrs must be a dict")
                     _validate_coord_map(
-                        dependency.coord_map,
-                        rank=event_ranks[id(dependency.event)],
+                        coord_map,
+                        rank=event_ranks[id(event)],
                         label=f"tile {tile.name!r} {kind} coord_map",
                     )
                     if kind == "notify":
-                        notifiers[id(dependency.event)].append(tile.name)
+                        notifiers[id(event)].append(tile.name)
                     else:
-                        waiters.append((tile.name, dependency.event))
+                        waiters.append((tile.name, event))
 
         edges = {name: set() for name in tile_names}
         for waiter, event in waiters:
@@ -336,13 +351,17 @@ class KernelSpec:
                 raise ValueError(f"event {event.name!r} is waited on but has no notifier")
             for producer in producers:
                 edges[producer].add(waiter)
+        for tensor_id, producer in tensor_producers.items():
+            for consumer in tensor_consumers[tensor_id]:
+                if consumer != producer:
+                    edges[producer].add(consumer)
 
         visiting: set[str] = set()
         visited: set[str] = set()
 
         def visit(tile_name: str) -> None:
             if tile_name in visiting:
-                raise ValueError("logical event dependencies must be acyclic")
+                raise ValueError("logical dependencies must be acyclic")
             if tile_name in visited:
                 return
             visiting.add(tile_name)
@@ -355,7 +374,9 @@ class KernelSpec:
             visit(tile_name)
         return self
 
-    def lower(self):
-        """Lowering is supplied by an implementation-specific integration."""
+    def lower(self, options=None):
+        """Lower this graph with the default single-device static policy."""
 
-        raise NotImplementedError("Lowering is not yet implemented.")
+        from tvm.megakernel.transform import lower_to_tirx
+
+        return lower_to_tirx(self, options)

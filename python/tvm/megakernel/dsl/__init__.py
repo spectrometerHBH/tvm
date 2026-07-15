@@ -16,10 +16,10 @@
 # under the License.
 """Megakernel DSL building blocks."""
 
-from .impl import TileImpl
+from .impl import SmemAllocRecord, SmemManager, TileImpl
 from .spec import (
     CoordMapType,
-    DependencySpec,
+    DependencyType,
     EventSpec,
     ExprLike,
     KernelSpec,
@@ -32,11 +32,13 @@ from .spec import (
 
 __all__ = [
     "CoordMapType",
-    "DependencySpec",
+    "DependencyType",
     "EventSpec",
     "ExprLike",
     "KernelSpec",
     "ShapeType",
+    "SmemAllocRecord",
+    "SmemManager",
     "TensorSpec",
     "TileImpl",
     "TileNumType",

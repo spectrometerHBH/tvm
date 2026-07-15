@@ -14,17 +14,77 @@
 # KIND, either express or implied.  See the License for the
 # specific language governing permissions and limitations
 # under the License.
-"""Tile implementation interface for the megakernel DSL."""
+"""Parser-style implementation hooks for the megakernel DSL."""
+
+from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from dataclasses import dataclass, field
+from typing import Any, ClassVar, Literal
+
+from tvm.script import tirx as T
+
+
+@dataclass(frozen=True)
+class SmemAllocRecord:
+    """Metadata recorded for one managed shared-memory allocation."""
+
+    buffer: Any
+    shape: Any
+    dtype: str
+    policy: str
+    attrs: dict[str, Any] = field(default_factory=dict)
+
+
+class SmemManager:
+    """Shared-memory manager supplied to ``TileImpl`` lifecycle hooks."""
+
+    VALID_POLICIES: ClassVar[set[str]] = {"shared", "exclusive", "persistent"}
+
+    def alloc(
+        self,
+        shape,
+        dtype="float32",
+        strides=None,
+        scope="shared.dyn",
+        align=0,
+        buffer_type="",
+        axis_separators=None,
+        layout="default",
+        policy: Literal["shared", "exclusive", "persistent"] = "shared",
+        **kwargs,
+    ):
+        """Allocate managed shared memory and return its buffer."""
+
+        raise NotImplementedError
+
+    def commit(self):
+        """Finalize the managed shared-memory pool."""
+
+        raise NotImplementedError
+
+    def acquire_all(self, level="cta"):
+        """Wait until the current tile's shared-memory phase is available."""
+
+        raise NotImplementedError
+
+    def release_all(self, level="cta"):
+        """Release the current tile's shared-memory phase."""
+
+        raise NotImplementedError
+
+    def advance(self):
+        """Advance the current tile's shared-memory phase."""
+
+        raise NotImplementedError
 
 
 class TileImpl(ABC):
-    """Local implementation of one tile kind.
+    """Local parser-style implementation of one logical tile kind.
 
-    A ``TileImpl`` describes how one tile instance runs.  It does not describe
-    global scheduling, event layout, or cross-tile dependency policy.  Those
-    relationships are represented by the logical specification classes.
+    Global scheduling, dependency placement, profiling, and region lifecycle
+    are represented by an execution plan.  Implementations own only their
+    tensors and local resources.
     """
 
     @classmethod
@@ -40,22 +100,27 @@ class TileImpl(ABC):
         return f"{self.__class__.__name__}-{self._instance_id:x}"
 
     @classmethod
-    def init_shared_resources(cls):
-        """Initialize resources shared by all instances of this tile class."""
+    @T.inline
+    def init_shared_resources(cls, smem_manager: SmemManager):
+        """Optionally initialize resources shared by all class instances."""
 
     @classmethod
-    def finalize_shared_resources(cls):
-        """Release resources created by ``init_shared_resources``."""
+    @T.inline
+    def finalize_shared_resources(cls, smem_manager: SmemManager):
+        """Optionally finalize resources shared by all class instances."""
 
-    def device_init(self):
-        """Initialize device-side state owned by one tile instance."""
+    @T.inline
+    def device_init(self, smem_manager: SmemManager, m_idx, n_idx, k_idx):
+        """Optionally initialize device resources owned by this instance."""
 
     def host_init(self):
-        """Initialize host-side state for one tile instance."""
+        """Optionally initialize host resources owned by this instance."""
 
+    @T.inline
     def prefetch(self, m_idx, n_idx, k_idx):
-        """Optionally prefetch data for one tile instance before ``run``."""
+        """Optionally prefetch data before ``run``."""
 
     @abstractmethod
+    @T.inline
     def run(self, m_idx, n_idx, k_idx):
-        """Run one logical tile instance at index ``(m_idx, n_idx, k_idx)``."""
+        """Emit the parser-style tile body at ``(m_idx, n_idx, k_idx)``."""
