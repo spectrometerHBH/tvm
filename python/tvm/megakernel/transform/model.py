@@ -444,14 +444,49 @@ class MegakernelBackend:
     def bind_region_dependency(self, plan: ExecutionPlan, dependency: RegionDependencyPlan) -> None:
         """Bind one launch-order or completion dependency."""
 
+        if dependency.kind == "launch_order":
+            self.bind_launch_order(plan, dependency)
+        else:
+            self.bind_completion(plan, dependency)
+
+    def bind_launch_order(self, plan: ExecutionPlan, dependency: RegionDependencyPlan) -> None:
+        """Bind ordering between asynchronous region launches."""
+
+    def bind_completion(self, plan: ExecutionPlan, dependency: RegionDependencyPlan) -> None:
+        """Bind a dependency that requires source-region completion."""
+
     def begin_region(self, plan: ExecutionPlan, region: DeviceRegionPlan | HostRegionPlan) -> None:
         """Begin one region."""
+
+        if isinstance(region, DeviceRegionPlan):
+            self.begin_device_region(plan, region)
+        else:
+            self.begin_host_region(plan, region)
+
+    def begin_device_region(self, plan: ExecutionPlan, region: DeviceRegionPlan) -> None:
+        """Begin one device region."""
+
+    def begin_host_region(self, plan: ExecutionPlan, region: HostRegionPlan) -> None:
+        """Begin one host/runtime region."""
 
     def begin_action_program(self, context: EmissionContext) -> None:
         """Begin one ordered action program."""
 
     def emit_action(self, action: Action, context: EmissionContext) -> None:
         """Emit one action at its exact program position."""
+
+        if isinstance(context.region, DeviceRegionPlan):
+            self.emit_device_action(action, context)
+        else:
+            self.emit_host_action(action, context)
+
+    def emit_device_action(self, action: Action, context: EmissionContext) -> None:
+        """Emit an action owned by a device region."""
+
+        raise NotImplementedError
+
+    def emit_host_action(self, action: Action, context: EmissionContext) -> None:
+        """Emit an action owned by a host/runtime region."""
 
         raise NotImplementedError
 
@@ -460,6 +495,17 @@ class MegakernelBackend:
 
     def end_region(self, plan: ExecutionPlan, region: DeviceRegionPlan | HostRegionPlan) -> None:
         """End one region."""
+
+        if isinstance(region, DeviceRegionPlan):
+            self.end_device_region(plan, region)
+        else:
+            self.end_host_region(plan, region)
+
+    def end_device_region(self, plan: ExecutionPlan, region: DeviceRegionPlan) -> None:
+        """End one device region."""
+
+    def end_host_region(self, plan: ExecutionPlan, region: HostRegionPlan) -> None:
+        """End one host/runtime region."""
 
     def end_execution(self, plan: ExecutionPlan):
         """Finish the plan and return the backend result."""

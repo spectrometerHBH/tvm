@@ -28,6 +28,7 @@ from tvm.megakernel.transform import (
     EdgeBindingPlan,
     ExecutionPlan,
     FetchGuardAction,
+    HookAction,
     HostCallAction,
     HostEdgeAction,
     HostRegionPlan,
@@ -360,6 +361,69 @@ def test_region_dag_distinguishes_launch_order_and_completion():
         ("begin", "consumer"),
     ]
     assert trace[:2] == (("dependency", "launch_order"), ("dependency", "completion"))
+
+
+class _RegionProtocolBackend(MegakernelBackend):
+    def __init__(self):
+        self.trace = []
+
+    def bind_launch_order(self, plan, dependency):
+        self.trace.append(("launch_order", dependency.source, dependency.target))
+
+    def bind_completion(self, plan, dependency):
+        self.trace.append(("completion", dependency.source, dependency.target))
+
+    def begin_device_region(self, plan, region):
+        self.trace.append(("begin_device", region.name))
+
+    def begin_host_region(self, plan, region):
+        self.trace.append(("begin_host", region.name))
+
+    def emit_device_action(self, action, context):
+        self.trace.append(("device", context.region.name, type(action).__name__))
+
+    def emit_host_action(self, action, context):
+        self.trace.append(("host", context.region.name, type(action).__name__))
+
+    def end_device_region(self, plan, region):
+        self.trace.append(("end_device", region.name))
+
+    def end_host_region(self, plan, region):
+        self.trace.append(("end_host", region.name))
+
+    def end_execution(self, plan):
+        return tuple(self.trace)
+
+
+def test_region_backend_protocol_dispatches_region_and_dependency_kinds():
+    kernel = KernelSpec("region_protocol")
+    partial = DeviceRegionPlan("partial", prologue=(HookAction("launch"),))
+    collective = HostRegionPlan("collective", (HostCallAction("reduce_scatter"),))
+    reduce = DeviceRegionPlan("reduce", epilogue=(HookAction("finish"),))
+    plan = ExecutionPlan(
+        kernel,
+        device_regions=(partial, reduce),
+        host_regions=(collective,),
+        region_dependencies=(
+            RegionDependencyPlan("partial", "collective", "launch_order"),
+            RegionDependencyPlan("collective", "reduce", "completion"),
+        ),
+    )
+
+    trace = TileEmitter(_RegionProtocolBackend()).emit(plan)
+    assert trace == (
+        ("launch_order", "partial", "collective"),
+        ("completion", "collective", "reduce"),
+        ("begin_device", "partial"),
+        ("device", "partial", "HookAction"),
+        ("end_device", "partial"),
+        ("begin_host", "collective"),
+        ("host", "collective", "HostCallAction"),
+        ("end_host", "collective"),
+        ("begin_device", "reduce"),
+        ("device", "reduce", "HookAction"),
+        ("end_device", "reduce"),
+    )
 
 
 def test_region_dag_rejects_cycle():
