@@ -54,6 +54,33 @@ TIR_DEFINE_BUILTIN_FUNC(thread_return)
                                static_cast<int64_t>(CallEffectKind::kControlJump))
     .set_num_inputs(0);
 
+// Frontend-only IKET annotations.  LowerIket removes every one of these
+// before target code generation, whether tracing is enabled or disabled.
+TVM_REGISTER_OP("tirx.iket.mark")
+    .set_attr<TIRxOpCategory>("TIRxOpCategory", ffi::String("builtin"))
+    .set_attr<TScriptPrinterName>("TScriptPrinterName", ffi::String("tirx.iket.mark"))
+    .set_attr<TCallEffectKind>("TCallEffectKind", static_cast<int64_t>(CallEffectKind::kOpaque));
+TVM_REGISTER_OP("tirx.iket.range_start")
+    .set_attr<TIRxOpCategory>("TIRxOpCategory", ffi::String("builtin"))
+    .set_attr<TScriptPrinterName>("TScriptPrinterName", ffi::String("tirx.iket.range_start"))
+    .set_attr<TCallEffectKind>("TCallEffectKind", static_cast<int64_t>(CallEffectKind::kOpaque));
+TVM_REGISTER_OP("tirx.iket.range_end")
+    .set_attr<TIRxOpCategory>("TIRxOpCategory", ffi::String("builtin"))
+    .set_attr<TScriptPrinterName>("TScriptPrinterName", ffi::String("tirx.iket.range_end"))
+    .set_attr<TCallEffectKind>("TCallEffectKind", static_cast<int64_t>(CallEffectKind::kOpaque));
+TVM_REGISTER_OP("tirx.iket.range_push")
+    .set_attr<TIRxOpCategory>("TIRxOpCategory", ffi::String("builtin"))
+    .set_attr<TScriptPrinterName>("TScriptPrinterName", ffi::String("tirx.iket.range_push"))
+    .set_attr<TCallEffectKind>("TCallEffectKind", static_cast<int64_t>(CallEffectKind::kOpaque));
+TVM_REGISTER_OP("tirx.iket.range_pop")
+    .set_attr<TIRxOpCategory>("TIRxOpCategory", ffi::String("builtin"))
+    .set_attr<TScriptPrinterName>("TScriptPrinterName", ffi::String("tirx.iket.range_pop"))
+    .set_attr<TCallEffectKind>("TCallEffectKind", static_cast<int64_t>(CallEffectKind::kOpaque));
+TVM_REGISTER_OP("tirx.iket.sentinel_token")
+    .set_attr<TIRxOpCategory>("TIRxOpCategory", ffi::String("builtin"))
+    .set_attr<TScriptPrinterName>("TScriptPrinterName", ffi::String("tirx.iket.sentinel_token"))
+    .set_attr<TCallEffectKind>("TCallEffectKind", static_cast<int64_t>(CallEffectKind::kOpaque));
+
 TIR_DEFINE_BUILTIN_FUNC(continue_loop)
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                static_cast<int64_t>(CallEffectKind::kControlJump))

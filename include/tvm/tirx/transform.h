@@ -174,6 +174,16 @@ TVM_DLL Pass RemapThreadAxis(ffi::Map<ffi::String, IterVar> axis_map);
 TVM_DLL Pass SplitHostDevice();
 
 /*!
+ * \brief Lower TIRx IKET annotations after host/device splitting.
+ *
+ * The pass always removes the frontend-only ``tirx.iket.*`` calls.  When the
+ * input IRModule carries ``tirx.iket.enabled = true``, it emits NVIDIA IKET
+ * metadata and NativeDump placeholders for external ``run-iket`` patching.
+ * \return The pass.
+ */
+TVM_DLL Pass LowerIket();
+
+/*!
  * \brief skip assert stmt.
  *
  * \return The pass.
