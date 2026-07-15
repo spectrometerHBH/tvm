@@ -17,7 +17,7 @@
 
 Run as a normal Python program; :func:`iket.run` performs the replay::
 
-  python tests/python/tirx/iket_profile_workload.py \
+  python tests/python/tirx/iket/iket_profile_workload.py \
     --output-dir /tmp/tvm-iket-workload
 """
 

@@ -13,7 +13,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Verify a locked run-iket NativeDump patch from retained trace artifacts.
+"""Verify the locked run-iket NativeDump patch from retained trace artifacts.
 
 Run ``run-iket`` with ``--log-level trace --keep`` so its per-kernel patched
 and unpatched images are retained.  This helper reconstructs a disassemblable

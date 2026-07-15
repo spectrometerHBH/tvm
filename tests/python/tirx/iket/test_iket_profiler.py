@@ -14,6 +14,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+"""Tests for IKET lowering, metadata, installation locks, and trace contracts."""
+
 import hashlib
 import importlib
 import inspect
