@@ -173,6 +173,7 @@ void RegisterDeviceIntrinsic(const DeviceIntrinsicRegistration& reg) {
 const DeviceIntrinsicRegistration kDeviceIntrinsics[] = {
     TIRX_DEVICE_INTRIN_ALIAS(cuda_atomic_add, cuda, kOpaque),
     TIRX_DEVICE_INTRIN_ALIAS(cuda_atomic_cas, cuda, kOpaque),
+    TIRX_DEVICE_INTRIN_ALIAS(cuda_iket_official_event, cuda, kOpaque),
     TIRX_DEVICE_INTRIN_ALIAS(cuda_ballot_sync, cuda, kOpaque),
     TIRX_DEVICE_INTRIN_ALIAS(cuda_bfloat1622float2, cuda, kOpaque),
     TIRX_DEVICE_INTRIN_ALIAS(cuda_bfloat162float, cuda, kOpaque),

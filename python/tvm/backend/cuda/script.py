@@ -365,10 +365,23 @@ class GriddepcontrolNamespace:
         self.launch_dependents = _op_wrapper(_cuda_op.ptx_griddepcontrol_launch_dependents)
 
 
+class IketNamespace:
+    """Frontend-only NVIDIA IKET annotations."""
+
+    def __init__(self):
+        self.mark = _op_wrapper(_cuda_op.cuda_iket_mark)
+        self.range_start = _op_wrapper(_cuda_op.cuda_iket_range_start)
+        self.range_end = _op_wrapper(_cuda_op.cuda_iket_range_end)
+        self.range_push = _op_wrapper(_cuda_op.cuda_iket_range_push)
+        self.range_pop = _op_wrapper(_cuda_op.cuda_iket_range_pop)
+        self.sentinel_token = _op_wrapper(_cuda_op.cuda_iket_sentinel_token)
+
+
 class CUDANamespace:
     """The CUDA intrinsics submodule."""
 
     def __init__(self):
+        self.iket = IketNamespace()
         self.atomic_add = _op_wrapper(_cuda_op.cuda_atomic_add)
         self.thread_fence = _op_wrapper(_cuda_op.cuda_thread_fence)
         self.warpgroup_sync = _op_wrapper(_cuda_op.cuda_warpgroup_sync)
