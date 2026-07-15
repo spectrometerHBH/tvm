@@ -28,11 +28,11 @@ from pathlib import Path
 import pytest
 
 import tvm
+from tvm.backend.cuda import transforms as cuda_transforms
 from tvm.script import tirx as T
 from tvm.tirx.bench import IketProfiler
 
 TARGET = tvm.target.Target({"kind": "cuda", "arch": "sm_100a"})
-ORACLE_PATH = Path(__file__).with_name("iket_official_cutlass_4_6_1_oracle.json")
 
 
 @T.prim_func
@@ -282,6 +282,8 @@ def test_public_interface_is_official_only():
     profiler = IketProfiler()
     assert not hasattr(profiler, "capture")
     assert not hasattr(profiler, "export")
+    assert not hasattr(tvm.tirx.transform, "LowerIket")
+    assert callable(cuda_transforms.LowerIket)
 
     script = serial_a.script()
     assert 'T.cuda.iket.mark("a")' in script
@@ -300,7 +302,7 @@ def test_annotation_ops_are_cuda_owned(name):
 
 
 def test_regular_lowering_strips_annotations_and_tokens():
-    stripped = tvm.tirx.transform.LowerIket()(tvm.IRModule({"main": token_loop}))
+    stripped = cuda_transforms.LowerIket()(tvm.IRModule({"main": token_loop}))
     script = stripped.script()
     assert "cuda.iket" not in script
     assert "sentinel" not in script
@@ -341,7 +343,7 @@ def test_tirx_pipelines_immediately_lower_iket(module_name, factory_name):
     factory = getattr(importlib.import_module(module_name), factory_name)
     source = inspect.getsource(factory)
     assert re.search(
-        r"tirx\.transform\.SplitHostDevice\(\),\s+tirx\.transform\.LowerIket\(\)", source
+        r"tirx\.transform\.SplitHostDevice\(\),\s+cuda_transforms\.LowerIket\(\)", source
     )
 
 
@@ -577,37 +579,6 @@ def test_injection_environment_accepts_run_iket_two_passes(tmp_path, monkeypatch
         )
 
 
-def test_cutlass_4_6_1_oracle_manifest_integrity():
-    oracle = json.loads(ORACLE_PATH.read_text(encoding="utf-8"))
-    assert oracle["schema_version"] == 2
-    assert oracle["profile"]["cutlass_dsl"] == "4.6.1"
-    assert oracle["profile"]["instrument_method"] == "NativeDump"
-    assert "--dump-dir=<output>" in oracle["profile"]["compiler_flags"]
-    metadata_bytes = json.dumps(oracle["metadata"], sort_keys=True, separators=(",", ":")).encode()
-    assert hashlib.sha256(metadata_bytes).hexdigest() == oracle["metadata_sha256"]
-    abi = oracle["native_dump_abi"]
-    assert abi["sentinel_event_id"] == 0
-    assert abi["range_pop_event_id"] == 31
-    assert (
-        abi["meta_info_bytes"],
-        abi["event_attributes_bytes"],
-        abi["range_attributes_bytes"],
-    ) == (48, 60, 72)
-    assert abi["patched_hot_path"] == [
-        "GLOBALTIMERLO",
-        "ENCODE_EVENT_ID",
-        "STORE_GLOBAL_32",
-        "ADD_WRITE_PTR_64_4",
-    ]
-    all_hashes = [
-        *oracle["artifact_sha256"].values(),
-        *oracle["patch_artifact_sha256"].values(),
-        *oracle["wheels"].values(),
-        oracle["metadata_sha256"],
-    ]
-    assert all(re.fullmatch(r"[0-9a-f]{64}", value) for value in all_hashes)
-
-
 def test_external_trace_contract():
     trace_path = os.environ.get("TVM_IKET_OFFICIAL_TRACE_JSON")
     if trace_path is None:
@@ -658,8 +629,12 @@ def test_external_patch_contract(tmp_path):
         check=True,
     )
     report = json.loads((tmp_path / "verification.json").read_text(encoding="utf-8"))
-    oracle = json.loads(ORACLE_PATH.read_text(encoding="utf-8"))
     assert report["schema_version"] == 1
     assert report["site_count"] > 0
-    assert report["normalized_signature"] == oracle["native_dump_abi"]["patched_hot_path"]
+    assert report["normalized_signature"] == [
+        "GLOBALTIMERLO",
+        "ENCODE_EVENT_ID",
+        "STORE_GLOBAL_32",
+        "ADD_WRITE_PTR_64_4",
+    ]
     assert all(re.fullmatch(r"[0-9a-f]{64}", value) for value in report["sha256"].values())

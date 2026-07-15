@@ -1563,12 +1563,12 @@ Pass LowerIket() {
   auto pass_func = [](IRModule module, tvm::transform::PassContext) {
     return LowerIketImpl(std::move(module));
   };
-  return tvm::transform::CreateModulePass(pass_func, 0, "tirx.LowerIket", {});
+  return tvm::transform::CreateModulePass(pass_func, 0, "tirx.backend.cuda.LowerIket", {});
 }
 
 TVM_FFI_STATIC_INIT_BLOCK() {
   namespace refl = tvm::ffi::reflection;
-  refl::GlobalDef().def("tirx.transform.LowerIket", LowerIket);
+  refl::GlobalDef().def("tirx.backend.cuda.transforms.LowerIket", LowerIket);
 }
 
 }  // namespace transform

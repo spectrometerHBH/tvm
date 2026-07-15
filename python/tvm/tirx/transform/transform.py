@@ -291,23 +291,6 @@ def SplitHostDevice():
     return _ffi_api.SplitHostDevice()  # type: ignore
 
 
-def LowerIket():
-    """Lower frontend-only IKET annotations.
-
-    This pass must run after :pyfunc:`SplitHostDevice` and before
-    :pyfunc:`MakePackedAPI`.  It strips annotations for regular compilation
-    and emits NVIDIA IKET metadata and NativeDump placeholders when the
-    IRModule is explicitly IKET-enabled.  Trace collection and postprocessing
-    are owned by the external ``run-iket`` process.
-
-    Returns
-    -------
-    fpass : tvm.transform.Pass
-        The result pass.
-    """
-    return _ffi_api.LowerIket()  # type: ignore
-
-
 def SkipAssert():
     """Skip assert stmt.
 

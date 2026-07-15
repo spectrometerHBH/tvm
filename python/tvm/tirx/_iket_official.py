@@ -28,7 +28,7 @@ _PROFILE_HINT = (
     "run-iket profile --postprocess all -- python workload.py"
 )
 
-# Hashes are from the public 4.6.1 wheels recorded by the oracle generator.
+# Hashes are SHA-256 digests of files in the public 4.6.1 wheels.
 # Only ABI-independent runtime/compiler binaries are pinned so the profile is
 # usable with every Python version supported by that CUTLASS DSL release.
 _OFFICIAL_PROFILES = {
