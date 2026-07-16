@@ -26,8 +26,9 @@ import sys
 import tempfile
 import time
 import uuid
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from contextlib import contextmanager
+from dataclasses import dataclass
 from enum import Enum
 
 import numpy as np
@@ -38,6 +39,41 @@ import tvm_ffi
 import tvm
 from tvm.script import tirx as T
 from tvm.support import nvcc
+
+_DISTRIBUTED_EVENT_WARMUP_ITERATIONS = 5
+_DISTRIBUTED_EVENT_REPEAT_ITERATIONS = 30
+_DISTRIBUTED_KINETO_WARMUP_ITERATIONS = 30
+_DISTRIBUTED_KINETO_REPEAT_ITERATIONS = 30
+_DISTRIBUTED_KINETO_FLUSH_L2_BYTES = int(8e9)
+_DISTRIBUTED_KINETO_GPU_SLEEP_CYCLES = int(2e7)
+
+
+@dataclass(frozen=True)
+class DistributedBenchContext:
+    """Rank-local synchronization needed by the distributed Kineto timer.
+
+    Parameters
+    ----------
+    rank : int
+        Rank of the current process.
+    world_size : int
+        Number of ranks participating in the benchmark.
+    barrier : callable
+        Host callback that blocks until every rank reaches the same point.
+    max_reduce : callable
+        Host callback that returns the maximum of one floating-point value over
+        all ranks.  The distributed timer calls it once per measured launch.
+    stream : torch.cuda.Stream
+        The actual CUDA stream whose launch scope is being timed.  Launch
+        closures that use auxiliary streams must make this stream wait for them
+        before returning.
+    """
+
+    rank: int
+    world_size: int
+    barrier: Callable[[], None]
+    max_reduce: Callable[[float], float]
+    stream: object
 
 
 def is_running_under_pytest():
@@ -414,6 +450,242 @@ def _sleep_before_impl(cooldown_s):
         time.sleep(cooldown_s)
 
 
+def _validate_distributed_context(distributed):
+    if not isinstance(distributed, DistributedBenchContext):
+        raise TypeError("distributed must be a DistributedBenchContext")
+    if (
+        not isinstance(distributed.world_size, int)
+        or isinstance(distributed.world_size, bool)
+        or distributed.world_size < 1
+    ):
+        raise ValueError("distributed.world_size must be a positive integer")
+    if (
+        not isinstance(distributed.rank, int)
+        or isinstance(distributed.rank, bool)
+        or not 0 <= distributed.rank < distributed.world_size
+    ):
+        raise ValueError("distributed.rank must be in [0, world_size)")
+    if not callable(distributed.barrier):
+        raise TypeError("distributed.barrier must be callable")
+    if not callable(distributed.max_reduce):
+        raise TypeError("distributed.max_reduce must be callable")
+    if not hasattr(distributed.stream, "synchronize"):
+        raise TypeError("distributed.stream must be an actual CUDA stream")
+
+
+def _distributed_kineto_cold_start(distributed):
+    """Apply DeepGEMM's cold-cache protocol before one profiled launch."""
+    torch.empty(
+        _DISTRIBUTED_KINETO_FLUSH_L2_BYTES // 4,
+        dtype=torch.int,
+        device="cuda",
+    ).zero_()
+    torch.cuda._sleep(_DISTRIBUTED_KINETO_GPU_SLEEP_CYCLES)
+    distributed.barrier()
+
+
+def _run_distributed_kineto_batch(name, func, prepare, distributed, iterations):
+    """Run one DeepGEMM-style Kineto phase for a single implementation."""
+    prepare_fn = prepare.get(name)
+    for _ in range(iterations):
+        _distributed_kineto_cold_start(distributed)
+        if prepare_fn is not None:
+            prepare_fn()
+        func()
+
+
+def _parse_kineto_time_us(value):
+    units = {"ns": 1e-3, "us": 1.0, "ms": 1e3, "s": 1e6}
+    for unit, scale in units.items():
+        if value.endswith(unit):
+            return float(value[: -len(unit)]) * scale
+    raise RuntimeError(f"kineto: unsupported profiler time value {value!r}")
+
+
+def _collect_named_kineto_time(profiler, kernel_name):
+    """Parse one named CUDA kernel from the standard Kineto table."""
+    lines = (
+        profiler.key_averages()
+        .table(sort_by="cuda_time_total", max_name_column_width=100)
+        .split("\n")
+    )
+    matches = [line for line in lines if kernel_name in line]
+    if len(matches) != 1:
+        raise RuntimeError(
+            f"kineto: expected one profiler row containing {kernel_name!r}, found {len(matches)}"
+        )
+    fields = matches[0].split()
+    try:
+        elapsed_us = _parse_kineto_time_us(fields[-2])
+        call_count = int(fields[-1])
+    except (IndexError, ValueError) as err:
+        raise RuntimeError(
+            f"kineto: could not parse profiler row for {kernel_name!r}: {matches[0]!r}"
+        ) from err
+    if call_count != _DISTRIBUTED_KINETO_REPEAT_ITERATIONS:
+        raise RuntimeError(
+            f"kineto: expected {_DISTRIBUTED_KINETO_REPEAT_ITERATIONS} calls for "
+            f"{kernel_name!r}, found {call_count}"
+        )
+    if not math.isfinite(elapsed_us) or elapsed_us <= 0:
+        raise RuntimeError(
+            f"kineto: named kernel {kernel_name!r} has invalid elapsed time {elapsed_us}"
+        )
+    return elapsed_us
+
+
+def _profile_distributed_kineto(name, func, kernel_name, prepare, distributed):
+    """Faithfully apply DeepGEMM's two-phase named-kernel Kineto protocol."""
+    with torch.cuda.stream(distributed.stream):
+        prepare_fn = prepare.get(name)
+        if prepare_fn is not None:
+            prepare_fn()
+        func()
+        distributed.stream.synchronize()
+
+        schedule = torch.profiler.schedule(wait=0, warmup=1, active=1, repeat=1)
+        profiler = torch.profiler.profile(
+            activities=[torch.profiler.ProfilerActivity.CUDA],
+            schedule=schedule,
+            acc_events=True,
+        )
+        with profiler:
+            _run_distributed_kineto_batch(
+                name,
+                func,
+                prepare,
+                distributed,
+                _DISTRIBUTED_KINETO_WARMUP_ITERATIONS,
+            )
+            distributed.stream.synchronize()
+            profiler.step()
+
+            _run_distributed_kineto_batch(
+                name,
+                func,
+                prepare,
+                distributed,
+                _DISTRIBUTED_KINETO_REPEAT_ITERATIONS,
+            )
+            distributed.stream.synchronize()
+            profiler.step()
+
+    return _collect_named_kineto_time(profiler, kernel_name)
+
+
+def _distributed_stream_id(stream):
+    value = getattr(stream, "cuda_stream", None)
+    return int(value) if value is not None else repr(stream)
+
+
+def _bench_distributed_event(funcs, prepare, distributed, rounds, cooldown_s):
+    """Time complete distributed closures with CUDA events on every rank."""
+    items = list(funcs.items())
+    round_samples = {name: [] for name in funcs}
+    for _ in range(rounds):
+        for name, func in items:
+            _sleep_before_impl(cooldown_s)
+            distributed.barrier()
+            prepare_fn = prepare.get(name)
+            with torch.cuda.stream(distributed.stream):
+                for _ in range(_DISTRIBUTED_EVENT_WARMUP_ITERATIONS):
+                    if prepare_fn is not None:
+                        prepare_fn()
+                    func()
+            distributed.stream.synchronize()
+
+            samples = []
+            for _ in range(_DISTRIBUTED_EVENT_REPEAT_ITERATIONS):
+                start = torch.cuda.Event(enable_timing=True)
+                end = torch.cuda.Event(enable_timing=True)
+                with torch.cuda.stream(distributed.stream):
+                    if prepare_fn is not None:
+                        prepare_fn()
+                    start.record()
+                    func()
+                    end.record()
+                distributed.stream.synchronize()
+                elapsed_us = float(distributed.max_reduce(start.elapsed_time(end) * 1000.0))
+                if not math.isfinite(elapsed_us) or elapsed_us <= 0:
+                    raise RuntimeError(
+                        "event: distributed max-reduce returned invalid elapsed time "
+                        f"for {name!r}: {elapsed_us}"
+                    )
+                samples.append(elapsed_us)
+            round_samples[name].append(statistics.median(samples))
+            distributed.barrier()
+
+    return {
+        "impls": {name: statistics.mean(samples) for name, samples in round_samples.items()},
+        "round_samples": round_samples,
+        "errors": {},
+        "timer": "event",
+        "benchmark_protocol": {
+            "source": "torch.cuda.Event",
+            "timing_scope": "complete launch closure",
+            "timing_stream": _distributed_stream_id(distributed.stream),
+            "auxiliary_streams_join_timing_stream": True,
+            "warmup_iterations": _DISTRIBUTED_EVENT_WARMUP_ITERATIONS,
+            "repeat_iterations": _DISTRIBUTED_EVENT_REPEAT_ITERATIONS,
+            "prepare_outside_timing": True,
+            "rank_aggregate": "sample_wise_max",
+            "sample_aggregate": "median",
+            "round_aggregate": "mean",
+            "world_size": distributed.world_size,
+            "rounds": rounds,
+            "cooldown_s": cooldown_s,
+            "order": [name for name, _ in items],
+        },
+    }
+
+
+def _bench_distributed_kineto(funcs, prepare, distributed, rounds, cooldown_s, kineto_kernel_names):
+    """Run DeepGEMM's named-kernel Kineto table protocol."""
+    items = list(funcs.items())
+    round_samples = {name: [] for name in funcs}
+    for _ in range(rounds):
+        for name, func in items:
+            _sleep_before_impl(cooldown_s)
+            local_us = _profile_distributed_kineto(
+                name, func, kineto_kernel_names[name], prepare, distributed
+            )
+            elapsed_us = float(distributed.max_reduce(local_us))
+            if not math.isfinite(elapsed_us) or elapsed_us <= 0:
+                raise RuntimeError(
+                    "kineto: distributed max-reduce returned invalid elapsed time "
+                    f"for {name!r}: {elapsed_us}"
+                )
+            round_samples[name].append(elapsed_us)
+
+    return {
+        "impls": {name: statistics.mean(samples) for name, samples in round_samples.items()},
+        "round_samples": round_samples,
+        "errors": {},
+        "timer": "kineto",
+        "benchmark_protocol": {
+            "source": "DeepGEMM bench_kineto named-kernel table",
+            "timing_scope": "named CUDA kernel only",
+            "kernel_names": dict(kineto_kernel_names),
+            "timing_stream": _distributed_stream_id(distributed.stream),
+            "preflight_iterations": 1,
+            "warmup_iterations": _DISTRIBUTED_KINETO_WARMUP_ITERATIONS,
+            "repeat_iterations": _DISTRIBUTED_KINETO_REPEAT_ITERATIONS,
+            "flush_l2": True,
+            "flush_l2_bytes": _DISTRIBUTED_KINETO_FLUSH_L2_BYTES,
+            "gpu_sleep_cycles": _DISTRIBUTED_KINETO_GPU_SLEEP_CYCLES,
+            "rank_barrier_before_each_launch": True,
+            "prepare_excluded_by_kernel_name": True,
+            "profile_session_scope": "per_implementation",
+            "rank_aggregate": "max",
+            "round_aggregate": "mean",
+            "world_size": distributed.world_size,
+            "rounds": rounds,
+            "cooldown_s": cooldown_s,
+            "order": [name for name, _ in items],
+        },
+    }
+
+
 def bench(
     funcs,
     *,
@@ -424,6 +696,9 @@ def bench(
     references=None,
     cooldown_s=1.0,
     rounds=1,
+    distributed=None,
+    prepare=None,
+    kineto_kernel_names=None,
 ):
     """Benchmark pure-launch implementations using Triton-standard timing.
 
@@ -456,9 +731,10 @@ def bench(
         (default) defers to that timer's own default. Each timer default lives only
         in its own signature (Triton: do_bench 25/100, graph 20); nothing is hardcoded
         here.
-    timer : {None, "event", "proton", "cudagraph_proton"}
-        ``None`` (default) resolves to ``proton`` -- see the resolution in the body;
-        the default is defined in exactly one place so kernels pass ``None`` to inherit.
+    timer : {None, "event", "proton", "cudagraph_proton", "kineto"}
+        ``None`` (default) resolves to ``proton`` for a local benchmark and to
+        ``event`` when ``distributed`` is present.  The default is defined in
+        exactly one place so kernels pass ``None`` to inherit.
         ``event`` -> ported ``do_bench`` (CUDA-event wall of each call).
         ``proton`` -> ported ``do_bench_proton``: same setup as ``event``, differs
         ONLY in timing -- Proton per-kernel GPU time instead of the event wall (so
@@ -473,13 +749,28 @@ def bench(
         CuTeDSL) -- ``event`` would over/under-credit us by measuring the wall, not the
         kernel. Timer failures are propagated; a result is never silently relabelled
         after falling back to a different measurement method.
+        Distributed ``event`` measures each complete launch closure with CUDA
+        events and performs sample-wise slowest-rank aggregation.  Distributed
+        ``kineto`` faithfully uses DeepGEMM's two-phase, 30-iteration, 8 GB L2
+        flush and GPU-sleep protocol, then parses only the named CUDA kernel row.
+        Both distributed timers use fixed iteration counts and reject local timer
+        budget overrides.
+    distributed : DistributedBenchContext, optional
+        Rank-local barrier, max-reduce callback, and actual CUDA timing stream.
+        Launch closures that use auxiliary streams must make the timing stream
+        wait for them before returning.
+    prepare : dict[str, callable], optional
+        Per-implementation reset/preparation callbacks.  CUDA events are recorded
+        after preparation; Kineto excludes preparation through named-kernel parsing.
+    kineto_kernel_names : dict[str, str], optional
+        Required for distributed ``kineto``. Maps each implementation to the
+        unique CUDA kernel-name substring extracted from the Kineto table.
     rounds : int
         Independent measurement rounds; per-impl times are averaged across
         rounds. (Triton times a single fn with no rounds; this is our sampling
         layer on top.)
     cooldown_s : float
-        Seconds to sleep immediately before each implementation's warmup and
-        measurement. The first implementation in the first round is included.
+        Seconds to sleep immediately before each implementation in every round.
 
     Returns
     -------
@@ -487,31 +778,46 @@ def bench(
         ``{"impls": {name: us}, "round_samples": {name: [us, ...]}, ...}``.
         Times are stored in microseconds (same unit as the pinned tir-bench baselines).
     """
-    # warmup/repeat/cudagraph_rep default to None = "use the timer function's own
-    # (Triton-aligned) default". They are only forwarded to the timer below when a
-    # caller explicitly overrides, so the defaults live in exactly one place: the
-    # _do_bench_* signatures.
-    if repeat is not None and repeat <= 0:
-        raise ValueError("repeat must be positive")
-    if warmup is not None and warmup < 0:
-        raise ValueError("warmup must be non-negative")
-    if rounds < 1:
+    if not isinstance(rounds, int) or isinstance(rounds, bool) or rounds < 1:
         raise ValueError("rounds must be >= 1")
     if cooldown_s < 0:
         raise ValueError("cooldown_s must be non-negative")
-    # ``timer=None`` means "use the default timer". The default lives in exactly one
-    # place -- here -- so kernels forward ``timer=None`` to inherit it and a future
-    # change is a one-line edit. proton = pure per-kernel GPU time; it is honest for
-    # references with heavy host dispatch (flashinfer, CuTeDSL) where the ``event``
-    # wall would over/under-credit us, and matches event within a few % on
-    # compute-bound kernels. A Proton failure is explicit so the recorded timer
-    # always names the quantity that was actually measured.
-    if timer is None:
-        timer = "proton"
-    if timer not in {"event", "proton", "cudagraph_proton"}:
-        raise ValueError(
-            f"unsupported timer {timer!r}; expected event, proton, or cudagraph_proton"
-        )
+
+    if distributed is None:
+        if prepare is not None:
+            raise ValueError("prepare is supported only with a distributed context")
+        if kineto_kernel_names is not None:
+            raise ValueError("kineto_kernel_names requires a distributed context")
+        if repeat is not None and repeat <= 0:
+            raise ValueError("repeat must be positive")
+        if warmup is not None and warmup < 0:
+            raise ValueError("warmup must be non-negative")
+        if timer is None:
+            timer = "proton"
+        if timer not in {"event", "proton", "cudagraph_proton"}:
+            raise ValueError(
+                f"unsupported timer {timer!r}; expected event, proton, or cudagraph_proton"
+            )
+    else:
+        _validate_distributed_context(distributed)
+        if timer is None:
+            timer = "event"
+        elif timer not in {"event", "kineto"}:
+            raise ValueError("a distributed context supports only timer='event' or timer='kineto'")
+        overrides = [
+            name
+            for name, value in (
+                ("warmup", warmup),
+                ("repeat", repeat),
+                ("cudagraph_rep", cudagraph_rep),
+            )
+            if value is not None
+        ]
+        if overrides:
+            raise ValueError(
+                f"timer={timer!r} uses fixed iteration counts and rejects overrides: "
+                + ", ".join(overrides)
+            )
     if not isinstance(funcs, Mapping) or not funcs:
         raise TypeError("funcs must be a non-empty mapping of name to no-arg callable")
     for name, func in funcs.items():
@@ -538,6 +844,41 @@ def bench(
         if not callable(ref_fn):
             raise TypeError(f"references[{ref_name!r}] builder must return a callable")
         funcs = {**funcs, ref_name: ref_fn}
+
+    if distributed is not None:
+        if prepare is None:
+            prepare = {}
+        if not isinstance(prepare, Mapping):
+            raise TypeError("prepare must map implementation names to no-arg callables")
+        for name, prepare_fn in prepare.items():
+            if name not in funcs:
+                raise ValueError(f"prepare contains unknown implementation {name!r}")
+            if not callable(prepare_fn):
+                raise TypeError(f"prepare[{name!r}] must be callable")
+        if timer == "event":
+            if kineto_kernel_names is not None:
+                raise ValueError("kineto_kernel_names is valid only for timer='kineto'")
+            result = _bench_distributed_event(
+                funcs, prepare, distributed, rounds=rounds, cooldown_s=cooldown_s
+            )
+        else:
+            if not isinstance(kineto_kernel_names, Mapping):
+                raise TypeError("timer='kineto' requires kineto_kernel_names mapping")
+            if set(kineto_kernel_names) != set(funcs):
+                raise ValueError("kineto_kernel_names must cover every implementation exactly")
+            for name, kernel_name in kineto_kernel_names.items():
+                if not isinstance(kernel_name, str) or not kernel_name:
+                    raise TypeError(f"kineto_kernel_names[{name!r}] must be a non-empty string")
+            result = _bench_distributed_kineto(
+                funcs,
+                prepare,
+                distributed,
+                rounds=rounds,
+                cooldown_s=cooldown_s,
+                kineto_kernel_names=kineto_kernel_names,
+            )
+        result["errors"] = build_errors
+        return result
 
     # Resolve the timer function once. Only forward warmup/repeat/cudagraph_rep when a
     # caller explicitly overrode them; otherwise the _do_bench_* signature default
