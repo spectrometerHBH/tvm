@@ -369,7 +369,7 @@ class IketProfiler:
     def range_start(self, name: str):
         return T.cuda.iket.range_start(name)
 
-    def range_end(self, token: tvm.tirx.PrimExpr):
+    def range_end(self, token: tvm.tirx.Expr):
         T.evaluate(T.cuda.iket.range_end(token))
 
     def range_push(self, name: str):

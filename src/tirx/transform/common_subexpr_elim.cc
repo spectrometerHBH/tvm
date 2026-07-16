@@ -781,9 +781,9 @@ class CSERewriter : public StmtExprMutator {
         new_stmts = ffi::Array<Stmt>(it->second.begin(), it->second.end());
       } else {
         std::unordered_map<const VarNode*, PrimExpr> remap;
-        auto lookup = [&remap](const Var& v) -> ffi::Optional<PrimExpr> {
+        auto lookup = [&remap](const Var& v) -> ffi::Optional<Expr> {
           auto rit = remap.find(v.get());
-          if (rit != remap.end()) return rit->second;
+          if (rit != remap.end()) return Expr(rit->second);
           return std::nullopt;
         };
         for (const Stmt& s : it->second) {
@@ -791,9 +791,9 @@ class CSERewriter : public StmtExprMutator {
           TVM_FFI_ICHECK(bind != nullptr);
           // Deeper Bind values may reference shallower cse vars of this same
           // insertion point; route them through the fresh vars as well.
-          PrimExpr value = Substitute(bind->value, lookup);
-          Var fresh(bind->var->name_hint, bind->var.ty());
-          remap[bind->var.get()] = fresh;
+          Expr value = Substitute(bind->value, lookup);
+          Var fresh(bind->var->name, bind->var->ty.as_or_throw<PrimType>());
+          remap[bind->var.get()] = fresh.as_or_throw<PrimExpr>();
           new_stmts.push_back(Bind(fresh, value));
         }
         visited = Substitute(visited, lookup);

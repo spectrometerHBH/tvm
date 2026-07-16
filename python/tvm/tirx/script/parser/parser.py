@@ -217,20 +217,21 @@ def bind_assign_value(self: Parser, node: doc.expr, var_name: str, value: Any) -
         IRBuilder.name(var_name, value)
         return value
     else:
-        if not tvm.ir.is_prim_expr(value):
+        if not tvm.ir.is_prim_expr(value) and not isinstance(value, Expr):
+            # Python scalar (int/float/bool) -> const prim expr
             value = tvm.tirx.const(value)
-        if not isinstance(value, tvm.tirx.StringImm):
+        if isinstance(value, tvm.tirx.StringImm) or not tvm.ir.is_prim_expr(value):
+            # StringImm or non-prim-expr (e.g. pointer Call): immutable Bind var
+            ann_var = tvm.tirx.Var(var_name, value.ty)
+            IRBuilder.name(var_name, ann_var)
+            T.Bind(value, var=ann_var)
+            return ann_var
+        else:
             # x = expr -> scalar (auto-typed from value)
             scalar = T.local_scalar(dtype=str(value.ty.dtype))
             IRBuilder.name(var_name, scalar.scalar.buffer)
             T.buffer_store(scalar.scalar.buffer, value, [0])
             return scalar.scalar
-        else:
-            # StringImm: x = expr -> immutable Bind var
-            ann_var = tvm.tirx.Var(var_name, value.ty)
-            IRBuilder.name(var_name, ann_var)
-            T.Bind(value, var=ann_var)
-            return ann_var
 
 
 def find_decorator_annotation(node: doc.FunctionDef, annotation: str, default: bool = True) -> bool:
@@ -260,7 +261,7 @@ def visit_for(self: Parser, node: doc.For) -> None:
     node : doc.For
         The doc AST for node.
     """
-    # Intercept range() at AST level so it works with both Python ints and PrimExprs.
+    # Intercept range() at AST level so it works with both Python ints and Exprs.
     # In other contexts (e.g. list comprehensions), range remains Python's builtin.
     if (
         isinstance(node.iter, doc.Call)
@@ -752,7 +753,7 @@ def visit_expr_stmt(self: Parser, node: doc.Expr) -> None:
             # different function Call representation. Convert to the TIR representation.
             T.evaluate(tvm.tirx.call_tir(res.op, *res.args))
         else:
-            # Pointer-valued TIR calls are general Expr rather than PrimExpr,
+            # Pointer-valued TIR calls are general Expr rather than Expr,
             # but are still valid standalone Evaluate statements.
             T.evaluate(res)
     elif isinstance(res, str):

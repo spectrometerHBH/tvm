@@ -388,13 +388,13 @@ class Buffer(Object, Scriptable):
             return self._redecl(shape, layout, dtype=cast_dtype, elem_offset=new_elem_offset)
         else:
             # --- Signature 1: view(*shape, **opts) ---
-            # Check if all positional args are integers/PrimExprs with dtype int32 or int64 (the shape)  # noqa: E501
+            # Check if all positional args are integers/Exprs with dtype int32 or int64 (the shape)  # noqa: E501
             shape = args
             assert all(
                 isinstance(arg, int)
                 or (tvm.ir.is_prim_expr(arg) and arg.ty.dtype in ["int32", "int64"])
                 for arg in shape
-            ), "shape must be a list of integers or PrimExprs with dtype int32 or int64"
+            ), "shape must be a list of integers or Exprs with dtype int32 or int64"
             # Safely get optional keyword arguments
             layout = kwargs.get("layout", None)
             # Assert there are no other kwargs
@@ -524,7 +524,7 @@ class Buffer(Object, Scriptable):
         The dim's iters are outer→inner in row-major coordinate order:
         decompose ``index`` mixed-radix over their extents and weight each
         coordinate by its iter's stride. A single-iter dim reduces to
-        ``index * stride``. ``index`` may be a PrimExpr; multi-iter dims
+        ``index * stride``. ``index`` may be a Expr; multi-iter dims
         need concrete inner extents.
         """
         if len(group) == 1:
@@ -709,7 +709,7 @@ class Buffer(Object, Scriptable):
         ``(dim, factors)`` specs as sugar for a chain. ``factors`` is the
         tuple the dim splits into (row-major, like :meth:`unflatten`; one
         ``-1`` inferred). The indexer takes one entry per factor: an ``int`` /
-        ``PrimExpr`` **picks** it (fixing the chunk, dropping the axis, folding
+        ``Expr`` **picks** it (fixing the chunk, dropping the axis, folding
         its offset) and ``:`` **keeps** it. At least one factor per dim must be
         picked — a pure keep-everything split is :meth:`unflatten`, not a
         chunk::
@@ -721,7 +721,7 @@ class Buffer(Object, Scriptable):
             tile(d, (n, -1))[c, :]   # contiguous block c
             tile(d, (-1, n))[:, c]   # round-robin chunk c
 
-        A picked index may be a dynamic PrimExpr (e.g. a warp id); picking
+        A picked index may be a dynamic Expr (e.g. a warp id); picking
         several factors of one dim is allowed.
         """
         if specs and isinstance(specs[0], int | Integral):
@@ -751,7 +751,7 @@ class Buffer(Object, Scriptable):
         (leave the dim) or a positive int ``n`` (split that dim, extent ``E``
         with ``E % n == 0``, into ``n`` equal chunks of ``E // n``). Then
         ``chunk(spec)[picks]`` takes one entry per dim: a chunked dim's pick is
-        the chunk index (int / PrimExpr) and **narrows that dim** to the chunk's
+        the chunk index (int / Expr) and **narrows that dim** to the chunk's
         ``[c*E//n : (c+1)*E//n)`` range — the dim is kept at ``E // n``, no
         dimension is added; an unchunked dim's pick is a normal index (``:`` /
         int / slice). The result is the *same BufferRegion* as the hand-written
@@ -1018,7 +1018,7 @@ class _TileIndexer:
     """Indexer object returned by :meth:`Buffer.tile`.
 
     Holds ``(dim, factors)`` specs; ``[...]`` takes one entry per factor
-    (``int`` / ``PrimExpr`` picks and drops it, ``:`` keeps it). Each dim is
+    (``int`` / ``Expr`` picks and drops it, ``:`` keeps it). Each dim is
     processed as ``view`` (split) -> per-factor ``_view_drop`` -> a single
     ``view`` (merge) of the kept factors. Dims are processed high-to-low so a
     fully-picked (rank-reducing) dim never shifts a lower dim's index.
@@ -1035,7 +1035,7 @@ class _TileIndexer:
         if len(picks) != n_factors:
             raise ValueError(
                 f"tile: split into {n_factors} factor(s) but {len(picks)} "
-                f"index(es) given (int/PrimExpr picks, ':' keeps)"
+                f"index(es) given (int/Expr picks, ':' keeps)"
             )
         # Distribute the flat index list across specs, left to right.
         groups, pos = [], 0

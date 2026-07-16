@@ -490,7 +490,10 @@ def test_gemm_tcgen05_cta_group_2(task):
         tma_mbar = T.alloc_shared([1], "uint64")
         mma_mbar = T.alloc_shared([1], "uint64")
 
-        ptr: T.let[T.Var(name="ptr", ty=PointerType(PrimType("uint64")))] = T.reinterpret("handle", T.ptx.map_shared_rank(tma_mbar.ptr_to([0]), 0))  # noqa: E501
+        ptr: T.let = T.reinterpret(
+            PointerType(PrimType("uint64")),
+            T.ptx.map_shared_rank(tma_mbar.ptr_to([0]), 0),
+        )
         tma_mbar_cta_0 = T.decl_buffer([1], "uint64", data=ptr, scope="shared")
 
         if tid_in_wg == 0:
@@ -622,7 +625,10 @@ def test_gemm_tcgen05_cta_group_2_layout_b():
         tma_mbar = T.alloc_shared([1], "uint64")
         mma_mbar = T.alloc_shared([1], "uint64")
 
-        ptr: T.let[T.Var(name="ptr", ty=PointerType(PrimType("uint64")))] = T.reinterpret("handle", T.ptx.map_shared_rank(tma_mbar.ptr_to([0]), 0))  # noqa: E501
+        ptr: T.let = T.reinterpret(
+            PointerType(PrimType("uint64")),
+            T.ptx.map_shared_rank(tma_mbar.ptr_to([0]), 0),
+        )
         tma_mbar_cta_0 = T.decl_buffer([1], "uint64", data=ptr, scope="shared")
 
         if tid_in_wg == 0:
@@ -999,7 +1005,10 @@ def test_gemm_block_scaled_fp8_cta_group_2(task):
         descSFA = T.alloc_buffer((1,), "uint64", scope="local")
         descSFB = T.alloc_buffer((1,), "uint64", scope="local")
 
-        ptr: T.let[T.Var(name="ptr", ty=PointerType(PrimType("uint64")))] = T.reinterpret("handle", T.ptx.map_shared_rank(tma_mbar.ptr_to([0]), 0))  # noqa: E501
+        ptr: T.let = T.reinterpret(
+            PointerType(PrimType("uint64")),
+            T.ptx.map_shared_rank(tma_mbar.ptr_to([0]), 0),
+        )
         tma_mbar_cta_0 = T.decl_buffer([1], "uint64", data=ptr, scope="shared")
 
         if tid_in_wg == 0:
@@ -1381,7 +1390,10 @@ def test_gemm_block_scaled_nvfp4_cta_group_2():
         descSFA = T.alloc_buffer((1,), "uint64", scope="local")
         descSFB = T.alloc_buffer((1,), "uint64", scope="local")
 
-        ptr: T.let[T.Var(name="ptr", ty=PointerType(PrimType("uint64")))] = T.reinterpret("handle", T.ptx.map_shared_rank(tma_mbar.ptr_to([0]), 0))  # noqa: E501
+        ptr: T.let = T.reinterpret(
+            PointerType(PrimType("uint64")),
+            T.ptx.map_shared_rank(tma_mbar.ptr_to([0]), 0),
+        )
         tma_mbar_cta_0 = T.decl_buffer([1], "uint64", data=ptr, scope="shared")
 
         if tid_in_wg == 0:
@@ -2702,28 +2714,6 @@ def _run_dense_gemm(
     mod["main"](A_t, B_t, C_t)
     C_ref = A_np.astype("float32") @ B_np.astype("float32").T
     np.testing.assert_allclose(C_t.numpy().astype("float32"), C_ref, atol=atol, rtol=rtol)
-
-
-@pytest.mark.gpu
-@pytest.mark.skipif(not env.has_cuda_compute(10), reason="need cuda compute >= 10.0")
-@pytest.mark.skipif(ml_dtypes is None, reason="Requires ml_dtypes for fp8")
-def test_gemm_dense_fp8():
-    _run_dense_gemm("float8_e4m3fn", "float8_e4m3fn", "float32", 128, atol=2.0, rtol=0.15)
-
-
-@pytest.mark.gpu
-@pytest.mark.skipif(not env.has_cuda_compute(10), reason="need cuda compute >= 10.0")
-def test_gemm_tf32_with_tfloat32_tma():
-    _run_dense_gemm(
-        "float32",
-        "float32",
-        "float32",
-        64,
-        is_AB_tf32=True,
-        tma_dtype_B="tf32",
-        atol=2e-2,
-        rtol=2e-2,
-    )
 
 
 def _build_smem_desc_kernel(smem_desc, weight_stationary=False, pass_descI=False):

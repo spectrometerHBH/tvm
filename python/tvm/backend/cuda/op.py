@@ -94,6 +94,11 @@ def cuda_iket_sentinel_token(name):
     return call_intrin("uint32", "tirx.cuda.iket_sentinel_token", name)
 
 
+def cuda_iket_official_event(event_id, source_code=""):
+    """Create an NVIDIA IKET official range-end event."""
+    return call_intrin("uint32", "tirx.cuda.iket_official_event", event_id, source_code)
+
+
 def cuda_func_call(func_name, *args, source_code, return_type="void"):
     """TVM intrinsic to call a CUDA function. Source code is provided as a string.
 
@@ -571,7 +576,7 @@ def ptx_cp_async_mbarrier_arrive(bar, noinc=False, space="shared"):
 
     Parameters
     ----------
-    bar : PrimExpr
+    bar : Expr
         Pointer to the shared-memory mbarrier object.
 
     noinc : bool
@@ -593,7 +598,7 @@ def ptx_cp_async_mbarrier_arrive_noinc(bar, space="shared::cta"):
 
     Parameters
     ----------
-    bar : PrimExpr
+    bar : Expr
         Pointer to the shared-memory mbarrier object.
 
     space : str
@@ -3390,7 +3395,7 @@ def cuda_ldg(addr, dtype, *, dst=None, vec=""):
     dtype : str
         The data type of the loaded value.
 
-    dst : PrimExpr or tuple[PrimExpr], optional
+    dst : Expr or tuple[Expr], optional
         Destination pointers for vector loads.
 
     vec : str
@@ -3581,7 +3586,7 @@ def _validate_f32x2_value_return_dtype(return_dtype: str) -> str:
 
 
 def _as_f32x2_bits(value):
-    if isinstance(value, PrimExpr) and str(value.ty) == "float32x2":
+    if is_prim_expr(value) and str(value.ty) == "float32x2":
         return reinterpret("uint64", value)
     return value
 

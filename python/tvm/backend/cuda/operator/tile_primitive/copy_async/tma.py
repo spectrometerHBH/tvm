@@ -1013,7 +1013,7 @@ def _assemble_plan(
         issue_axes=issue_axes,
         tensor_ptr=g_buf.data,
         elem_bytes=elem_bytes,
-        elem_dtype=g_buf.dtype,
+        elem_dtype=str(g_buf.dtype),
     )
     return _merge_contig_full_box_dims(plan, analyzer)
 
@@ -1416,10 +1416,10 @@ def copy_tma_impl(op_call: TilePrimitiveCall, sctx: DispatchContext) -> PrimFunc
         mbarrier_addr_static = mbarrier_addr_config
     elif isinstance(mbarrier_addr_config, tvm.tirx.IntImm):
         mbarrier_addr_static = bool(int(mbarrier_addr_config))
-    elif isinstance(mbarrier_addr_config, tvm.tirx.PrimExpr):
+    elif isinstance(mbarrier_addr_config, tvm.tirx.Expr):
         mbarrier_addr_pred = mbarrier_addr_config
     else:
-        fail("copy_async(tma) mbarrier_addr must be bool or PrimExpr")
+        fail("copy_async(tma) mbarrier_addr must be bool or Expr")
     if (mbarrier_addr_static or mbarrier_addr_pred is not None) and direction != "g2s":
         fail("copy_async(tma) mbarrier_addr is only supported for global -> shared copies")
     use_tma_reduce = op_call.config.get("use_tma_reduce", None)

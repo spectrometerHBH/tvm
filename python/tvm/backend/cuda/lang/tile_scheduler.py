@@ -370,7 +370,6 @@ class ClusterPersistentScheduler2D(BaseTileScheduler):
         BLOCK_SIZE = T.meta_var(self._BLOCK_SIZE)  # S * S
         FULL_BLOCK_TILES = T.meta_var(self._FULL_BLOCK_TILES)
         M_TILE_ROWS = T.meta_var(self._M_TILE_ROWS)
-        T.meta_var(self._N_TILE_COLS)
         RESIDUAL_N = T.meta_var(self._RESIDUAL_N)
         RESIDUAL_M = T.meta_var(self._RESIDUAL_M)
 

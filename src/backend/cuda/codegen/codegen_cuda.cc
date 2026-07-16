@@ -1320,6 +1320,22 @@ void CodeGenCUDA::VisitExpr_(const CallNode* op, std::ostream& os) {
            << guard << ")\n";
     stream << ");\n";
   } else if (op->op.same_as(builtin::reinterpret())) {
+    // Compile-time pointer reinterpret of a literal (e.g. a tcgen05 descriptor
+    // template encoded at address 0): emit C++-style reinterpret_cast<T*>(...)
+    // to match the encoded template. Runtime pointer reinterprets fall through
+    // to CodeGenC, which emits the C-style (T*)... cast.
+    if (op->ty.as<PointerTypeNode>() && op->args[0].as<IntImmNode>()) {
+      os << "reinterpret_cast<";
+      if (const auto* pt = op->ty.as<PointerTypeNode>()) {
+        if (const auto* et = pt->element_type.as<PrimTypeNode>()) {
+          this->PrintType(ffi::GetRef<PrimType>(et), os);
+        } else {
+          os << "void";
+        }
+      }
+      os << "*>(" << PrintExpr(op->args[0]) << ")";
+      return;
+    }
     auto tgt_prim_type = op->ty.as<PrimType>();
     auto src_prim_type = op->args[0]->ty.as<PrimType>();
 

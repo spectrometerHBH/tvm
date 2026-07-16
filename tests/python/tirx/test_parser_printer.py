@@ -1651,7 +1651,7 @@ def test_buffer_sub_swizzle_commutation():
 
 def test_buffer_tile_ir():
     """buf.tile((dim, factors))[picks] splits dims into factors and picks
-    chunks in one call: int/PrimExpr picks a factor, ':' keeps it, kept
+    chunks in one call: int/Expr picks a factor, ':' keeps it, kept
     factors merge back. Equivalent to the view (reshape) + sub chain."""
 
     # fmt: off
@@ -1772,8 +1772,8 @@ def test_buffer_chunk_ir():
     assert (int(reg_c.region[1].min), int(reg_c.region[1].extent)) == (256, 128)
     assert_structural_equal(reg_c, C[:, 256:384])
 
-    # a symbolic (PrimExpr) chunk index translates to c*k : (c+1)*k as well.
-    c = T.Var(name="c", dtype="int32")
+    # a symbolic (Expr) chunk index translates to c*k : (c+1)*k as well.
+    c = T.Var(name="c", ty="int32")
     assert_structural_equal(A.chunk((None, None, 2))[:, :, c], A[:, :, c * 8 : c * 8 + 8])
 
     # validation

@@ -582,9 +582,9 @@ def test_cp_async_bulk_tensor_global_to_shared_swizzle(swizzle, dtype):
             B = T.match_buffer(B_ptr, total_elems, dtype=dtype, align=16)
 
             A_map: T.let[T.handle("tensormap")] = T.tvm_stack_alloca("tensormap", 1)
-            T.call_packed("runtime.cuTensorMapEncodeTiled", A_map, dtype, len(shape), A.data, *load_args)  # noqa: E501
+            T.call_packed("runtime.cuTensorMapEncodeTiled", A_map, str(dtype), len(shape), A.data, *load_args)  # noqa: E501
             B_map: T.let[T.handle("tensormap")] = T.tvm_stack_alloca("tensormap", 1)
-            T.call_packed("runtime.cuTensorMapEncodeTiled", B_map, dtype, len(shape), B.data, *store_args)  # noqa: E501
+            T.call_packed("runtime.cuTensorMapEncodeTiled", B_map, str(dtype), len(shape), B.data, *store_args)  # noqa: E501
 
             T.device_entry()
             for blockIdx in T.thread_binding(1, thread="blockIdx.x"):

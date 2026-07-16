@@ -375,6 +375,7 @@ class IketNamespace:
         self.range_push = _op_wrapper(_cuda_op.cuda_iket_range_push)
         self.range_pop = _op_wrapper(_cuda_op.cuda_iket_range_pop)
         self.sentinel_token = _op_wrapper(_cuda_op.cuda_iket_sentinel_token)
+        self.official_event = _op_wrapper(_cuda_op.cuda_iket_official_event)
 
 
 class CUDANamespace:

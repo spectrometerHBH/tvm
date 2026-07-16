@@ -27,7 +27,7 @@ from typing import Any, ClassVar
 import tvm_ffi
 from tvm_ffi import register_object
 
-from tvm.ir import Op, PrimExpr, Range
+from tvm.ir import Op, Expr, Range
 from tvm.runtime import Object, Scriptable
 from tvm.target import Target
 
@@ -47,14 +47,14 @@ class LambdaExpr(Object):
     """
 
     vars: list[Var]
-    pred: PrimExpr
+    pred: Expr
 
-    def __init__(self, f_pred: Callable[..., PrimExpr]):
+    def __init__(self, f_pred: Callable[..., Expr]):
         vars = [Var(name, "int32") for name in inspect.signature(f_pred).parameters]
         pred = f_pred(*vars)
         self.__init_handle_by_constructor__(_ffi_api.LambdaExpr, vars, pred)
 
-    def apply(self, indices: list[PrimExpr]) -> PrimExpr:
+    def apply(self, indices: list[Expr]) -> Expr:
         """Substitute the bound variables with the given indices, returning the body."""
         return _ffi_api.LambdaExprApply(self, indices)
 
@@ -71,7 +71,7 @@ class DispatchContext(Object, Scriptable):
     exec_scope : ExecScope
         The execution scope of the dispatch context.
 
-    launch_params : Dict[str, PrimExpr]
+    launch_params : Dict[str, Expr]
         The launch parameters of the dispatch context.
 
     var_range_map : Dict[Var, Range]
@@ -243,7 +243,7 @@ class DispatchContext(Object, Scriptable):
         return self.scope_kind == "cluster"
 
 
-def normalize_const_arg(arg) -> PrimExpr:
+def normalize_const_arg(arg) -> Expr:
     if isinstance(arg, float):
         return FloatImm("float32", arg)
     return arg
@@ -258,7 +258,7 @@ class TilePrimitiveCall(Stmt):
     op : Op
         The operator.
 
-    args : List[PrimExpr]
+    args : List[Expr]
         The arguments.
 
     workspace : Map[str, Buffer]
@@ -274,7 +274,7 @@ class TilePrimitiveCall(Stmt):
         The cooperation scope of this call. Defaults to ``thread`` (an unscoped call).
     """
 
-    args: list[PrimExpr]
+    args: list[Expr]
     workspace: dict[str, Buffer]
     config: dict[str, Any]
     dispatch: str | None
@@ -283,7 +283,7 @@ class TilePrimitiveCall(Stmt):
 
     def __init__(
         self,
-        *args: list[PrimExpr],
+        *args: list[Expr],
         op: Op | None = None,
         workspace: dict[str, Buffer] | None = None,
         config: dict[str, Any] | None = None,
@@ -365,11 +365,11 @@ class TilePrimitiveCall(Stmt):
         return self.replace(workspace=workspace)
 
     @property
-    def srcs(self) -> list[PrimExpr]:
+    def srcs(self) -> list[Expr]:
         raise NotImplementedError("Subclass must implement this method")
 
     @property
-    def dsts(self) -> list[PrimExpr]:
+    def dsts(self) -> list[Expr]:
         raise NotImplementedError("Subclass must implement this method")
 
     def get_private_buffers(

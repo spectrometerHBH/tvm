@@ -86,7 +86,7 @@ class TMABarAddrCounter(StmtExprVisitor):
 
     def visit_evaluate_(self, op):
         if (
-            isinstance(op.value, tvm.tirx.Call)
+            isinstance(op.value, tvm.ir.Call)
             and op.value.op.name == "tirx.ptx.cp_async_bulk_tensor_g2s_cluster"
             and len(op.value.args) >= 10
         ):
@@ -142,7 +142,7 @@ class Gather4CallCollector(StmtExprVisitor):
 
     def visit_evaluate_(self, op):
         if (
-            isinstance(op.value, tvm.tirx.Call)
+            isinstance(op.value, tvm.ir.Call)
             and op.value.op.name == "tirx.ptx.cp_async_bulk_tensor_g2s_cluster"
             and len(op.value.args) >= 9
             and isinstance(op.value.args[8], StringImm)
@@ -241,7 +241,7 @@ def _build_expected_host_init(dtype, encode_args):
     stack_alloca = tvm.ir.Call(
         tvm.ir.Op.get("tirx.tvm_stack_alloca"),
         [StringImm("tensormap"), IntImm("int32", 1)],
-        ret_ty="handle",
+        ret_ty=PointerType(TensorMapType(), "global"),
     )
     A_var = Var("A", PointerType(PrimType(dtype), "global"))
     call_args = (
@@ -319,7 +319,7 @@ def _build_expected_impl(direction, dtype, s_shape, s_layout, impl_spec):
     addr_of = tvm.ir.Call(
         tvm.ir.Op.get("tirx.address_of"),
         [tvm.tirx.BufferLoad(s_buf, buf_indices)],
-        ret_ty="handle",
+        ret_ty=s_buf.data.ty,
     )
 
     # Coordinate args (must have exactly `dim` entries)
@@ -357,7 +357,7 @@ def _build_expected_impl(direction, dtype, s_shape, s_layout, impl_spec):
             *coords,
         ]
 
-    eval_stmt = tvm.tirx.Evaluate(tvm.ir.Call(ptx_op, ptx_args))
+    eval_stmt = tvm.tirx.Evaluate(tvm.ir.Call(ptx_op, ptx_args, ret_ty="void"))
 
     # Wrap: DeclBuffer -> nested For loops (skipped when total extent is 1,
     # matching the implementation's always-unroll single-loop emission).

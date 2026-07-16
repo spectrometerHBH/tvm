@@ -156,8 +156,8 @@ std::string GetName(const CallNode* call, size_t index = 0) {
   return result;
 }
 
-std::string ValidatePayload(const PrimExpr& payload) {
-  DLDataType dtype = payload.ty()->dtype;
+std::string ValidatePayload(const Expr& payload) {
+  DLDataType dtype = payload.as_or_throw<PrimExpr>().ty()->dtype;
   TVM_FFI_CHECK_EQ(dtype.lanes, 1, TypeError) << "IKET payload must be a scalar value";
   TVM_FFI_CHECK_GT(dtype.bits, 0, TypeError) << "IKET payload must have a concrete bit width";
   TVM_FFI_CHECK_LE(dtype.bits, 64, TypeError) << "IKET payload must be at most 64 bits";
@@ -165,7 +165,7 @@ std::string ValidatePayload(const PrimExpr& payload) {
                    dtype.code == kDLBfloat;
   TVM_FFI_CHECK(supported, TypeError) << "IKET payload must be bool, int, uint, or float, but got "
                                       << ffi::DLDataTypeToString(dtype);
-  CallEffectKind effect = SideEffect(payload);
+  CallEffectKind effect = SideEffect(payload.as_or_throw<PrimExpr>());
   TVM_FFI_CHECK(effect <= CallEffectKind::kReadState, ValueError)
       << "IKET payload expressions may read state but must not update state; got " << effect;
   return ffi::DLDataTypeToString(dtype);
@@ -254,13 +254,13 @@ class AnnotationCollector : public StmtExprVisitor {
     if (call->op.same_as(IketMarkOp())) {
       AddDeclaration(DeclarationKind::kMark, call);
     } else if (call->op.same_as(IketRangeStartOp())) {
-      TVM_FFI_CHECK(call->ty()->dtype.code == kDLUInt && call->ty()->dtype.bits == 32, TypeError)
+      TVM_FFI_CHECK(call->ty.as_or_throw<PrimType>()->dtype.code == kDLUInt && call->ty.as_or_throw<PrimType>()->dtype.bits == 32, TypeError)
           << "IKET range_start must return uint32";
       AddDeclaration(DeclarationKind::kRange, call);
     } else if (call->op.same_as(IketSentinelOp())) {
       TVM_FFI_CHECK_EQ(call->args.size(), 1, TypeError)
           << "IKET sentinel_token expects one event name";
-      TVM_FFI_CHECK(call->ty()->dtype.code == kDLUInt && call->ty()->dtype.bits == 32, TypeError)
+      TVM_FFI_CHECK(call->ty.as_or_throw<PrimType>()->dtype.code == kDLUInt && call->ty.as_or_throw<PrimType>()->dtype.bits == 32, TypeError)
           << "IKET sentinel_token must return uint32";
       AddDeclaration(DeclarationKind::kRange, call, true);
     } else if (call->op.same_as(IketRangePushOp())) {
@@ -268,7 +268,7 @@ class AnnotationCollector : public StmtExprVisitor {
     } else if (call->op.same_as(IketRangeEndOp())) {
       TVM_FFI_CHECK(call->args.size() == 1 || call->args.size() == 2, TypeError)
           << "IKET range_end expects a token and optional payload";
-      DLDataType token_dtype = call->args[0].ty()->dtype;
+      DLDataType token_dtype = call->args[0].as_or_throw<PrimExpr>().ty()->dtype;
       TVM_FFI_CHECK(token_dtype.code == kDLUInt && token_dtype.bits == 32 && token_dtype.lanes == 1,
                     TypeError)
           << "IKET RangeToken must have dtype uint32";
@@ -446,7 +446,7 @@ class TokenVerifier : public StmtExprVisitor {
           << "range_start and sentinel_token results must be assigned to a RangeToken";
       bool old_allow_producer = allow_producer_;
       allow_producer_ = false;
-      for (const PrimExpr& arg : call->args) VisitExpr(arg);
+      for (const Expr& arg : call->args) VisitExpr(arg);
       allow_producer_ = old_allow_producer;
       return;
     }
@@ -855,7 +855,7 @@ class StripIket : public StmtExprMutator {
     return StmtExprMutator::VisitStmt_(evaluate);
   }
 
-  PrimExpr VisitExpr_(const CallNode* call) final {
+  Expr VisitExpr_(const CallNode* call) final {
     if (call->op.same_as(IketRangeStartOp()) || call->op.same_as(IketSentinelOp())) {
       return IntImm(PrimType::UInt(32), 0);
     }
@@ -890,27 +890,28 @@ class RemoveStrippedIketNoOps : public StmtExprMutator {
     Stmt body = VisitStmt(attr_stmt->body);
     if (IsEvaluateZero(body)) return body;
     if (body.same_as(attr_stmt->body)) return ffi::GetRef<Stmt>(attr_stmt);
-    return AttrStmt(attr_stmt->node, attr_stmt->attr_key, VisitExpr(attr_stmt->value), body,
-                    attr_stmt->span);
+    return AttrStmt(attr_stmt->node, attr_stmt->attr_key,
+                    VisitExpr(attr_stmt->value).as_or_throw<PrimExpr>(), body, attr_stmt->span);
   }
 
   Stmt VisitStmt_(const ForNode* loop) final {
     Stmt body = VisitStmt(loop->body);
     if (IsEvaluateZero(body)) return body;
     if (body.same_as(loop->body)) return ffi::GetRef<Stmt>(loop);
-    return For(loop->loop_var, VisitExpr(loop->min), VisitExpr(loop->extent), loop->kind, body,
-               loop->thread_binding, loop->annotations, loop->step, loop->span);
+    return For(loop->loop_var, VisitExpr(loop->min).as_or_throw<PrimExpr>(),
+              VisitExpr(loop->extent).as_or_throw<PrimExpr>(), loop->kind, body,
+              loop->thread_binding, loop->annotations, loop->step, loop->span);
   }
 
   Stmt VisitStmt_(const WhileNode* loop) final {
     Stmt body = VisitStmt(loop->body);
     if (IsEvaluateZero(body)) return body;
     if (body.same_as(loop->body)) return ffi::GetRef<Stmt>(loop);
-    return While(VisitExpr(loop->condition), body, loop->span);
+    return While(VisitExpr(loop->condition).as_or_throw<PrimExpr>(), body, loop->span);
   }
 
   Stmt VisitStmt_(const IfThenElseNode* branch) final {
-    PrimExpr condition = VisitExpr(branch->condition);
+    PrimExpr condition = VisitExpr(branch->condition).as_or_throw<PrimExpr>();
     Stmt then_case = VisitStmt(branch->then_case);
     if (!branch->else_case.has_value()) {
       if (IsEvaluateZero(then_case)) return PreserveConditionEffects(condition);
@@ -1143,7 +1144,7 @@ class UniformExprChecker : public ExprVisitor {
   UniformExprChecker(const DivergentVarSet& divergent_vars, const UniformBufferSet& uniform_buffers)
       : divergent_vars_(divergent_vars), uniform_buffers_(uniform_buffers) {}
 
-  bool IsUniform(const PrimExpr& expr) {
+  bool IsUniform(const Expr& expr) {
     uniform_ = true;
     operator()(expr);
     return uniform_;
@@ -1235,7 +1236,7 @@ class AnnotationFinder : public StmtExprVisitor {
 
 class IketConvergenceVerifier : public StmtExprVisitor {
  private:
-  bool IsUniform(const PrimExpr& expr) const {
+  bool IsUniform(const Expr& expr) const {
     return UniformExprChecker(divergent_vars_, uniform_buffers_).IsUniform(expr);
   }
 
@@ -1262,7 +1263,7 @@ class IketConvergenceVerifier : public StmtExprVisitor {
         thread_tag = iter_var.value()->thread_tag;
         thread_var = iter_var.value()->var.get();
       } else if (auto var = op->node.as<Var>()) {
-        thread_tag = var.value()->name_hint;
+        thread_tag = var.value()->name;
         thread_var = var.value().get();
       }
       if (!thread_tag.starts_with("threadIdx.")) thread_var = nullptr;
@@ -1379,7 +1380,7 @@ class IketConvergenceVerifier : public StmtExprVisitor {
     if (IsIketOp(call->op)) {
       if (divergent_context_) {
         TVM_FFI_THROW(ValueError) << "IKET event site may be reached by a divergent set of lanes: "
-                                  << GetRef<PrimExpr>(call);
+                                  << GetRef<Expr>(call);
       }
       if (call->op.same_as(IketRangeEndOp())) {
         TVM_FFI_CHECK(IsUniform(call->args[0]), ValueError)
@@ -1422,13 +1423,13 @@ class InstrumentOfficialKernel : public StmtExprMutator {
   Stmt VisitStmt_(const EvaluateNode* evaluate) final {
     if (const auto* call = evaluate->value.as<CallNode>();
         call && call->op.same_as(IketRangeEndOp())) {
-      PrimExpr token = VisitExpr(call->args[0]);
+      PrimExpr token = VisitExpr(call->args[0]).as_or_throw<PrimExpr>();
       return Evaluate(Event(token));
     }
     return StmtExprMutator::VisitStmt_(evaluate);
   }
 
-  PrimExpr VisitExpr_(const CallNode* call) final {
+  Expr VisitExpr_(const CallNode* call) final {
     if (call->op.same_as(IketRangeStartOp())) {
       return Event(IntImm(PrimType::UInt(32), Lookup(DeclarationKind::kRange, call).event_id));
     }

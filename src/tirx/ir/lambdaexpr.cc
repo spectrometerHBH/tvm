@@ -39,7 +39,7 @@ PrimExpr LambdaExprNode::Apply(const ffi::Array<PrimExpr>& indices) const {
     vmap.Set(vars[i], indices[i]);
   }
 
-  return Substitute(std::move(pred), [&](const Var& var) { return vmap.Get(var); });
+  return Substitute(std::move(pred), vmap);
 }
 
 LambdaExpr::LambdaExpr(ffi::Array<Var> vars, PrimExpr pred) {
