@@ -42,13 +42,21 @@ def _alignment_ok(vec_len: int, terms) -> bool:
     """
     if vec_len <= 1:
         return True
+    from ._swizzle_iter import _to_int64
+
     analyzer = arith.Analyzer()
     for t in terms:
         if isinstance(t, int):
             if t % vec_len != 0:
                 return False
         else:
-            if not analyzer.can_prove_equal(t % vec_len, 0):
+            if analyzer.can_prove_equal(t % vec_len, 0):
+                continue
+            # The analyzer only does modular reasoning on signed dtypes;
+            # retry with the term widened to int64 (value-preserving for
+            # SMEM/GMEM offsets, e.g. uint32 stage indices).
+            normalized = _to_int64(t)
+            if normalized is None or not analyzer.can_prove_equal(normalized[0] % vec_len, 0):
                 return False
     return True
 
