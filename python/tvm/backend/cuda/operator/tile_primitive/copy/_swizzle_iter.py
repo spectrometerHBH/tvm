@@ -72,6 +72,135 @@ from tvm import arith
 from tvm.script import tirx as T
 from tvm.tirx.expr import IntImm as _IntImm
 from tvm.tirx.layout import ComposeLayout, S, TileLayout
+from tvm.tirx.stmt_functor import ExprMutator
+
+
+def _expr_dtype(expr) -> str:
+    return expr.expr_ty().dtype
+
+
+class _ToInt64Mutator(ExprMutator):
+    """Rewrite an offset expr to int64 for analyzer-based bit checks.
+
+    SMEM offsets are far below 2**31, so widening unsigned/small dtypes is
+    value-preserving, and the analyzer's modular reasoning only fires on
+    signed dtypes (uint32 offsets otherwise block the (C1) proof).
+    """
+
+    def __init__(self):
+        super().__init__()
+        self._vmap = {}
+
+    def visit_var_(self, var):
+        if _expr_dtype(var) != "int64":
+            new_var = self._vmap.get(var)
+            if new_var is None:
+                new_var = tvm.tirx.Var(var.name, "int64")
+                self._vmap[var] = new_var
+            return new_var
+        return var
+
+    def visit_buffer_load_(self, op):
+        # A memory load is an unknown integer for symbolic purposes: proxy it
+        # with a fresh int64 var (cached per node) so divisibility structure
+        # around it (e.g. ``load * 4096``) stays provable.
+        proxy = self._vmap.get(op)
+        if proxy is None:
+            proxy = tvm.tirx.Var(f"{op.buffer.name}_ld{len(self._vmap)}", "int64")
+            self._vmap[op] = proxy
+        return proxy
+
+    def visit_cast_(self, op):
+        return self.visit_expr(op.value).astype("int64")
+
+    def visit_int_imm_(self, op):
+        return _IntImm("int64", int(op.value))
+
+    def _binary(self, op, fn):
+        return fn(self.visit_expr(op.a), self.visit_expr(op.b))
+
+    def visit_add_(self, op):
+        return self._binary(op, lambda a, b: a + b)
+
+    def visit_sub_(self, op):
+        return self._binary(op, lambda a, b: a - b)
+
+    def visit_mul_(self, op):
+        return self._binary(op, lambda a, b: a * b)
+
+    def visit_floordiv_(self, op):
+        return self._binary(op, tvm.tirx.floordiv)
+
+    def visit_floormod_(self, op):
+        return self._binary(op, tvm.tirx.floormod)
+
+    def visit_div_(self, op):
+        return self._binary(op, tvm.tirx.div)
+
+    def visit_mod_(self, op):
+        return self._binary(op, lambda a, b: tvm.tirx.floormod(a, b))
+
+    def visit_min_(self, op):
+        return self._binary(op, tvm.tirx.min)
+
+    def visit_max_(self, op):
+        return self._binary(op, tvm.tirx.max)
+
+    def visit_and_(self, op):
+        return self._binary(op, lambda a, b: a & b)
+
+    def visit_or_(self, op):
+        return self._binary(op, lambda a, b: a | b)
+
+    def visit_call_(self, op):
+        # Re-issue pure builtins with widened args; refuse impure calls.
+        _PURE = {
+            "tir.shift_right",
+            "tir.shift_left",
+            "tir.bitwise_and",
+            "tir.bitwise_or",
+            "tir.bitwise_xor",
+            "tir.floordiv",
+            "tir.floormod",
+            "tir.min",
+            "tir.max",
+        }
+        name = getattr(op.op, "name", None) or getattr(op.op, "global_symbol", None) or str(op.op)
+        if name not in _PURE:
+            raise ValueError(f"_ToInt64Mutator: unsupported call {name}")
+        args = [self.visit_expr(a) for a in op.args]
+        builtin = getattr(T, name.split(".")[-1], None)
+        if builtin is None:
+            builtin = getattr(tvm.tirx, name.split(".")[-1])
+        return builtin(*args)
+
+
+def _to_int64(expr):
+    """Best-effort signed widening of an offset expr.
+
+    Returns ``(widened_expr, old_var -> new_var map)``, or ``None`` on failure.
+    """
+    try:
+        mutator = _ToInt64Mutator()
+        out = mutator.visit_expr(expr)
+        # Verify no narrow/unsigned residue remains.
+        ok = True
+
+        def _check(node):
+            nonlocal ok
+            try:
+                dtype = _expr_dtype(node)
+            except (AttributeError, TypeError):
+                return
+            if dtype not in ("int64", "int32"):
+                ok = False
+
+        from tvm.tirx.stmt_functor import post_order_visit
+
+        post_order_visit(out, _check)
+        return (out, mutator._vmap) if ok else None
+    except Exception:
+        return None
 
 
 @dataclass
@@ -252,17 +381,27 @@ def try_recognize(
     # free lane / warp placeholders in s_off_template — ``can_prove_equal``
     # returns False if the analyzer can't discharge the equality
     # universally, conservatively forcing a fallback.
+    #
+    # The analyzer only does modular reasoning on signed dtypes, so widen
+    # the template to int64 first (value-preserving for SMEM offsets); the
+    # lane/warp bounds are re-keyed to the widened vars.
     analyzer = arith.Analyzer()
+    normalized = _to_int64(s_off_template)
+    if normalized is not None:
+        check_template, vmap = normalized
+        check_dtype = "int64"
+    else:
+        check_template, vmap, check_dtype = s_off_template, {}, _expr_dtype(s_off_template)
     if var_bounds:
         for var, rng in var_bounds.items():
-            analyzer.bind(var, rng)
+            analyzer.bind(vmap.get(var, var), rng)
     for bj in bj_set:
         divisor = C * (1 << bj)
         check = tvm.tirx.floormod(
-            tvm.tirx.floordiv(s_off_template, _IntImm("int32", divisor)),
-            _IntImm("int32", 2),
+            tvm.tirx.floordiv(check_template, _IntImm(check_dtype, divisor)),
+            _IntImm(check_dtype, 2),
         )
-        if not analyzer.can_prove_equal(check, _IntImm("int32", 0)):
+        if not analyzer.can_prove_equal(check, _IntImm(check_dtype, 0)):
             return None
 
     return SwizzlePattern(
