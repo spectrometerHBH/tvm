@@ -254,13 +254,17 @@ class AnnotationCollector : public StmtExprVisitor {
     if (call->op.same_as(IketMarkOp())) {
       AddDeclaration(DeclarationKind::kMark, call);
     } else if (call->op.same_as(IketRangeStartOp())) {
-      TVM_FFI_CHECK(call->ty.as_or_throw<PrimType>()->dtype.code == kDLUInt && call->ty.as_or_throw<PrimType>()->dtype.bits == 32, TypeError)
+      TVM_FFI_CHECK(call->ty.as_or_throw<PrimType>()->dtype.code == kDLUInt &&
+                        call->ty.as_or_throw<PrimType>()->dtype.bits == 32,
+                    TypeError)
           << "IKET range_start must return uint32";
       AddDeclaration(DeclarationKind::kRange, call);
     } else if (call->op.same_as(IketSentinelOp())) {
       TVM_FFI_CHECK_EQ(call->args.size(), 1, TypeError)
           << "IKET sentinel_token expects one event name";
-      TVM_FFI_CHECK(call->ty.as_or_throw<PrimType>()->dtype.code == kDLUInt && call->ty.as_or_throw<PrimType>()->dtype.bits == 32, TypeError)
+      TVM_FFI_CHECK(call->ty.as_or_throw<PrimType>()->dtype.code == kDLUInt &&
+                        call->ty.as_or_throw<PrimType>()->dtype.bits == 32,
+                    TypeError)
           << "IKET sentinel_token must return uint32";
       AddDeclaration(DeclarationKind::kRange, call, true);
     } else if (call->op.same_as(IketRangePushOp())) {
@@ -899,8 +903,8 @@ class RemoveStrippedIketNoOps : public StmtExprMutator {
     if (IsEvaluateZero(body)) return body;
     if (body.same_as(loop->body)) return ffi::GetRef<Stmt>(loop);
     return For(loop->loop_var, VisitExpr(loop->min).as_or_throw<PrimExpr>(),
-              VisitExpr(loop->extent).as_or_throw<PrimExpr>(), loop->kind, body,
-              loop->thread_binding, loop->annotations, loop->step, loop->span);
+               VisitExpr(loop->extent).as_or_throw<PrimExpr>(), loop->kind, body,
+               loop->thread_binding, loop->annotations, loop->step, loop->span);
   }
 
   Stmt VisitStmt_(const WhileNode* loop) final {

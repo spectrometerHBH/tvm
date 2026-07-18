@@ -32,7 +32,7 @@ from enum import IntEnum
 
 import tvm_ffi
 
-from tvm.ir import Expr, Op, Range, Span, is_prim_expr
+from tvm.ir import Expr, Range, Span, is_prim_expr
 from tvm.runtime import Object, Scriptable, const
 from tvm.tirx import IntImm
 

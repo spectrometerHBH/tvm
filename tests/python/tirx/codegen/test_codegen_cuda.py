@@ -26,7 +26,6 @@ from tvm import tirx as tir
 from tvm.script import tirx as T
 from tvm.testing import env
 
-
 _CUDA_LDG_SCALAR_CASES = [
     ("int8", "i8", "signed char"),
     ("uint8", "u8", "unsigned char"),

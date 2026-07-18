@@ -16,10 +16,9 @@
 # under the License.
 """Hardware requirements for TIRx codegen tests."""
 
-from pathlib import Path
-
 import gc
 import os
+from pathlib import Path
 
 import pytest
 
