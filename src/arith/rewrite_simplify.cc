@@ -1196,6 +1196,9 @@ Expr RewriteSimplifier::Impl::VisitExpr_(const FloorDivNode* op) {
   if (op_ty.MatchesCode(DLDataTypeCode::kDLUInt) && (op_ty.bits() == 32 || op_ty.bits() == 64)) {
     TVM_TRY_REWRITE(floordiv(x, x), OneWithTypeLike(x));            // x / x -> 1  (x != 0)
     TVM_TRY_REWRITE_IF(floordiv(x, c1), x, c1.Eval()->value == 1);  // x / 1 -> x
+    // Unsigned x is always >= 0, so x < y provably implies x / y == 0.
+    TVM_TRY_REWRITE_IF(floordiv(x, y), ZeroWithTypeLike(x),
+                       CanProveGreaterEqual(y.Eval(), 1) && CanProve(x.Eval() < y.Eval()));
   }
   return ret;
 }
@@ -1208,7 +1211,7 @@ Expr RewriteSimplifier::Impl::VisitExpr_(const FloorModNode* op) {
   // Pattern var to match any expression
   PVar<PrimExpr> x, y, z, b1;
   // Pattern var match IntImm
-  PVar<IntImm> c1, c2;
+  PVar<IntImm> c1, c2, c3;
   // Pattern var for lanes in broadcast and ramp
   PVar<PrimExpr> lanes;
 
@@ -1322,28 +1325,53 @@ Expr RewriteSimplifier::Impl::VisitExpr_(const FloorModNode* op) {
   // OVERFLOW-FREE identities are valid here.
   PrimType op_ty = op->ty.as_or_throw<PrimType>();
   if (op_ty.MatchesCode(DLDataTypeCode::kDLUInt) && (op_ty.bits() == 32 || op_ty.bits() == 64)) {
+    const int64_t op_bits = op_ty.bits();
+    const auto is_pow2_le_bits = [op_bits](int64_t v) {
+      return v > 0 && (v & (v - 1)) == 0 &&
+             (op_bits < 64 ? v <= (int64_t{1} << op_bits) : v <= (int64_t{1} << 63));
+    };
     TVM_TRY_REWRITE(floormod(x, x), ZeroWithTypeLike(x));  // x % x -> 0  (x != 0)
     TVM_TRY_REWRITE_IF(floormod(x, c1), ZeroWithTypeLike(x),
                        c1.Eval()->value == 1);  // x % 1 -> 0
-    // Overflow-free: when c1 is a multiple of c2, x * c1 is too (in Z and mod 2^bits).
+    // When c1 is a multiple of c2, x * c1 is too — but the identity is only
+    // sound when c2 | 2^bits: otherwise the wraparound subtraction of
+    // k*2^bits changes residues mod c2. (No non-pow2 c2 occurs in practice;
+    // probed across the arith/copy/kernel test suites.)
     TVM_TRY_REWRITE_IF(floormod(x * c1, c2), ZeroWithTypeLike(x),
-                       c2.Eval()->value != 0 && c1.Eval()->value % c2.Eval()->value == 0);
+                       c2.Eval()->value != 0 && c1.Eval()->value % c2.Eval()->value == 0 &&
+                           is_pow2_le_bits(c2.Eval()->value));
 
-    // When c2 divides 2^bits (a power of two no wider than the type), reducing
-    // mod 2^bits does not change residues mod c2, so modular analysis is
-    // sound for unsigned operands too.
-    const int64_t op_bits = op_ty.bits();
-    if (floormod(x, c2).Match(ret)) {
+    // When c2 divides 2^bits, reducing mod 2^bits does not change residues
+    // mod c2, so modular analysis is sound for unsigned operands too.
+    if (floormod(x, c2).Match(ret) && is_pow2_le_bits(c2.Eval()->value)) {
       const int64_t c2val = c2.Eval()->value;
-      const bool c2_pow2 =
-          c2val > 0 && (c2val & (c2val - 1)) == 0 &&
-          (op_bits < 64 ? c2val <= (int64_t{1} << op_bits) : c2val <= (int64_t{1} << 63));
-      if (c2_pow2) {
-        // x = coeff * q + base stays congruent mod c2 when c2 | 2^bits, so
-        // the signed block's modular-analysis branch is valid here as well.
-        ModularSet mod = analyzer_->modular_set(x.Eval());
-        if (mod->coeff % c2val == 0) {
-          return floormod(mod->base, c2).Eval();
+      // x = coeff * q + base stays congruent mod c2 when c2 | 2^bits, so
+      // the signed block's modular-analysis branch is valid here as well.
+      ModularSet mod = analyzer_->modular_set(x.Eval());
+      if (mod->coeff % c2val == 0) {
+        return floormod(mod->base, c2).Eval();
+      }
+    }
+
+    // Parity-preserving floordiv decomposition inside a floormod:
+    // floormod(floordiv(x * c1 + y, c2), c3) -> floormod(x*(c1/c2) + floordiv(y, c2), c3).
+    // Under unsigned wraparound the split differs from the exact quotient by
+    // a multiple of 2^bits/c2, which vanishes mod c3 whenever c3 | 2^bits/c2
+    // (and (x*c1) mod 2^bits stays divisible by c2 since c2 | c1 and
+    // c2 | 2^bits, so no carry hides in the split).
+    if (floormod(floordiv(x * c1 + y, c2), c3).Match(ret) &&
+        c1.Eval()->value % c2.Eval()->value == 0 && is_pow2_le_bits(c2.Eval()->value)) {
+      const int64_t c2v = c2.Eval()->value;
+      const int64_t c3v = c3.Eval()->value;
+      if (c3v > 0 && (c3v & (c3v - 1)) == 0) {
+        const int64_t log_c2 = __builtin_ctzll(static_cast<unsigned long long>(c2v));
+        const int64_t log_c3 = __builtin_ctzll(static_cast<unsigned long long>(c3v));
+        if (log_c2 + log_c3 <= op_bits) {
+          return floormod(x * PConst<PrimExpr>(
+                                  IntImm(op->ty.as_or_throw<PrimType>(), c1.Eval()->value / c2v)) +
+                              floordiv(y, c2),
+                          c3)
+              .Eval();
         }
       }
     }

@@ -790,6 +790,32 @@ class TestFloorModUnsigned(BaseCompare):
             flm(x * tirx.const(16, "uint32") + (z * 4).astype("uint32"), tirx.const(12, "uint32")),
             flm(x * tirx.const(16, "uint32") + (z * 4).astype("uint32"), tirx.const(12, "uint32")),
         ),
+        # The pre-existing x * c1 % c2 -> 0 rule is pow2-guarded: c2=12 must
+        # not fold to 0 (e.g. x=2^29 wraps: uint32(x*12)=2^31, and 2^31 % 12 = 8).
+        TestCase(
+            flm(x * tirx.const(12, "uint32"), tirx.const(12, "uint32")),
+            flm(x * tirx.const(12, "uint32"), tirx.const(12, "uint32")),
+        ),
+        TestCase(
+            flm(x * tirx.const(8, "uint32"), tirx.const(8, "uint32")), tirx.const(0, "uint32")
+        ),
+        # Parity-preserving floordiv decomposition inside a floormod.
+        TestCase(
+            flm(
+                tvm.tirx.floordiv(x * tirx.const(4096, "uint32") + y, tirx.const(512, "uint32")),
+                tirx.const(2, "uint32"),
+            ),
+            flm(
+                x * tirx.const(8, "uint32") + tvm.tirx.floordiv(y, tirx.const(512, "uint32")),
+                tirx.const(2, "uint32"),
+            ),
+        ),
+        # Unsigned floordiv to zero by const bound.
+        TestCase(
+            tvm.tirx.floordiv(x, tirx.const(512, "uint32")),
+            tirx.const(0, "uint32"),
+            [x < 512],
+        ),
     )
 
 
