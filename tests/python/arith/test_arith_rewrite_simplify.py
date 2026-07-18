@@ -799,17 +799,6 @@ class TestFloorModUnsigned(BaseCompare):
         TestCase(
             flm(x * tirx.const(8, "uint32"), tirx.const(8, "uint32")), tirx.const(0, "uint32")
         ),
-        # Parity-preserving floordiv decomposition inside a floormod.
-        TestCase(
-            flm(
-                tvm.tirx.floordiv(x * tirx.const(4096, "uint32") + y, tirx.const(512, "uint32")),
-                tirx.const(2, "uint32"),
-            ),
-            flm(
-                x * tirx.const(8, "uint32") + tvm.tirx.floordiv(y, tirx.const(512, "uint32")),
-                tirx.const(2, "uint32"),
-            ),
-        ),
         # Unsigned floordiv to zero by const bound.
         TestCase(
             tvm.tirx.floordiv(x, tirx.const(512, "uint32")),

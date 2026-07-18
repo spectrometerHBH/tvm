@@ -1352,29 +1352,6 @@ Expr RewriteSimplifier::Impl::VisitExpr_(const FloorModNode* op) {
         return floormod(mod->base, c2).Eval();
       }
     }
-
-    // Parity-preserving floordiv decomposition inside a floormod:
-    // floormod(floordiv(x * c1 + y, c2), c3) -> floormod(x*(c1/c2) + floordiv(y, c2), c3).
-    // Under unsigned wraparound the split differs from the exact quotient by
-    // a multiple of 2^bits/c2, which vanishes mod c3 whenever c3 | 2^bits/c2
-    // (and (x*c1) mod 2^bits stays divisible by c2 since c2 | c1 and
-    // c2 | 2^bits, so no carry hides in the split).
-    if (floormod(floordiv(x * c1 + y, c2), c3).Match(ret) &&
-        c1.Eval()->value % c2.Eval()->value == 0 && is_pow2_le_bits(c2.Eval()->value)) {
-      const int64_t c2v = c2.Eval()->value;
-      const int64_t c3v = c3.Eval()->value;
-      if (c3v > 0 && (c3v & (c3v - 1)) == 0) {
-        const int64_t log_c2 = __builtin_ctzll(static_cast<unsigned long long>(c2v));
-        const int64_t log_c3 = __builtin_ctzll(static_cast<unsigned long long>(c3v));
-        if (log_c2 + log_c3 <= op_bits) {
-          return floormod(x * PConst<PrimExpr>(
-                                  IntImm(op->ty.as_or_throw<PrimType>(), c1.Eval()->value / c2v)) +
-                              floordiv(y, c2),
-                          c3)
-              .Eval();
-        }
-      }
-    }
   }
   return ret;
 }
