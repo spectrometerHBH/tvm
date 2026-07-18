@@ -758,6 +758,41 @@ def test_uint_floormod_const_fold():
     assert analyzer.can_prove_equal(expr, 0)
 
 
+class TestFloorModUnsigned(BaseCompare):
+    """Modular-analysis simplifications for unsigned operands (uint32/uint64).
+
+    Only sound when the divisor is a power of two (c2 | 2^bits): reducing
+    mod 2^bits does not change residues mod c2 in that case, so the
+    modular-decomposition rules carry over from the signed block.
+    """
+
+    x = tirx.Var("x", "uint32")
+    y = tirx.Var("y", "uint32")
+    z = tirx.Var("z", "int32")
+    test_case = tvm.testing.parameter(
+        TestCase(
+            flm(x * tirx.const(8, "uint32"), tirx.const(4, "uint32")), tirx.const(0, "uint32")
+        ),
+        TestCase(flm((z * 4).astype("uint32"), tirx.const(4, "uint32")), tirx.const(0, "uint32")),
+        TestCase(
+            flm(x * tirx.const(16, "uint32") + (z * 4).astype("uint32"), tirx.const(4, "uint32")),
+            tirx.const(0, "uint32"),
+        ),
+        TestCase(
+            flm(
+                x * tirx.const(32, "uint32") + y * tirx.const(8, "uint32"), tirx.const(8, "uint32")
+            ),
+            tirx.const(0, "uint32"),
+        ),
+        # Non-power-of-two divisor must NOT simplify (unsigned wraparound
+        # changes residues mod c2).
+        TestCase(
+            flm(x * tirx.const(16, "uint32") + (z * 4).astype("uint32"), tirx.const(12, "uint32")),
+            flm(x * tirx.const(16, "uint32") + (z * 4).astype("uint32"), tirx.const(12, "uint32")),
+        ),
+    )
+
+
 class TestMinIndex(BaseCompare):
     x, y, z = tvm.tirx.Var("x", "int32"), tvm.tirx.Var("y", "int32"), tvm.tirx.Var("z", "int32")
     test_case = tvm.testing.parameter(

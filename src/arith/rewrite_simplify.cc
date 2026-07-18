@@ -1328,6 +1328,25 @@ Expr RewriteSimplifier::Impl::VisitExpr_(const FloorModNode* op) {
     // Overflow-free: when c1 is a multiple of c2, x * c1 is too (in Z and mod 2^bits).
     TVM_TRY_REWRITE_IF(floormod(x * c1, c2), ZeroWithTypeLike(x),
                        c2.Eval()->value != 0 && c1.Eval()->value % c2.Eval()->value == 0);
+
+    // When c2 divides 2^bits (a power of two no wider than the type), reducing
+    // mod 2^bits does not change residues mod c2, so modular analysis is
+    // sound for unsigned operands too.
+    const int64_t op_bits = op_ty.bits();
+    if (floormod(x, c2).Match(ret)) {
+      const int64_t c2val = c2.Eval()->value;
+      const bool c2_pow2 =
+          c2val > 0 && (c2val & (c2val - 1)) == 0 &&
+          (op_bits < 64 ? c2val <= (int64_t{1} << op_bits) : c2val <= (int64_t{1} << 63));
+      if (c2_pow2) {
+        // x = coeff * q + base stays congruent mod c2 when c2 | 2^bits, so
+        // the signed block's modular-analysis branch is valid here as well.
+        ModularSet mod = analyzer_->modular_set(x.Eval());
+        if (mod->coeff % c2val == 0) {
+          return floormod(mod->base, c2).Eval();
+        }
+      }
+    }
   }
   return ret;
 }
