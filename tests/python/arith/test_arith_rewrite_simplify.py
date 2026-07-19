@@ -1398,9 +1398,14 @@ def test_allow_uint_as_index():
     )
     check = flm(fld(s_off, T.uint32(512)), T.uint32(2))
     assert not analyzer.can_prove_equal(check, 0)
+    # a non-pow2 divisor never folds, inside or outside the mode... unless
+    # the flag is on: under the no-overflow assertion any c2 != 0 works.
+    np2 = flm(x * T.uint32(12), T.uint32(12))
+    assert not analyzer.can_prove_equal(np2, 0)
     with tvm.arith.allow_uint_as_index():
         assert analyzer.can_prove_equal(check, 0)
         assert analyzer.can_prove_equal(flm(fld(s_off, T.uint32(32)), T.uint32(2)), 0)
+        assert analyzer.can_prove_equal(np2, 0)
         # nested scopes compose
         with tvm.arith.allow_uint_as_index():
             assert analyzer.can_prove_equal(check, 0)

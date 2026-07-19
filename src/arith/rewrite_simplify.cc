@@ -1391,6 +1391,25 @@ Expr RewriteSimplifier::Impl::VisitExpr_(const FloorModNode* op) {
         return floormod(mod->base, c2).Eval();
       }
     }
+
+    // Under the caller's no-overflow assertion (uint_as_index) the pow2
+    // restriction above disappears: without wraparound the residues are the
+    // plain integer ones, so these hold for any c2 != 0. Each application is
+    // logged for audit.
+    if (uint_as_index::Enabled()) {
+      if (floormod(x * c1, c2).Match(ret) && c2.Eval()->value != 0 &&
+          c1.Eval()->value % c2.Eval()->value == 0) {
+        LOG(WARNING) << "arith: no-overflow floormod rule on unsigned expr: " << ret;
+        return ZeroWithTypeLike(x).Eval();
+      }
+      if (floormod(x, c2).Match(ret) && c2.Eval()->value > 0) {
+        ModularSet mod = analyzer_->modular_set(x.Eval());
+        if (mod->coeff % c2.Eval()->value == 0) {
+          LOG(WARNING) << "arith: no-overflow floormod rule on unsigned expr: " << ret;
+          return floormod(mod->base, c2).Eval();
+        }
+      }
+    }
   }
   return ret;
 }
