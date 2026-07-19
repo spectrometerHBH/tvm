@@ -1196,9 +1196,48 @@ Expr RewriteSimplifier::Impl::VisitExpr_(const FloorDivNode* op) {
   if (op_ty.MatchesCode(DLDataTypeCode::kDLUInt) && (op_ty.bits() == 32 || op_ty.bits() == 64)) {
     TVM_TRY_REWRITE(floordiv(x, x), OneWithTypeLike(x));            // x / x -> 1  (x != 0)
     TVM_TRY_REWRITE_IF(floordiv(x, c1), x, c1.Eval()->value == 1);  // x / 1 -> x
-    // Unsigned x is always >= 0, so x < y provably implies x / y == 0.
-    TVM_TRY_REWRITE_IF(floordiv(x, y), ZeroWithTypeLike(x),
-                       CanProveGreaterEqual(y.Eval(), 1) && CanProve(x.Eval() < y.Eval()));
+    // Unsigned x is always >= 0, so x / c2 == 0 when x < c2 is provable from
+    // the interval bound (const_int_bound is dtype-agnostic; CanProve's
+    // comparison machinery is signed-centric and can't be used here).
+    if (floordiv(x, c2).Match(ret) && c2.Eval()->value > 0) {
+      ConstIntBound x_bound = analyzer_->const_int_bound(x.Eval());
+      if (x_bound->min_value >= 0 && x_bound->max_value < c2.Eval()->value) {
+        return ZeroWithTypeLike(x).Eval();
+      }
+    }
+
+    // Enabled only under the caller's no-overflow assertion (uint_as_index):
+    // these floordiv identities are unsound in general for unsigned
+    // wraparound (the quotient's high bits are lost when x*c1 overflows), but
+    // are exact in the asserted no-overflow domain. Each application is
+    // logged for audit.
+    if (uint_as_index::Enabled()) {
+      if (floordiv(x * c1, c2).Match(ret) && c2.Eval()->value > 0 &&
+          c1.Eval()->value % c2.Eval()->value == 0) {
+        LOG(WARNING) << "arith: no-overflow floordiv rule on unsigned expr: " << ret;
+        return (x * floordiv(c1, c2)).Eval();
+      }
+      if (floordiv(x * c1 + y, c2).Match(ret) && c2.Eval()->value > 0 &&
+          c1.Eval()->value % c2.Eval()->value == 0) {
+        LOG(WARNING) << "arith: no-overflow floordiv rule on unsigned expr: " << ret;
+        return (x * floordiv(c1, c2) + floordiv(y, c2)).Eval();
+      }
+      if (floordiv(y + x * c1, c2).Match(ret) && c2.Eval()->value > 0 &&
+          c1.Eval()->value % c2.Eval()->value == 0) {
+        LOG(WARNING) << "arith: no-overflow floordiv rule on unsigned expr: " << ret;
+        return (x * floordiv(c1, c2) + floordiv(y, c2)).Eval();
+      }
+      if (floordiv(x * c1 + y + z, c2).Match(ret) && c2.Eval()->value > 0 &&
+          c1.Eval()->value % c2.Eval()->value == 0) {
+        LOG(WARNING) << "arith: no-overflow floordiv rule on unsigned expr: " << ret;
+        return (x * floordiv(c1, c2) + floordiv(y + z, c2)).Eval();
+      }
+      if (floordiv(y + x * c1 + z, c2).Match(ret) && c2.Eval()->value > 0 &&
+          c1.Eval()->value % c2.Eval()->value == 0) {
+        LOG(WARNING) << "arith: no-overflow floordiv rule on unsigned expr: " << ret;
+        return (x * floordiv(c1, c2) + floordiv(y + z, c2)).Eval();
+      }
+    }
   }
   return ret;
 }

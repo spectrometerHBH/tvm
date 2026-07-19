@@ -1379,3 +1379,31 @@ class TestCLZ(BaseCompare):
 
 if __name__ == "__main__":
     tvm.testing.main()
+
+
+def test_allow_uint_as_index():
+    """Opt-in no-overflow domain: unsigned index terms are not analyzed by
+    default; within allow_uint_as_index() the signed rule set applies and the
+    swizzle-style floordiv-quotient bit checks over uint32 offsets discharge."""
+    w = tirx.Var("w", "int32")
+    lane = tirx.Var("lane", "int32")
+    x = tirx.Var("x", "uint32")
+    analyzer = tvm.arith.Analyzer()
+    analyzer.bind(lane, tvm.ir.Range.from_min_extent(0, 32))
+    analyzer.bind(w, tvm.ir.Range.from_min_extent(0, 4))
+    s_off = (
+        (w * 1024 + lane // 8 * 8).astype("uint32")
+        + x * T.uint32(4096)
+        + (lane % 8 * 64).astype("uint32")
+    )
+    check = flm(fld(s_off, T.uint32(512)), T.uint32(2))
+    assert not analyzer.can_prove_equal(check, 0)
+    with tvm.arith.allow_uint_as_index():
+        assert analyzer.can_prove_equal(check, 0)
+        assert analyzer.can_prove_equal(flm(fld(s_off, T.uint32(32)), T.uint32(2)), 0)
+        # nested scopes compose
+        with tvm.arith.allow_uint_as_index():
+            assert analyzer.can_prove_equal(check, 0)
+        assert analyzer.can_prove_equal(check, 0)
+    # the mode is scoped: disabled again afterwards
+    assert not analyzer.can_prove_equal(check, 0)
