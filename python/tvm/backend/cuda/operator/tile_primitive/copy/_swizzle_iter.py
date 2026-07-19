@@ -252,18 +252,23 @@ def try_recognize(
     # free lane / warp placeholders in s_off_template — ``can_prove_equal``
     # returns False if the analyzer can't discharge the equality
     # universally, conservatively forcing a fallback.
+    #
+    # These are compile-time SMEM-offset proofs (values stay far below
+    # 2**32), so unsigned index terms are analyzed in the no-overflow
+    # domain; every uint expression admitted is logged once by the analyzer.
     analyzer = arith.Analyzer()
     if var_bounds:
         for var, rng in var_bounds.items():
             analyzer.bind(var, rng)
-    for bj in bj_set:
-        divisor = C * (1 << bj)
-        check = tvm.tirx.floormod(
-            tvm.tirx.floordiv(s_off_template, _IntImm("int32", divisor)),
-            _IntImm("int32", 2),
-        )
-        if not analyzer.can_prove_equal(check, _IntImm("int32", 0)):
-            return None
+    with arith.allow_uint_as_index():
+        for bj in bj_set:
+            divisor = C * (1 << bj)
+            check = tvm.tirx.floormod(
+                tvm.tirx.floordiv(s_off_template, _IntImm(s_off_template.expr_ty().dtype, divisor)),
+                _IntImm(s_off_template.expr_ty().dtype, 2),
+            )
+            if not analyzer.can_prove_equal(check, _IntImm(s_off_template.expr_ty().dtype, 0)):
+                return None
 
     return SwizzlePattern(
         swizzle=swizzle,

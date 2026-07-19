@@ -27,7 +27,7 @@ from typing import Any, ClassVar
 import tvm_ffi
 from tvm_ffi import register_object
 
-from tvm.ir import Op, Expr, Range
+from tvm.ir import Expr, Op, Range
 from tvm.runtime import Object, Scriptable
 from tvm.target import Target
 
