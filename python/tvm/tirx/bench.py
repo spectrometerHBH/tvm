@@ -44,8 +44,8 @@ _DISTRIBUTED_EVENT_WARMUP_ITERATIONS = 5
 _DISTRIBUTED_EVENT_REPEAT_ITERATIONS = 30
 _DISTRIBUTED_KINETO_WARMUP_ITERATIONS = 30
 _DISTRIBUTED_KINETO_REPEAT_ITERATIONS = 30
-_DISTRIBUTED_KINETO_FLUSH_L2_BYTES = int(8e9)
-_DISTRIBUTED_KINETO_GPU_SLEEP_CYCLES = int(2e7)
+_DISTRIBUTED_FLUSH_L2_BYTES = int(8e9)
+_DISTRIBUTED_GPU_SLEEP_CYCLES = int(2e7)
 
 
 @dataclass(frozen=True)
@@ -473,14 +473,14 @@ def _validate_distributed_context(distributed):
         raise TypeError("distributed.stream must be an actual CUDA stream")
 
 
-def _distributed_kineto_cold_start(distributed):
-    """Apply DeepGEMM's cold-cache protocol before one profiled launch."""
+def _distributed_cold_start(distributed):
+    """Apply DeepGEMM's cold-cache protocol before one distributed launch."""
     torch.empty(
-        _DISTRIBUTED_KINETO_FLUSH_L2_BYTES // 4,
+        _DISTRIBUTED_FLUSH_L2_BYTES // 4,
         dtype=torch.int,
         device="cuda",
     ).zero_()
-    torch.cuda._sleep(_DISTRIBUTED_KINETO_GPU_SLEEP_CYCLES)
+    torch.cuda._sleep(_DISTRIBUTED_GPU_SLEEP_CYCLES)
     distributed.barrier()
 
 
@@ -488,7 +488,7 @@ def _run_distributed_kineto_batch(name, func, prepare, distributed, iterations):
     """Run one DeepGEMM-style Kineto phase for a single implementation."""
     prepare_fn = prepare.get(name)
     for _ in range(iterations):
-        _distributed_kineto_cold_start(distributed)
+        _distributed_cold_start(distributed)
         if prepare_fn is not None:
             prepare_fn()
         func()
@@ -589,6 +589,7 @@ def _bench_distributed_event(funcs, prepare, distributed, rounds, cooldown_s):
             prepare_fn = prepare.get(name)
             with torch.cuda.stream(distributed.stream):
                 for _ in range(_DISTRIBUTED_EVENT_WARMUP_ITERATIONS):
+                    _distributed_cold_start(distributed)
                     if prepare_fn is not None:
                         prepare_fn()
                     func()
@@ -599,6 +600,7 @@ def _bench_distributed_event(funcs, prepare, distributed, rounds, cooldown_s):
                 start = torch.cuda.Event(enable_timing=True)
                 end = torch.cuda.Event(enable_timing=True)
                 with torch.cuda.stream(distributed.stream):
+                    _distributed_cold_start(distributed)
                     if prepare_fn is not None:
                         prepare_fn()
                     start.record()
@@ -627,6 +629,11 @@ def _bench_distributed_event(funcs, prepare, distributed, rounds, cooldown_s):
             "auxiliary_streams_join_timing_stream": True,
             "warmup_iterations": _DISTRIBUTED_EVENT_WARMUP_ITERATIONS,
             "repeat_iterations": _DISTRIBUTED_EVENT_REPEAT_ITERATIONS,
+            "flush_l2": True,
+            "flush_l2_bytes": _DISTRIBUTED_FLUSH_L2_BYTES,
+            "gpu_sleep_cycles": _DISTRIBUTED_GPU_SLEEP_CYCLES,
+            "rank_barrier_before_each_launch": True,
+            "cold_start_outside_timing": True,
             "prepare_outside_timing": True,
             "rank_aggregate": "sample_wise_max",
             "sample_aggregate": "median",
@@ -671,8 +678,8 @@ def _bench_distributed_kineto(funcs, prepare, distributed, rounds, cooldown_s, k
             "warmup_iterations": _DISTRIBUTED_KINETO_WARMUP_ITERATIONS,
             "repeat_iterations": _DISTRIBUTED_KINETO_REPEAT_ITERATIONS,
             "flush_l2": True,
-            "flush_l2_bytes": _DISTRIBUTED_KINETO_FLUSH_L2_BYTES,
-            "gpu_sleep_cycles": _DISTRIBUTED_KINETO_GPU_SLEEP_CYCLES,
+            "flush_l2_bytes": _DISTRIBUTED_FLUSH_L2_BYTES,
+            "gpu_sleep_cycles": _DISTRIBUTED_GPU_SLEEP_CYCLES,
             "rank_barrier_before_each_launch": True,
             "prepare_excluded_by_kernel_name": True,
             "profile_session_scope": "per_implementation",
@@ -750,11 +757,11 @@ def bench(
         kernel. Timer failures are propagated; a result is never silently relabelled
         after falling back to a different measurement method.
         Distributed ``event`` measures each complete launch closure with CUDA
-        events and performs sample-wise slowest-rank aggregation.  Distributed
-        ``kineto`` faithfully uses DeepGEMM's two-phase, 30-iteration, 8 GB L2
-        flush and GPU-sleep protocol, then parses only the named CUDA kernel row.
-        Both distributed timers use fixed iteration counts and reject local timer
-        budget overrides.
+        events and performs sample-wise slowest-rank aggregation.  Both distributed
+        timers apply DeepGEMM's 8 GB L2 flush, GPU sleep, and rank barrier before
+        every launch.  Distributed ``kineto`` uses DeepGEMM's two-phase,
+        30-iteration schedule and parses only the named CUDA kernel row.  Both
+        timers use fixed iteration counts and reject local timer budget overrides.
     distributed : DistributedBenchContext, optional
         Rank-local barrier, max-reduce callback, and actual CUDA timing stream.
         Launch closures that use auxiliary streams must make the timing stream

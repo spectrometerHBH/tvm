@@ -167,6 +167,11 @@ def test_distributed_event_times_full_closure_and_uses_sample_wise_rank_max(monk
 
     monkeypatch.setattr(bench_module.torch.cuda, "Event", FakeEvent)
     monkeypatch.setattr(bench_module.torch.cuda, "stream", fake_stream)
+    monkeypatch.setattr(
+        bench_module,
+        "_distributed_cold_start",
+        lambda _distributed: calls.append("cold"),
+    )
 
     def max_reduce(value):
         reductions.append(value)
@@ -185,9 +190,11 @@ def test_distributed_event_times_full_closure_and_uses_sample_wise_rank_max(monk
     assert len(reductions) == 30
     assert calls.count("prepare") == 35
     assert calls.count("launch") == 35
+    assert calls.count("cold") == 35
     assert calls.count("event") == 60
     first_measured = calls.index("event")
-    assert calls[first_measured - 1 : first_measured + 3] == [
+    assert calls[first_measured - 2 : first_measured + 3] == [
+        "cold",
         "prepare",
         "event",
         "launch",
@@ -196,6 +203,9 @@ def test_distributed_event_times_full_closure_and_uses_sample_wise_rank_max(monk
     protocol = result["benchmark_protocol"]
     assert protocol["timing_scope"] == "complete launch closure"
     assert protocol["prepare_outside_timing"] is True
+    assert protocol["cold_start_outside_timing"] is True
+    assert protocol["flush_l2"] is True
+    assert protocol["flush_l2_bytes"] == int(8e9)
     assert protocol["rank_aggregate"] == "sample_wise_max"
     assert protocol["sample_aggregate"] == "median"
 
@@ -248,7 +258,7 @@ def test_distributed_kineto_uses_deepgemm_two_phase_named_kernel_protocol(monkey
     monkeypatch.setattr(bench_module.torch.cuda, "stream", fake_stream)
     monkeypatch.setattr(
         bench_module,
-        "_distributed_kineto_cold_start",
+        "_distributed_cold_start",
         lambda _distributed: calls.append("cold"),
     )
     monkeypatch.setattr(
