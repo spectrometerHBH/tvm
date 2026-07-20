@@ -22,7 +22,17 @@ from typing import Literal
 
 from tvm.script import tirx as T
 
-from ..dsl import SmemAllocRecord, SmemManager
+from ..dsl import SmemAllocRecord, SmemManager, TileSpec
+
+
+def _tile_key(tile) -> str:
+    """Return the stable allocation/phase key for one declaration owner."""
+
+    if tile is None:
+        return "default"
+    if isinstance(tile, TileSpec):
+        return tile.name
+    return str(tile)
 
 
 @T.inline
@@ -86,26 +96,18 @@ class TIRXSmemManager(SmemManager):
         self.exist_bufs = {}
         self.records: list[SmemAllocRecord] = []
         self.tile_phase_state = {}
+        self.tile_class_keys: dict[str, str] = {}
+        self.class_tile_keys: dict[str, set[str]] = {}
         self.mbar = None
         self.cur_phase = None
 
     def set_tile(self, tile) -> None:
         """Begin declaration-time allocation recording for one tile."""
 
-        self.cur_tile_name = "default" if tile is None else str(tile)
-        self.tiles[self.cur_tile_name] = {
-            "exclusive": [],
-            "shared": [],
-        }
-        self.tile_phase_state[self.cur_tile_name] = {
-            "uses_managed_smem": False,
-            "acquire_all": False,
-            "release_all": False,
-        }
-        self.pool_allocator["shared"].move_base_to(0)
+        self._select_owner(tile)
 
     def enter_tile_runtime(self, tile) -> None:
-        self.cur_tile_name = str(tile)
+        self._select_owner(tile)
 
     def exit_tile_runtime(self) -> None:
         self.cur_tile_name = ""
@@ -160,16 +162,20 @@ class TIRXSmemManager(SmemManager):
 
         if policy == "persistent":
             self.persistent_bufs[buffer] = begin, end
-        elif self.cur_tile_name in self.tiles:
+        else:
+            buffers = self.tiles.setdefault(self.cur_tile_name, {"exclusive": [], "shared": []})
             other_policy = "exclusive" if policy == "shared" else "shared"
-            if self.tiles[self.cur_tile_name][other_policy]:
+            if any(
+                self.tiles[owner_key][other_policy]
+                for owner_key in self._related_owner_keys(self.cur_tile_name)
+            ):
                 raise ValueError(
                     "one tile cannot mix shared and exclusive smem allocation policies"
                 )
             info = split, begin, size, policy
-            self.tiles[self.cur_tile_name][policy].append(info)
+            buffers[policy].append(info)
             self.bufs[buffer] = info
-            self.tile_phase_state[self.cur_tile_name]["uses_managed_smem"] = True
+            self._phase_state()["uses_managed_smem"] = True
         self.records.append(
             SmemAllocRecord(
                 buffer,
@@ -220,6 +226,7 @@ class TIRXSmemManager(SmemManager):
         if level != "cta":
             raise ValueError("TIRXSmemManager.acquire_all supports only level='cta'")
         self._phase_state()["acquire_all"] = True
+        self._phase_state()["phase_ops"].append("acquire_all")
         _wait_all_chunks(self.mbar, self.cur_phase, self.chunk_num, self.warp_count)
 
     def wait_all(self, level="cta") -> None:
@@ -233,30 +240,49 @@ class TIRXSmemManager(SmemManager):
         if level != "cta":
             raise ValueError("TIRXSmemManager.release_all supports only level='cta'")
         self._phase_state()["release_all"] = True
+        self._phase_state()["phase_ops"].append("release_all")
         _release_all_chunks(self.mbar, self.chunk_num, self.warp_count)
 
     def advance(self) -> None:
         """Flip the mbarrier phase used by the next tile execution."""
 
+        self._phase_state()["advance"] = True
+        self._phase_state()["phase_ops"].append("advance")
         _advance_phase(self.cur_phase)
 
     def validate_tile_phase(self, tile) -> None:
         """Require acquire/release calls for tiles using managed transient SMEM."""
 
-        tile_name = "default" if tile is None else str(tile)
-        state = self.tile_phase_state.get(tile_name)
-        if not state or not state["uses_managed_smem"]:
+        tile_name = _tile_key(tile)
+        state = self.tile_phase_state.get(tile_name, {})
+        class_state = {}
+        if isinstance(tile, TileSpec):
+            class_state = self.tile_phase_state.get(_tile_key(type(tile.impl)), {})
+        if not (state.get("uses_managed_smem") or class_state.get("uses_managed_smem")):
             return
         missing = []
-        if not state["acquire_all"]:
+        if not state.get("acquire_all"):
             missing.append("acquire_all()")
-        if not state["release_all"]:
+        if not state.get("release_all"):
             missing.append("release_all()")
+        if not state.get("advance"):
+            missing.append("advance()")
         if missing:
             display_name = "default" if tile is None else getattr(tile, "name", tile_name)
             raise ValueError(
                 f"tile {display_name!r} allocates managed shared memory but does not call "
                 + " and ".join(missing)
+            )
+        phase_ops = state.get("phase_ops", ())
+        expected = ("acquire_all", "release_all", "advance")
+        if len(phase_ops) % len(expected) or any(
+            tuple(phase_ops[index : index + len(expected)]) != expected
+            for index in range(0, len(phase_ops), len(expected))
+        ):
+            display_name = "default" if tile is None else getattr(tile, "name", tile_name)
+            raise ValueError(
+                f"tile {display_name!r} must call acquire_all(), release_all(), and advance() "
+                "in order for each managed shared-memory phase"
             )
 
     def commit(self) -> None:
@@ -272,8 +298,41 @@ class TIRXSmemManager(SmemManager):
                 "uses_managed_smem": False,
                 "acquire_all": False,
                 "release_all": False,
+                "advance": False,
+                "phase_ops": [],
             },
         )
+
+    def _select_owner(self, owner) -> None:
+        owner_key = _tile_key(owner)
+        self.cur_tile_name = owner_key
+        self.tiles.setdefault(owner_key, {"exclusive": [], "shared": []})
+        self._phase_state()
+        if isinstance(owner, TileSpec):
+            class_key = _tile_key(type(owner.impl))
+            previous = self.tile_class_keys.setdefault(owner_key, class_key)
+            if previous != class_key:
+                raise ValueError(f"tile owner key {owner_key!r} maps to more than one class")
+            self.class_tile_keys.setdefault(class_key, set()).add(owner_key)
+            self.tiles.setdefault(class_key, {"exclusive": [], "shared": []})
+        self.pool_allocator["shared"].move_base_to(
+            self._transient_end(self._related_owner_keys(owner_key))
+        )
+
+    def _related_owner_keys(self, owner_key: str) -> tuple[str, ...]:
+        if owner_key in self.tile_class_keys:
+            return tuple(dict.fromkeys((self.tile_class_keys[owner_key], owner_key)))
+        if owner_key in self.class_tile_keys:
+            return (owner_key, *sorted(self.class_tile_keys[owner_key]))
+        return (owner_key,)
+
+    def _transient_end(self, owner_keys) -> int:
+        end = 0
+        for owner_key in owner_keys:
+            for policy in ("shared", "exclusive"):
+                for _, begin, size, _ in self.tiles[owner_key][policy]:
+                    end = max(end, begin + size)
+        return end
 
     def _validate_allocations(self) -> None:
         persistent = list(self.persistent_bufs.values())
@@ -282,7 +341,25 @@ class TIRXSmemManager(SmemManager):
                 raise ValueError("persistent smem allocation exceeds the configured capacity")
         _validate_non_overlapping(persistent, "persistent smem allocations overlap")
 
-        for policy_buffers in self.tiles.values():
+        owner_groups = []
+        grouped_owners = set()
+        for tile_key in self.tile_class_keys:
+            owner_keys = self._related_owner_keys(tile_key)
+            owner_groups.append(owner_keys)
+            grouped_owners.update(owner_keys)
+        owner_groups.extend(
+            (owner_key,) for owner_key in self.tiles if owner_key not in grouped_owners
+        )
+
+        for owner_keys in owner_groups:
+            policy_buffers = {
+                policy: [info for owner_key in owner_keys for info in self.tiles[owner_key][policy]]
+                for policy in ("shared", "exclusive")
+            }
+            if policy_buffers["shared"] and policy_buffers["exclusive"]:
+                raise ValueError(
+                    "one tile cannot mix shared and exclusive smem allocation policies"
+                )
             intervals = []
             for policy in ("shared", "exclusive"):
                 for _, begin, size, _ in policy_buffers[policy]:

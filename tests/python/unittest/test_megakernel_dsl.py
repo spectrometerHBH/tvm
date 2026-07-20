@@ -58,10 +58,12 @@ from tvm.megakernel.transform import (
     build_semantic_plan,
     logical_edges,
     lower_execution_plan,
+    lower_static_queue_init_to_tirx,
     make_static_execution_plan,
     validate_semantic_plan,
 )
 from tvm.megakernel.transform.prepare import prepare_tirx_lowering_plan
+from tvm.megakernel.transform.semantic.validate import _build_instance_event_graph
 from tvm.script import tirx as T
 
 
@@ -92,6 +94,130 @@ class HostInitTile(RecordingTile):
 
     def host_init(self):
         T.evaluate(T.call_packed(self.hook_name))
+
+
+class PrefetchMarkerTile(RecordingTile):
+    @T.inline
+    def prefetch(self, m_idx, n_idx, k_idx):
+        T.evaluate(T.call_packed("test.prefetch.before_wait"))
+
+
+class CapturedVarHolder:
+    def __init__(self, target=None):
+        self.target = target
+
+
+_GLOBAL_COORD_HOLDER = CapturedVarHolder()
+
+
+def _global_captured_coord(m, n, k):
+    return (_GLOBAL_COORD_HOLDER.target + 1,) if m == 2 else (m,)
+
+
+class DeviceInitManagedSmemTile(RecordingTile):
+    @T.inline
+    def device_init(self, smem_manager, m_idx, n_idx, k_idx):
+        smem_manager.alloc((16,), "uint8", name="device_init_managed")
+
+
+class RunManagedSmemTile(RecordingTile):
+    @classmethod
+    def init_shared_resources(cls, smem_manager):
+        cls.smem_manager = smem_manager
+
+    @T.inline
+    def run(self, m_idx, n_idx, k_idx):
+        self.smem_manager.alloc((16,), "uint8", name="run_managed")
+        self.smem_manager.acquire_all()
+        self.smem_manager.release_all()
+        self.smem_manager.advance()
+
+
+class ClassManagedSmemTile(RecordingTile):
+    @classmethod
+    def init_shared_resources(cls, smem_manager):
+        cls.smem_manager = smem_manager
+        cls.buffer = smem_manager.alloc((16,), "uint8", name="class_managed")
+
+
+class SynchronizedClassManagedSmemTile(ClassManagedSmemTile):
+    @T.inline
+    def run(self, m_idx, n_idx, k_idx):
+        self.smem_manager.acquire_all()
+        self.smem_manager.release_all()
+        self.smem_manager.advance()
+
+
+class MissingAdvanceManagedSmemTile(ClassManagedSmemTile):
+    @T.inline
+    def run(self, m_idx, n_idx, k_idx):
+        self.smem_manager.acquire_all()
+        self.smem_manager.release_all()
+
+
+class WrongOrderManagedSmemTile(ClassManagedSmemTile):
+    @T.inline
+    def run(self, m_idx, n_idx, k_idx):
+        self.smem_manager.advance()
+        self.smem_manager.acquire_all()
+        self.smem_manager.release_all()
+
+
+class ClassAndDeviceManagedSmemTile(RecordingTile):
+    @classmethod
+    def init_shared_resources(cls, smem_manager):
+        cls.smem_manager = smem_manager
+        cls.class_buffer = smem_manager.alloc((64,), "uint8", name="class_layout")
+
+    @T.inline
+    def device_init(self, smem_manager, m_idx, n_idx, k_idx):
+        smem_manager.alloc((64,), "uint8", name="tile_layout")
+
+    @T.inline
+    def run(self, m_idx, n_idx, k_idx):
+        self.smem_manager.acquire_all()
+        self.smem_manager.release_all()
+        self.smem_manager.advance()
+
+
+class ClassSharedDeviceExclusiveSmemTile(ClassAndDeviceManagedSmemTile):
+    @T.inline
+    def device_init(self, smem_manager, m_idx, n_idx, k_idx):
+        smem_manager.alloc((64,), "uint8", name="exclusive_tile_layout", policy="exclusive")
+
+
+class OversizedClassSmemTile(RecordingTile):
+    @classmethod
+    def init_shared_resources(cls, smem_manager):
+        cls.smem_manager = smem_manager
+        cls.buffer = smem_manager.alloc((5120,), "uint8", name="oversized_class")
+
+    @T.inline
+    def run(self, m_idx, n_idx, k_idx):
+        self.smem_manager.acquire_all()
+        self.smem_manager.release_all()
+        self.smem_manager.advance()
+
+
+class SmallClassSmemTile(RecordingTile):
+    @classmethod
+    def init_shared_resources(cls, smem_manager):
+        cls.smem_manager = smem_manager
+        cls.buffer = smem_manager.alloc((16,), "uint8", name="small_class")
+
+    @T.inline
+    def run(self, m_idx, n_idx, k_idx):
+        self.smem_manager.acquire_all()
+        self.smem_manager.release_all()
+        self.smem_manager.advance()
+
+
+class FinalizeOwnerTile(RecordingTile):
+    finalized_key = None
+
+    @classmethod
+    def finalize_shared_resources(cls, smem_manager):
+        cls.finalized_key = smem_manager.cur_tile_name
 
 
 def _two_stage_kernel():
@@ -239,6 +365,157 @@ def test_semantic_validation_exhausts_bounded_symbolic_event_counts():
         invalid.validate()
 
 
+def test_semantic_samples_unbounded_symbolic_event_counts():
+    kernel = KernelSpec("unbounded_event_count")
+    rows = kernel.var("rows")
+    ready = kernel.event("ready", (rows,), 2)
+    kernel.tile("producer", RecordingTile(), (rows, 1, 1)).notify(ready, lambda m, n, k: (m,))
+    kernel.tile("consumer", RecordingTile(), (rows, 1, 1)).wait(ready, lambda m, n, k: (m,))
+
+    with pytest.raises(ValueError, match="expects init_count 2"):
+        kernel.validate()
+
+
+def test_symbolic_event_shape_checks_zero_notify_coordinates_in_full_domain():
+    kernel = KernelSpec("symbolic_full_event_domain")
+    rows = kernel.var("rows", range=(1, 3))
+    ready = kernel.event("ready", (rows,), 1)
+    kernel.tile("producer", RecordingTile(), (1, 1, 1)).notify(ready, (0,))
+    kernel.tile("consumer", RecordingTile(), (1, 1, 1)).wait(ready, (0,))
+
+    with pytest.raises(ValueError, match="expects init_count 1.*full domain"):
+        kernel.validate()
+
+
+def test_constant_capacity_event_checks_only_runtime_active_coordinates():
+    kernel = KernelSpec("runtime_active_event_capacity")
+    active_rows = kernel.var("active_rows")
+    ready = kernel.event("ready", (64,), 12)
+    kernel.tile("producer", RecordingTile(), (active_rows, 12, 1)).notify(
+        ready, lambda m, n, k: (m,)
+    )
+    kernel.tile("consumer", RecordingTile(), (active_rows, 1, 1)).wait(ready, lambda m, n, k: (m,))
+
+    assert kernel.validate() is kernel
+
+
+def test_constant_event_shape_ignores_unused_callable_captures_for_coverage():
+    kernel = KernelSpec("constant_event_full_domain")
+    unused = kernel.var("unused", range=(1, 1))
+    ready = kernel.event("ready", (2,), 1)
+
+    def coord(m, n, k, captured=unused):
+        del captured
+        return (m,)
+
+    kernel.tile("producer", RecordingTile(), (1, 1, 1)).notify(ready, coord)
+    kernel.tile("consumer", RecordingTile(), (1, 1, 1)).wait(ready, coord)
+
+    with pytest.raises(ValueError, match="expects init_count 1.*full domain"):
+        kernel.validate()
+
+
+def test_instance_event_graph_uses_one_synthetic_node_per_event_coordinate():
+    kernel = KernelSpec("linear_event_coordinate_graph")
+    event = kernel.event("ready", (1,), 512)
+    tensor = kernel.tensor("buffer", (512,), "float32")
+    kernel.tile("producer", RecordingTile(), (512, 1, 1), writes=[tensor]).notify(event, (0,))
+    kernel.tile("consumer", RecordingTile(), (512, 1, 1), reads=[tensor]).wait(event, (0,))
+
+    semantic = kernel.semantic_plan()
+    assert validate_semantic_plan(semantic) is semantic
+    graph = _build_instance_event_graph(semantic, {})
+
+    assert sum(map(len, graph.adjacency.values())) == 1024
+
+
+def test_semantic_samples_large_bounded_regions_and_ignores_unrelated_vars():
+    kernel = KernelSpec("large_bounded_region")
+    rows = kernel.var("rows", range=(1, 8192))
+    kernel.var("unrelated", range=(1, 1_000_000))
+    tensor = kernel.tensor("buffer", (rows,), "float32")
+    kernel.tile(
+        "writer",
+        RecordingTile(),
+        (1, 1, 1),
+        writes=[tensor.region(lambda m, n, k: R[0])],
+    )
+
+    assert kernel.validate() is kernel
+
+
+def test_semantic_samples_large_static_event_space_without_rejecting_it():
+    kernel = KernelSpec("large_event_space")
+    extent = 262_145
+    ready = kernel.event("ready", (extent,), 1)
+    kernel.tile("producer", RecordingTile(), (extent, 1, 1)).notify(ready, lambda m, n, k: (m,))
+    kernel.tile("consumer", RecordingTile(), (extent, 1, 1)).wait(ready, lambda m, n, k: (m,))
+
+    assert kernel.validate() is kernel
+
+
+def test_large_static_event_uses_total_cardinality_check():
+    kernel = KernelSpec("large_event_count_mismatch")
+    extent = 262_145
+    ready = kernel.event("ready", (extent,), 2)
+    kernel.tile("producer", RecordingTile(), (extent, 1, 1)).notify(ready, lambda m, n, k: (m,))
+    kernel.tile("consumer", RecordingTile(), (extent, 1, 1)).wait(ready, lambda m, n, k: (m,))
+
+    with pytest.raises(ValueError, match="expects init_count 2.*full domain"):
+        kernel.validate()
+
+
+def test_event_variable_discovery_covers_closure_default_and_bound_self():
+    class BoundMapper:
+        def __init__(self, target):
+            self.target = target
+
+        def coord(self, m, n, k):
+            return (self.target + 1,) if m == 2 else (m,)
+
+    for capture_kind in ("closure", "default", "bound_self", "global"):
+        kernel = KernelSpec(f"captured_event_var_{capture_kind}")
+        target = kernel.var("target", range=(1, 1))
+        ready = kernel.event("ready", (3,), 1)
+        if capture_kind == "closure":
+
+            def coord(m, n, k):
+                return (target + 1,) if m == 2 else (m,)
+
+        elif capture_kind == "default":
+
+            def coord(m, n, k, captured=target):
+                return (captured + 1,) if m == 2 else (m,)
+
+        else:
+            if capture_kind == "bound_self":
+                coord = BoundMapper(target).coord
+            else:
+                _GLOBAL_COORD_HOLDER.target = target
+                coord = _global_captured_coord
+        kernel.tile("producer", RecordingTile(), (3, 1, 1)).notify(ready, coord)
+        kernel.tile("consumer", RecordingTile(), (3, 1, 1)).wait(ready, lambda m, n, k: (m,))
+
+        assert kernel.validate() is kernel
+
+
+def test_symbolic_environment_enumeration_has_a_combined_work_budget():
+    kernel = KernelSpec("combined_validation_budget")
+    rows = kernel.var("rows", range=(1, 4096))
+    ready = kernel.event("ready", (1024,), 1)
+    calls = {"count": 0}
+
+    def coord(m, n, k):
+        calls["count"] += 1
+        return (m + rows - rows,)
+
+    kernel.tile("producer", RecordingTile(), (1024, 1, 1)).notify(ready, coord)
+    kernel.tile("consumer", RecordingTile(), (1024, 1, 1)).wait(ready, coord)
+
+    assert kernel.validate() is kernel
+    assert calls["count"] < 100_000
+
+
 def test_tensor_regions_validate_matching_event_coordinates():
     kernel = KernelSpec("regions")
     tensor = kernel.tensor("buffer", (8,), "float32")
@@ -258,7 +535,155 @@ def test_tensor_regions_validate_matching_event_coordinates():
 
     assert kernel.validate() is kernel
     consumer.waits[0] = (ready, lambda m, n, k: (1 - m,))
-    with pytest.raises(ValueError, match="matching event coordinate"):
+    with pytest.raises(ValueError, match="no producer notifying that coord"):
+        kernel.validate()
+
+
+def test_semantic_rejects_waited_coord_without_overlapping_writer_region():
+    kernel = KernelSpec("waited_coord_wrong_region")
+    tensor = kernel.tensor("buffer", (2,), "float32")
+    ready = kernel.event("ready", (1,), 1)
+    kernel.tile(
+        "producer",
+        RecordingTile(),
+        (1, 1, 1),
+        writes=[tensor.region(lambda m, n, k: R[0])],
+    ).notify(ready, (0,))
+    kernel.tile(
+        "consumer",
+        RecordingTile(),
+        (1, 1, 1),
+        reads=[tensor.region(lambda m, n, k: R[1])],
+    ).wait(ready, (0,))
+
+    with pytest.raises(ValueError, match="no producer notifying that coord"):
+        kernel.validate()
+
+
+def test_tensor_dependency_requires_ordering_from_every_overlapping_writer():
+    kernel = KernelSpec("partial_waited_region_coverage")
+    tensor = kernel.tensor("buffer", (2,), "float32")
+    ready = kernel.event("ready", (2,), 1)
+    kernel.tile(
+        "left_producer",
+        RecordingTile(),
+        (1, 1, 1),
+        writes=[tensor.region(lambda m, n, k: R[0])],
+    ).notify(ready, (0,))
+    kernel.tile(
+        "right_producer",
+        RecordingTile(),
+        (1, 1, 1),
+        writes=[tensor.region(lambda m, n, k: R[1])],
+    ).notify(ready, (1,))
+    kernel.tile(
+        "consumer",
+        RecordingTile(),
+        (1, 1, 1),
+        reads=[tensor.region(lambda m, n, k: R[0:2])],
+    ).wait(ready, (0,))
+
+    with pytest.raises(ValueError, match="right_producer.*without an event dependency"):
+        kernel.validate()
+
+
+def test_static_region_dependency_accepts_transitive_event_ordering():
+    kernel = KernelSpec("transitive_region_dependency")
+    tensor = kernel.tensor("buffer", (1,), "float32")
+    first = kernel.event("first", (1,), 1)
+    second = kernel.event("second", (1,), 1)
+    kernel.tile(
+        "producer",
+        RecordingTile(),
+        (1, 1, 1),
+        writes=[tensor.region(lambda m, n, k: R[0])],
+    ).notify(first, (0,))
+    kernel.tile("middle", RecordingTile(), (1, 1, 1)).wait(first, (0,)).notify(second, (0,))
+    kernel.tile(
+        "consumer",
+        RecordingTile(),
+        (1, 1, 1),
+        reads=[tensor.region(lambda m, n, k: R[0])],
+    ).wait(second, (0,))
+
+    assert kernel.validate() is kernel
+
+
+def test_static_region_transitive_ordering_requires_matching_event_coordinates():
+    kernel = KernelSpec("transitive_region_coord_mismatch")
+    tensor = kernel.tensor("buffer", (1,), "float32")
+    first = kernel.event("first", (2,), 1)
+    second = kernel.event("second", (1,), 1)
+    kernel.tile(
+        "producer",
+        RecordingTile(),
+        (1, 1, 1),
+        writes=[tensor.region(lambda m, n, k: R[0])],
+    ).notify(first, (0,))
+    kernel.tile("other_producer", RecordingTile(), (1, 1, 1)).notify(first, (1,))
+    kernel.tile("middle", RecordingTile(), (1, 1, 1)).wait(first, (1,)).notify(second, (0,))
+    kernel.tile(
+        "consumer",
+        RecordingTile(),
+        (1, 1, 1),
+        reads=[tensor.region(lambda m, n, k: R[0])],
+    ).wait(second, (0,))
+    # This tile is structurally unrelated to the producer-to-consumer path and
+    # must not make the coordinate graph inexact.
+    kernel.tile("unrelated_large", RecordingTile(), (65_537, 1, 1))
+
+    with pytest.raises(ValueError, match="without an event dependency"):
+        kernel.validate()
+
+
+@pytest.mark.parametrize("access_kind", ["bare", "dynamic"])
+def test_tensor_transitive_ordering_requires_matching_event_coordinates(access_kind):
+    kernel = KernelSpec(f"transitive_{access_kind}_coord_mismatch")
+    tensor = kernel.tensor("buffer", (1,), "float32")
+    first = kernel.event("first", (2,), 1)
+    second = kernel.event("second", (1,), 1)
+    access = (
+        tensor
+        if access_kind == "bare"
+        else tensor.region(dynamic=True, reason="runtime-selected row")
+    )
+    kernel.tile(
+        "producer",
+        RecordingTile(),
+        (1, 1, 1),
+        writes=[access],
+    ).notify(first, (0,))
+    kernel.tile("other_producer", RecordingTile(), (1, 1, 1)).notify(first, (1,))
+    kernel.tile("middle", RecordingTile(), (1, 1, 1)).wait(first, (1,)).notify(second, (0,))
+    kernel.tile(
+        "consumer",
+        RecordingTile(),
+        (1, 1, 1),
+        reads=[access],
+    ).wait(second, (0,))
+
+    with pytest.raises(ValueError, match="without an event dependency"):
+        kernel.validate()
+
+
+def test_static_region_dependency_rejects_reverse_event_ordering():
+    kernel = KernelSpec("reverse_region_dependency")
+    tensor = kernel.tensor("buffer", (1,), "float32")
+    reverse = kernel.event("reverse", (1,), 1)
+    kernel.tile(
+        "producer",
+        RecordingTile(),
+        (1, 1, 1),
+        writes=[tensor.region(lambda m, n, k: R[0])],
+    ).wait(reverse, (0,))
+    kernel.tile(
+        "consumer",
+        RecordingTile(),
+        (1, 1, 1),
+        reads=[tensor.region(lambda m, n, k: R[0])],
+    ).notify(reverse, (0,))
+
+    with pytest.raises(ValueError, match="without an event dependency"):
         kernel.validate()
 
 
@@ -302,6 +727,27 @@ def test_tensor_regions_allow_disjoint_writers_and_reject_overlap():
     kernel.validate()
 
     right.writes[0] = tensor.region(lambda m, n, k: R[3:8])
+    with pytest.raises(ValueError, match="multiple producers with overlapping regions"):
+        kernel.validate()
+
+
+def test_tensor_regions_reject_overlapping_instances_of_one_writer_tile():
+    kernel = KernelSpec("same_tile_region_writers")
+    tensor = kernel.tensor("buffer", (1,), "float32")
+    ready = kernel.event("ready", (2,), 1)
+    kernel.tile(
+        "producer",
+        RecordingTile(),
+        (2, 1, 1),
+        writes=[tensor.region(lambda m, n, k: R[0])],
+    ).notify(ready, lambda m, n, k: (m,))
+    kernel.tile(
+        "consumer",
+        RecordingTile(),
+        (1, 1, 1),
+        reads=[tensor.region(lambda m, n, k: R[0])],
+    ).wait(ready, (0,))
+
     with pytest.raises(ValueError, match="multiple producers with overlapping regions"):
         kernel.validate()
 
@@ -361,6 +807,7 @@ def test_transform_exports_only_physical_step_contract():
         "EdgeBindingPlan",
         "EmissionContext",
         "MegakernelBackend",
+        "MegakernelLowerer",
         "SchedulerFetchProgram",
         "TileActionProgram",
         "TileEmitter",
@@ -466,6 +913,15 @@ def test_validate_rejects_foreign_event_missing_notifier_and_bad_tuple():
         kernel.validate()
 
 
+def test_validate_rejects_notify_without_consumer():
+    kernel = KernelSpec("missing_consumer")
+    ready = kernel.event("ready", (1,), 1)
+    kernel.tile("producer", RecordingTile(), (1, 1, 1)).notify(ready, (0,))
+
+    with pytest.raises(ValueError, match="notified but has no consumer"):
+        kernel.validate()
+
+
 @pytest.mark.parametrize(
     "coord_map,error",
     [
@@ -484,7 +940,7 @@ def test_validate_rejects_invalid_coord_maps(coord_map, error):
         kernel.validate()
 
 
-def test_validate_rejects_stateful_callables_and_cycles():
+def test_validate_rejects_stateful_callables():
     state = {"value": 0}
 
     def stateful_coord(m, n, k):
@@ -498,6 +954,8 @@ def test_validate_rejects_stateful_callables_and_cycles():
     with pytest.raises(ValueError, match="pure deterministic"):
         kernel.validate()
 
+
+def test_static_prepare_rejects_event_cycles_accepted_by_semantic_spec():
     kernel = KernelSpec("cycle")
     first_ready = kernel.event("first_ready", (1,), 1)
     second_ready = kernel.event("second_ready", (1,), 1)
@@ -507,8 +965,99 @@ def test_validate_rejects_stateful_callables_and_cycles():
     kernel.tile("second", RecordingTile(), (1, 1, 1)).wait(first_ready, (0,)).notify(
         second_ready, (0,)
     )
-    with pytest.raises(ValueError, match="acyclic"):
-        kernel.validate()
+    assert kernel.validate() is kernel
+    execution = make_static_execution_plan(kernel)
+    with pytest.raises(ValueError, match="static schedule.*acyclic"):
+        prepare_tirx_lowering_plan(execution, LoweringOptions())
+
+
+def test_static_prepare_accepts_coord_disjoint_coarse_tile_cycle():
+    kernel = KernelSpec("coord_disjoint_tile_cycle")
+    first_ready = kernel.event("first_ready", (2,), 1)
+    second_ready = kernel.event("second_ready", (2,), 1)
+    kernel.tile("first", RecordingTile(), (1, 1, 1)).wait(second_ready, (1,)).notify(
+        first_ready, (0,)
+    )
+    kernel.tile("second", RecordingTile(), (1, 1, 1)).wait(first_ready, (1,)).notify(
+        second_ready, (0,)
+    )
+    kernel.tile("first_entry", RecordingTile(), (1, 1, 1)).notify(first_ready, (1,))
+    kernel.tile("second_entry", RecordingTile(), (1, 1, 1)).notify(second_ready, (1,))
+
+    execution = make_static_execution_plan(kernel)
+    assert prepare_tirx_lowering_plan(execution, LoweringOptions()).static_schedule is not None
+
+
+def test_static_schedule_topologically_orders_waiting_tile_phases():
+    kernel = KernelSpec("waiting_phase_order")
+    entry_ready = kernel.event("entry_ready", (1,), 1)
+    middle_ready = kernel.event("middle_ready", (1,), 1)
+    kernel.tile("entry", RecordingTile(), (1, 1, 1)).notify(entry_ready, (0,))
+    # Register the consumer first to ensure policy source order is unsafe.
+    kernel.tile("consumer", RecordingTile(), (1, 1, 1)).wait(middle_ready, (0,))
+    kernel.tile("middle", RecordingTile(), (1, 1, 1)).wait(entry_ready, (0,)).notify(
+        middle_ready, (0,)
+    )
+
+    prepared = prepare_tirx_lowering_plan(make_static_execution_plan(kernel), LoweringOptions())
+    labels = [
+        phase.label
+        for phase in prepared.static_schedule.phases
+        if phase.label in {"entry", "middle", "consumer"}
+    ]
+    assert labels == ["entry", "middle", "consumer"]
+
+
+def test_static_queue_initializer_partitions_rows_by_cta():
+    kernel = KernelSpec("partitioned_queue")
+    kernel.tile("tile", RecordingTile(), (4, 1, 1))
+
+    script = lower_static_queue_init_to_tirx(
+        kernel,
+        LoweringOptions(attrs={"sm_count": 4}),
+    ).script()
+
+    assert "v = T.cta_id([4])" in script
+    assert "if buffer % 4 == v:" in script
+    assert "queue[v, buffer // 4]" in script
+
+
+def test_static_schedule_uses_coordinate_projection_to_break_coarse_cycle():
+    kernel = KernelSpec("coordinate_projected_phase_order")
+    first_ready = kernel.event("first_ready", (2,), 1)
+    second_ready = kernel.event("second_ready", (1,), 1)
+    kernel.tile("first", RecordingTile(), (1, 1, 1)).wait(second_ready, (0,)).notify(
+        first_ready, (0,)
+    )
+    kernel.tile("second", RecordingTile(), (1, 1, 1)).wait(first_ready, (1,)).notify(
+        second_ready, (0,)
+    )
+    kernel.tile("entry", RecordingTile(), (1, 1, 1)).notify(first_ready, (1,))
+
+    prepared = prepare_tirx_lowering_plan(make_static_execution_plan(kernel), LoweringOptions())
+    labels = [
+        phase.label
+        for phase in prepared.static_schedule.phases
+        if phase.label in {"entry", "first", "second"}
+    ]
+    assert labels == ["entry", "second", "first"]
+
+
+def test_static_prepare_rejects_instance_dag_with_cyclic_tile_projection():
+    kernel = KernelSpec("cyclic_tile_projection")
+    first_ready = kernel.event("first_ready", (2,), 1)
+    second_ready = kernel.event("second_ready", (3,), 1)
+    kernel.tile("first", RecordingTile(), (2, 1, 1)).wait(
+        second_ready, lambda m, n, k: (m,)
+    ).notify(first_ready, lambda m, n, k: (m,))
+    kernel.tile("second", RecordingTile(), (2, 1, 1)).wait(
+        first_ready, lambda m, n, k: (m,)
+    ).notify(second_ready, lambda m, n, k: (m + 1,))
+    kernel.tile("entry", RecordingTile(), (1, 1, 1)).notify(second_ready, (0,))
+
+    execution = make_static_execution_plan(kernel)
+    with pytest.raises(ValueError, match="project to an acyclic tile-phase order"):
+        prepare_tirx_lowering_plan(execution, LoweringOptions())
 
 
 @pytest.mark.parametrize(
@@ -552,12 +1101,13 @@ def test_default_policy_is_an_ordered_physical_program():
         "RunStep",
         "NotifyStep",
     ]
+    assert producer_program.steps[-1].release is True
     consumer_program = plan.device_regions[0].tile_programs[1]
     assert consumer_program.smem_scope == "program"
     assert [type(step).__name__ for step in consumer_program.steps] == [
         "HookStep",
-        "WaitStep",
         "HookStep",
+        "WaitStep",
         "RunStep",
     ]
     placements = plan.edge_placements()
@@ -570,12 +1120,169 @@ def test_default_policy_is_an_ordered_physical_program():
     assert placements[0].edge.consumer == consumer.name
 
 
+def test_prefetch_is_emitted_before_event_wait():
+    kernel = KernelSpec("prefetch_before_wait")
+    tensor = kernel.tensor("buffer", (1,), "float32")
+    ready = kernel.event("ready", (1,), 1)
+    kernel.tile("producer", RecordingTile(), (1, 1, 1), writes=[tensor]).notify(ready, (0,))
+    kernel.tile("consumer", PrefetchMarkerTile(), (1, 1, 1), reads=[tensor]).wait(ready, (0,))
+
+    script = lower_execution_plan(make_static_execution_plan(kernel)).script()
+    marker = script.index('T.call_packed("test.prefetch.before_wait")')
+    assert marker < script.index("T.ptx.ld_global_acquire", marker)
+
+
+def test_default_backend_lowers_release_event_publication():
+    kernel = KernelSpec("release_event_publication")
+    event = kernel.event("ready", (1,), 1)
+    kernel.tile("producer", RecordingTile(), (1, 1, 1)).notify(event, (0,))
+    kernel.tile("consumer", RecordingTile(), (1, 1, 1)).wait(event, (0,))
+    script = lower_execution_plan(make_static_execution_plan(kernel)).script()
+    fence = script.index("T.cuda.thread_fence()")
+    atomic = script.index("T.cuda.atomic_add", fence)
+    assert fence < atomic
+
+
+def test_managed_smem_requires_acquire_and_release_for_the_same_tile_key():
+    kernel = KernelSpec("missing_smem_phase")
+    kernel.tile("managed", DeviceInitManagedSmemTile(), (1, 1, 1))
+
+    with pytest.raises(
+        tvm.error.DiagnosticError,
+        match=r"tile 'managed'.*acquire_all\(\).*release_all\(\)",
+    ):
+        lower_execution_plan(make_static_execution_plan(kernel))
+
+
+def test_managed_smem_is_validated_when_program_scope_is_none():
+    kernel = KernelSpec("none_scope_smem_phase")
+    kernel.tile("managed", DeviceInitManagedSmemTile(), (1, 1, 1))
+    plan = make_static_execution_plan(kernel)
+    region = plan.device_regions[0]
+    program = replace(region.tile_programs[0], smem_scope="none")
+
+    with pytest.raises(
+        tvm.error.DiagnosticError,
+        match=r"tile 'managed'.*acquire_all\(\).*release_all\(\)",
+    ):
+        lower_execution_plan(
+            replace(plan, device_regions=(replace(region, tile_programs=(program,)),))
+        )
+
+
+def test_class_managed_smem_requires_each_tile_to_acquire_and_release():
+    invalid = KernelSpec("missing_class_smem_phase")
+    invalid.tile("managed", ClassManagedSmemTile(), (1, 1, 1))
+    with pytest.raises(
+        tvm.error.DiagnosticError,
+        match=r"tile 'managed'.*acquire_all\(\).*release_all\(\)",
+    ):
+        lower_execution_plan(make_static_execution_plan(invalid))
+
+    valid = KernelSpec("synchronized_class_smem_phase")
+    valid.tile("managed", SynchronizedClassManagedSmemTile(), (1, 1, 1))
+    script = lower_execution_plan(make_static_execution_plan(valid)).script()
+    assert "T.ptx.mbarrier.try_wait" in script
+    assert "T.ptx.mbarrier.arrive" in script
+
+
+def test_managed_smem_requires_phase_advance_after_release():
+    kernel = KernelSpec("missing_smem_advance")
+    kernel.tile("managed", MissingAdvanceManagedSmemTile(), (1, 1, 1))
+
+    with pytest.raises(tvm.error.DiagnosticError, match=r"tile 'managed'.*advance\(\)"):
+        lower_execution_plan(make_static_execution_plan(kernel))
+
+
+def test_managed_smem_requires_acquire_release_advance_order():
+    kernel = KernelSpec("wrong_smem_phase_order")
+    kernel.tile("managed", WrongOrderManagedSmemTile(), (1, 1, 1))
+
+    with pytest.raises(
+        tvm.error.DiagnosticError,
+        match=r"tile 'managed'.*acquire_all\(\).*release_all\(\).*advance\(\).*in order",
+    ):
+        lower_execution_plan(make_static_execution_plan(kernel))
+
+
+def test_none_scope_run_alloc_without_device_init_uses_the_tile_owner():
+    kernel = KernelSpec("run_smem_without_device_init")
+    tile = kernel.tile("managed", RunManagedSmemTile(), (1, 1, 1))
+    plan = make_static_execution_plan(kernel)
+    region = plan.device_regions[0]
+    program = region.tile_programs[0]
+    steps = tuple(
+        step
+        for step in program.steps
+        if not (isinstance(step, HookStep) and step.hook == "device_init")
+    )
+    plan = replace(
+        plan,
+        device_regions=(
+            replace(
+                region,
+                tile_programs=(replace(program, tile=tile, steps=steps, smem_scope="none"),),
+            ),
+        ),
+    )
+
+    lowered = lower_execution_plan(plan)
+    assert RunManagedSmemTile.smem_manager.tiles["managed"]["shared"]
+    assert "T.ptx.mbarrier.try_wait" in lowered.script()
+    assert "T.ptx.mbarrier.arrive" in lowered.script()
+
+
+def test_class_and_tile_transient_smem_layouts_do_not_alias():
+    kernel = KernelSpec("class_and_tile_smem_layout")
+    kernel.tile("managed", ClassAndDeviceManagedSmemTile(), (1, 1, 1))
+
+    lower_execution_plan(make_static_execution_plan(kernel))
+    manager = ClassAndDeviceManagedSmemTile.smem_manager
+    class_info = manager.tiles[str(ClassAndDeviceManagedSmemTile)]["shared"][0]
+    tile_info = manager.tiles["managed"]["shared"][0]
+    _, class_begin, class_size, _ = class_info
+    _, tile_begin, tile_size, _ = tile_info
+    assert (class_begin, class_begin + class_size) == (0, 64)
+    assert (tile_begin, tile_begin + tile_size) == (64, 128)
+
+
+def test_class_and_tile_transient_smem_reject_mixed_policies():
+    kernel = KernelSpec("class_and_tile_smem_policy")
+    kernel.tile("managed", ClassSharedDeviceExclusiveSmemTile(), (1, 1, 1))
+
+    with pytest.raises(
+        tvm.error.DiagnosticError,
+        match="cannot mix shared and exclusive smem allocation policies",
+    ):
+        lower_execution_plan(make_static_execution_plan(kernel))
+
+
+def test_class_smem_records_are_not_overwritten_by_later_classes():
+    kernel = KernelSpec("class_smem_records")
+    kernel.tile("oversized", OversizedClassSmemTile(), (1, 1, 1))
+    kernel.tile("small", SmallClassSmemTile(), (1, 1, 1))
+
+    with pytest.raises(tvm.error.DiagnosticError, match="configured capacity"):
+        lower_execution_plan(
+            make_static_execution_plan(kernel),
+            options=LoweringOptions(smem_max_bytes=4096, smem_chunk_size=1024),
+        )
+
+
+def test_finalize_shared_resources_uses_its_class_allocation_key():
+    kernel = KernelSpec("finalize_class_smem_key")
+    kernel.tile("tile", FinalizeOwnerTile(), (1, 1, 1))
+
+    lower_execution_plan(make_static_execution_plan(kernel))
+    assert FinalizeOwnerTile.finalized_key == str(FinalizeOwnerTile)
+
+
 def test_host_init_is_emitted_before_device_entry_and_restricted_to_prologue():
     kernel = KernelSpec("host_init_order")
     first_impl = HostInitTile("test.host_init.first")
     second_impl = HostInitTile("test.host_init.second")
     first = kernel.tile("first", first_impl, (1, 1, 1))
-    kernel.tile("second", second_impl, (1, 1, 1))
+    second = kernel.tile("second", second_impl, (1, 1, 1))
 
     plan = make_static_execution_plan(kernel)
     script = lower_execution_plan(plan).script()
@@ -584,31 +1291,47 @@ def test_host_init_is_emitted_before_device_entry_and_restricted_to_prologue():
     assert script.index('T.call_packed("test.host_init.second")') < device_entry
 
     step = HookStep("host_init", target=first_impl)
+    minimal_programs = (
+        TileProgram(first, (RunStep(),)),
+        TileProgram(second, (RunStep(),)),
+    )
     invalid_plans = (
         ExecutionPlan(
             kernel,
-            device_regions=(DeviceRegionPlan("device", fetch_steps=(step,)),),
-        ),
-        ExecutionPlan(
-            kernel,
             device_regions=(
-                DeviceRegionPlan("device", tile_programs=(TileProgram(first, (step,)),)),
+                DeviceRegionPlan("device", fetch_steps=(step,), tile_programs=minimal_programs),
             ),
         ),
         ExecutionPlan(
             kernel,
-            device_regions=(DeviceRegionPlan("device", epilogue_steps=(step,)),),
+            device_regions=(
+                DeviceRegionPlan(
+                    "device",
+                    tile_programs=(
+                        TileProgram(first, (step,)),
+                        TileProgram(second, (RunStep(),)),
+                    ),
+                ),
+            ),
         ),
-        ExecutionPlan(kernel, host_regions=(HostRegionPlan("host", (step,)),)),
+        ExecutionPlan(
+            kernel,
+            device_regions=(
+                DeviceRegionPlan("device", tile_programs=minimal_programs, epilogue_steps=(step,)),
+            ),
+        ),
+        ExecutionPlan(
+            kernel,
+            host_regions=(HostRegionPlan("host", (step,), owned_tiles=(first, second)),),
+        ),
     )
     for invalid in invalid_plans:
         with pytest.raises(ValueError, match="device prologue_steps"):
             invalid.validate()
 
 
-def test_default_backend_emits_barriers_and_runtime_event_init_before_scheduler():
-    kernel = KernelSpec("explicit_steps")
-    event = kernel.event("runtime_ready", (1,), 1)
+def test_default_backend_emits_barriers():
+    kernel = KernelSpec("explicit_barriers")
     tile = kernel.tile("tile", RecordingTile(), (1, 1, 1))
     plan = make_static_execution_plan(kernel)
     region = plan.device_regions[0]
@@ -618,44 +1341,61 @@ def test_default_backend_emits_barriers_and_runtime_event_init_before_scheduler(
     )
     region = replace(
         region,
-        prologue_steps=(
-            *region.prologue_steps,
-            RuntimeEventInitStep(event, 7, scope="thread", scope_id=3),
-        ),
         tile_programs=(program,),
     )
     explicit = replace(plan, device_regions=(region,))
 
-    script = lower_execution_plan(
-        explicit,
-        options=LoweringOptions(attrs={"num_threads": 64}),
-    ).script()
+    script = lower_execution_plan(explicit).script()
     assert "T.cuda.cta_sync()" in script
     assert "T.cuda.warp_sync()" in script
-    assert "T.thread_id([64])" in script
 
 
-def test_default_backend_rejects_unsupported_runtime_scope_and_profile_event():
+def test_default_backend_rejects_runtime_event_init_step():
+    kernel = KernelSpec("runtime_event_init")
+    event = kernel.event("runtime_ready", (1,), 1)
+    kernel.tile("tile", RecordingTile(), (1, 1, 1))
+    plan = make_static_execution_plan(kernel)
+    region = replace(
+        plan.device_regions[0],
+        prologue_steps=(
+            *plan.device_regions[0].prologue_steps,
+            RuntimeEventInitStep(event, 1, scope="thread", scope_id=0),
+        ),
+    )
+
+    with pytest.raises(NotImplementedError, match="does not support RuntimeEventInitStep"):
+        prepare_tirx_lowering_plan(replace(plan, device_regions=(region,)), LoweringOptions())
+
+
+@pytest.mark.parametrize("variant", ["missing", "duplicate", "not_final"])
+def test_default_backend_requires_one_final_smem_commit(variant):
+    kernel = KernelSpec("smem_commit_contract")
+    kernel.tile("tile", RecordingTile(), (1, 1, 1))
+    plan = make_static_execution_plan(kernel)
+    region = plan.device_regions[0]
+    commit = next(
+        step
+        for step in region.epilogue_steps
+        if isinstance(step, HookStep) and step.hook == "smem_commit"
+    )
+    epilogue = tuple(step for step in region.epilogue_steps if step is not commit)
+    if variant == "duplicate":
+        epilogue = (*epilogue, commit, commit)
+    elif variant == "not_final":
+        epilogue = (commit, *epilogue)
+    invalid = replace(plan, device_regions=(replace(region, epilogue_steps=epilogue),))
+
+    assert invalid.validate() is invalid
+    with pytest.raises(ValueError, match="exactly one final epilogue.*smem_commit"):
+        prepare_tirx_lowering_plan(invalid, LoweringOptions())
+
+
+def test_default_backend_rejects_profile_event():
     kernel = KernelSpec("unsupported_steps")
     event = kernel.event("runtime_ready", (1,), 1)
     tile = kernel.tile("tile", RecordingTile(), (1, 1, 1))
     plan = make_static_execution_plan(kernel)
     region = plan.device_regions[0]
-
-    invalid_scope = replace(
-        plan,
-        device_regions=(
-            replace(
-                region,
-                prologue_steps=(
-                    *region.prologue_steps,
-                    RuntimeEventInitStep(event, 1, scope="cta"),
-                ),
-            ),
-        ),
-    )
-    with pytest.raises(tvm.error.DiagnosticError, match="does not support 'cta' scope"):
-        lower_execution_plan(invalid_scope)
 
     profiled = replace(
         plan,
@@ -667,8 +1407,8 @@ def test_default_backend_rejects_unsupported_runtime_scope_and_profile_event():
         ),
     )
     assert profiled.device_regions[0].tile_programs[0].steps[0].profile_event is event
-    with pytest.raises(tvm.error.DiagnosticError, match="RunStep.profile_event"):
-        lower_execution_plan(profiled)
+    with pytest.raises(NotImplementedError, match="RunStep.profile_event"):
+        prepare_tirx_lowering_plan(profiled, LoweringOptions())
 
 
 def test_backend_prepare_binds_bounded_workspace_and_static_phases():
@@ -732,6 +1472,414 @@ def test_backend_prepare_rejects_non_int32_event_storage():
         prepare_tirx_lowering_plan(make_static_execution_plan(kernel), LoweringOptions())
 
 
+@pytest.mark.parametrize(
+    "init_count",
+    [32768, lambda coord: 32768],
+    ids=["constant", "callable"],
+)
+def test_backend_prepare_rejects_event_counts_that_overflow_int32(init_count):
+    kernel = KernelSpec("event_counter_overflow")
+    ready = kernel.event("ready", (1,), init_count)
+    kernel.tile("producer", RecordingTile(), (8192, 4, 1)).notify(ready, (0,))
+    kernel.tile("consumer", RecordingTile(), (1, 1, 1)).wait(ready, (0,))
+
+    with pytest.raises(ValueError, match="int32 semaphore encoding limit 32767"):
+        prepare_tirx_lowering_plan(
+            make_static_execution_plan(kernel),
+            LoweringOptions(attrs={"sm_count": 148}),
+        )
+
+
+@pytest.mark.parametrize("step_type,program_index", [(NotifyStep, 0), (WaitStep, 1)])
+@pytest.mark.parametrize("foreign", [False, True])
+def test_default_backend_rejects_event_step_edge_mismatch(step_type, program_index, foreign):
+    kernel, _, _, _ = _two_stage_kernel()
+    other = kernel.event("other", (1,), 1)
+    plan = make_static_execution_plan(kernel)
+    region = plan.device_regions[0]
+    program = region.tile_programs[program_index]
+    replacement_event = EventSpec("foreign", (1,), 1) if foreign else other
+    steps = tuple(
+        replace(step, event=replacement_event) if isinstance(step, step_type) else step
+        for step in program.steps
+    )
+    programs = list(region.tile_programs)
+    programs[program_index] = replace(program, steps=steps)
+    invalid = replace(plan, device_regions=(replace(region, tile_programs=tuple(programs)),))
+
+    assert invalid.validate() is invalid
+    error = "outside the semantic plan" if foreign else "does not match its logical edge"
+    with pytest.raises(ValueError, match=error):
+        prepare_tirx_lowering_plan(invalid, LoweringOptions())
+
+
+@pytest.mark.parametrize("step_type,program_index", [(NotifyStep, 0), (WaitStep, 1)])
+def test_default_backend_rejects_callable_endpoint_coord_map_mismatch(step_type, program_index):
+    kernel = KernelSpec("physical_callable_coord_mismatch")
+    ready = kernel.event("ready", (2,), 1)
+    kernel.tile("producer", RecordingTile(), (2, 1, 1)).notify(ready, lambda m, n, k: (m,))
+    kernel.tile("consumer", RecordingTile(), (2, 1, 1)).wait(ready, lambda m, n, k: (m,))
+    plan = make_static_execution_plan(kernel)
+    region = plan.device_regions[0]
+    program = region.tile_programs[program_index]
+    steps = tuple(
+        replace(step, coord_map=lambda m, n, k: (1 - m,)) if isinstance(step, step_type) else step
+        for step in program.steps
+    )
+    programs = list(region.tile_programs)
+    programs[program_index] = replace(program, steps=steps)
+    invalid = replace(plan, device_regions=(replace(region, tile_programs=tuple(programs)),))
+
+    assert invalid.validate() is invalid
+    with pytest.raises(ValueError, match="coord_map.*logical event endpoint"):
+        prepare_tirx_lowering_plan(invalid, LoweringOptions())
+
+
+def test_default_backend_rejects_static_endpoint_coord_map_mismatch():
+    kernel = KernelSpec("physical_static_coord_mismatch")
+    ready = kernel.event("ready", (1,), 1)
+    kernel.tile("producer", RecordingTile(), (1, 1, 1)).notify(ready, (0,))
+    kernel.tile("consumer", RecordingTile(), (1, 1, 1)).wait(ready, (0,))
+    plan = make_static_execution_plan(kernel)
+    region = plan.device_regions[0]
+    producer, consumer = region.tile_programs
+    producer_steps = tuple(
+        replace(step, coord_map=(1,)) if isinstance(step, NotifyStep) else step
+        for step in producer.steps
+    )
+    invalid = replace(
+        plan,
+        device_regions=(
+            replace(
+                region,
+                tile_programs=(replace(producer, steps=producer_steps), consumer),
+            ),
+        ),
+    )
+
+    assert invalid.validate() is invalid
+    with pytest.raises(ValueError, match="coord_map.*logical event endpoint"):
+        prepare_tirx_lowering_plan(invalid, LoweringOptions())
+
+
+@pytest.mark.parametrize(
+    "field,value,error",
+    [
+        ("release", False, "requires NotifyStep.release=True"),
+        ("rank", 0, "does not support remote NotifyStep.rank"),
+        ("count", 2, "requires NotifyStep.count=1"),
+        ("scope", "thread", "requires CTA-wide NotifyStep endpoints"),
+        ("scope_id", -1, "requires CTA-wide NotifyStep endpoints"),
+    ],
+)
+def test_default_backend_rejects_unsupported_notify_endpoint_fields(field, value, error):
+    kernel, _, _, _ = _two_stage_kernel()
+    plan = make_static_execution_plan(kernel)
+    region = plan.device_regions[0]
+    producer, consumer = region.tile_programs
+    producer_steps = tuple(
+        replace(step, **{field: value}) if isinstance(step, NotifyStep) else step
+        for step in producer.steps
+    )
+    invalid = replace(
+        plan,
+        device_regions=(
+            replace(
+                region,
+                tile_programs=(replace(producer, steps=producer_steps), consumer),
+            ),
+        ),
+    )
+
+    assert invalid.validate() is invalid
+    with pytest.raises(ValueError, match=error):
+        prepare_tirx_lowering_plan(invalid, LoweringOptions())
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [("level", "warp"), ("mask", 0)],
+)
+def test_default_backend_rejects_unsupported_wait_endpoint_fields(field, value):
+    kernel, _, _, _ = _two_stage_kernel()
+    plan = make_static_execution_plan(kernel)
+    region = plan.device_regions[0]
+    producer, consumer = region.tile_programs
+    consumer_steps = tuple(
+        replace(step, **{field: value}) if isinstance(step, WaitStep) else step
+        for step in consumer.steps
+    )
+    invalid = replace(
+        plan,
+        device_regions=(
+            replace(
+                region,
+                tile_programs=(producer, replace(consumer, steps=consumer_steps)),
+            ),
+        ),
+    )
+
+    assert invalid.validate() is invalid
+    with pytest.raises(ValueError, match="requires CTA-wide WaitStep endpoints"):
+        prepare_tirx_lowering_plan(invalid, LoweringOptions())
+
+
+def test_default_backend_rejects_unbound_event_endpoints():
+    kernel, _, _, _ = _two_stage_kernel()
+    plan = make_static_execution_plan(kernel)
+    region = plan.device_regions[0]
+    consumer = region.tile_programs[1]
+    extra_wait = WaitStep(kernel.events["ready"], (0,))
+    consumer_steps = list(consumer.steps)
+    consumer_steps.insert(
+        next(i for i, step in enumerate(consumer_steps) if isinstance(step, RunStep)),
+        extra_wait,
+    )
+    programs = (*region.tile_programs[:1], replace(consumer, steps=tuple(consumer_steps)))
+    invalid = replace(plan, device_regions=(replace(region, tile_programs=programs),))
+
+    assert invalid.validate() is invalid
+    with pytest.raises(ValueError, match="must bind at least one logical edge"):
+        prepare_tirx_lowering_plan(invalid, LoweringOptions())
+
+
+def test_default_backend_rejects_duplicate_or_missing_event_endpoints():
+    kernel, _, _, _ = _two_stage_kernel()
+    edge = logical_edges(kernel)[0]
+    plan = make_static_execution_plan(kernel)
+    region = plan.device_regions[0]
+    producer, consumer = region.tile_programs
+    wait_coord_map = next(step.coord_map for step in consumer.steps if isinstance(step, WaitStep))
+
+    duplicate_steps = list(consumer.steps)
+    duplicate_steps.insert(
+        next(i for i, step in enumerate(duplicate_steps) if isinstance(step, RunStep)),
+        WaitStep(edge.event, wait_coord_map, edges=(edge,)),
+    )
+    duplicate_wait = replace(
+        plan,
+        device_regions=(
+            replace(
+                region,
+                tile_programs=(
+                    producer,
+                    replace(consumer, steps=tuple(duplicate_steps)),
+                ),
+            ),
+        ),
+    )
+    assert duplicate_wait.validate() is duplicate_wait
+    with pytest.raises(ValueError, match="exactly one WaitStep and one NotifyStep"):
+        prepare_tirx_lowering_plan(duplicate_wait, LoweringOptions())
+
+    missing_notify = replace(
+        plan,
+        device_regions=(
+            replace(
+                region,
+                tile_programs=(
+                    replace(
+                        producer,
+                        steps=tuple(
+                            step for step in producer.steps if not isinstance(step, NotifyStep)
+                        ),
+                    ),
+                    consumer,
+                ),
+            ),
+        ),
+    )
+    assert missing_notify.validate() is missing_notify
+    with pytest.raises(ValueError, match="exactly one WaitStep and one NotifyStep"):
+        prepare_tirx_lowering_plan(missing_notify, LoweringOptions())
+
+
+@pytest.mark.parametrize(
+    "variant,error",
+    [
+        ("notify_before_run", "NotifyStep.*follow its RunStep"),
+        ("wait_after_run", "WaitStep.*precede its RunStep"),
+        ("producer_without_run", "producer.*exactly one RunStep"),
+        ("consumer_without_run", "consumer.*exactly one RunStep"),
+        ("producer_with_two_runs", "producer.*exactly one RunStep"),
+    ],
+)
+def test_default_backend_rejects_unsafe_event_endpoint_order(variant, error):
+    kernel, _, _, _ = _two_stage_kernel()
+    plan = make_static_execution_plan(kernel)
+    region = plan.device_regions[0]
+    producer, consumer = region.tile_programs
+    programs = [producer, consumer]
+
+    program_index = 1 if variant.startswith("consumer") or variant.startswith("wait") else 0
+    steps = list(programs[program_index].steps)
+    if variant == "notify_before_run":
+        notify = next(step for step in steps if isinstance(step, NotifyStep))
+        steps.remove(notify)
+        steps.insert(next(i for i, step in enumerate(steps) if isinstance(step, RunStep)), notify)
+    elif variant == "wait_after_run":
+        wait = next(step for step in steps if isinstance(step, WaitStep))
+        steps.remove(wait)
+        run_index = next(i for i, step in enumerate(steps) if isinstance(step, RunStep))
+        steps.insert(run_index + 1, wait)
+    elif variant.endswith("without_run"):
+        steps = [step for step in steps if not isinstance(step, RunStep)]
+    else:
+        run_index = next(i for i, step in enumerate(steps) if isinstance(step, RunStep))
+        steps.insert(run_index + 1, RunStep())
+    programs[program_index] = replace(programs[program_index], steps=tuple(steps))
+    invalid = replace(
+        plan,
+        device_regions=(replace(region, tile_programs=tuple(programs)),),
+    )
+
+    assert invalid.validate() is invalid
+    with pytest.raises(ValueError, match=error):
+        prepare_tirx_lowering_plan(invalid, LoweringOptions())
+
+
+@pytest.mark.parametrize(
+    "field,value,error",
+    [
+        ("predicate", False, "RunStep.predicate"),
+        ("repeat", 0, "RunStep.repeat=1"),
+        ("repeat", 2, "RunStep.repeat=1"),
+        ("index_map", lambda m, n, k, repeat: (1 - m, n, k), "RunStep.index_map"),
+    ],
+)
+def test_default_backend_rejects_noncanonical_run_step(field, value, error):
+    kernel, _, _, _ = _two_stage_kernel()
+    plan = make_static_execution_plan(kernel)
+    region = plan.device_regions[0]
+    producer, consumer = region.tile_programs
+    producer_steps = tuple(
+        replace(step, **{field: value}) if isinstance(step, RunStep) else step
+        for step in producer.steps
+    )
+    invalid = replace(
+        plan,
+        device_regions=(
+            replace(
+                region,
+                tile_programs=(replace(producer, steps=producer_steps), consumer),
+            ),
+        ),
+    )
+
+    assert invalid.validate() is invalid
+    with pytest.raises(NotImplementedError, match=error):
+        prepare_tirx_lowering_plan(invalid, LoweringOptions())
+
+
+def test_default_backend_rejects_logical_edges_on_non_endpoint_steps():
+    kernel, _, _, _ = _two_stage_kernel()
+    edge = logical_edges(kernel)[0]
+    plan = make_static_execution_plan(kernel)
+    region = plan.device_regions[0]
+    producer, consumer = region.tile_programs
+    producer_steps = tuple(
+        replace(step, edges=(edge,))
+        if isinstance(step, RunStep)
+        else replace(step, edges=())
+        if isinstance(step, NotifyStep)
+        else step
+        for step in producer.steps
+    )
+    consumer_steps = tuple(
+        replace(step, edges=()) if isinstance(step, WaitStep) else step for step in consumer.steps
+    )
+    invalid = replace(
+        plan,
+        device_regions=(
+            replace(
+                region,
+                tile_programs=(
+                    replace(producer, steps=producer_steps),
+                    replace(consumer, steps=consumer_steps),
+                ),
+            ),
+        ),
+    )
+
+    assert invalid.validate() is invalid
+    with pytest.raises(ValueError, match="bound by a WaitStep or NotifyStep"):
+        prepare_tirx_lowering_plan(invalid, LoweringOptions())
+
+
+def test_static_backend_prepare_rejects_fetch_steps_explicitly():
+    kernel = KernelSpec("static_fetch")
+    kernel.tile("tile", RecordingTile(), (1, 1, 1))
+    plan = make_static_execution_plan(kernel)
+    region = replace(
+        plan.device_regions[0],
+        fetch_steps=(FetchGuardStep(predicate=True),),
+    )
+
+    with pytest.raises(NotImplementedError, match="fetch_steps.*distributed backends"):
+        prepare_tirx_lowering_plan(replace(plan, device_regions=(region,)), LoweringOptions())
+
+
+def test_execution_plan_requires_each_tile_in_exactly_one_region():
+    kernel = KernelSpec("tile_coverage")
+    first = kernel.tile("first", RecordingTile(), (1, 1, 1))
+    second = kernel.tile("second", RecordingTile(), (1, 1, 1))
+
+    with pytest.raises(ValueError, match="missing tile programs for 1 tile"):
+        ExecutionPlan(
+            kernel,
+            device_regions=(
+                DeviceRegionPlan("device", tile_programs=(TileProgram(first, (RunStep(),)),)),
+            ),
+        ).validate()
+
+    with pytest.raises(ValueError, match="more than one execution region"):
+        ExecutionPlan(
+            kernel,
+            device_regions=(
+                DeviceRegionPlan("first", tile_programs=(TileProgram(first, (RunStep(),)),)),
+                DeviceRegionPlan(
+                    "second",
+                    tile_programs=(
+                        TileProgram(first, (RunStep(),)),
+                        TileProgram(second, (RunStep(),)),
+                    ),
+                ),
+            ),
+        ).validate()
+
+    with pytest.raises(ValueError, match="must contain at least one physical step"):
+        ExecutionPlan(
+            kernel,
+            device_regions=(
+                DeviceRegionPlan(
+                    "device",
+                    tile_programs=(
+                        TileProgram(first, ()),
+                        TileProgram(second, (RunStep(),)),
+                    ),
+                ),
+            ),
+        ).validate()
+
+    with pytest.raises(ValueError, match="owns tiles but has no physical steps"):
+        ExecutionPlan(
+            kernel,
+            device_regions=(
+                DeviceRegionPlan("device", tile_programs=(TileProgram(second, (RunStep(),)),)),
+            ),
+            host_regions=(HostRegionPlan("host", (), owned_tiles=(first,)),),
+        ).validate()
+
+    plan = ExecutionPlan(
+        kernel,
+        device_regions=(
+            DeviceRegionPlan("device", tile_programs=(TileProgram(second, (RunStep(),)),)),
+        ),
+        host_regions=(HostRegionPlan("host", (HostCallStep("first"),), owned_tiles=(first,)),),
+    )
+    assert plan.validate() is plan
+
+
 def test_edge_placement_rejects_missing_cross_location_and_cross_region():
     kernel, producer, consumer, _ = _two_stage_kernel()
     plan = make_static_execution_plan(kernel)
@@ -750,7 +1898,10 @@ def test_edge_placement_rejects_missing_cross_location_and_cross_region():
     fetch_and_tile = DeviceRegionPlan(
         "device",
         fetch_steps=(FetchGuardStep(edges=(edge,)),),
-        tile_programs=(TileProgram(producer, (NotifyStep(edge.event, (0,), edges=(edge,)),)),),
+        tile_programs=(
+            TileProgram(producer, (NotifyStep(edge.event, (0,), edges=(edge,)),)),
+            TileProgram(consumer, (RunStep(),)),
+        ),
     )
     with pytest.raises(ValueError, match="spans physical placements"):
         ExecutionPlan(kernel, device_regions=(fetch_and_tile,)).validate()
@@ -774,19 +1925,31 @@ def test_edge_placement_rejects_unknown_wrong_endpoint_and_wrong_port():
     with pytest.raises(ValueError, match="unknown logical edge"):
         ExecutionPlan(
             kernel,
-            host_regions=(HostRegionPlan("host", (HostSyncStep("completion", edges=(unknown,)),)),),
+            host_regions=(
+                HostRegionPlan(
+                    "host",
+                    (HostSyncStep("completion", edges=(unknown,)),),
+                    owned_tiles=(producer, consumer),
+                ),
+            ),
         ).validate()
 
     wrong_producer = DeviceRegionPlan(
         "device",
-        tile_programs=(TileProgram(consumer, (NotifyStep(edge.event, (0,), edges=(edge,)),)),),
+        tile_programs=(
+            TileProgram(consumer, (NotifyStep(edge.event, (0,), edges=(edge,)),)),
+            TileProgram(producer, (RunStep(),)),
+        ),
     )
     with pytest.raises(ValueError, match="logical producer tile"):
         ExecutionPlan(kernel, device_regions=(wrong_producer,)).validate()
 
     wrong_consumer = DeviceRegionPlan(
         "device",
-        tile_programs=(TileProgram(producer, (WaitStep(edge.event, (0,), edges=(edge,)),)),),
+        tile_programs=(
+            TileProgram(producer, (WaitStep(edge.event, (0,), edges=(edge,)),)),
+            TileProgram(consumer, (RunStep(),)),
+        ),
     )
     with pytest.raises(ValueError, match="logical consumer tile"):
         ExecutionPlan(kernel, device_regions=(wrong_consumer,)).validate()
@@ -801,6 +1964,7 @@ def test_edge_placement_rejects_unknown_wrong_endpoint_and_wrong_port():
                     MidBodyPortStep("after_advance", edges=(edge,)),
                 ),
             ),
+            TileProgram(consumer, (RunStep(),)),
         ),
     )
     with pytest.raises(ValueError, match="spans physical placements"):
@@ -808,25 +1972,33 @@ def test_edge_placement_rejects_unknown_wrong_endpoint_and_wrong_port():
 
 
 def test_fetch_mid_body_and_host_edge_locations_are_derived():
-    kernel, producer, _, _ = _two_stage_kernel()
+    kernel, producer, consumer, _ = _two_stage_kernel()
     edge = logical_edges(kernel)[0]
     fetch_region = DeviceRegionPlan(
         "fetch_device",
         fetch_steps=(FetchGuardStep(edges=(edge,)),),
-        tile_programs=(TileProgram(producer, ()),),
+        tile_programs=(
+            TileProgram(producer, (RunStep(),)),
+            TileProgram(consumer, (RunStep(),)),
+        ),
     )
     fetch = ExecutionPlan(kernel, device_regions=(fetch_region,)).edge_placements()[0]
     assert (fetch.location, fetch.region, fetch.port) == ("fetch", "fetch_device", None)
 
     port_region = DeviceRegionPlan(
         "port_device",
-        tile_programs=(TileProgram(producer, (MidBodyPortStep("after_store", edges=(edge,)),)),),
+        tile_programs=(
+            TileProgram(producer, (MidBodyPortStep("after_store", edges=(edge,)),)),
+            TileProgram(consumer, (RunStep(),)),
+        ),
     )
     port = ExecutionPlan(kernel, device_regions=(port_region,)).edge_placements()[0]
     assert (port.location, port.region, port.port) == ("tile", "port_device", "after_store")
 
     host_region = HostRegionPlan(
-        "runtime", (HostSyncStep("completion", edges=(edge,)), HostCallStep("collective"))
+        "runtime",
+        (HostSyncStep("completion", edges=(edge,)), HostCallStep("collective")),
+        owned_tiles=(producer, consumer),
     )
     host = ExecutionPlan(kernel, host_regions=(host_region,)).edge_placements()[0]
     assert (host.location, host.region, host.port) == ("host", "runtime", None)

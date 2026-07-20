@@ -48,18 +48,20 @@ The DSL starts after the tile/event plan is known.  Its responsibility is to
 record the planned structure and attach tile implementations in a stable Python
 object model.
 
-The DSL is not responsible for:
+The logical spec and implementation layers are not responsible for:
 
 ```text
 1. parsing natural language or source programs
 2. deciding the tile partitioning
 3. deciding which logical events are required
 4. implementing wait/notify mechanics
-5. generating TIRX by itself
+5. selecting or emitting a concrete backend
 ```
 
-Those tasks belong to input interpretation, planning, validation, and lowering
-steps around the DSL.
+Those tasks belong to input interpretation, planning, validation, and transform
+layers around the logical model.  This package's `transform/` module includes a
+reference single-device static TIRX backend; custom backends may consume the
+same `ExecutionPlan` contract.
 
 ## Compiler Plan Boundaries
 
@@ -253,5 +255,6 @@ This lowering decides concrete implementation details, including:
 7. runtime integration
 ```
 
-Executable lowering references belong to implementation integrations rather
-than this logical DSL package.  They are not part of the agent planning output.
+This package includes the reference executable static lowering described above.
+It is an implementation integration rather than part of the logical spec or an
+agent's planning output; other integrations may lower the same execution plan.

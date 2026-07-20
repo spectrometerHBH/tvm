@@ -79,11 +79,15 @@ class TIRXSemaphore:
 
     @T.inline
     def semaphore_notify(self, *coord, rank=-1, release: bool = False) -> None:
+        if release:
+            T.cuda.thread_fence()
         self.state[0] = T.cuda.atomic_add(self.buffer.ptr_to(coord), -(self.base + 1))
         if self.state[0] <= 0:
             while 1:
                 T.ptx.ld_global_acquire(self.state[0], self.buffer.ptr_to(coord))
                 if _gt(self.state[0], 0):
+                    if release:
+                        T.cuda.thread_fence()
                     self.state[0] = T.cuda.atomic_add(self.buffer.ptr_to(coord), -(self.base + 1))
                     break
                 T.cuda.nano_sleep(self.sleep_cycles)

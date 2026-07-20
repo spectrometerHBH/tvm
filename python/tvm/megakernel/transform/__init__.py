@@ -19,7 +19,6 @@
 from .lower import (
     LoweringOptions,
     LowerMegakernelDSL,
-    MegakernelLowerer,
     TIRXStaticBackend,
     lower_execution_plan,
     lower_static_queue_init_to_tirx,
@@ -66,7 +65,6 @@ __all__ = [
     "LogicalEdge",
     "LowerMegakernelDSL",
     "LoweringOptions",
-    "MegakernelLowerer",
     "MidBodyPortStep",
     "NotifyStep",
     "ProgramStep",

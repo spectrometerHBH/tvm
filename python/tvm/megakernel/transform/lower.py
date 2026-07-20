@@ -71,6 +71,7 @@ def _wait_event_init_complete(buffer, coord, sm_count, warp_count):
             (state[0] <= sm_count * (TIRXSemaphore.base + 1)) & (state[0] > 0),
         ):
             if (lane_id == 0) & (warp_id == 0):
+                T.cuda.thread_fence()
                 T.cuda.atomic_add(T.address_of(buffer[coord]), -(TIRXSemaphore.base + 1))
             break
         T.cuda.nano_sleep(40)
@@ -292,10 +293,8 @@ class TIRXStaticBackend(ExecutionPlanBackend):
 
     def _emit_tile_program(self, program: TileProgram, runtime) -> None:
         smem = runtime["state"].smem_manager
-        entered_smem = False
-        if program.smem_scope == "program":
-            smem.enter_tile_runtime(program.tile)
-            entered_smem = True
+        smem.enter_tile_runtime(program.tile)
+        entered_smem = program.smem_scope != "run_to_end"
         for step in program.steps:
             if (
                 program.smem_scope == "run_to_end"
@@ -305,9 +304,8 @@ class TIRXStaticBackend(ExecutionPlanBackend):
                 smem.enter_tile_runtime(program.tile)
                 entered_smem = True
             self._emit_tirx_step(step, runtime, program.tile)
-        if entered_smem:
-            smem.validate_tile_phase(program.tile)
-            smem.exit_tile_runtime()
+        smem.validate_tile_phase(program.tile)
+        smem.exit_tile_runtime()
 
     def _emit_tirx_step(self, step: ProgramStep, runtime, tile=None) -> None:
         state: _BuildState = runtime["state"]
@@ -318,12 +316,13 @@ class TIRXStaticBackend(ExecutionPlanBackend):
             if step.hook == "host_init":
                 step.target.host_init()
             elif step.hook == "init_shared_resources":
-                smem.set_tile(None)
+                smem.set_tile(step.target)
                 step.target.init_shared_resources(smem)
             elif step.hook == "finalize_shared_resources":
+                smem.set_tile(step.target)
                 step.target.finalize_shared_resources(smem)
             elif step.hook == "device_init":
-                smem.set_tile(step.target)
+                smem.set_tile(tile)
                 step.target.device_init(smem, *indices)
             elif step.hook == "prefetch":
                 step.target.prefetch(*indices)
@@ -454,7 +453,7 @@ class TIRXStaticBackend(ExecutionPlanBackend):
         def notify_func(_notify_idx):
             return (1, -1, state.event_complete_coord)
 
-        state.scheduler.notify(semaphore, notify_func, scope="cta")
+        state.scheduler.notify(semaphore, notify_func, scope="cta", release=True)
 
     def _emit_wait_event_init_task(self, state: _BuildState) -> None:
         _wait_event_init_complete(
@@ -501,7 +500,7 @@ class _QueueInitEmitter:
         }
         queue = T.arg("queue", T.Buffer((sm_count, max_tasks), "int32"))
         T.device_entry()
-        T.cta_id([sm_count])
+        block_id = T.cta_id([sm_count])
         tid = T.thread_id([num_threads])
         offset = T.alloc_buffer((1,), "int32", scope="local")
         T.buffer_store(offset, 0, [0])
@@ -518,11 +517,13 @@ class _QueueInitEmitter:
                     grid = T.grid(*shape)
                     indices = grid.__enter__()
                     packed = _pack_static_task(*indices, job_id)
-                    T.buffer_store(
-                        queue,
-                        packed,
-                        [offset[0] % sm_count, offset[0] // sm_count],
-                    )
+                    with T.If(offset[0] % sm_count == block_id):
+                        with T.Then():
+                            T.buffer_store(
+                                queue,
+                                packed,
+                                [block_id, offset[0] // sm_count],
+                            )
                     T.buffer_store(offset, offset[0] + 1, [0])
                     grid.__exit__(None, None, None)
                 with T.Else():
@@ -640,12 +641,9 @@ class LowerMegakernelDSL:
         return IRModule({**mod.functions, **lowered.functions}, attrs=mod.attrs)
 
 
-MegakernelLowerer = TIRXStaticBackend
-
 __all__ = [
     "LowerMegakernelDSL",
     "LoweringOptions",
-    "MegakernelLowerer",
     "TIRXStaticBackend",
     "lower_execution_plan",
     "lower_static_queue_init_to_tirx",

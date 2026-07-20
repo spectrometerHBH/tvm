@@ -19,7 +19,6 @@
 from .transform import (
     LoweringOptions,
     LowerMegakernelDSL,
-    MegakernelLowerer,
     SemanticPlan,
     build_semantic_plan,
     lower_execution_plan,
@@ -32,7 +31,6 @@ from .transform import (
 __all__ = [
     "LowerMegakernelDSL",
     "LoweringOptions",
-    "MegakernelLowerer",
     "SemanticPlan",
     "build_semantic_plan",
     "lower_execution_plan",

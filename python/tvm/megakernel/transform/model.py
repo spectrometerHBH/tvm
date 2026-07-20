@@ -180,6 +180,7 @@ class HostRegionPlan:
     name: str
     steps: tuple[ProgramStep, ...]
     attrs: dict[str, Any] = field(default_factory=dict)
+    owned_tiles: tuple[TileSpec, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -276,6 +277,21 @@ class ExecutionPlan:
                 raise ValueError(f"unsupported region dependency kind {dependency.kind!r}")
         self.regions_in_dependency_order()
 
+        program_tiles = [
+            program.tile for region in self.device_regions for program in region.tile_programs
+        ]
+        host_tiles = [tile for region in self.host_regions for tile in region.owned_tiles]
+        placed_tile_ids = [id(tile) for tile in (*program_tiles, *host_tiles)]
+        kernel_tile_ids = {id(tile) for tile in self.kernel.tiles}
+        if len(placed_tile_ids) != len(set(placed_tile_ids)):
+            raise ValueError("a tile appears in more than one execution region")
+        unknown = set(placed_tile_ids) - kernel_tile_ids
+        if unknown:
+            raise ValueError("execution plan references a tile outside this kernel")
+        missing = kernel_tile_ids - set(placed_tile_ids)
+        if missing:
+            raise ValueError(f"execution plan is missing tile programs for {len(missing)} tile(s)")
+
         self._derive_edge_placements(semantic)
         return self
 
@@ -368,6 +384,11 @@ class ExecutionPlan:
                 seen_tiles.add(id(program.tile))
                 if not isinstance(program.steps, tuple):
                     raise TypeError(f"tile program {program.tile.name!r} steps must be a tuple")
+                if not program.steps:
+                    raise ValueError(
+                        f"tile program {program.tile.name!r} must contain "
+                        "at least one physical step"
+                    )
                 if program.smem_scope not in ("none", "program", "run_to_end"):
                     raise ValueError(
                         f"tile program {program.tile.name!r} has invalid smem_scope "
@@ -381,8 +402,14 @@ class ExecutionPlan:
         for region in self.host_regions:
             if not isinstance(region.attrs, dict):
                 raise TypeError(f"host region {region.name!r} attrs must be a dict")
+            if not isinstance(region.owned_tiles, tuple):
+                raise TypeError(f"host region {region.name!r} owned_tiles must be a tuple")
             if not isinstance(region.steps, tuple):
                 raise TypeError(f"host region {region.name!r} steps must be a tuple")
+            if region.owned_tiles and not region.steps:
+                raise ValueError(
+                    f"host region {region.name!r} owns tiles but has no physical steps"
+                )
             for step in region.steps:
                 place_step(step, "host", region.name)
 
@@ -453,14 +480,14 @@ def make_static_execution_plan(kernel: KernelSpec) -> ExecutionPlan:
     programs = []
     for tile in kernel.tiles:
         steps: list[ProgramStep] = [HookStep("device_init", target=tile.impl)]
+        steps.append(HookStep("prefetch", target=tile.impl))
         for event, coord_map in tile.waits:
             event_edges = tuple(by_consumer_event[(tile.name, id(event))])
             steps.append(WaitStep(event, coord_map, edges=event_edges))
-        steps.append(HookStep("prefetch", target=tile.impl))
         steps.append(RunStep())
         for event, coord_map in tile.notifies:
             event_edges = tuple(by_producer_event[(tile.name, id(event))])
-            steps.append(NotifyStep(event, coord_map, edges=event_edges))
+            steps.append(NotifyStep(event, coord_map, edges=event_edges, release=True))
         programs.append(TileProgram(tile, tuple(steps), smem_scope="program"))
 
     region_name = "device"

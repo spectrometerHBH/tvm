@@ -140,16 +140,20 @@ producer = kernel.tile(
     "producer",
     producer_impl,
     tile_num=(row_tiles, 1, 1),
-    writes=[workspace.region(lambda m, n, k: R[m * 128 : (m + 1) * 128, 0:128])],
+    writes=[workspace.region(lambda m, n, k: R[m, 0:128])],
 )
 ```
 
-Static regions let semantic validation prove bounds, disjoint writers, and
-matching producer/consumer event coordinates by exact enumeration.  Validation
-accepts at most 4,096 bounded symbolic environments and 65,536 tile points or
-tile pairs for one proof.  If a data-dependent or larger region cannot be
-proven statically, declare it dynamic and give a non-empty reason.  Dynamic
-access still requires an event dependency between its producer and consumer.
+Static regions let semantic validation check bounds, disjoint writers, and
+producer/consumer ordering.  Validation proves these properties when it can
+exactly enumerate at most 4,096 bounded symbolic environments, 65,536 tile
+points or tile pairs for one check, and 4,194,304 combined environment-point
+operations.  It collects only variables referenced by that check.  A larger
+bounded space uses deterministic boundary, midpoint, and fixed-seed samples
+instead of failing.  Variables used by a static region still require explicit
+ranges.  If a region is data-dependent rather than symbolically bounded,
+declare it dynamic and give a non-empty reason.  Dynamic access still requires
+an event dependency between its producer and consumer.
 
 ## `KernelSpec.event`
 
@@ -174,6 +178,27 @@ Parameters:
   event coordinate.
 - `dtype`: event storage dtype.  Defaults to `"int32"`.
 - `attrs`: optional metadata reserved for later passes.
+
+Event cardinality validation exactly enumerates at most 262,144 event and tile
+points for each concrete environment.  Larger point spaces, bounded symbolic
+spaces above 4,096 environments, combined exact work above 4,194,304
+environment-point operations, and unbounded symbolic variables use the same
+deterministic best-effort sampling policy.  Sampled validation still rejects
+concrete out-of-bounds coordinates and proven count mismatches, but does not
+claim an exhaustive proof of an opaque Python coordinate map.
+
+The reference static backend stores each count in a signed `int32` semaphore
+using a stride of 65,537, so every per-coordinate `init_count` must be at most
+32,767.  A callable count is exhaustively checked across a bounded event domain
+of at most 262,144 coordinates; larger callable domains require a custom
+backend with its own count representation or proof.
+
+A symbolic event shape denotes its full runtime domain, so every coordinate in
+that domain must receive its declared `init_count`.  A constant event shape may
+instead reserve capacity for a symbolic runtime-active tile domain; in that
+case only coordinates reached by active producers or consumers require
+notifications.  This supports persistent pipelines whose runtime work count is
+smaller than their statically allocated event workspace.
 
 Returns: `EventSpec`.
 
@@ -344,6 +369,12 @@ Optional.  Initializes device-side state owned by one tile instance.  For
 example, this hook can allocate managed shared-memory buffers used by that tile
 instance.
 
+Every tile that allocates transient managed shared memory must bracket its use
+with `smem_manager.acquire_all()` and `smem_manager.release_all()`, then call
+`smem_manager.advance()` so the next task waits on the opposite mbarrier phase.
+The reference backend validates this order for every complete phase cycle and
+for each allocation owner.
+
 ### `TileImpl.host_init`
 
 ```python
@@ -408,8 +439,11 @@ tiles, and logical event edges; validation rejects a stale snapshot.
 
 Lowering policies produce one `ExecutionPlan`.  Its device regions contain
 ordered `TileProgram` objects, and each program contains the `ProgramStep`
-sequence that a backend lowers.  For example, the default static policy emits
-`HookStep`, `WaitStep`, `RunStep`, and `NotifyStep` values in source order:
+sequence that a backend lowers.  Host regions explicitly list their logical
+ownership in `HostRegionPlan.owned_tiles`.  Validation requires every logical
+tile to belong to exactly one device or host region.  For example, the default
+static policy emits device initialization, prefetch, waits, `RunStep`, and
+notifications in source order:
 
 ```python
 from tvm.megakernel.transform import make_static_execution_plan
@@ -423,6 +457,32 @@ for program in plan.device_regions[0].tile_programs:
 Logical edge locations are not stored separately.  `plan.edge_placements()`
 validates the programs and returns the read-only `EdgePlacement` values derived
 from the steps carrying each edge.
+
+`DeviceRegionPlan.fetch_steps` belongs to the general execution-plan contract
+for custom schedulers and distributed backends.  The reference static backend
+rejects it explicitly; it is distinct from a tile's early `prefetch` hook.
+`RuntimeEventInitStep` is likewise reserved for custom backends because the
+reference backend owns one built-in event initialization phase.  Each logical
+edge in the reference backend must bind exactly one CTA-wide wait and notify,
+reuse the logical coordinate maps, and publish the notification with a
+device-scope release fence before its atomic signal.  Remote ranks and batched
+endpoint counts are not supported by this single-device backend.
+
+Each default tile program contains exactly one canonical `RunStep`: waits must
+precede it, notifications must follow it, and predicate, repeat, index-map, and
+profiling modifiers require a custom backend that validates their mapping to
+logical tile instances.  The device epilogue ends with exactly one
+`HookStep("smem_commit")`, which commits the dynamic shared-memory extent used
+by the persistent scheduler and tile programs.
+
+The reference static persistent queue also requires the concrete
+tile-instance/event-coordinate dependency graph to be acyclic.  It checks a
+coarse logical cycle at concrete coordinates and accepts it only when exact
+enumeration proves that the coordinate-level graph and its tile-phase
+projection are acyclic.  Other backends may implement cyclic protocols.  For a
+coarse acyclic graph, waiting tile phases are emitted in stable topological
+order so a persistent CTA does not
+block on a later producer phase.
 
 A custom backend implements a single entry point and owns traversal of regions
 and programs:

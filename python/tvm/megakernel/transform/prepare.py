@@ -21,11 +21,24 @@ from __future__ import annotations
 import keyword
 import re
 from dataclasses import dataclass
+from itertools import product
 from typing import TYPE_CHECKING, Any
 
 from ..dsl import EventSpec, ExprSpec, TensorSpec, VarSpec, expr_bounds
-from .model import DeviceRegionPlan, ExecutionPlan, TileProgram, WaitStep
+from .model import (
+    DeviceRegionPlan,
+    ExecutionPlan,
+    HookStep,
+    NotifyStep,
+    RunStep,
+    RuntimeEventInitStep,
+    TileProgram,
+    WaitStep,
+    logical_edges,
+)
+from .scheduler import TIRXSemaphore
 from .semantic import SemanticPlan
+from .semantic.validate import _static_event_tile_adjacency
 
 if TYPE_CHECKING:
     from .lower import LoweringOptions
@@ -35,6 +48,8 @@ WAIT_EVENT_INIT_JOB_ID = 30
 EVENT_INIT_COMPLETE_NAME = "__event_init_complete__"
 DEFAULT_END_JOB_ID = 31
 DEFAULT_MAX_TASKS = 128
+_EVENT_INIT_COUNT_PROOF_LIMIT = 262_144
+_MAX_EVENT_COUNTER_COUNT = ((1 << 31) - 1) // (TIRXSemaphore.base + 1)
 
 
 @dataclass(frozen=True)
@@ -122,25 +137,6 @@ class TIRXLoweringPlan:
         layout = self.event_init_complete_layout
         return 0 if layout is None else layout.workspace_offset + layout.reserved_size
 
-    def var_binding(self, var: VarSpec) -> VarBinding:
-        for binding in self.var_bindings:
-            if binding.var is var:
-                return binding
-        raise KeyError(var.name)
-
-    def tensor_binding(self, tensor: TensorSpec) -> TensorBinding:
-        base = tensor.base_tensor
-        for binding in self.tensor_bindings:
-            if binding.tensor is base:
-                return binding
-        raise KeyError(base.name)
-
-    def event_layout(self, event: EventSpec) -> EventLayout:
-        for layout in self.event_layouts:
-            if layout.event is event:
-                return layout
-        raise KeyError(event.name)
-
 
 def prepare_tirx_lowering_plan(
     execution: ExecutionPlan, options: LoweringOptions
@@ -152,6 +148,15 @@ def prepare_tirx_lowering_plan(
     if len(execution.device_regions) != 1 or execution.host_regions:
         raise ValueError("the default backend requires exactly one device region")
     region = execution.device_regions[0]
+    _validate_default_event_steps(region, semantic)
+    static_tile_adjacency = None
+    if options.schedule == "static":
+        static_tile_adjacency = _static_event_tile_adjacency(semantic)
+        if region.fetch_steps:
+            raise NotImplementedError(
+                "the default static TIRX backend does not support fetch_steps; "
+                "fetch steps belong to custom distributed backends"
+            )
     attrs = {**region.attrs, **options.attrs}
 
     used_names: set[str] = set()
@@ -204,6 +209,7 @@ def prepare_tirx_lowering_plan(
             tile_plans,
             len(event_layouts),
             attrs,
+            static_tile_adjacency,
         )
 
     plan = TIRXLoweringPlan(
@@ -222,9 +228,177 @@ def prepare_tirx_lowering_plan(
     return validate_tirx_lowering_plan(plan)
 
 
+def _validate_default_event_steps(region: DeviceRegionPlan, semantic: SemanticPlan) -> None:
+    """Keep physical wait/notify storage bound to its declared logical edge."""
+
+    non_epilogue_steps = [
+        *region.prologue_steps,
+        *region.fetch_steps,
+        *(step for program in region.tile_programs for step in program.steps),
+    ]
+    commit_indices = [
+        index
+        for index, step in enumerate(region.epilogue_steps)
+        if isinstance(step, HookStep) and step.hook == "smem_commit"
+    ]
+    if any(
+        isinstance(step, HookStep) and step.hook == "smem_commit" for step in non_epilogue_steps
+    ) or commit_indices != [len(region.epilogue_steps) - 1]:
+        raise ValueError(
+            "the default backend requires exactly one final epilogue HookStep('smem_commit')"
+        )
+
+    all_steps = [
+        *non_epilogue_steps,
+        *region.epilogue_steps,
+    ]
+    if any(isinstance(step, RuntimeEventInitStep) for step in all_steps):
+        raise NotImplementedError(
+            "the default static TIRX backend does not support RuntimeEventInitStep; "
+            "event storage is initialized by its built-in init phase"
+        )
+
+    semantic_event_ids = {id(event) for event in semantic.events}
+    expected_edges = {edge.key: edge for edge in logical_edges(semantic)}
+    wait_counts = {edge_key: 0 for edge_key in expected_edges}
+    notify_counts = {edge_key: 0 for edge_key in expected_edges}
+    for program in region.tile_programs:
+        run_indices = [
+            index for index, step in enumerate(program.steps) if isinstance(step, RunStep)
+        ]
+        if len(run_indices) != 1:
+            raise ValueError(
+                f"the default backend requires tile {program.tile.name!r} "
+                "to contain exactly one RunStep"
+            )
+        run_index = run_indices[0]
+        for step_index, step in enumerate(program.steps):
+            if isinstance(step, WaitStep) and step_index > run_index:
+                raise ValueError(
+                    f"the default backend requires every WaitStep in tile "
+                    f"{program.tile.name!r} to precede its RunStep"
+                )
+            if isinstance(step, NotifyStep) and step_index < run_index:
+                raise ValueError(
+                    f"the default backend requires every NotifyStep in tile "
+                    f"{program.tile.name!r} to follow its RunStep"
+                )
+            if isinstance(step, RunStep):
+                _validate_default_run_step(step, program.tile.name)
+            if isinstance(step, WaitStep | NotifyStep) and not step.edges:
+                raise ValueError(
+                    f"{type(step).__name__} in tile {program.tile.name!r} must bind "
+                    "at least one logical edge"
+                )
+            if not step.edges:
+                continue
+            if not isinstance(step, WaitStep | NotifyStep):
+                raise ValueError(
+                    f"the default backend requires logical edge {step.edges[0]} to be bound "
+                    "by a WaitStep or NotifyStep"
+                )
+            if not isinstance(step.event, EventSpec) or id(step.event) not in semantic_event_ids:
+                raise ValueError(
+                    f"{type(step).__name__} in tile {program.tile.name!r} references "
+                    "an event outside the semantic plan"
+                )
+            if any(edge.event is not step.event for edge in step.edges):
+                raise ValueError(
+                    f"{type(step).__name__} in tile {program.tile.name!r} has an event "
+                    "that does not match its logical edge"
+                )
+            if isinstance(step, WaitStep) and (step.level != "cta" or step.mask != 0xFFFFFFFF):
+                raise ValueError(
+                    "the default static TIRX backend requires CTA-wide WaitStep endpoints"
+                )
+            if isinstance(step, NotifyStep):
+                if step.release is not True:
+                    raise ValueError(
+                        "the default static TIRX backend requires NotifyStep.release=True "
+                        "for logical event publication"
+                    )
+                if not isinstance(step.rank, int) or isinstance(step.rank, bool) or step.rank != -1:
+                    raise ValueError(
+                        "the default static TIRX backend does not support remote NotifyStep.rank"
+                    )
+                if (
+                    not isinstance(step.count, int)
+                    or isinstance(step.count, bool)
+                    or step.count != 1
+                ):
+                    raise ValueError("the default static TIRX backend requires NotifyStep.count=1")
+                if step.scope != "cta" or step.scope_id != 0:
+                    raise ValueError(
+                        "the default static TIRX backend requires CTA-wide NotifyStep endpoints"
+                    )
+            for edge in step.edges:
+                expected_coord_map = _logical_endpoint_coord_map(
+                    semantic,
+                    edge.producer if isinstance(step, NotifyStep) else edge.consumer,
+                    edge.event,
+                    "notify" if isinstance(step, NotifyStep) else "wait",
+                )
+                if not _coord_maps_match(step.coord_map, expected_coord_map):
+                    raise ValueError(
+                        f"{type(step).__name__} in tile {program.tile.name!r} has a coord_map "
+                        "that does not match its logical event endpoint"
+                    )
+                if isinstance(step, WaitStep):
+                    wait_counts[edge.key] += 1
+                else:
+                    notify_counts[edge.key] += 1
+
+    for edge_key, edge in expected_edges.items():
+        if wait_counts[edge_key] != 1 or notify_counts[edge_key] != 1:
+            raise ValueError(
+                f"the default backend requires exactly one WaitStep and one NotifyStep "
+                f"for logical edge {edge}"
+            )
+
+
+def _validate_default_run_step(step: RunStep, tile_name: str) -> None:
+    """Require one physical execution for each logical tile instance."""
+
+    if step.predicate is not None and step.predicate is not True:
+        raise NotImplementedError(
+            f"the default backend does not support RunStep.predicate for tile {tile_name!r}"
+        )
+    if not isinstance(step.repeat, int) or isinstance(step.repeat, bool) or step.repeat != 1:
+        raise NotImplementedError(
+            f"the default backend requires RunStep.repeat=1 for tile {tile_name!r}"
+        )
+    if step.index_map is not None:
+        raise NotImplementedError(
+            f"the default backend does not support RunStep.index_map for tile {tile_name!r}"
+        )
+    if step.profile_event is not None:
+        raise NotImplementedError(
+            f"the default backend does not support RunStep.profile_event for tile {tile_name!r}"
+        )
+
+
+def _logical_endpoint_coord_map(semantic, tile_name, event, endpoint_kind):
+    """Return the declared logical coordinate map for one physical endpoint."""
+
+    tile = next(tile for tile in semantic.tiles if tile.name == tile_name)
+    dependencies = tile.notifies if endpoint_kind == "notify" else tile.waits
+    return next(
+        coord_map for dependency_event, coord_map in dependencies if dependency_event is event
+    )
+
+
+def _coord_maps_match(actual, expected) -> bool:
+    """Compare static coordinate values and require callable maps to be shared."""
+
+    if callable(actual) or callable(expected):
+        return actual is expected
+    return actual == expected
+
+
 def validate_tirx_lowering_plan(plan: TIRXLoweringPlan) -> TIRXLoweringPlan:
     """Validate event layout, task encodings, and static queue capacity."""
 
+    _validate_event_counter_encoding(plan)
     _validate_event_layout(plan)
     _validate_job_ids(plan)
     if plan.options.schedule == "static":
@@ -234,7 +408,78 @@ def validate_tirx_lowering_plan(plan: TIRXLoweringPlan) -> TIRXLoweringPlan:
     return plan
 
 
-def _build_static_schedule(tile_plans, event_count: int, attrs) -> StaticSchedulePlan:
+def _validate_event_counter_encoding(plan: TIRXLoweringPlan) -> None:
+    """Prove that every encoded semaphore count fits signed int32 storage."""
+
+    for event in plan.semantic.events:
+        if isinstance(event.init_count, int) and not isinstance(event.init_count, bool):
+            if event.init_count > _MAX_EVENT_COUNTER_COUNT:
+                raise ValueError(
+                    f"event {event.name!r} init_count {event.init_count} exceeds the "
+                    f"int32 semaphore encoding limit {_MAX_EVENT_COUNTER_COUNT}"
+                )
+            continue
+
+        upper_extents = _upper_bound_shape_extents(
+            event.shape,
+            f"event {event.name!r} init_count domain",
+        )
+        point_count = 1
+        for extent in upper_extents:
+            point_count *= extent
+        if point_count > _EVENT_INIT_COUNT_PROOF_LIMIT:
+            raise ValueError(
+                f"event {event.name!r} callable init_count spans {point_count} coordinates; "
+                "the default backend cannot prove its int32 semaphore encoding"
+            )
+        for coord in product(*(range(extent) for extent in upper_extents)):
+            try:
+                first = event.init_count(coord)
+                second = event.init_count(coord)
+            except Exception as err:  # pylint: disable=broad-exception-caught
+                raise ValueError(
+                    f"event {event.name!r} init_count failed at coord {coord}"
+                ) from err
+            if first != second:
+                raise ValueError(
+                    f"event {event.name!r} init_count must be deterministic at coord {coord}"
+                )
+            if not isinstance(first, int) or isinstance(first, bool) or first <= 0:
+                raise ValueError(
+                    f"event {event.name!r} init_count at coord {coord} must be positive"
+                )
+            if first > _MAX_EVENT_COUNTER_COUNT:
+                raise ValueError(
+                    f"event {event.name!r} init_count {first} at coord {coord} exceeds the "
+                    f"int32 semaphore encoding limit {_MAX_EVENT_COUNTER_COUNT}"
+                )
+
+    if plan.event_init_complete_layout is not None and plan.static_schedule is not None:
+        complete_count = len(plan.event_layouts) + 1 + plan.static_schedule.sm_count
+        if complete_count > _MAX_EVENT_COUNTER_COUNT:
+            raise ValueError(
+                f"event initialization completion count {complete_count} exceeds the "
+                f"int32 semaphore encoding limit {_MAX_EVENT_COUNTER_COUNT}"
+            )
+
+
+def _upper_bound_shape_extents(shape, label: str) -> tuple[int, ...]:
+    values = tuple(shape) if isinstance(shape, tuple | list) else (shape,)
+    result = []
+    for extent in values:
+        try:
+            bounds = expr_bounds(extent, require_bounded=True)
+        except (TypeError, ValueError) as err:
+            raise type(err)(f"{label}: {err}") from err
+        if bounds[0] <= 0:
+            raise ValueError(f"{label} extents must be positive")
+        result.append(bounds[1])
+    return tuple(result)
+
+
+def _build_static_schedule(
+    tile_plans, event_count: int, attrs, tile_adjacency
+) -> StaticSchedulePlan:
     sm_count = _positive_int(attrs.get("sm_count", 1), "sm_count")
     end_job_id = _nonnegative_int(attrs.get("end_job_id", DEFAULT_END_JOB_ID), "end_job_id")
     phases = []
@@ -242,6 +487,7 @@ def _build_static_schedule(tile_plans, event_count: int, attrs) -> StaticSchedul
         phases.append(TaskPhase("grid", INIT_EVENT_JOB_ID, (event_count + 1, 1, 1), "init_events"))
     entry = [tile for tile in tile_plans if not _program_waits(tile.program)]
     waiting = [tile for tile in tile_plans if _program_waits(tile.program)]
+    waiting = _stable_topological_tile_plans(waiting, tile_adjacency)
     phases.extend(_tile_phase(tile) for tile in entry)
     if event_count:
         phases.append(
@@ -263,6 +509,39 @@ def _build_static_schedule(tile_plans, event_count: int, attrs) -> StaticSchedul
         "max_tasks",
     )
     return StaticSchedulePlan(tuple(phases), sm_count, max_tasks, end_job_id)
+
+
+def _stable_topological_tile_plans(tile_plans, tile_adjacency):
+    """Order the static waiting-tile DAG without disturbing stable ties."""
+
+    if len(tile_plans) < 2:
+        return tile_plans
+    by_tile_id = {id(tile_plan.tile): tile_plan for tile_plan in tile_plans}
+    order = {id(tile_plan.tile): index for index, tile_plan in enumerate(tile_plans)}
+    outgoing = {tile_id: set() for tile_id in by_tile_id}
+    incoming = {tile_id: 0 for tile_id in by_tile_id}
+    for producer_id, consumer_ids in tile_adjacency.items():
+        if producer_id not in by_tile_id:
+            continue
+        for consumer_id in consumer_ids:
+            if consumer_id not in by_tile_id or consumer_id in outgoing[producer_id]:
+                continue
+            outgoing[producer_id].add(consumer_id)
+            incoming[consumer_id] += 1
+
+    ready = sorted((tile_id for tile_id, count in incoming.items() if count == 0), key=order.get)
+    result = []
+    while ready:
+        tile_id = ready.pop(0)
+        result.append(by_tile_id[tile_id])
+        for consumer_id in sorted(outgoing[tile_id], key=order.get):
+            incoming[consumer_id] -= 1
+            if incoming[consumer_id] == 0:
+                ready.append(consumer_id)
+                ready.sort(key=order.get)
+    if len(result) != len(tile_plans):
+        raise ValueError("static event-coordinate dependencies do not form a tile-phase DAG")
+    return result
 
 
 def _program_waits(program: TileProgram) -> bool:
