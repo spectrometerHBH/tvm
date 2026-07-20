@@ -17,6 +17,8 @@
 """Tests for tvm.tirx.bench utilities."""
 
 import importlib
+import inspect
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -24,9 +26,26 @@ import torch
 pytest.importorskip("triton")  # tvm.tirx.bench imports triton.profiler
 
 from tvm.testing import env
-from tvm.tirx.bench import bench
+from tvm.tirx.bench import DistributedBenchContext, bench
 
 bench_module = importlib.import_module("tvm.tirx.bench")
+
+
+class _FakeStream:
+    cuda_stream = 123
+
+    def synchronize(self):
+        pass
+
+
+def _distributed_context(max_reduce=lambda value: value):
+    return DistributedBenchContext(
+        rank=0,
+        world_size=4,
+        barrier=lambda: None,
+        max_reduce=max_reduce,
+        stream=_FakeStream(),
+    )
 
 
 def test_bench_cooldown_precedes_every_impl(monkeypatch):
@@ -125,6 +144,127 @@ def test_bench_default_timer_is_proton(monkeypatch):
     assert results["timer"] == "proton"
     assert results["impls"] == {"noop": 1.0}
     assert calls == [(25, 100)]
+
+
+def test_distributed_kineto_span_uses_cross_stream_samples_and_rank_max(monkeypatch):
+    reductions = []
+    local_samples = [float(index + 1) for index in range(30)]
+
+    def fake_profile(name, func, prepare, distributed):
+        assert name == "impl"
+        assert callable(func)
+        assert callable(prepare["impl"])
+        assert distributed.world_size == 4
+        return local_samples, [2] * len(local_samples)
+
+    def max_reduce(value):
+        reductions.append(value)
+        return value + 100.0
+
+    monkeypatch.setattr(bench_module, "_profile_distributed_kineto_span", fake_profile)
+
+    result = bench(
+        {"impl": lambda: None},
+        distributed=_distributed_context(max_reduce),
+        prepare={"impl": lambda: None},
+        cooldown_s=0,
+    )
+
+    assert result["timer"] == "kineto"
+    assert result["impls"] == {"impl": 115.5}
+    assert reductions == local_samples
+    protocol = result["benchmark_protocol"]
+    assert protocol["timing_scope"] == "complete correlated GPU activity span"
+    assert protocol["span_definition"] == "latest activity end minus earliest activity start"
+    assert protocol["rank_aggregate"] == "sample_wise_max"
+    assert protocol["rank_local_scope_stream_counts"] == {"impl": [{"min": 2, "max": 2}]}
+
+
+def test_kineto_span_collector_uses_earliest_start_and_latest_end():
+    def event(name, device_type, stream, start, end):
+        return SimpleNamespace(
+            name=name,
+            device_type=device_type,
+            device_resource_id=stream,
+            time_range=SimpleNamespace(start=start, end=end),
+        )
+
+    profiler = SimpleNamespace(
+        events=lambda: [
+            event("sample.0", torch.autograd.DeviceType.CPU, 0, 0.0, 10.0),
+            event("sample.0", torch.autograd.DeviceType.CUDA, 11, 2.0, 5.0),
+            event("sample.0", torch.autograd.DeviceType.CUDA, 17, 3.0, 8.0),
+            event("sample.1", torch.autograd.DeviceType.CUDA, 11, 20.0, 21.5),
+        ]
+    )
+
+    samples, stream_counts = bench_module._collect_kineto_span_samples(
+        profiler, ["sample.0", "sample.1"]
+    )
+
+    assert samples == [6.0, 1.5]
+    assert stream_counts == [2, 1]
+
+
+def test_distributed_kineto_span_keeps_fixed_order_without_ab_ba():
+    source = inspect.getsource(bench_module._bench_distributed_kineto_span)
+    assert "reversed" not in source
+    assert "round_orders" not in source
+
+
+@pytest.mark.parametrize(
+    "kwargs, match",
+    [
+        ({"timer": "event"}, "only timer='kineto'"),
+        ({"timer": "proton"}, "only timer='kineto'"),
+        ({"warmup": 1}, "rejects overrides: warmup"),
+        ({"repeat": 1}, "rejects overrides: repeat"),
+        ({"cudagraph_rep": 1}, "rejects overrides: cudagraph_rep"),
+    ],
+)
+def test_distributed_timers_reject_invalid_timer_and_budgets(kwargs, match):
+    with pytest.raises(ValueError, match=match):
+        bench(
+            {"noop": lambda: None},
+            distributed=_distributed_context(),
+            cooldown_s=0,
+            **kwargs,
+        )
+
+
+@pytest.mark.parametrize(
+    ("overrides", "error", "match"),
+    [
+        ({"world_size": 0}, ValueError, "world_size must be a positive integer"),
+        ({"world_size": True}, ValueError, "world_size must be a positive integer"),
+        ({"rank": -1}, ValueError, "rank must be in"),
+        ({"rank": 4}, ValueError, "rank must be in"),
+        ({"barrier": None}, TypeError, "barrier must be callable"),
+        ({"max_reduce": None}, TypeError, "max_reduce must be callable"),
+        ({"stream": object()}, TypeError, "stream must be an actual CUDA stream"),
+    ],
+)
+def test_distributed_timer_rejects_invalid_context(overrides, error, match):
+    values = {
+        "rank": 0,
+        "world_size": 4,
+        "barrier": lambda: None,
+        "max_reduce": lambda value: value,
+        "stream": _FakeStream(),
+    }
+    values.update(overrides)
+
+    with pytest.raises(error, match=match):
+        bench(
+            {"noop": lambda: None},
+            distributed=DistributedBenchContext(**values),
+            cooldown_s=0,
+        )
+
+
+def test_prepare_requires_distributed_context():
+    with pytest.raises(ValueError, match="only with a distributed context"):
+        bench({"noop": lambda: None}, prepare={"noop": lambda: None}, cooldown_s=0)
 
 
 def test_bench_cudagraph_proton_wiring(monkeypatch):
