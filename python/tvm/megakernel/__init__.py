@@ -20,18 +20,24 @@ from .transform import (
     LoweringOptions,
     LowerMegakernelDSL,
     MegakernelLowerer,
+    SemanticPlan,
+    build_semantic_plan,
     lower_execution_plan,
     lower_static_queue_init_to_tirx,
     lower_to_tirx,
     lower_to_tirx_module,
+    validate_semantic_plan,
 )
 
 __all__ = [
     "LowerMegakernelDSL",
     "LoweringOptions",
     "MegakernelLowerer",
+    "SemanticPlan",
+    "build_semantic_plan",
     "lower_execution_plan",
     "lower_static_queue_init_to_tirx",
     "lower_to_tirx",
     "lower_to_tirx_module",
+    "validate_semantic_plan",
 ]

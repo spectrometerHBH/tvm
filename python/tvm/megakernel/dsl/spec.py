@@ -23,7 +23,6 @@ concrete CUDA/TIRX/runtime implementation chosen by later lowering passes.
 
 from __future__ import annotations
 
-import inspect
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
@@ -33,16 +32,266 @@ from .impl import TileImpl
 
 @dataclass(frozen=True)
 class VarSpec:
-    """Symbolic variable used in shapes, tile counts, and event counts."""
+    """Symbolic variable used in shapes, tile counts, and event counts.
+
+    ``range`` is an optional inclusive ``(minimum, maximum)`` bound.  A
+    backend may use the upper bound to reserve static storage while lowering
+    the runtime value as an ordinary kernel argument.
+    """
 
     name: str
     dtype: str = "int32"
+    range: tuple[int, int] | None = None
+
+    def __add__(self, other):
+        return _binary_expr("add", self, other)
+
+    def __radd__(self, other):
+        return _binary_expr("add", other, self)
+
+    def __sub__(self, other):
+        return _binary_expr("sub", self, other)
+
+    def __rsub__(self, other):
+        return _binary_expr("sub", other, self)
+
+    def __mul__(self, other):
+        return _binary_expr("mul", self, other)
+
+    def __rmul__(self, other):
+        return _binary_expr("mul", other, self)
+
+    def __floordiv__(self, other):
+        return _binary_expr("floordiv", self, other)
+
+    def __rfloordiv__(self, other):
+        return _binary_expr("floordiv", other, self)
+
+    def __mod__(self, other):
+        return _binary_expr("mod", self, other)
+
+    def __rmod__(self, other):
+        return _binary_expr("mod", other, self)
+
+    def __neg__(self):
+        return ExprSpec("neg", (self,))
+
+    def ceildiv(self, other):
+        """Return ``ceildiv(self, other)`` as a logical integer expression."""
+
+        return _binary_expr("ceildiv", self, other)
 
 
-ExprLike = int | VarSpec
+@dataclass(frozen=True)
+class ExprSpec:
+    """Small integer expression over ``VarSpec`` and integer constants."""
+
+    op: str
+    args: tuple[ExprLike, ...]
+
+    def __add__(self, other):
+        return _binary_expr("add", self, other)
+
+    def __radd__(self, other):
+        return _binary_expr("add", other, self)
+
+    def __sub__(self, other):
+        return _binary_expr("sub", self, other)
+
+    def __rsub__(self, other):
+        return _binary_expr("sub", other, self)
+
+    def __mul__(self, other):
+        return _binary_expr("mul", self, other)
+
+    def __rmul__(self, other):
+        return _binary_expr("mul", other, self)
+
+    def __floordiv__(self, other):
+        return _binary_expr("floordiv", self, other)
+
+    def __rfloordiv__(self, other):
+        return _binary_expr("floordiv", other, self)
+
+    def __mod__(self, other):
+        return _binary_expr("mod", self, other)
+
+    def __rmod__(self, other):
+        return _binary_expr("mod", other, self)
+
+    def __neg__(self):
+        return ExprSpec("neg", (self,))
+
+    def ceildiv(self, other):
+        """Return ``ceildiv(self, other)`` as a logical integer expression."""
+
+        return _binary_expr("ceildiv", self, other)
+
+
+ExprLike = int | VarSpec | ExprSpec
 ShapeType = ExprLike | tuple[ExprLike, ...] | list[ExprLike]
-CoordMapType = Callable[[int, int, int], tuple[int, ...]] | tuple[int, ...] | list[int]
+CoordMapType = (
+    Callable[[int, int, int], tuple[ExprLike, ...]] | tuple[ExprLike, ...] | list[ExprLike]
+)
 TileNumType = tuple[ExprLike, ExprLike, ExprLike] | list[ExprLike]
+
+
+def _as_expr_like(value: Any) -> ExprLike:
+    if isinstance(value, bool):
+        raise TypeError("boolean values are not valid megakernel expressions")
+    if isinstance(value, int | VarSpec | ExprSpec):
+        return value
+    raise TypeError(
+        f"megakernel expression operands must be int, VarSpec, or ExprSpec, got {value!r}"
+    )
+
+
+def _binary_expr(op: str, lhs: Any, rhs: Any) -> ExprSpec:
+    return ExprSpec(op, (_as_expr_like(lhs), _as_expr_like(rhs)))
+
+
+def expr_vars(value: Any) -> tuple[VarSpec, ...]:
+    """Return the ``VarSpec`` leaves referenced by an expression or shape."""
+
+    result: list[VarSpec] = []
+    seen: set[VarSpec] = set()
+
+    def visit(item: Any) -> None:
+        if isinstance(item, VarSpec):
+            if item not in seen:
+                seen.add(item)
+                result.append(item)
+        elif isinstance(item, ExprSpec):
+            for arg in item.args:
+                visit(arg)
+        elif isinstance(item, tuple | list):
+            for child in item:
+                visit(child)
+
+    visit(value)
+    return tuple(result)
+
+
+def eval_expr_like(value: Any, env: dict[VarSpec, int] | None = None) -> int | None:
+    """Evaluate a logical integer expression in a concrete variable environment."""
+
+    if _is_int(value):
+        return value
+    if isinstance(value, VarSpec):
+        return None if env is None else env.get(value)
+    if isinstance(value, ExprSpec):
+        args = [eval_expr_like(arg, env) for arg in value.args]
+        if any(arg is None for arg in args):
+            return None
+        return _eval_expr_op(value.op, args)
+    return None
+
+
+def _eval_expr_op(op: str, args: list[int]) -> int:
+    if op == "add":
+        return args[0] + args[1]
+    if op == "sub":
+        return args[0] - args[1]
+    if op == "mul":
+        return args[0] * args[1]
+    if op == "floordiv":
+        return args[0] // args[1]
+    if op == "mod":
+        return args[0] % args[1]
+    if op == "neg":
+        return -args[0]
+    if op == "ceildiv":
+        return -((-args[0]) // args[1])
+    raise ValueError(f"unsupported ExprSpec op {op!r}")
+
+
+def expr_bounds(value: Any, *, require_bounded: bool = True) -> tuple[int, int] | None:
+    """Return conservative inclusive bounds for a logical integer expression."""
+
+    if _is_int(value):
+        return value, value
+    if isinstance(value, VarSpec):
+        if value.range is None:
+            if require_bounded:
+                raise ValueError(f"symbolic VarSpec({value.name!r}) has no range")
+            return None
+        return value.range
+    if not isinstance(value, ExprSpec):
+        if require_bounded:
+            raise TypeError(f"expected int, VarSpec, or ExprSpec, got {value!r}")
+        return None
+    arg_bounds = [expr_bounds(arg, require_bounded=require_bounded) for arg in value.args]
+    if any(bound is None for bound in arg_bounds):
+        return None
+    return _expr_bounds_op(value.op, arg_bounds)
+
+
+def _expr_bounds_op(op: str, bounds: list[tuple[int, int]]) -> tuple[int, int]:
+    if op == "add":
+        return bounds[0][0] + bounds[1][0], bounds[0][1] + bounds[1][1]
+    if op == "sub":
+        return bounds[0][0] - bounds[1][1], bounds[0][1] - bounds[1][0]
+    if op == "mul":
+        values = [lhs * rhs for lhs in bounds[0] for rhs in bounds[1]]
+        return min(values), max(values)
+    if op in ("floordiv", "ceildiv", "mod"):
+        divisor_min, divisor_max = bounds[1]
+        if divisor_min <= 0 <= divisor_max:
+            raise ValueError(f"{op} expression divisor range must not include zero")
+        if op == "mod":
+            if divisor_min > 0:
+                return 0, divisor_max - 1
+            return divisor_min + 1, 0
+        if op == "floordiv":
+            values = [lhs // rhs for lhs in bounds[0] for rhs in bounds[1]]
+        else:
+            values = [-((-lhs) // rhs) for lhs in bounds[0] for rhs in bounds[1]]
+        return min(values), max(values)
+    if op == "neg":
+        return -bounds[0][1], -bounds[0][0]
+    raise ValueError(f"unsupported ExprSpec op {op!r}")
+
+
+@dataclass(frozen=True)
+class RegionRange:
+    """One half-open tensor-region dimension ``[start, start + extent)``."""
+
+    start: Any
+    extent: Any
+
+
+@dataclass(frozen=True)
+class RegionSpec:
+    """Logical tensor region attached to one tile read or write."""
+
+    dims: tuple[RegionRange, ...] = ()
+    dynamic: bool = False
+    reason: str = ""
+
+
+class RegionBuilder:
+    """Build a region with syntax such as ``R[m, n:n + 8]``."""
+
+    def __getitem__(self, indices):
+        if not isinstance(indices, tuple):
+            indices = (indices,)
+        dims = []
+        for index in indices:
+            if isinstance(index, slice):
+                if index.step is not None:
+                    raise ValueError("region slices do not support a step")
+                if index.stop is None:
+                    raise ValueError("region slices require a stop")
+                start = 0 if index.start is None else index.start
+                dims.append(RegionRange(start=start, extent=index.stop - start))
+            else:
+                dims.append(RegionRange(start=index, extent=1))
+        return RegionSpec(dims=tuple(dims))
+
+
+R = RegionBuilder()
+RegionValueType = RegionSpec | tuple[ExprLike, ...] | list[ExprLike]
+RegionMapType = Callable[[int, int, int], RegionValueType] | RegionValueType
 
 
 @dataclass(frozen=True)
@@ -52,6 +301,55 @@ class TensorSpec:
     name: str
     shape: ShapeType
     dtype: str
+    region_map: RegionMapType | None = field(default=None, compare=False)
+    region_dynamic: bool = field(default=False, compare=False)
+    region_reason: str = field(default="", compare=False)
+    base: TensorSpec | None = field(default=None, compare=False)
+
+    @property
+    def base_tensor(self) -> TensorSpec:
+        """Return the registered tensor behind this access view."""
+
+        return self.base if self.base is not None else self
+
+    @property
+    def has_region(self) -> bool:
+        """Whether this value carries tile-specific access-region metadata."""
+
+        return self.region_map is not None or self.region_dynamic
+
+    def region(
+        self,
+        region_map: RegionMapType | None = None,
+        *,
+        dynamic: bool = False,
+        reason: str = "",
+    ) -> TensorSpec:
+        """Return an access view that identifies the tile's tensor region."""
+
+        base = self.base_tensor
+        if dynamic:
+            if region_map is not None:
+                raise ValueError("a dynamic tensor region cannot also provide a region_map")
+            if not isinstance(reason, str) or not reason.strip():
+                raise ValueError("a dynamic tensor region requires a non-empty reason")
+            return TensorSpec(
+                base.name,
+                base.shape,
+                base.dtype,
+                region_dynamic=True,
+                region_reason=reason,
+                base=base,
+            )
+        if region_map is None:
+            raise ValueError("tensor.region requires a region_map unless dynamic=True")
+        return TensorSpec(
+            base.name,
+            base.shape,
+            base.dtype,
+            region_map=region_map,
+            base=base,
+        )
 
 
 @dataclass(frozen=True)
@@ -102,89 +400,6 @@ def _is_int(value: Any) -> bool:
     return isinstance(value, int) and not isinstance(value, bool)
 
 
-def _shape_items(
-    shape: ShapeType,
-    *,
-    label: str,
-    var_ids: set[int] | None = None,
-) -> tuple[ExprLike, ...]:
-    if isinstance(shape, int | VarSpec) and not isinstance(shape, bool):
-        values = (shape,)
-    elif isinstance(shape, tuple | list):
-        values = tuple(shape)
-    else:
-        raise TypeError(f"{label} must be an int, VarSpec, tuple, or list")
-
-    for extent in values:
-        if _is_int(extent):
-            if extent <= 0:
-                raise ValueError(f"{label} extents must be positive")
-        elif isinstance(extent, VarSpec):
-            if not extent.name:
-                raise ValueError(f"{label} VarSpec names must be non-empty")
-            if var_ids is not None and id(extent) not in var_ids:
-                raise ValueError(f"{label} references a VarSpec outside this kernel")
-        else:
-            raise TypeError(f"{label} extents must be int or VarSpec")
-    return values
-
-
-def _bind_callable(func: Callable[..., Any], args: tuple[Any, ...], *, label: str) -> None:
-    try:
-        inspect.signature(func).bind(*args)
-    except (TypeError, ValueError) as err:
-        raise ValueError(f"{label} has an invalid callable signature") from err
-
-
-def _call_twice(func: Callable[..., Any], args: tuple[Any, ...], *, label: str) -> Any:
-    try:
-        first = func(*args)
-        second = func(*args)
-    except Exception as err:  # pylint: disable=broad-exception-caught
-        raise ValueError(f"{label} failed during validation") from err
-    if type(first) is not type(second) or first != second:  # pylint: disable=unidiomatic-typecheck
-        raise ValueError(f"{label} must be a pure deterministic callable")
-    return first
-
-
-def _validate_coord_map(coord_map: CoordMapType, *, rank: int, label: str) -> None:
-    if callable(coord_map):
-        args = (0, 0, 0)
-        _bind_callable(coord_map, args, label=label)
-        coordinates = _call_twice(coord_map, args, label=label)
-        other = _call_twice(coord_map, (1, 2, 3), label=label)
-        if type(coordinates) is not type(other):  # pylint: disable=unidiomatic-typecheck
-            raise ValueError(f"{label} must return a stable coordinate type")
-    else:
-        coordinates = coord_map
-
-    if not isinstance(coordinates, tuple | list):
-        raise ValueError(f"{label} must return a tuple or list")
-    if len(coordinates) != rank:
-        raise ValueError(f"{label} rank {len(coordinates)} does not match event rank {rank}")
-    if not all(_is_int(value) for value in coordinates):
-        raise TypeError(f"{label} coordinates must be integers")
-
-
-def _validate_init_count(event: EventSpec, *, rank: int) -> None:
-    label = f"event {event.name!r} init_count"
-    if _is_int(event.init_count):
-        if event.init_count <= 0:
-            raise ValueError(f"{label} must be positive")
-        return
-    if not callable(event.init_count):
-        raise TypeError(f"{label} must be a positive integer or callable")
-
-    args = ((0,) * rank,)
-    _bind_callable(event.init_count, args, label=label)
-    values = (
-        _call_twice(event.init_count, args, label=label),
-        _call_twice(event.init_count, ((1,) * rank,), label=label),
-    )
-    if not all(_is_int(value) and value > 0 for value in values):
-        raise ValueError(f"{label} must return a positive integer")
-
-
 class KernelSpec:
     """Container and fluent builder for one logical megakernel specification."""
 
@@ -196,12 +411,26 @@ class KernelSpec:
         self.events: dict[str, EventSpec] = {}
         self.tiles: list[TileSpec] = []
 
-    def var(self, name: str, dtype: str = "int32"):
+    def var(
+        self,
+        name: str,
+        dtype: str = "int32",
+        range: tuple[int, int] | None = None,
+    ):
         """Register a symbolic variable."""
 
         if name in self.vars:
             raise ValueError(f"Duplicate var: {name}")
-        var = VarSpec(name=name, dtype=dtype)
+        if range is not None:
+            if (
+                not isinstance(range, tuple)
+                or len(range) != 2
+                or any(not _is_int(value) for value in range)
+            ):
+                raise TypeError("var range must be a tuple of two integers")
+            if range[0] <= 0 or range[0] > range[1]:
+                raise ValueError("var range must satisfy 0 < minimum <= maximum")
+        var = VarSpec(name=name, dtype=dtype, range=range)
         self.vars[name] = var
         return var
 
@@ -251,12 +480,14 @@ class KernelSpec:
 
         if any(tile.name == name for tile in self.tiles):
             raise ValueError(f"Duplicate tile: {name}")
+        read_tensors = _normalize_accesses(reads or (), "reads")
+        write_tensors = _normalize_accesses(writes or (), "writes")
         tile = TileSpec(
             name=name,
             impl=impl,
             tile_num=tile_num,
-            reads=list(reads or ()),
-            writes=list(writes or ()),
+            reads=read_tensors,
+            writes=write_tensors,
             attrs=attrs or {},
         )
         self.tiles.append(tile)
@@ -265,114 +496,23 @@ class KernelSpec:
     def validate(self):
         """Validate the implementation-independent logical specification."""
 
-        if not isinstance(self.attrs, dict):
-            raise TypeError("kernel attrs must be a dict")
+        from tvm.megakernel.transform.semantic import (
+            build_semantic_plan,
+            validate_semantic_plan,
+        )
 
-        var_ids = {id(var) for var in self.vars.values()}
-        tensor_ids = {id(tensor) for tensor in self.tensors.values()}
-        event_ids = {id(event) for event in self.events.values()}
-        event_ranks: dict[int, int] = {}
-        for name, var in self.vars.items():
-            if var.name != name:
-                raise ValueError(f"var registry name mismatch: {name}")
-            if not var.name:
-                raise ValueError("VarSpec names must be non-empty")
-            if not isinstance(var.dtype, str) or not var.dtype:
-                raise TypeError(f"var {name!r} dtype must be a non-empty string")
-
-        for name, tensor in self.tensors.items():
-            if tensor.name != name:
-                raise ValueError(f"tensor registry name mismatch: {name}")
-            _shape_items(tensor.shape, label=f"tensor {name!r} shape", var_ids=var_ids)
-
-        for name, event in self.events.items():
-            if event.name != name:
-                raise ValueError(f"event registry name mismatch: {name}")
-            rank = len(_shape_items(event.shape, label=f"event {name!r} shape", var_ids=var_ids))
-            event_ranks[id(event)] = rank
-            _validate_init_count(event, rank=rank)
-            if not isinstance(event.attrs, dict):
-                raise TypeError(f"event {name!r} attrs must be a dict")
-
-        tile_names: set[str] = set()
-        notifiers: dict[int, list[str]] = {event_id: [] for event_id in event_ids}
-        waiters: list[tuple[str, EventSpec]] = []
-        tensor_producers: dict[int, str] = {}
-        tensor_consumers: dict[int, list[str]] = {tensor_id: [] for tensor_id in tensor_ids}
-        for tile in self.tiles:
-            if tile.name in tile_names:
-                raise ValueError(f"Duplicate tile: {tile.name}")
-            tile_names.add(tile.name)
-            if not isinstance(tile.impl, TileImpl) or inspect.isabstract(type(tile.impl)):
-                raise TypeError(f"tile {tile.name!r} impl must be a concrete TileImpl instance")
-            if not isinstance(tile.tile_num, tuple | list) or len(tile.tile_num) != 3:
-                raise ValueError(f"tile {tile.name!r} tile_num must contain exactly three axes")
-            _shape_items(
-                tile.tile_num,
-                label=f"tile {tile.name!r} tile_num",
-                var_ids=var_ids,
-            )
-            if not isinstance(tile.attrs, dict):
-                raise TypeError(f"tile {tile.name!r} attrs must be a dict")
-
-            for tensor in tile.reads:
-                if not isinstance(tensor, TensorSpec) or id(tensor) not in tensor_ids:
-                    raise ValueError(f"tile {tile.name!r} references a tensor outside this kernel")
-                tensor_consumers[id(tensor)].append(tile.name)
-            for tensor in tile.writes:
-                if not isinstance(tensor, TensorSpec) or id(tensor) not in tensor_ids:
-                    raise ValueError(f"tile {tile.name!r} references a tensor outside this kernel")
-                previous = tensor_producers.setdefault(id(tensor), tile.name)
-                if previous != tile.name:
-                    raise ValueError(f"tensor {tensor.name!r} has multiple producers")
-            for kind, dependencies in (("wait", tile.waits), ("notify", tile.notifies)):
-                for dependency in dependencies:
-                    if not isinstance(dependency, tuple) or len(dependency) != 2:
-                        raise TypeError(f"tile {tile.name!r} has an invalid {kind} dependency")
-                    event, coord_map = dependency
-                    if not isinstance(event, EventSpec) or id(event) not in event_ids:
-                        raise ValueError(
-                            f"tile {tile.name!r} references an event outside this kernel"
-                        )
-                    _validate_coord_map(
-                        coord_map,
-                        rank=event_ranks[id(event)],
-                        label=f"tile {tile.name!r} {kind} coord_map",
-                    )
-                    if kind == "notify":
-                        notifiers[id(event)].append(tile.name)
-                    else:
-                        waiters.append((tile.name, event))
-
-        edges = {name: set() for name in tile_names}
-        for waiter, event in waiters:
-            producers = notifiers[id(event)]
-            if not producers:
-                raise ValueError(f"event {event.name!r} is waited on but has no notifier")
-            for producer in producers:
-                edges[producer].add(waiter)
-        for tensor_id, producer in tensor_producers.items():
-            for consumer in tensor_consumers[tensor_id]:
-                if consumer != producer:
-                    edges[producer].add(consumer)
-
-        visiting: set[str] = set()
-        visited: set[str] = set()
-
-        def visit(tile_name: str) -> None:
-            if tile_name in visiting:
-                raise ValueError("logical dependencies must be acyclic")
-            if tile_name in visited:
-                return
-            visiting.add(tile_name)
-            for consumer in edges[tile_name]:
-                visit(consumer)
-            visiting.remove(tile_name)
-            visited.add(tile_name)
-
-        for tile_name in tile_names:
-            visit(tile_name)
+        validate_semantic_plan(build_semantic_plan(self))
         return self
+
+    def semantic_plan(self):
+        """Build and validate the backend-independent semantic plan."""
+
+        from tvm.megakernel.transform.semantic import (
+            build_semantic_plan,
+            validate_semantic_plan,
+        )
+
+        return validate_semantic_plan(build_semantic_plan(self))
 
     def lower(self, options=None):
         """Lower this graph with the default single-device static policy."""
@@ -380,3 +520,12 @@ class KernelSpec:
         from tvm.megakernel.transform import lower_to_tirx
 
         return lower_to_tirx(self, options)
+
+
+def _normalize_accesses(accesses, label: str) -> list[TensorSpec]:
+    result = []
+    for access in accesses:
+        if not isinstance(access, TensorSpec):
+            raise TypeError(f"tile {label} entries must be TensorSpec, got {access!r}")
+        result.append(access)
+    return result

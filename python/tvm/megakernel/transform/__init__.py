@@ -50,6 +50,7 @@ from .model import (
     logical_edges,
     make_static_execution_plan,
 )
+from .semantic import SemanticEdge, SemanticPlan, build_semantic_plan, validate_semantic_plan
 
 __all__ = [
     "BarrierStep",
@@ -73,13 +74,17 @@ __all__ = [
     "RegionDependencyPlan",
     "RunStep",
     "RuntimeEventInitStep",
+    "SemanticEdge",
+    "SemanticPlan",
     "TIRXStaticBackend",
     "TileProgram",
     "WaitStep",
+    "build_semantic_plan",
     "logical_edges",
     "lower_execution_plan",
     "lower_static_queue_init_to_tirx",
     "lower_to_tirx",
     "lower_to_tirx_module",
     "make_static_execution_plan",
+    "validate_semantic_plan",
 ]

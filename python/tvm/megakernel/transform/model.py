@@ -23,6 +23,7 @@ from dataclasses import dataclass, field
 from typing import Any, Literal
 
 from ..dsl import CoordMapType, EventSpec, KernelSpec, TileSpec
+from .semantic import SemanticPlan, build_semantic_plan, validate_semantic_plan
 
 EdgeLocation = Literal["prologue", "fetch", "tile", "host", "epilogue"]
 RegionDependencyKind = Literal["launch_order", "completion"]
@@ -200,27 +201,14 @@ class EdgePlacement:
     port: str | None = None
 
 
-def logical_edges(kernel: KernelSpec) -> tuple[LogicalEdge, ...]:
+def logical_edges(kernel: KernelSpec | SemanticPlan) -> tuple[LogicalEdge, ...]:
     """Return logical event edges in stable kernel/tile order."""
 
-    producers: dict[int, list[str]] = defaultdict(list)
-    consumers: dict[int, list[str]] = defaultdict(list)
-    event_by_id = {id(event): event for event in kernel.events.values()}
-    for tile in kernel.tiles:
-        for event, _ in tile.notifies:
-            if tile.name not in producers[id(event)]:
-                producers[id(event)].append(tile.name)
-        for event, _ in tile.waits:
-            if tile.name not in consumers[id(event)]:
-                consumers[id(event)].append(tile.name)
-
-    result = []
-    for event in kernel.events.values():
-        event_id = id(event)
-        for producer in producers[event_id]:
-            for consumer in consumers[event_id]:
-                result.append(LogicalEdge(event_by_id[event_id], producer, consumer))
-    return tuple(result)
+    semantic = kernel if isinstance(kernel, SemanticPlan) else build_semantic_plan(kernel)
+    return tuple(
+        LogicalEdge(edge.event, edge.producer.name, edge.consumer.name)
+        for edge in semantic.logical_edges
+    )
 
 
 @dataclass(frozen=True)
@@ -232,6 +220,15 @@ class ExecutionPlan:
     host_regions: tuple[HostRegionPlan, ...] = ()
     region_dependencies: tuple[RegionDependencyPlan, ...] = ()
     attrs: dict[str, Any] = field(default_factory=dict)
+    semantic_plan: SemanticPlan | None = field(default=None, compare=False)
+
+    def resolved_semantic_plan(self) -> SemanticPlan:
+        """Return the validated semantic input consumed by this physical plan."""
+
+        semantic = self.semantic_plan or build_semantic_plan(self.kernel)
+        if semantic.kernel is not self.kernel:
+            raise ValueError("execution plan semantic plan belongs to a different KernelSpec")
+        return validate_semantic_plan(semantic)
 
     def regions_in_dependency_order(self) -> tuple[DeviceRegionPlan | HostRegionPlan, ...]:
         """Return a stable topological order of all regions."""
@@ -261,7 +258,7 @@ class ExecutionPlan:
     def validate(self) -> ExecutionPlan:
         """Validate region topology, step placement, and exact edge coverage."""
 
-        self.kernel.validate()
+        semantic = self.resolved_semantic_plan()
         if not isinstance(self.attrs, dict):
             raise TypeError("execution plan attrs must be a dict")
 
@@ -279,19 +276,22 @@ class ExecutionPlan:
                 raise ValueError(f"unsupported region dependency kind {dependency.kind!r}")
         self.regions_in_dependency_order()
 
-        self._derive_edge_placements()
+        self._derive_edge_placements(semantic)
         return self
 
     def edge_placements(self) -> tuple[EdgePlacement, ...]:
         """Return the validated physical placement derived for every logical edge."""
 
+        semantic = self.resolved_semantic_plan()
         self.validate()
-        return self._derive_edge_placements()
+        return self._derive_edge_placements(semantic)
 
-    def _derive_edge_placements(self) -> tuple[EdgePlacement, ...]:
+    def _derive_edge_placements(
+        self, semantic: SemanticPlan | None = None
+    ) -> tuple[EdgePlacement, ...]:
         """Validate physical programs and derive edge placements without storing a copy."""
 
-        expected_edges = logical_edges(self.kernel)
+        expected_edges = logical_edges(semantic or self.resolved_semantic_plan())
         expected_by_key = {edge.key: edge for edge in expected_edges}
         occurrences: dict[tuple[int, str, str], list[tuple[EdgePlacement, ProgramStep]]] = (
             defaultdict(list)
@@ -425,8 +425,8 @@ class ExecutionPlanBackend:
 def make_static_execution_plan(kernel: KernelSpec) -> ExecutionPlan:
     """Create the default single-device static physical program."""
 
-    kernel.validate()
-    edges = logical_edges(kernel)
+    semantic = kernel.semantic_plan()
+    edges = logical_edges(semantic)
     by_producer_event: dict[tuple[str, int], list[LogicalEdge]] = defaultdict(list)
     by_consumer_event: dict[tuple[str, int], list[LogicalEdge]] = defaultdict(list)
     for edge in edges:
@@ -470,6 +470,7 @@ def make_static_execution_plan(kernel: KernelSpec) -> ExecutionPlan:
                 attrs={"schedule": "static"},
             ),
         ),
+        semantic_plan=semantic,
     ).validate()
 
 

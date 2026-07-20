@@ -27,7 +27,7 @@ natural language, an operator graph, pseudocode, or any other description that
 contains enough staged computation information for an agent or user to plan the
 megakernel structure.
 
-The DSL is split into two layers:
+The user-facing DSL is split into two layers:
 
 ```text
 1. Spec layer: describes tile stages, tile spaces, tensors, events, and
@@ -60,6 +60,26 @@ The DSL is not responsible for:
 
 Those tasks belong to input interpretation, planning, validation, and lowering
 steps around the DSL.
+
+## Compiler Plan Boundaries
+
+The compiler does not use one catch-all plan object:
+
+```text
+KernelSpec
+  -> SemanticPlan
+  -> ExecutionPlan
+  -> backend-private TIRXLoweringPlan
+  -> TIRX
+```
+
+`SemanticPlan` owns backend-independent meaning and validation.  It includes
+logical tile/event edges and optional tensor access regions.  `ExecutionPlan`
+owns explicit physical regions and source-ordered `ProgramStep` sequences.
+The default backend's private plan owns sanitized parameter bindings, bounded
+event-workspace offsets, packed job IDs, and static queue phases.  Backends may
+prepare different private plans without changing the semantic or physical
+contracts.
 
 ## Agent Workflow
 
@@ -118,6 +138,8 @@ The spec layer mainly records:
 4. each tile's input tensors
 5. each tile's output tensors
 6. each tile's wait/notify dependencies
+7. optional bounded symbolic expressions
+8. optional tile-specific tensor access regions
 ```
 
 The current core API is:
@@ -126,8 +148,11 @@ The current core API is:
 KernelSpec:
   container for one megakernel spec
 
+VarSpec and ExprSpec:
+  bounded symbolic values and logical integer expressions
+
 TensorSpec:
-  logical tensor or buffer name, shape, dtype
+  logical tensor or buffer name, shape, dtype, and optional access-region view
 
 EventSpec:
   logical event name, shape, init_count, dtype, attrs
@@ -202,6 +227,9 @@ Validation should check at least:
 4. event coord_map rank is compatible with the event shape when statically known
 5. producer/consumer tensor flow is complete enough for lowering
 6. required TileImpl hooks and signatures are compatible with the selected lowering
+7. event notify multiplicity matches each event coordinate when exactly provable
+8. static tensor regions are in bounds and producer/consumer coordinates agree
+9. bounded storage and packed task fields fit backend limits
 ```
 
 Validation should produce diagnostics that are useful for either the user or an
@@ -209,8 +237,9 @@ agent to repair the DSL.
 
 ## Step 6: Lower To TIRX Megakernel
 
-After validation, the compiler lowers the DSL together with the tile
-implementations to a TIRX megakernel.
+After semantic validation and physical-policy selection, the backend prepares
+its private lowering plan and lowers it together with the tile implementations
+to a TIRX megakernel.
 
 This lowering decides concrete implementation details, including:
 

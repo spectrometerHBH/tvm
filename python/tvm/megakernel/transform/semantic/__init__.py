@@ -14,48 +14,16 @@
 # KIND, either express or implied.  See the License for the
 # specific language governing permissions and limitations
 # under the License.
-"""Megakernel DSL building blocks."""
+"""Semantic megakernel transform layer."""
 
-from .impl import SmemAllocRecord, SmemManager, TileImpl
-from .spec import (
-    CoordMapType,
-    DependencyType,
-    EventSpec,
-    ExprLike,
-    ExprSpec,
-    KernelSpec,
-    R,
-    RegionRange,
-    RegionSpec,
-    ShapeType,
-    TensorSpec,
-    TileNumType,
-    TileSpec,
-    VarSpec,
-    eval_expr_like,
-    expr_bounds,
-    expr_vars,
-)
+from .build import build_semantic_plan, semantic_edges
+from .model import SemanticEdge, SemanticPlan
+from .validate import validate_semantic_plan
 
 __all__ = [
-    "CoordMapType",
-    "DependencyType",
-    "EventSpec",
-    "ExprLike",
-    "ExprSpec",
-    "KernelSpec",
-    "R",
-    "RegionRange",
-    "RegionSpec",
-    "ShapeType",
-    "SmemAllocRecord",
-    "SmemManager",
-    "TensorSpec",
-    "TileImpl",
-    "TileNumType",
-    "TileSpec",
-    "VarSpec",
-    "eval_expr_like",
-    "expr_bounds",
-    "expr_vars",
+    "SemanticEdge",
+    "SemanticPlan",
+    "build_semantic_plan",
+    "semantic_edges",
+    "validate_semantic_plan",
 ]

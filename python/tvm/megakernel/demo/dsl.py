@@ -49,10 +49,12 @@ class Stage1ReduceTile(TileImpl):
         self.P_smem = None
 
     def device_init(self, smem_manager: SmemManager, m_idx, n_idx, k_idx):
+        self.smem_manager = smem_manager
         self.A_smem = smem_manager.alloc((self.block_m, self.block_n), "float32")
         self.P_smem = smem_manager.alloc((self.block_m, 1), "float32")
 
     def run(self, m_idx, n_idx, k_idx):
+        self.smem_manager.acquire_all("cta")
         Tx.copy(
             self.A_smem,
             self.A[
@@ -71,6 +73,8 @@ class Stage1ReduceTile(TileImpl):
             ],
             self.P_smem,
         )
+        self.smem_manager.release_all("cta")
+        self.smem_manager.advance()
 
 
 class Stage2ReduceTile(TileImpl):
@@ -87,10 +91,12 @@ class Stage2ReduceTile(TileImpl):
         self.C_smem = None
 
     def device_init(self, smem_manager: SmemManager, m_idx, n_idx, k_idx):
+        self.smem_manager = smem_manager
         self.B_smem = smem_manager.alloc((self.block_m, self.num_block_n), "float32")
         self.C_smem = smem_manager.alloc((self.block_m, 1), "float32")
 
     def run(self, m_idx, n_idx, k_idx):
+        self.smem_manager.acquire_all("cta")
         Tx.copy(
             self.B_smem,
             self.B[
@@ -109,6 +115,8 @@ class Stage2ReduceTile(TileImpl):
             ],
             self.C_smem,
         )
+        self.smem_manager.release_all("cta")
+        self.smem_manager.advance()
 
 
 # ============================================================

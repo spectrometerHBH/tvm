@@ -18,8 +18,6 @@
 
 from __future__ import annotations
 
-import keyword
-import re
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -28,7 +26,7 @@ from tvm.ir import IRModule
 from tvm.script import tirx as T
 from tvm.tirx import PrimFunc
 
-from ..dsl import EventSpec, KernelSpec, TensorSpec, VarSpec
+from ..dsl import EventSpec, KernelSpec, TensorSpec
 from .model import (
     BarrierStep,
     DeviceRegionPlan,
@@ -48,11 +46,15 @@ from .model import (
     WaitStep,
     make_static_execution_plan,
 )
+from .prepare import (
+    INIT_EVENT_JOB_ID,
+    WAIT_EVENT_INIT_JOB_ID,
+    TIRXLoweringPlan,
+    lower_shape,
+    prepare_tirx_lowering_plan,
+)
 from .scheduler import StaticTileScheduler, TIRXSemaphore
 from .smem import TIRXSmemManager
-
-INIT_EVENT_JOB_ID = 29
-WAIT_EVENT_INIT_JOB_ID = 30
 
 
 @T.inline
@@ -97,6 +99,7 @@ class _TensorBinding:
 class _BuildState:
     plan: ExecutionPlan
     options: LoweringOptions
+    lowering_plan: TIRXLoweringPlan
     var_values: dict[int, Any] = field(default_factory=dict)
     tensor_bindings: dict[int, _TensorBinding] = field(default_factory=dict)
     event_buffers: dict[int, Any] = field(default_factory=dict)
@@ -132,42 +135,49 @@ class TIRXStaticBackend(ExecutionPlanBackend):
     def lower(self, plan: ExecutionPlan) -> PrimFunc:
         if self.options.schedule != "static":
             raise NotImplementedError("the default backend supports only static scheduling")
-        if len(plan.device_regions) != 1 or plan.host_regions:
-            raise ValueError("the default backend requires exactly one device region")
-        state = self._prepare_state(plan)
+        state = self._prepare_state(self.prepare(plan))
         try:
             return _megakernel_entry.specialize(emitter=_ParserEmitter(self, state))
         finally:
             self._restore_tensor_specs(state)
 
-    def _prepare_state(self, plan: ExecutionPlan) -> _BuildState:
-        used_names: set[str] = set()
-        state = _BuildState(plan, self.options)
-        for tensor in plan.kernel.tensors.values():
-            name = _sanitize_identifier(tensor.name, used_names)
-            state.tensor_bindings[id(tensor)] = _TensorBinding(tensor, name)
+    def prepare(self, plan: ExecutionPlan) -> TIRXLoweringPlan:
+        """Prepare the private binding/layout/schedule plan for this backend."""
+
+        return prepare_tirx_lowering_plan(plan, self.options)
+
+    def _prepare_state(self, lowering_plan: TIRXLoweringPlan) -> _BuildState:
+        state = _BuildState(lowering_plan.execution, self.options, lowering_plan)
+        for binding in lowering_plan.tensor_bindings:
+            state.tensor_bindings[id(binding.tensor)] = _TensorBinding(
+                binding.tensor, binding.param_name
+            )
         return state
 
     def _emit_kernel(self, state: _BuildState) -> None:
         plan = state.plan
         kernel = plan.kernel
-        region = plan.device_regions[0]
+        region = state.lowering_plan.region
         T.func_attr({"global_symbol": kernel.name})
         self._emit_var_args(state)
         self._emit_tensor_args(state)
         self._patch_tensor_specs(state)
         self._emit_event_workspace(state)
-        attrs = {**region.attrs, **self.options.attrs}
+        attrs = state.lowering_plan.attrs
         sm_count = attrs.get("sm_count", 1)
         num_threads = attrs.get("num_threads", 256)
-        max_tasks = attrs.get("max_tasks", StaticTileScheduler.MAX_TASKS)
+        max_tasks = state.lowering_plan.static_schedule.max_tasks
         state.queue = T.arg("queue", T.Buffer((sm_count, max_tasks), "int32"))
         T.device_entry()
 
         state.smem_manager = TIRXSmemManager(
-            self.options.smem_max_bytes, self.options.smem_chunk_size
+            self.options.smem_max_bytes,
+            self.options.smem_chunk_size,
+            num_threads=num_threads,
+            warp_count=attrs.get("warp_count"),
         )
         self._bind_event_buffers(state)
+        state.smem_manager.init()
         runtime = {"state": state, "region": region, "indices": (None, None, None)}
         for step in region.prologue_steps:
             self._emit_tirx_step(step, runtime)
@@ -196,21 +206,12 @@ class TIRXStaticBackend(ExecutionPlanBackend):
             self._emit_tirx_step(step, runtime)
 
     def _emit_var_args(self, state: _BuildState) -> None:
-        used_names: set[str] = set()
-        for var in state.plan.kernel.vars.values():
-            name = _sanitize_identifier(var.name, used_names)
-            state.var_values[id(var)] = T.arg(name, T.Var(name, var.dtype))
-
-    def _lower_extent(self, state: _BuildState, value: Any, label: str):
-        if isinstance(value, int) and not isinstance(value, bool):
-            return value
-        if isinstance(value, VarSpec) and id(value) in state.var_values:
-            return state.var_values[id(value)]
-        raise ValueError(f"{label} contains an unbound symbolic variable")
+        for binding in state.lowering_plan.var_bindings:
+            name = binding.param_name
+            state.var_values[id(binding.var)] = T.arg(name, T.Var(name, binding.var.dtype))
 
     def _shape(self, state: _BuildState, shape, label: str) -> tuple[Any, ...]:
-        values = tuple(shape) if isinstance(shape, tuple | list) else (shape,)
-        return tuple(self._lower_extent(state, value, label) for value in values)
+        return lower_shape(shape, state.var_values, label)
 
     def _emit_tensor_args(self, state: _BuildState) -> None:
         for binding in state.tensor_bindings.values():
@@ -218,31 +219,33 @@ class TIRXStaticBackend(ExecutionPlanBackend):
             binding.buffer = T.arg(binding.name, T.Buffer(shape, binding.spec.dtype))
 
     def _emit_event_workspace(self, state: _BuildState) -> None:
-        if not state.plan.kernel.events:
+        lowering_plan = state.lowering_plan
+        if not lowering_plan.event_layouts:
             return
-        total = 0
-        for event in state.plan.kernel.events.values():
+        for layout in lowering_plan.event_layouts:
+            event = layout.event
             shape = self._shape(state, event.shape, f"event {event.name!r}")
             size = _shape_product(shape)
             state.event_sizes[id(event)] = size
-            total += size
-        state.event_complete_coord = total
-        state.event_workspace = T.arg("event_workspace", T.Buffer((total + 1,), "int32"))
+        state.event_complete_coord = lowering_plan.event_init_complete_layout.workspace_offset
+        state.event_workspace = T.arg(
+            "event_workspace",
+            T.Buffer((lowering_plan.event_workspace_size,), "int32"),
+        )
 
     def _bind_event_buffers(self, state: _BuildState) -> None:
         if state.event_workspace is None:
             return
-        offset = 0
-        for event in state.plan.kernel.events.values():
+        for layout in state.lowering_plan.event_layouts:
+            event = layout.event
             shape = self._shape(state, event.shape, f"event {event.name!r}")
             state.event_buffers[id(event)] = T.decl_buffer(
                 shape,
                 event.dtype,
                 data=state.event_workspace.data,
-                elem_offset=offset,
+                elem_offset=layout.workspace_offset,
                 scope="global",
             )
-            offset += state.event_sizes[id(event)]
 
     def _emit_dispatch(self, state: _BuildState, region: DeviceRegionPlan, runtime) -> None:
         items: list[tuple[int, str | TileProgram]] = []
@@ -253,7 +256,9 @@ class TIRXStaticBackend(ExecutionPlanBackend):
                     (WAIT_EVENT_INIT_JOB_ID, "wait_event_init"),
                 ]
             )
-        items.extend((job_id, program) for job_id, program in enumerate(region.tile_programs))
+        items.extend(
+            (tile_plan.job_id, tile_plan.program) for tile_plan in state.lowering_plan.tile_plans
+        )
         if not items:
             return
         task_type = state.scheduler.task_type[0]
@@ -297,6 +302,7 @@ class TIRXStaticBackend(ExecutionPlanBackend):
                 entered_smem = True
             self._emit_tirx_step(step, runtime, program.tile)
         if entered_smem:
+            smem.validate_tile_phase(program.tile)
             smem.exit_tile_runtime()
 
     def _emit_tirx_step(self, step: ProgramStep, runtime, tile=None) -> None:
@@ -464,21 +470,25 @@ class TIRXStaticBackend(ExecutionPlanBackend):
 
 
 class _QueueInitEmitter:
-    def __init__(self, plan: ExecutionPlan, options: LoweringOptions):
+    def __init__(self, plan: TIRXLoweringPlan):
         self.plan = plan
-        self.options = options
 
     def emit(self) -> None:
         kernel = self.plan.kernel
-        region = self.plan.device_regions[0]
-        attrs = {**region.attrs, **self.options.attrs}
-        sm_count = attrs.get("sm_count", 1)
+        schedule = self.plan.static_schedule
+        if schedule is None:
+            raise ValueError("queue initialization requires a static lowering plan")
+        attrs = self.plan.attrs
+        sm_count = schedule.sm_count
         num_threads = attrs.get("num_threads", 256)
-        max_tasks = attrs.get("max_tasks", StaticTileScheduler.MAX_TASKS)
-        end_job_id = attrs.get("end_job_id", 31)
+        max_tasks = schedule.max_tasks
         T.func_attr({"global_symbol": f"{kernel.name}_init_queue"})
         var_values = {
-            id(var): T.arg(var.name, T.Var(var.name, var.dtype)) for var in kernel.vars.values()
+            id(binding.var): T.arg(
+                binding.param_name,
+                T.Var(binding.param_name, binding.var.dtype),
+            )
+            for binding in self.plan.var_bindings
         }
         queue = T.arg("queue", T.Buffer((sm_count, max_tasks), "int32"))
         T.device_entry()
@@ -486,20 +496,13 @@ class _QueueInitEmitter:
         tid = T.thread_id([num_threads])
         offset = T.alloc_buffer((1,), "int32", scope="local")
         T.buffer_store(offset, 0, [0])
-        phases = []
-        events = list(kernel.events.values())
-        if events:
-            phases.append((INIT_EVENT_JOB_ID, (len(events) + 1, 1, 1)))
-        for job_id, program in enumerate(region.tile_programs):
-            if not program.tile.waits:
-                phases.append((job_id, _lower_shape(program.tile.tile_num, var_values)))
-        if events:
-            phases.append((WAIT_EVENT_INIT_JOB_ID, (sm_count, 1, 1)))
-        for job_id, program in enumerate(region.tile_programs):
-            if program.tile.waits:
-                phases.append((job_id, _lower_shape(program.tile.tile_num, var_values)))
-        phases.append((end_job_id, (sm_count, 1, 1)))
-        for job_id, shape in phases:
+        for phase in schedule.phases:
+            job_id = phase.job_id
+            shape = lower_shape(
+                phase.tile_num,
+                var_values,
+                f"static phase {phase.label!r}",
+            )
             count = _shape_product(shape)
             with T.If(tid == 0):
                 with T.Then():
@@ -522,19 +525,6 @@ def _queue_init_entry(*, emitter: T.constexpr):
     emitter.emit()
 
 
-def _sanitize_identifier(name: str, used: set[str]) -> str:
-    candidate = re.sub(r"\W", "_", name)
-    if not candidate or candidate[0].isdigit() or keyword.iskeyword(candidate):
-        candidate = f"value_{candidate}"
-    base = candidate
-    suffix = 1
-    while candidate in used:
-        candidate = f"{base}_{suffix}"
-        suffix += 1
-    used.add(candidate)
-    return candidate
-
-
 def _shape_product(shape) -> Any:
     result = 1
     for extent in shape:
@@ -551,11 +541,6 @@ def _linear_index_to_coord(index, shape) -> tuple[Any, ...]:
     return tuple(reversed(coord))
 
 
-def _lower_shape(shape, var_values) -> tuple[Any, ...]:
-    values = tuple(shape) if isinstance(shape, tuple | list) else (shape,)
-    return tuple(var_values[id(value)] if isinstance(value, VarSpec) else value for value in values)
-
-
 def _pack_static_task(m_idx, n_idx, k_idx, job_id):
     return T.bitwise_or(
         T.bitwise_or(job_id, T.shift_left(m_idx, 5)),
@@ -564,8 +549,8 @@ def _pack_static_task(m_idx, n_idx, k_idx, job_id):
 
 
 def _replace_tensor_specs(value: Any, bindings: dict[int, _TensorBinding]) -> Any:
-    if isinstance(value, TensorSpec) and id(value) in bindings:
-        return bindings[id(value)].buffer
+    if isinstance(value, TensorSpec) and id(value.base_tensor) in bindings:
+        return bindings[id(value.base_tensor)].buffer
     if isinstance(value, tuple):
         return tuple(_replace_tensor_specs(item, bindings) for item in value)
     if isinstance(value, list):
@@ -617,9 +602,8 @@ def lower_static_queue_init_to_tirx(
     resolved = _resolve_options(options)
     plan = resolved.execution_plan or make_static_execution_plan(kernel)
     plan.validate()
-    if len(plan.device_regions) != 1 or plan.host_regions:
-        raise ValueError("static queue init requires one device region")
-    return _queue_init_entry.specialize(emitter=_QueueInitEmitter(plan, resolved))
+    lowering_plan = prepare_tirx_lowering_plan(plan, resolved)
+    return _queue_init_entry.specialize(emitter=_QueueInitEmitter(lowering_plan))
 
 
 def lower_to_tirx_module(kernel: KernelSpec, options: LoweringOptions | None = None) -> IRModule:

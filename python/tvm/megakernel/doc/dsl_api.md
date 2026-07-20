@@ -21,7 +21,7 @@ This document lists the user-facing API in `tvm.megakernel.dsl`.
 
 ## DSL Layers
 
-The DSL has two layers:
+The user-facing DSL has two layers:
 
 - Spec layer: `KernelSpec`, `VarSpec`, `TensorSpec`, `EventSpec`, and
   `TileSpec`.  This layer describes tile stages, tensors, logical events, and
@@ -31,6 +31,17 @@ The DSL has two layers:
 
 The spec layer corresponds to Step 3 in [workflow.md](workflow.md).  The impl
 layer corresponds to Step 4.
+
+Compiler transforms keep the following contracts separate:
+
+```text
+KernelSpec -> SemanticPlan -> ExecutionPlan -> backend-private lowering plan
+```
+
+`SemanticPlan` is the validated, implementation-independent meaning of the
+spec.  `ExecutionPlan` records explicit physical regions and ordered programs.
+The default TIRX backend then prepares its own bindings, event layout, job IDs,
+and queue phases; that last object is intentionally not a user API.
 
 ## `KernelSpec`
 
@@ -56,17 +67,38 @@ kernel = KernelSpec("two_stage_reduce", attrs={"target": "sm90"})
 ## `KernelSpec.var`
 
 ```python
-var = kernel.var(name: str, dtype: str = "int32")
+var = kernel.var(
+    name: str,
+    dtype: str = "int32",
+    range: tuple[int, int] | None = None,
+)
 ```
 
-Registers a symbolic variable owned by this kernel.  Shapes and three-axis
-tile counts may reference the returned `VarSpec`.
+Registers a symbolic variable owned by this kernel.  Shapes, event extents,
+and three-axis tile counts may reference the returned `VarSpec`.  `range` is
+an optional inclusive positive lower/upper bound.  Static backends use it to
+reserve bounded storage while keeping the variable as a runtime parameter.
 
 Example:
 
 ```python
-rows = kernel.var("rows", "int32")
+rows = kernel.var("rows", "int32", range=(1, 8192))
 ```
+
+## Integer expressions
+
+`VarSpec` and `ExprSpec` support `+`, `-`, `*`, `//`, `%`, unary `-`, and
+`.ceildiv(...)`.  Expressions remain logical until a backend binds their
+variables.
+
+```python
+rows = kernel.var("rows", range=(1, 8192))
+row_tiles = rows.ceildiv(128)
+workspace = kernel.tensor("workspace", (row_tiles, 128), "float16")
+```
+
+A bounded static allocation requires every variable contributing to its size
+to have a range.
 
 ## `KernelSpec.tensor`
 
@@ -79,7 +111,8 @@ Registers a logical tensor.
 Parameters:
 
 - `name`: tensor name, unique inside the kernel.
-- `shape`: tensor shape.  Each dimension can be an `int` or `VarSpec`.
+- `shape`: tensor shape.  Each dimension can be an `int`, `VarSpec`, or
+  `ExprSpec`.
 - `dtype`: tensor element type.
 
 Returns: `TensorSpec`.
@@ -90,6 +123,33 @@ Example:
 rows = kernel.var("rows")
 A = kernel.tensor("A", shape=(rows, 1024), dtype="float32")
 ```
+
+## `TensorSpec.region`
+
+```python
+access = tensor.region(region_map)
+access = tensor.region(dynamic=True, reason="data-dependent routing")
+```
+
+Returns an access view of the registered tensor for use in one tile's
+`reads` or `writes`.  A static region map receives `(m, n, k)` tile indices
+and returns `R[...]`, a `RegionSpec`, or a tuple/list of point indices.
+
+```python
+producer = kernel.tile(
+    "producer",
+    producer_impl,
+    tile_num=(row_tiles, 1, 1),
+    writes=[workspace.region(lambda m, n, k: R[m * 128 : (m + 1) * 128, 0:128])],
+)
+```
+
+Static regions let semantic validation prove bounds, disjoint writers, and
+matching producer/consumer event coordinates by exact enumeration.  Validation
+accepts at most 4,096 bounded symbolic environments and 65,536 tile points or
+tile pairs for one proof.  If a data-dependent or larger region cannot be
+proven statically, declare it dynamic and give a non-empty reason.  Dynamic
+access still requires an event dependency between its producer and consumer.
 
 ## `KernelSpec.event`
 
@@ -341,6 +401,10 @@ stage2 = kernel.tile(
 ```
 
 ## Physical Execution Plan
+
+`kernel.semantic_plan()` builds and validates a `SemanticPlan` before any
+physical policy is selected.  The plan snapshots variables, tensors, events,
+tiles, and logical event edges; validation rejects a stale snapshot.
 
 Lowering policies produce one `ExecutionPlan`.  Its device regions contain
 ordered `TileProgram` objects, and each program contains the `ProgramStep`

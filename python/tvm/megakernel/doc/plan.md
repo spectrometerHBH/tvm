@@ -76,6 +76,7 @@ The top-level YAML keys are:
 
 ```yaml
 tiles: {}
+variables: {}
 tensors: {}
 events: {}
 dependencies: []
@@ -97,6 +98,15 @@ tiles:
     index_axes: [m, n, k]
     reads: [<tensor_name>, ...]
     writes: [<tensor_name>, ...]
+    access_regions:
+      <tensor_name>:
+        region: <static region expression or null>
+        dynamic_reason: <non-empty reason or null>
+
+variables:
+  <variable_name>:
+    dtype: int32
+    range: [<positive inclusive minimum>, <inclusive maximum>] | null
 
 tensors:
   <tensor_name>:
@@ -142,6 +152,9 @@ The YAML is a planning artifact, not the final Python DSL.  In Step 3 of the
 workflow, use [dsl_api.md](dsl_api.md) as the API reference.
 `events.<name>.init` maps naturally to `EventSpec.init_count`, and each
 wait/notify entry maps to `TileSpec.wait(...)` or `TileSpec.notify(...)`.
+Static access regions map to `TensorSpec.region(...)`.  A region whose
+membership depends on runtime data must use `dynamic_reason`; never invent a
+sampled static approximation.
 
 For one-to-one dependencies, `event` may be `null` only if no logical readiness
 event is required.  Otherwise emit an event with `init: 1`.
@@ -157,7 +170,10 @@ event is required.  Otherwise emit an event with `init: 1`.
 7. Create events for dependencies that need logical readiness tracking.
 8. Define notify and wait coordinate maps.
 9. Validate rank, multiplicity, and staged dataflow preservation.
-10. Return YAML only.
+10. Record exact tensor regions where the input determines them, or an explicit
+    dynamic reason otherwise.
+11. Record positive inclusive ranges for symbols needed by bounded storage.
+12. Return YAML only.
 
 ## Dependency Rules
 

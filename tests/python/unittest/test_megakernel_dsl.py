@@ -22,7 +22,19 @@ from dataclasses import replace
 import pytest
 
 import tvm
-from tvm.megakernel.dsl import EventSpec, KernelSpec, TensorSpec, TileImpl, TileSpec, VarSpec
+from tvm.megakernel.dsl import (
+    EventSpec,
+    ExprSpec,
+    KernelSpec,
+    R,
+    RegionSpec,
+    TensorSpec,
+    TileImpl,
+    TileSpec,
+    VarSpec,
+    eval_expr_like,
+    expr_bounds,
+)
 from tvm.megakernel.transform import (
     DeviceRegionPlan,
     EdgePlacement,
@@ -37,12 +49,16 @@ from tvm.megakernel.transform import (
     MidBodyPortStep,
     NotifyStep,
     RegionDependencyPlan,
+    SemanticPlan,
     TileProgram,
     WaitStep,
+    build_semantic_plan,
     logical_edges,
     lower_execution_plan,
     make_static_execution_plan,
+    validate_semantic_plan,
 )
+from tvm.megakernel.transform.prepare import prepare_tirx_lowering_plan
 from tvm.script import tirx as T
 
 
@@ -75,7 +91,7 @@ def _two_stage_kernel():
     ready = kernel.event(
         "ready",
         (rows,),
-        lambda coord: coord[0] + 1,
+        4,
         attrs={"meaning": "all partial values are ready"},
     )
     producer_impl = RecordingTile()
@@ -119,6 +135,181 @@ def test_api_matches_parser_style_contract():
     assert RecordingTile.class_name() == "RecordingTile"
 
 
+def test_semantic_plan_is_distinct_from_the_physical_execution_plan():
+    kernel, _, _, _ = _two_stage_kernel()
+    semantic = build_semantic_plan(kernel)
+
+    assert isinstance(semantic, SemanticPlan)
+    assert semantic.kernel is kernel
+    assert [edge.producer.name for edge in semantic.logical_edges] == ["producer"]
+    assert [edge.consumer.name for edge in semantic.logical_edges] == ["consumer"]
+
+    execution = make_static_execution_plan(kernel)
+    assert execution.semantic_plan == semantic
+    assert execution.resolved_semantic_plan().kernel is kernel
+
+    stale = replace(semantic, logical_edges=())
+    with pytest.raises(ValueError, match="logical edges do not match"):
+        validate_semantic_plan(stale)
+
+
+def test_bounded_var_expressions_evaluate_and_bound_shapes():
+    kernel = KernelSpec("bounded")
+    rows = kernel.var("rows", range=(1, 17))
+    tiles = (rows + 3).ceildiv(4)
+    kernel.tensor("A", (tiles, rows * 2), "float16")
+
+    assert isinstance(tiles, ExprSpec)
+    assert eval_expr_like(tiles, {rows: 5}) == 2
+    assert expr_bounds(tiles) == (1, 5)
+    assert kernel.validate() is kernel
+
+
+@pytest.mark.parametrize(
+    "bounds,error",
+    [((0, 4), "0 < minimum"), ((5, 4), "0 < minimum"), ([1, 4], "tuple")],
+)
+def test_var_range_rejects_invalid_bounds(bounds, error):
+    kernel = KernelSpec("bad_bounds")
+    with pytest.raises((TypeError, ValueError), match=error):
+        kernel.var("rows", range=bounds)
+
+
+def test_semantic_validation_checks_exact_event_counts():
+    kernel = KernelSpec("event_count")
+    ready = kernel.event("ready", (2,), lambda coord: 2 - coord[0])
+    kernel.tile("producer", RecordingTile(), (3, 1, 1)).notify(ready, lambda m, n, k: (m // 2,))
+    kernel.tile("consumer", RecordingTile(), (2, 1, 1)).wait(ready, lambda m, n, k: (m,))
+    kernel.validate()
+
+    invalid = KernelSpec("invalid_event_count")
+    invalid_ready = invalid.event("ready", (2,), 1)
+    invalid.tile("producer", RecordingTile(), (3, 1, 1)).notify(
+        invalid_ready, lambda m, n, k: (m // 2,)
+    )
+    invalid.tile("consumer", RecordingTile(), (2, 1, 1)).wait(invalid_ready, lambda m, n, k: (m,))
+    with pytest.raises(ValueError, match="expects init_count"):
+        invalid.validate()
+
+
+def test_semantic_validation_exhausts_bounded_symbolic_event_counts():
+    kernel = KernelSpec("bounded_event_count")
+    rows = kernel.var("rows", range=(1, 3))
+    ready = kernel.event("ready", (rows,), 1)
+    kernel.tile("producer", RecordingTile(), (rows, 1, 1)).notify(ready, lambda m, n, k: (m,))
+    kernel.tile("consumer", RecordingTile(), (rows, 1, 1)).wait(ready, lambda m, n, k: (m,))
+
+    assert kernel.validate() is kernel
+
+    invalid = KernelSpec("bounded_event_count_failure")
+    invalid_rows = invalid.var("rows", range=(1, 3))
+    invalid_ready = invalid.event(
+        "ready",
+        (invalid_rows,),
+        lambda coord: 2 if coord[0] == 2 else 1,
+    )
+    invalid.tile("producer", RecordingTile(), (invalid_rows, 1, 1)).notify(
+        invalid_ready, lambda m, n, k: (m,)
+    )
+    invalid.tile("consumer", RecordingTile(), (invalid_rows, 1, 1)).wait(
+        invalid_ready, lambda m, n, k: (m,)
+    )
+    with pytest.raises(ValueError, match=r"coord \(2,\) expects init_count 2"):
+        invalid.validate()
+
+
+def test_tensor_regions_validate_matching_event_coordinates():
+    kernel = KernelSpec("regions")
+    tensor = kernel.tensor("buffer", (8,), "float32")
+    ready = kernel.event("ready", (2,), 1)
+    kernel.tile(
+        "producer",
+        RecordingTile(),
+        (2, 1, 1),
+        writes=[tensor.region(lambda m, n, k: R[m * 4 : (m + 1) * 4])],
+    ).notify(ready, lambda m, n, k: (m,))
+    consumer = kernel.tile(
+        "consumer",
+        RecordingTile(),
+        (2, 1, 1),
+        reads=[tensor.region(lambda m, n, k: R[m * 4 : (m + 1) * 4])],
+    ).wait(ready, lambda m, n, k: (m,))
+
+    assert kernel.validate() is kernel
+    consumer.waits[0] = (ready, lambda m, n, k: (1 - m,))
+    with pytest.raises(ValueError, match="matching event coordinate"):
+        kernel.validate()
+
+
+def test_tensor_regions_allow_disjoint_writers_and_reject_overlap():
+    kernel = KernelSpec("region_writers")
+    tensor = kernel.tensor("buffer", (8,), "float32")
+    kernel.tile(
+        "left",
+        RecordingTile(),
+        (1, 1, 1),
+        writes=[tensor.region(lambda m, n, k: R[0:4])],
+    )
+    right = kernel.tile(
+        "right",
+        RecordingTile(),
+        (1, 1, 1),
+        writes=[tensor.region(lambda m, n, k: R[4:8])],
+    )
+    kernel.validate()
+
+    right.writes[0] = tensor.region(lambda m, n, k: R[3:8])
+    with pytest.raises(ValueError, match="multiple producers with overlapping regions"):
+        kernel.validate()
+
+
+def test_tensor_regions_reject_out_of_bounds_single_access():
+    kernel = KernelSpec("region_bounds")
+    tensor = kernel.tensor("buffer", (8,), "float32")
+    kernel.tile(
+        "producer",
+        RecordingTile(),
+        (2, 1, 1),
+        writes=[tensor.region(lambda m, n, k: R[m * 8 : m * 8 + 8])],
+    )
+
+    with pytest.raises(ValueError, match="out of bounds"):
+        kernel.validate()
+
+
+def test_dynamic_tensor_region_requires_an_explicit_reason_only():
+    tensor = TensorSpec("buffer", (8,), "float32")
+    dynamic = tensor.region(dynamic=True, reason="data-dependent routing")
+    assert dynamic.base_tensor is tensor
+    assert dynamic.has_region
+    assert RegionSpec(dynamic=True).dynamic
+    with pytest.raises(ValueError, match="non-empty reason"):
+        tensor.region(dynamic=True)
+    with pytest.raises(ValueError, match="cannot also provide"):
+        tensor.region(R[0:1], dynamic=True)
+
+
+def test_dynamic_tensor_regions_allow_unbounded_runtime_dataflow():
+    kernel = KernelSpec("dynamic_regions")
+    rows = kernel.var("rows")
+    tensor = kernel.tensor("buffer", (rows,), "float32")
+    ready = kernel.event("ready", (rows,), 1)
+    kernel.tile(
+        "producer",
+        RecordingTile(),
+        (rows, 1, 1),
+        writes=[tensor.region(dynamic=True, reason="runtime scatter destinations")],
+    ).notify(ready, lambda m, n, k: (m,))
+    kernel.tile(
+        "consumer",
+        RecordingTile(),
+        (rows, 1, 1),
+        reads=[tensor.region(dynamic=True, reason="runtime gather sources")],
+    ).wait(ready, lambda m, n, k: (m,))
+
+    assert kernel.validate() is kernel
+
+
 def test_transform_exports_only_physical_step_contract():
     from tvm.megakernel import transform
 
@@ -160,6 +351,11 @@ def test_demo_uses_current_parser_style_api_and_lowers():
 
     lowered = demo.kernel.lower()
     assert lowered.attrs["global_symbol"] == "two_stage_reduce"
+    lowered_script = lowered.script()
+    assert "tirx.megakernel.smem" not in lowered_script
+    assert "T.ptx.mbarrier.init" in lowered_script
+    assert "T.ptx.mbarrier.try_wait" in lowered_script
+    assert "T.ptx.mbarrier.arrive" in lowered_script
 
 
 @pytest.mark.parametrize("shape,error", [((4, object()), "extents"), ((4, 0), "positive")])
@@ -320,6 +516,67 @@ def test_default_policy_is_an_ordered_physical_program():
     assert placements[0].port is None
     assert placements[0].edge.producer == producer.name
     assert placements[0].edge.consumer == consumer.name
+
+
+def test_backend_prepare_binds_bounded_workspace_and_static_phases():
+    kernel = KernelSpec("prepared")
+    rows = kernel.var("rows", range=(1, 8))
+    source = kernel.tensor("source", (rows, 4), "float16")
+    destination = kernel.tensor("destination", (rows, 4), "float16")
+    tile_rows = rows.ceildiv(2)
+    ready = kernel.event("ready", (tile_rows,), 1)
+    kernel.tile(
+        "producer",
+        RecordingTile(),
+        (tile_rows, 1, 1),
+        reads=[source],
+        writes=[destination],
+    ).notify(ready, lambda m, n, k: (m,))
+    kernel.tile(
+        "consumer",
+        RecordingTile(),
+        (tile_rows, 1, 1),
+        reads=[destination],
+    ).wait(ready, lambda m, n, k: (m,))
+
+    execution = make_static_execution_plan(kernel)
+    prepared = prepare_tirx_lowering_plan(
+        execution,
+        LoweringOptions(attrs={"sm_count": 2}),
+    )
+
+    assert prepared.semantic.kernel is kernel
+    assert [binding.param_name for binding in prepared.var_bindings] == ["rows"]
+    assert [binding.param_name for binding in prepared.tensor_bindings] == [
+        "source",
+        "destination",
+    ]
+    assert prepared.event_layouts[0].reserved_size == 4
+    assert prepared.event_workspace_size == 5
+    assert [tile.job_id for tile in prepared.tile_plans] == [0, 1]
+    assert [phase.job_id for phase in prepared.static_schedule.phases] == [29, 0, 30, 1, 31]
+
+
+def test_backend_prepare_rejects_unbounded_event_workspace():
+    kernel = KernelSpec("unbounded_workspace")
+    rows = kernel.var("rows")
+    ready = kernel.event("ready", (rows,), 1)
+    kernel.tile("producer", RecordingTile(), (rows, 1, 1)).notify(ready, lambda m, n, k: (m,))
+    kernel.tile("consumer", RecordingTile(), (rows, 1, 1)).wait(ready, lambda m, n, k: (m,))
+    execution = make_static_execution_plan(kernel)
+
+    with pytest.raises(ValueError, match="has no range"):
+        prepare_tirx_lowering_plan(execution, LoweringOptions())
+
+
+def test_backend_prepare_rejects_non_int32_event_storage():
+    kernel = KernelSpec("event_dtype")
+    ready = kernel.event("ready", (1,), 1, dtype="int64")
+    kernel.tile("producer", RecordingTile(), (1, 1, 1)).notify(ready, (0,))
+    kernel.tile("consumer", RecordingTile(), (1, 1, 1)).wait(ready, (0,))
+
+    with pytest.raises(ValueError, match="requires int32"):
+        prepare_tirx_lowering_plan(make_static_execution_plan(kernel), LoweringOptions())
 
 
 def test_edge_placement_rejects_missing_cross_location_and_cross_region():

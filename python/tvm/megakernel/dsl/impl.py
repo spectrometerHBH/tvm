@@ -68,6 +68,11 @@ class SmemManager:
 
         raise NotImplementedError
 
+    def wait_all(self, level="cta"):
+        """Alias for ``acquire_all`` used by existing tile implementations."""
+
+        return self.acquire_all(level)
+
     def release_all(self, level="cta"):
         """Release the current tile's shared-memory phase."""
 
