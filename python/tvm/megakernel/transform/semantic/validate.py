@@ -534,7 +534,7 @@ def _validate_tensor_dependencies(plan, writers, readers) -> None:
                 for consumer, _ in readers[id(tensor)]:
                     if producer is consumer:
                         continue
-                    if not _tiles_share_event(producer, consumer):
+                    if not _tiles_ordered_by_events(plan, producer, consumer):
                         raise ValueError(
                             f"tile {consumer.name!r} reads tensor {tensor.name!r} written "
                             f"by tile {producer.name!r} without an event dependency"
@@ -549,7 +549,7 @@ def _validate_tensor_dependencies(plan, writers, readers) -> None:
                 if producer is consumer:
                     continue
                 if write_access.region_dynamic or read_access.region_dynamic:
-                    if not _tiles_share_event(producer, consumer):
+                    if not _tiles_ordered_by_events(plan, producer, consumer):
                         raise ValueError(
                             f"tile {consumer.name!r} dynamically reads tensor "
                             f"{tensor.name!r} written by tile {producer.name!r} without "
@@ -618,9 +618,24 @@ def _validate_tensor_dependencies(plan, writers, readers) -> None:
                         )
 
 
-def _tiles_share_event(producer, consumer) -> bool:
-    notified = {id(event) for event, _ in producer.notifies}
-    return any(id(event) in notified for event, _ in consumer.waits)
+def _tiles_ordered_by_events(plan: SemanticPlan, producer, consumer) -> bool:
+    if producer is consumer:
+        return True
+    outgoing: dict[int, set[int]] = defaultdict(set)
+    for edge in plan.logical_edges:
+        outgoing[id(edge.producer)].add(id(edge.consumer))
+    target = id(consumer)
+    pending = list(outgoing[id(producer)])
+    visited = set()
+    while pending:
+        current = pending.pop()
+        if current == target:
+            return True
+        if current in visited:
+            continue
+        visited.add(current)
+        pending.extend(outgoing[current] - visited)
+    return False
 
 
 def _matching_event_coord(producer, producer_idx, consumer, consumer_idx, env) -> bool:

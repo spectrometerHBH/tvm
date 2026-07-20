@@ -241,6 +241,28 @@ def test_tensor_regions_validate_matching_event_coordinates():
         kernel.validate()
 
 
+def test_bare_tensor_dependency_accepts_transitive_event_ordering():
+    kernel = KernelSpec("transitive_tensor_dependency")
+    tensor = kernel.tensor("buffer", (1,), "float32")
+    first = kernel.event("first", (1,), 1)
+    second = kernel.event("second", (1,), 1)
+    kernel.tile(
+        "producer",
+        RecordingTile(),
+        (1, 1, 1),
+        writes=[tensor],
+    ).notify(first, (0,))
+    kernel.tile("middle", RecordingTile(), (1, 1, 1)).wait(first, (0,)).notify(second, (0,))
+    kernel.tile(
+        "consumer",
+        RecordingTile(),
+        (1, 1, 1),
+        reads=[tensor],
+    ).wait(second, (0,))
+
+    assert kernel.validate() is kernel
+
+
 def test_tensor_regions_allow_disjoint_writers_and_reject_overlap():
     kernel = KernelSpec("region_writers")
     tensor = kernel.tensor("buffer", (8,), "float32")
