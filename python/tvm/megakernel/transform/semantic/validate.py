@@ -150,8 +150,10 @@ def validate_semantic_plan(plan: SemanticPlan) -> SemanticPlan:
             raise ValueError(f"event {event.name!r} is waited on but has no notifier")
         _validate_event_counts(event, producers[id(event)], consumers[id(event)], plan.vars)
 
-    _validate_dependencies_acyclic(plan, tensor_writers, tensor_readers)
-    _validate_tensor_dependencies(plan, tensor_writers, tensor_readers)
+    event_adjacency = _event_adjacency(plan)
+    _validate_dependencies_acyclic(plan, tensor_writers, tensor_readers, event_adjacency)
+    event_ordering = _transitive_closure(event_adjacency)
+    _validate_tensor_dependencies(plan, tensor_writers, tensor_readers, event_ordering)
     return plan
 
 
@@ -498,43 +500,63 @@ def _event_requires_environment(event, producers, consumers) -> bool:
     return False
 
 
-def _validate_dependencies_acyclic(plan, tensor_writers, tensor_readers) -> None:
-    edges = {tile.name: set() for tile in plan.tiles}
+def _event_adjacency(plan: SemanticPlan) -> dict[int, set[int]]:
+    adjacency = {id(tile): set() for tile in plan.tiles}
     for edge in plan.logical_edges:
         if edge.producer is not edge.consumer:
-            edges[edge.producer.name].add(edge.consumer.name)
+            adjacency[id(edge.producer)].add(id(edge.consumer))
+    return adjacency
+
+
+def _transitive_closure(adjacency: dict[int, set[int]]) -> dict[int, set[int]]:
+    closure = {}
+    for source, direct_consumers in adjacency.items():
+        reachable = set()
+        pending = list(direct_consumers)
+        while pending:
+            current = pending.pop()
+            if current in reachable:
+                continue
+            reachable.add(current)
+            pending.extend(adjacency[current] - reachable)
+        closure[source] = reachable
+    return closure
+
+
+def _validate_dependencies_acyclic(plan, tensor_writers, tensor_readers, event_adjacency) -> None:
+    edges = {tile_id: set(consumers) for tile_id, consumers in event_adjacency.items()}
     for tensor in plan.tensors:
         for producer, _ in tensor_writers[id(tensor)]:
             for consumer, _ in tensor_readers[id(tensor)]:
                 if producer is not consumer:
-                    edges[producer.name].add(consumer.name)
+                    edges[id(producer)].add(id(consumer))
 
-    visiting: set[str] = set()
-    visited: set[str] = set()
+    visiting: set[int] = set()
+    visited: set[int] = set()
 
-    def visit(tile_name: str) -> None:
-        if tile_name in visiting:
+    def visit(tile_id: int) -> None:
+        if tile_id in visiting:
             raise ValueError("logical dependencies must be acyclic")
-        if tile_name in visited:
+        if tile_id in visited:
             return
-        visiting.add(tile_name)
-        for consumer in edges[tile_name]:
+        visiting.add(tile_id)
+        for consumer in edges[tile_id]:
             visit(consumer)
-        visiting.remove(tile_name)
-        visited.add(tile_name)
+        visiting.remove(tile_id)
+        visited.add(tile_id)
 
-    for tile_name in edges:
-        visit(tile_name)
+    for tile_id in edges:
+        visit(tile_id)
 
 
-def _validate_tensor_dependencies(plan, writers, readers) -> None:
+def _validate_tensor_dependencies(plan, writers, readers, event_ordering) -> None:
     if not any(access.has_region for tile in plan.tiles for access in (*tile.reads, *tile.writes)):
         for tensor in plan.tensors:
             for producer, _ in writers[id(tensor)]:
                 for consumer, _ in readers[id(tensor)]:
                     if producer is consumer:
                         continue
-                    if not _tiles_ordered_by_events(plan, producer, consumer):
+                    if not _tiles_ordered_by_events(event_ordering, producer, consumer):
                         raise ValueError(
                             f"tile {consumer.name!r} reads tensor {tensor.name!r} written "
                             f"by tile {producer.name!r} without an event dependency"
@@ -549,7 +571,7 @@ def _validate_tensor_dependencies(plan, writers, readers) -> None:
                 if producer is consumer:
                     continue
                 if write_access.region_dynamic or read_access.region_dynamic:
-                    if not _tiles_ordered_by_events(plan, producer, consumer):
+                    if not _tiles_ordered_by_events(event_ordering, producer, consumer):
                         raise ValueError(
                             f"tile {consumer.name!r} dynamically reads tensor "
                             f"{tensor.name!r} written by tile {producer.name!r} without "
@@ -618,24 +640,10 @@ def _validate_tensor_dependencies(plan, writers, readers) -> None:
                         )
 
 
-def _tiles_ordered_by_events(plan: SemanticPlan, producer, consumer) -> bool:
+def _tiles_ordered_by_events(event_ordering, producer, consumer) -> bool:
     if producer is consumer:
         return True
-    outgoing: dict[int, set[int]] = defaultdict(set)
-    for edge in plan.logical_edges:
-        outgoing[id(edge.producer)].add(id(edge.consumer))
-    target = id(consumer)
-    pending = list(outgoing[id(producer)])
-    visited = set()
-    while pending:
-        current = pending.pop()
-        if current == target:
-            return True
-        if current in visited:
-            continue
-        visited.add(current)
-        pending.extend(outgoing[current] - visited)
-    return False
+    return id(consumer) in event_ordering[id(producer)]
 
 
 def _matching_event_coord(producer, producer_idx, consumer, consumer_idx, env) -> bool:

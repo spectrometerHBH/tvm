@@ -36,6 +36,7 @@ from tvm.megakernel.dsl import (
     expr_bounds,
 )
 from tvm.megakernel.transform import (
+    BarrierStep,
     DeviceRegionPlan,
     EdgePlacement,
     ExecutionPlan,
@@ -49,6 +50,8 @@ from tvm.megakernel.transform import (
     MidBodyPortStep,
     NotifyStep,
     RegionDependencyPlan,
+    RunStep,
+    RuntimeEventInitStep,
     SemanticPlan,
     TileProgram,
     WaitStep,
@@ -80,6 +83,15 @@ class CopyTile(TileImpl):
     @T.inline
     def run(self, m_idx, n_idx, k_idx):
         self.destination[m_idx] = self.source[m_idx]
+
+
+class HostInitTile(RecordingTile):
+    def __init__(self, hook_name):
+        super().__init__()
+        self.hook_name = hook_name
+
+    def host_init(self):
+        T.evaluate(T.call_packed(self.hook_name))
 
 
 def _two_stage_kernel():
@@ -133,6 +145,15 @@ def test_api_matches_parser_style_contract():
     impl.run(1, 2, 3)
     assert impl.indices == [(1, 2, 3)]
     assert RecordingTile.class_name() == "RecordingTile"
+
+
+def test_event_specs_use_identity_equality_and_hashing():
+    first = EventSpec("ready", (1,), 1)
+    second = EventSpec("ready", (1,), 1)
+
+    assert first is not second
+    assert first != second
+    assert len({first, second}) == 2
 
 
 def test_semantic_plan_is_distinct_from_the_physical_execution_plan():
@@ -510,6 +531,15 @@ def test_default_policy_is_an_ordered_physical_program():
     kernel, producer, consumer, _ = _two_stage_kernel()
     plan = make_static_execution_plan(kernel)
     assert plan.validate() is plan
+    host_init_steps = [
+        step
+        for step in plan.device_regions[0].prologue_steps
+        if isinstance(step, HookStep) and step.hook == "host_init"
+    ]
+    assert [step.target for step in host_init_steps] == [
+        producer.impl,
+        consumer.impl,
+    ]
     assert [program.tile.name for program in plan.device_regions[0].tile_programs] == [
         "producer",
         "consumer",
@@ -538,6 +568,107 @@ def test_default_policy_is_an_ordered_physical_program():
     assert placements[0].port is None
     assert placements[0].edge.producer == producer.name
     assert placements[0].edge.consumer == consumer.name
+
+
+def test_host_init_is_emitted_before_device_entry_and_restricted_to_prologue():
+    kernel = KernelSpec("host_init_order")
+    first_impl = HostInitTile("test.host_init.first")
+    second_impl = HostInitTile("test.host_init.second")
+    first = kernel.tile("first", first_impl, (1, 1, 1))
+    kernel.tile("second", second_impl, (1, 1, 1))
+
+    plan = make_static_execution_plan(kernel)
+    script = lower_execution_plan(plan).script()
+    device_entry = script.index('"tirx.device_entry"')
+    assert script.index('T.call_packed("test.host_init.first")') < device_entry
+    assert script.index('T.call_packed("test.host_init.second")') < device_entry
+
+    step = HookStep("host_init", target=first_impl)
+    invalid_plans = (
+        ExecutionPlan(
+            kernel,
+            device_regions=(DeviceRegionPlan("device", fetch_steps=(step,)),),
+        ),
+        ExecutionPlan(
+            kernel,
+            device_regions=(
+                DeviceRegionPlan("device", tile_programs=(TileProgram(first, (step,)),)),
+            ),
+        ),
+        ExecutionPlan(
+            kernel,
+            device_regions=(DeviceRegionPlan("device", epilogue_steps=(step,)),),
+        ),
+        ExecutionPlan(kernel, host_regions=(HostRegionPlan("host", (step,)),)),
+    )
+    for invalid in invalid_plans:
+        with pytest.raises(ValueError, match="device prologue_steps"):
+            invalid.validate()
+
+
+def test_default_backend_emits_barriers_and_runtime_event_init_before_scheduler():
+    kernel = KernelSpec("explicit_steps")
+    event = kernel.event("runtime_ready", (1,), 1)
+    tile = kernel.tile("tile", RecordingTile(), (1, 1, 1))
+    plan = make_static_execution_plan(kernel)
+    region = plan.device_regions[0]
+    program = TileProgram(
+        tile,
+        (BarrierStep("cta"), BarrierStep("warp"), RunStep()),
+    )
+    region = replace(
+        region,
+        prologue_steps=(
+            *region.prologue_steps,
+            RuntimeEventInitStep(event, 7, scope="thread", scope_id=3),
+        ),
+        tile_programs=(program,),
+    )
+    explicit = replace(plan, device_regions=(region,))
+
+    script = lower_execution_plan(
+        explicit,
+        options=LoweringOptions(attrs={"num_threads": 64}),
+    ).script()
+    assert "T.cuda.cta_sync()" in script
+    assert "T.cuda.warp_sync()" in script
+    assert "T.thread_id([64])" in script
+
+
+def test_default_backend_rejects_unsupported_runtime_scope_and_profile_event():
+    kernel = KernelSpec("unsupported_steps")
+    event = kernel.event("runtime_ready", (1,), 1)
+    tile = kernel.tile("tile", RecordingTile(), (1, 1, 1))
+    plan = make_static_execution_plan(kernel)
+    region = plan.device_regions[0]
+
+    invalid_scope = replace(
+        plan,
+        device_regions=(
+            replace(
+                region,
+                prologue_steps=(
+                    *region.prologue_steps,
+                    RuntimeEventInitStep(event, 1, scope="cta"),
+                ),
+            ),
+        ),
+    )
+    with pytest.raises(tvm.error.DiagnosticError, match="does not support 'cta' scope"):
+        lower_execution_plan(invalid_scope)
+
+    profiled = replace(
+        plan,
+        device_regions=(
+            replace(
+                region,
+                tile_programs=(TileProgram(tile, (RunStep(profile_event=event),)),),
+            ),
+        ),
+    )
+    assert profiled.device_regions[0].tile_programs[0].steps[0].profile_event is event
+    with pytest.raises(tvm.error.DiagnosticError, match="RunStep.profile_event"):
+        lower_execution_plan(profiled)
 
 
 def test_backend_prepare_binds_bounded_workspace_and_static_phases():

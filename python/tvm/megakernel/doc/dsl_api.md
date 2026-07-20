@@ -357,7 +357,7 @@ Example:
 
 ```python
 def host_init(self):
-    T.call_packed("runtime.cuTensorMapEncodeTiled", ...)
+    T.evaluate(T.call_packed("runtime.cuTensorMapEncodeTiled", ...))
 ```
 
 ### `TileImpl.prefetch`

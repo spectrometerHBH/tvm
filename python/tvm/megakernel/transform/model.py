@@ -315,6 +315,8 @@ class ExecutionPlan:
                 raise ValueError("FetchGuardStep must appear in device fetch_steps")
             if isinstance(step, HostCallStep | HostSyncStep) and location != "host":
                 raise ValueError(f"{type(step).__name__} must appear in a host region")
+            if isinstance(step, HookStep) and step.hook == "host_init" and location != "prologue":
+                raise ValueError("HookStep('host_init') must appear in device prologue_steps")
             if isinstance(step, WaitStep):
                 for edge in step.edges:
                     if edge.consumer != tile.name:
@@ -439,7 +441,10 @@ def make_static_execution_plan(kernel: KernelSpec) -> ExecutionPlan:
         if type(tile.impl) not in seen_classes:
             seen_classes.add(type(tile.impl))
             unique_classes.append(type(tile.impl))
-    prologue = tuple(HookStep("init_shared_resources", target=cls) for cls in unique_classes)
+    prologue = (
+        *(HookStep("host_init", target=tile.impl) for tile in kernel.tiles),
+        *(HookStep("init_shared_resources", target=cls) for cls in unique_classes),
+    )
     epilogue = (
         *(HookStep("finalize_shared_resources", target=cls) for cls in reversed(unique_classes)),
         HookStep("smem_commit"),

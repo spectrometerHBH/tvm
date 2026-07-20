@@ -352,7 +352,7 @@ class TensorSpec:
         )
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, eq=False)
 class EventSpec:
     """Logical readiness event independent of its physical implementation."""
 

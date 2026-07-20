@@ -168,6 +168,10 @@ class TIRXStaticBackend(ExecutionPlanBackend):
         num_threads = attrs.get("num_threads", 256)
         max_tasks = state.lowering_plan.static_schedule.max_tasks
         state.queue = T.arg("queue", T.Buffer((sm_count, max_tasks), "int32"))
+        runtime = {"state": state, "region": region, "indices": (None, None, None)}
+        for step in region.prologue_steps:
+            if isinstance(step, HookStep) and step.hook == "host_init":
+                self._emit_tirx_step(step, runtime)
         T.device_entry()
 
         state.smem_manager = TIRXSmemManager(
@@ -178,9 +182,9 @@ class TIRXStaticBackend(ExecutionPlanBackend):
         )
         self._bind_event_buffers(state)
         state.smem_manager.init()
-        runtime = {"state": state, "region": region, "indices": (None, None, None)}
         for step in region.prologue_steps:
-            self._emit_tirx_step(step, runtime)
+            if not (isinstance(step, HookStep) and step.hook == "host_init"):
+                self._emit_tirx_step(step, runtime)
 
         state.scheduler = StaticTileScheduler(
             state.queue,
@@ -311,7 +315,9 @@ class TIRXStaticBackend(ExecutionPlanBackend):
         smem = state.smem_manager
         scheduler = state.scheduler
         if isinstance(step, HookStep):
-            if step.hook == "init_shared_resources":
+            if step.hook == "host_init":
+                step.target.host_init()
+            elif step.hook == "init_shared_resources":
                 smem.set_tile(None)
                 step.target.init_shared_resources(smem)
             elif step.hook == "finalize_shared_resources":
@@ -349,9 +355,9 @@ class TIRXStaticBackend(ExecutionPlanBackend):
             self._emit_run(step, tile, indices)
         elif isinstance(step, BarrierStep):
             if step.kind == "cta":
-                T.cuda.cta_sync()
+                T.evaluate(T.cuda.cta_sync())
             elif step.kind == "warp":
-                T.cuda.warp_sync()
+                T.evaluate(T.cuda.warp_sync())
             else:
                 raise ValueError(f"unsupported barrier kind {step.kind!r}")
         elif isinstance(step, RuntimeEventInitStep):
@@ -365,7 +371,8 @@ class TIRXStaticBackend(ExecutionPlanBackend):
             if step.scope_id == -1:
                 T.buffer_store(buffer, step.value, [0])
             else:
-                tid = T.thread_id([scheduler.num_threads])
+                num_threads = state.lowering_plan.attrs.get("num_threads", 256)
+                tid = T.thread_id([num_threads])
                 with T.If(tid == step.scope_id):
                     with T.Then():
                         T.buffer_store(buffer, step.value, [0])
@@ -377,6 +384,8 @@ class TIRXStaticBackend(ExecutionPlanBackend):
             raise TypeError(f"unknown megakernel program step {type(step).__name__}")
 
     def _emit_run(self, step: RunStep, tile, indices) -> None:
+        if step.profile_event is not None:
+            raise NotImplementedError("default backend does not support RunStep.profile_event")
         predicate = step.predicate(*indices) if callable(step.predicate) else step.predicate
 
         def run_once(repeat_idx=0):
