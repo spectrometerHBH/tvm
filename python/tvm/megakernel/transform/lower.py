@@ -70,10 +70,9 @@ class LoweringOptions:
     """Options for the default single-device static backend.
 
     ``scheduler`` selects the build path: ``None`` keeps the legacy direct
-    emitter below, ``"static"`` routes to the runtime-library builder in
-    ``transform.runtime_build``, and ``"dynamic"`` is reserved for the
-    runtime dynamic builder (not yet implemented).  ``schedule`` is the
-    legacy emitter's own scheduling knob and is unrelated to routing.
+    emitter below, while ``"static"`` and ``"dynamic"`` route to the
+    runtime-library builder in ``transform.runtime_build``.  ``schedule`` is
+    the legacy emitter's own scheduling knob and is unrelated to routing.
     """
 
     smem_max_bytes: int = 228 * 1024
@@ -460,12 +459,7 @@ def _route_scheduler(options: LoweringOptions) -> str | None:
     scheduler = options.scheduler
     if scheduler is None:
         return None
-    if scheduler == "dynamic":
-        raise NotImplementedError(
-            "scheduler='dynamic' is not yet supported by the megakernel runtime "
-            "builder; use scheduler=None (legacy emitter) or scheduler='static'"
-        )
-    if scheduler != "static":
+    if scheduler not in ("static", "dynamic"):
         raise ValueError(
             f"unsupported scheduler {scheduler!r}; expected None, 'static', or 'dynamic'"
         )
@@ -489,7 +483,7 @@ def lower_to_tirx(kernel: KernelSpec, options: LoweringOptions | None = None) ->
     """Validate a spec and lower it to the default static persistent kernel."""
 
     resolved = _resolve_options(options)
-    if _route_scheduler(resolved) == "static":
+    if _route_scheduler(resolved) is not None:
         return _emit_with_runtime_builder(kernel, resolved)[kernel.name]
     plan = _prepare(kernel, resolved)
     builder = _StaticKernelBuilder(plan)
@@ -505,12 +499,12 @@ def lower_static_queue_init_to_tirx(
     """Build the queue initializer matching the default static kernel."""
 
     resolved = _resolve_options(options)
-    if _route_scheduler(resolved) == "static":
+    if _route_scheduler(resolved) is not None:
         raise ValueError(
-            "the runtime static builder (scheduler='static') derives the exec "
-            "queue on the host; use "
+            "the runtime builder (scheduler='static'/'dynamic') derives the "
+            "exec queue on the host; use "
             "tvm.megakernel.transform.build_runtime_kernel and its "
-            "RuntimeKernelBuild.exec_queue instead of a queue-init kernel"
+            "RuntimeKernelBuild queue arrays instead of a queue-init kernel"
         )
     plan = _prepare(kernel, resolved)
     return _queue_init_entry.specialize(emitter=_QueueInitEmitter(plan))
@@ -520,7 +514,7 @@ def lower_to_tirx_module(kernel: KernelSpec, options: LoweringOptions | None = N
     """Lower a spec to its device kernel and static queue initializer."""
 
     resolved = _resolve_options(options)
-    if _route_scheduler(resolved) == "static":
+    if _route_scheduler(resolved) is not None:
         return _emit_with_runtime_builder(kernel, resolved)
     return IRModule(
         {

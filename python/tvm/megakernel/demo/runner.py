@@ -97,10 +97,82 @@ def run_two_stage_reduce(
     }
 
 
+def run_dynamic_count(
+    counts=(8, 37),
+    upper: int = 64,
+    *,
+    profiler_on: bool = False,
+) -> dict:
+    """Run the dynamic runtime-scalar dispatch demo on the local CUDA device.
+
+    Launches the kernel once per value in ``counts``, re-uploading the MPMC
+    seed queue and re-zeroing the event workspace and output between launches
+    (the device mutates all three).  Each launch must produce
+    ``out[m] = m + 1`` for ``m < count`` and zero elsewhere — an exact check
+    on the dispatched task count.  Returns a small report dict.
+    """
+
+    from .dynamic import build_dynamic_count_spec
+
+    spec = build_dynamic_count_spec(upper)
+    spec.validate()
+    options = LoweringOptions(scheduler="dynamic", attrs={"profiler": profiler_on})
+    build = build_runtime_kernel(spec, options)
+    lib = tvm.compile(build.module, tvm.target.Target("cuda"), tir_pipeline="tirx")
+
+    dev = tvm.cuda(0)
+    count_host = np.zeros((1,), dtype=np.int32)
+    count_dev = tvm.runtime.tensor(count_host, dev)
+    out_dev = tvm.runtime.tensor(np.zeros((upper,), dtype=np.int32), dev)
+    workspace_dev = tvm.runtime.tensor(np.zeros((build.event_workspace_size,), dtype=np.int32), dev)
+    args = [count_dev, out_dev, workspace_dev]
+    tasks_dev = tvm.runtime.tensor(build.queue_tasks.copy(), dev)
+    head_dev = tvm.runtime.tensor(build.queue_head.copy(), dev)
+    tail_dev = tvm.runtime.tensor(build.queue_tail.copy(), dev)
+    args += [tasks_dev, head_dev, tail_dev]
+    if profiler_on:
+        args.append(
+            tvm.runtime.tensor(
+                np.zeros((MegaKernelWrapper.PROFILER_BUFFER_SIZE,), dtype=np.uint64),
+                dev,
+            )
+        )
+    kernel = lib[spec.name]
+
+    checks = []
+    for count in counts:
+        # Reset everything the device mutates: queue arrays, workspace, output.
+        count_dev.copyfrom(np.array([count], dtype=np.int32))
+        out_dev.copyfrom(np.zeros((upper,), dtype=np.int32))
+        workspace_dev.copyfrom(np.zeros((build.event_workspace_size,), dtype=np.int32))
+        tasks_dev.copyfrom(build.queue_tasks)
+        head_dev.copyfrom(build.queue_head)
+        tail_dev.copyfrom(build.queue_tail)
+        kernel(*args)
+        dev.sync()
+        expected = np.zeros((upper,), dtype=np.int32)
+        expected[:count] = np.arange(1, count + 1, dtype=np.int32)
+        np.testing.assert_array_equal(out_dev.numpy(), expected)
+        checks.append({"count": count, "ok": True})
+    return {
+        "upper": upper,
+        "checks": checks,
+        "seed_tasks": len(build.central_tasks),
+        "event_workspace_size": build.event_workspace_size,
+    }
+
+
 if __name__ == "__main__":
     for size in (256, 1024):
         report = run_two_stage_reduce(m=size)
         print(
             f"M={report['m']}: OK (max abs err {report['max_abs_err']:.3e}, "
             f"{report['central_tasks']} central tasks)"
+        )
+    dynamic_report = run_dynamic_count()
+    for check in dynamic_report["checks"]:
+        print(
+            f"dynamic count={check['count']}: OK "
+            f"({dynamic_report['seed_tasks']} seed tasks, "
+            f"ws {dynamic_report['event_workspace_size']})"
         )

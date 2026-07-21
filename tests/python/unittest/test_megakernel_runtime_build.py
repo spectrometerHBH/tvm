@@ -29,7 +29,12 @@ import pytest
 
 import tvm
 from tvm.megakernel.dsl import KernelSpec, TileImpl
-from tvm.megakernel.runtime import HardwareConfig, StaticTileScheduler, unpack_from_32bit_host
+from tvm.megakernel.runtime import (
+    DynamicTileScheduler,
+    HardwareConfig,
+    StaticTileScheduler,
+    unpack_from_32bit_host,
+)
 from tvm.megakernel.transform import (
     LoweringOptions,
     build_runtime_kernel,
@@ -43,8 +48,12 @@ from tvm.megakernel.transform.prepare import (
     WAIT_EVENT_INIT_JOB_ID,
 )
 from tvm.megakernel.transform.runtime_build import (
+    _hardware_from_options,
+    _lower_runtime_expr,
+    _prepare_dynamic_plan,
     _prepare_runtime_plan,
     _resolve_options,
+    _RuntimeDynamicKernelBuilder,
     build_static_queues,
     derive_static_central_tasks,
 )
@@ -389,10 +398,15 @@ def test_scheduler_static_has_no_queue_init_kernel():
         lower_static_queue_init_to_tirx(kernel, _static_options())
 
 
-def test_scheduler_dynamic_not_implemented():
+def test_scheduler_dynamic_routes_to_runtime_builder():
     kernel = _chain_kernel("dynamic_chain")
-    with pytest.raises(NotImplementedError, match="not yet"):
-        lower_to_tirx_module(kernel, LoweringOptions(scheduler="dynamic"))
+    module = lower_to_tirx_module(kernel, LoweringOptions(scheduler="dynamic"))
+    assert [gv.name_hint for gv in module.functions] == ["dynamic_chain"]
+    assert "exec_task" in module["dynamic_chain"].script()
+
+    func = lower_to_tirx(kernel, LoweringOptions(scheduler="dynamic"))
+    assert isinstance(func, tvm.tirx.PrimFunc)
+    assert func.attrs["global_symbol"] == "dynamic_chain"
 
 
 def test_scheduler_garbage_rejected():
@@ -401,10 +415,446 @@ def test_scheduler_garbage_rejected():
         lower_to_tirx_module(kernel, LoweringOptions(scheduler="round-robin"))
 
 
-def test_build_runtime_kernel_requires_static_scheduler():
+def test_build_runtime_kernel_requires_runtime_scheduler():
     kernel = _chain_kernel("misrouted_chain")
-    with pytest.raises(ValueError, match="scheduler='static'"):
+    with pytest.raises(ValueError, match="scheduler="):
         build_runtime_kernel(kernel, LoweringOptions())
+
+
+# ---------------------------------------------------------------------------
+# Dynamic scheduling: emission structure
+# ---------------------------------------------------------------------------
+
+
+class _DynScopedTile(_MarkerTile):
+    wait_level: ClassVar[str] = "warp"
+    wait_mask: ClassVar[int] = 0xF
+    notify_scope: ClassVar[tuple[str, int]] = ("warpgroup", 0)
+
+
+def _dynamic_options(attrs=None):
+    return LoweringOptions(scheduler="dynamic", attrs=attrs or {})
+
+
+def _dynamic_spec(name="dynamic_mark", scoped=True):
+    kernel = KernelSpec(name)
+    count_buf = kernel.tensor("count", (1,), "int32")
+    out = kernel.tensor("out", (64,), "int32")
+    n_tiles = kernel.scalar("n_tiles", source=(count_buf, (0,)), range=(1, 64))
+    ready = kernel.event("ready", (1,), 1)
+    kernel.tile("plant", _MarkerTile(), (1, 1, 1), reads=[count_buf]).notify(ready, (0,))
+    kernel.tile(
+        "mark", _DynScopedTile() if scoped else _MarkerTile(), (n_tiles, 1, 1), writes=[out]
+    ).wait(ready, (0,))
+    return kernel
+
+
+def test_dynamic_build_params_and_drain_layout():
+    kernel = _dynamic_spec()
+    build = build_runtime_kernel(kernel, _dynamic_options())
+    func = build.module[kernel.name]
+
+    assert [param.name for param in func.params] == [
+        "count_handle",
+        "out_handle",
+        "event_workspace_handle",
+        "exec_task_handle",
+        "exec_head_handle",
+        "exec_tail_handle",
+    ]
+    buffers = [func.buffer_map[param] for param in func.params]
+    # One user event cell plus the synthesized drain cell; no completion cell.
+    assert build.event_workspace_size == 2
+    assert tuple(buffers[2].shape) == (2,)
+    assert tuple(buffers[3].shape) == (DynamicTileScheduler.MAX_TASKS,)
+    assert tuple(buffers[4].shape) == tuple(buffers[5].shape) == (1,)
+    (drain,) = build.drain_events
+    assert drain.name == "__drain_mark__"
+    assert drain.workspace_offset == 1
+    assert drain.static_count is None
+    assert drain.runtime_initialized
+
+
+def test_dynamic_build_emits_mpmc_scheduler_and_push_structure():
+    kernel = _dynamic_spec()
+    build = build_runtime_kernel(kernel, _dynamic_options())
+    script = build.module[kernel.name].script()
+
+    # MPMC fetch/decode and the dispatch fallthrough trap.
+    assert "while_ld_global_acquire" in script
+    assert "unpack_from_32bit" in script
+    assert "trap_when_assert_failed(T.bool(False))" in script
+    # Pre-notify trigger (old % base == 1) and the queue push.
+    assert "% 65536 == 1" in script
+    assert "stg_local" in script
+    # The pusher's pre-notify uses its notify scope (cta), the terminal's
+    # drain pre-notify uses the warpgroup scope metadata.
+    assert "T.ptx.bar.sync" in script
+    # The terminal END push targets the reserved END job id with one task per SM.
+    assert "task_type: T.int32 = 31" in script
+    assert "enqueue_num: T.int32 = 148" in script
+    # The drain event is runtime-initialized with (base + 1) * count.
+    assert "65537 *" in script
+    # The mark tile waits at warp level through its declared mask.
+    assert "T.shift_right(15," in script
+    # Profiler stays off by default.
+    assert "timer_start" not in script
+
+
+def test_dynamic_build_profiler_hooks_when_enabled():
+    kernel = KernelSpec("dyn_profiled")
+    count_buf = kernel.tensor("count", (1,), "int32")
+    out = kernel.tensor("out", (64,), "int32")
+    n_tiles = kernel.scalar("n_tiles", source=(count_buf, (0,)), range=(1, 64))
+    ready = kernel.event("ready", (1,), 1)
+    kernel.tile("plant", _ProfiledTile(), (1, 1, 1), reads=[count_buf]).notify(ready, (0,))
+    kernel.tile("mark", _ProfiledTile(), (n_tiles, 1, 1), writes=[out]).wait(ready, (0,))
+
+    build = build_runtime_kernel(kernel, _dynamic_options(attrs={"profiler": True}))
+    func = build.module[kernel.name]
+    assert build.profiler_on
+    assert func.params[-1].name == "profiler_buffer_handle"
+    script = func.script()
+    for marker in ("timer_init", "timer_start", "timer_end", "timer_finalize"):
+        assert marker in script
+
+
+def test_dynamic_build_seed_queue_contents():
+    kernel = _dynamic_spec()
+    build = build_runtime_kernel(kernel, _dynamic_options())
+
+    # Two etensors (user event + drain) plus the single entry task.
+    assert build.central_tasks == (
+        (0, 0, 0, INIT_EVENT_JOB_ID),
+        (1, 0, 0, INIT_EVENT_JOB_ID),
+        (0, 0, 0, 0),
+    )
+    assert build.queue_tasks.shape == (DynamicTileScheduler.MAX_TASKS,)
+    for index, (m_idx, n_idx, k_idx, job_id) in enumerate(build.central_tasks):
+        assert unpack_from_32bit_host(build.queue_tasks[index]) == (job_id, m_idx, n_idx, k_idx)
+    assert build.queue_head.tolist() == [0]
+    assert build.queue_tail.tolist() == [len(build.central_tasks)]
+    # Untouched slots stay at the -1 empty marker for the device spin.
+    assert build.queue_tasks[len(build.central_tasks)] == -1
+
+
+# ---------------------------------------------------------------------------
+# Dynamic scheduling: synthesis decisions
+# ---------------------------------------------------------------------------
+
+
+def _dynamic_plan(kernel, attrs=None):
+    options = _resolve_options(_dynamic_options(attrs))
+    return _prepare_dynamic_plan(kernel, options, _hardware_from_options(options))
+
+
+def test_dynamic_synthesis_derives_pusher_count_and_indices():
+    plan = _dynamic_plan(_dynamic_spec())
+    (rule,) = plan.dispatch_rules.values()
+    assert (rule.source.name, rule.target.name) == ("plant", "mark")
+    assert rule.event.name == "ready"
+    # Constant coord on both sides: every mark axis is free.
+    assert rule.free_axes == (0, 1, 2)
+    assert rule.pinned == ()
+    assert rule.free_extents == plan.scheduled[id(rule.target)]
+    assert rule.pre_scope == ("cta", 0)
+    assert rule.push_level == "cta"
+
+
+def test_dynamic_synthesis_pinned_axis_push():
+    kernel = KernelSpec("pinned")
+    kernel.tensor("t", (8,), "float32")
+    ready = kernel.event("ready", (4,), 1)
+    kernel.tile("producer", _MarkerTile(), (4, 2, 1)).notify(ready, lambda m, n, k: (m,))
+    kernel.tile("consumer", _MarkerTile(), (4, 3, 1)).wait(ready, lambda m, n, k: (m,))
+
+    plan = _dynamic_plan(kernel)
+    (rule,) = plan.dispatch_rules.values()
+    # The m axis is pinned to the producer's m; n and k stay free.
+    assert rule.pinned == ((0, ("axis", 0)),)
+    assert rule.free_axes == (1, 2)
+    assert rule.free_extents == (3, 1)
+
+
+def test_dynamic_synthesis_rejects_multi_producer_event():
+    kernel = KernelSpec("ambiguous")
+    kernel.tensor("t", (4,), "float32")
+    ready = kernel.event("ready", (1,), 2)
+    kernel.tile("p1", _MarkerTile(), (1, 1, 1)).notify(ready, (0,))
+    kernel.tile("p2", _MarkerTile(), (1, 1, 1)).notify(ready, (0,))
+    kernel.tile("consumer", _MarkerTile(), (1, 1, 1)).wait(ready, (0,))
+
+    with pytest.raises(ValueError, match="producers"):
+        _dynamic_plan(kernel)
+
+
+def test_dynamic_synthesis_rejects_multi_wait_tile():
+    kernel = KernelSpec("multi_wait")
+    kernel.tensor("t", (4,), "float32")
+    event_a = kernel.event("event_a", (1,), 1)
+    event_b = kernel.event("event_b", (1,), 1)
+    kernel.tile("producer", _MarkerTile(), (1, 1, 1)).notify(event_a, (0,)).notify(event_b, (0,))
+    kernel.tile("consumer", _MarkerTile(), (1, 1, 1)).wait(event_a, (0,)).wait(event_b, (0,))
+
+    with pytest.raises(ValueError, match="waits"):
+        _dynamic_plan(kernel)
+
+
+def test_dynamic_synthesis_rejects_fan_out():
+    kernel = KernelSpec("fan_out")
+    kernel.tensor("t", (4,), "float32")
+    event_a = kernel.event("event_a", (1,), 1)
+    event_b = kernel.event("event_b", (1,), 1)
+    event_c = kernel.event("event_c", (1,), 2)
+    kernel.tile("producer", _MarkerTile(), (1, 1, 1)).notify(event_a, (0,)).notify(event_b, (0,))
+    kernel.tile("c1", _MarkerTile(), (1, 1, 1)).wait(event_a, (0,)).notify(event_c, (0,))
+    kernel.tile("c2", _MarkerTile(), (1, 1, 1)).wait(event_b, (0,)).notify(event_c, (0,))
+    kernel.tile("sink", _MarkerTile(), (1, 1, 1)).wait(event_c, (0,))
+
+    with pytest.raises(ValueError, match="more than one tile"):
+        _dynamic_plan(kernel)
+
+
+def test_dynamic_synthesis_rejects_multiple_terminal_tiles():
+    kernel = KernelSpec("two_terminals")
+    kernel.tensor("t", (4,), "float32")
+    ready = kernel.event("ready", (1,), 1)
+    kernel.tile("producer", _MarkerTile(), (1, 1, 1)).notify(ready, (0,))
+    kernel.tile("c1", _MarkerTile(), (1, 1, 1)).wait(ready, (0,))
+    kernel.tile("c2", _MarkerTile(), (1, 1, 1)).wait(ready, (0,))
+
+    with pytest.raises(ValueError, match="exactly one terminal"):
+        _dynamic_plan(kernel)
+
+
+def test_dynamic_synthesis_rejects_cycles():
+    kernel = KernelSpec("cyclic_dynamic")
+    kernel.tensor("t", (4,), "float32")
+    event_a = kernel.event("event_a", (1,), 1)
+    event_b = kernel.event("event_b", (1,), 1)
+    kernel.tile("t1", _MarkerTile(), (1, 1, 1)).wait(event_b, (0,)).notify(event_a, (0,))
+    kernel.tile("t2", _MarkerTile(), (1, 1, 1)).wait(event_a, (0,)).notify(event_b, (0,))
+
+    with pytest.raises(ValueError, match="acyclic"):
+        _dynamic_plan(kernel)
+
+
+def test_dynamic_synthesis_rejects_scalar_entry_tile():
+    kernel = KernelSpec("scalar_entry")
+    count_buf = kernel.tensor("count", (1,), "int32")
+    n_tiles = kernel.scalar("n_tiles", source=(count_buf, (0,)), range=(1, 64))
+    kernel.tile("entry", _MarkerTile(), (n_tiles, 1, 1))
+
+    with pytest.raises(ValueError, match="entry tile"):
+        _dynamic_plan(kernel)
+
+
+def test_dynamic_synthesis_rejects_oversized_queue_and_packing():
+    kernel = KernelSpec("too_big")
+    count_buf = kernel.tensor("count", (1,), "int32")
+    out = kernel.tensor("out", (64,), "int32")
+    n_tiles = kernel.scalar("n_tiles", source=(count_buf, (0,)), range=(1, 33))
+    ready = kernel.event("ready", (1,), 1)
+    kernel.tile("plant", _MarkerTile(), (1, 1, 1)).notify(ready, (0,))
+    kernel.tile("mark", _MarkerTile(), (n_tiles, 1000, 1), writes=[out]).wait(ready, (0,))
+
+    with pytest.raises(ValueError, match="capacity"):
+        _dynamic_plan(kernel)
+
+    kernel = KernelSpec("too_wide")
+    count_buf = kernel.tensor("count", (1,), "int32")
+    out = kernel.tensor("out", (64,), "int32")
+    n_tiles = kernel.scalar("n_tiles", source=(count_buf, (0,)), range=(1, 9000))
+    ready = kernel.event("ready", (1,), 1)
+    kernel.tile("plant", _MarkerTile(), (1, 1, 1)).notify(ready, (0,))
+    kernel.tile("mark", _MarkerTile(), (n_tiles, 1, 1), writes=[out]).wait(ready, (0,))
+
+    with pytest.raises(ValueError, match="packed-task limit"):
+        _dynamic_plan(kernel)
+
+
+def test_dynamic_coalescing_math_and_validation():
+    kernel = KernelSpec("coalesced")
+    count_buf = kernel.tensor("count", (1,), "int32")
+    out = kernel.tensor("out", (64,), "int32")
+    n_tiles = kernel.scalar("n_tiles", source=(count_buf, (0,)), range=(1, 64))
+    ready = kernel.event("ready", (1,), 1)
+    kernel.tile("plant", _MarkerTile(), (1, 1, 1)).notify(ready, (0,))
+    kernel.tile("mark", _MarkerTile(), (n_tiles, 16, 1), writes=[out]).wait(ready, (0,))
+
+    plan = _dynamic_plan(kernel, {"tile_coalescing": {"mark": 4}})
+    mark = next(tile for tile in plan.kernel.tiles if tile.name == "mark")
+    # The scheduled grid carries the divided n extent.
+    assert plan.scheduled[id(mark)][1] == 4
+    assert plan.drain.count_extents[1] == 4
+    (rule,) = plan.dispatch_rules.values()
+    assert rule.free_extents[1] == 4
+
+    with pytest.raises(ValueError, match="divisible"):
+        _dynamic_plan(kernel, {"tile_coalescing": {"mark": 3}})
+    with pytest.raises(ValueError, match="host-seeded"):
+        _dynamic_plan(kernel, {"tile_coalescing": {"plant": 2}})
+    with pytest.raises(ValueError, match="unknown tile"):
+        _dynamic_plan(kernel, {"tile_coalescing": {"ghost": 2}})
+
+
+def test_dynamic_coalesced_run_repeats_with_expanded_n():
+    kernel = KernelSpec("coalesced_emit")
+    count_buf = kernel.tensor("count", (1,), "int32")
+    out = kernel.tensor("out", (64,), "int32")
+    n_tiles = kernel.scalar("n_tiles", source=(count_buf, (0,)), range=(1, 64))
+    ready = kernel.event("ready", (1,), 1)
+    kernel.tile("plant", _MarkerTile(), (1, 1, 1)).notify(ready, (0,))
+    kernel.tile("mark", _MarkerTile(), (n_tiles, 16, 1), writes=[out]).wait(ready, (0,))
+
+    build = build_runtime_kernel(kernel, _dynamic_options(attrs={"tile_coalescing": {"mark": 4}}))
+    script = build.module[kernel.name].script()
+    # Four run hook invocations per task with n = n_idx * 4 + step.
+    assert script.count("T.cuda.thread_fence()") == 1 + 4
+    # The push count carries the divided extent.
+    assert "count * 4" in script
+
+
+def test_dynamic_escape_hatch_declares_push_rule():
+    kernel = KernelSpec("hatched")
+    count_buf = kernel.tensor("count", (1,), "int32")
+    out = kernel.tensor("out", (64,), "int32")
+    n_tiles = kernel.scalar("n_tiles", source=(count_buf, (0,)), range=(1, 64))
+    ready = kernel.event("ready", (1,), 1)
+    kernel.tile("plant", _MarkerTile(), (1, 1, 1)).notify(ready, (0,))
+    kernel.tile(
+        "mark",
+        _MarkerTile(),
+        (n_tiles, 1, 1),
+        writes=[out],
+        attrs={
+            "megakernel.dispatch": {
+                "source": "plant",
+                "count": n_tiles,
+                "indices": lambda push_idx, m, n, k: (push_idx, 0, 0),
+                "pre_scope": ("warp", 0),
+                "push_level": "warp",
+            }
+        },
+    ).wait(ready, (0,))
+
+    plan = _dynamic_plan(kernel)
+    (rule,) = plan.dispatch_rules.values()
+    assert rule.custom_count is not None
+    assert rule.custom_indices is not None
+    assert rule.pre_scope == ("warp", 0)
+    assert rule.push_level == "warp"
+    build = build_runtime_kernel(kernel, _dynamic_options())
+    assert build.event_workspace_size == 2
+
+
+@pytest.mark.parametrize(
+    "spec,error",
+    [
+        ({"ghost": 1, "source": "plant", "count": 1, "indices": (0, 0, 0)}, "unknown keys"),
+        ({"count": 1, "indices": (0, 0, 0)}, "requires key 'source'"),
+        ({"source": "ghost", "count": 1, "indices": (0, 0, 0)}, "unknown source"),
+        (
+            {"source": "plant", "count": 1, "indices": (0, 0, 0), "event": "ghost"},
+            "unknown event",
+        ),
+        (
+            {"source": "plant", "count": 1, "indices": (0, 0, 0), "pre_scope": ("warp",)},
+            "pre_scope",
+        ),
+        (
+            {
+                "source": "plant",
+                "count": 1,
+                "indices": (0, 0, 0),
+                "pre_scope": ("warp", 0),
+                "push_level": "cta",
+            },
+            "cannot push at",
+        ),
+    ],
+)
+def test_dynamic_escape_hatch_validation(spec, error):
+    kernel = KernelSpec("bad_hatch")
+    kernel.tensor("t", (4,), "float32")
+    ready = kernel.event("ready", (1,), 1)
+    kernel.tile("plant", _MarkerTile(), (1, 1, 1)).notify(ready, (0,))
+    kernel.tile("mark", _MarkerTile(), (1, 1, 1), attrs={"megakernel.dispatch": spec}).wait(
+        ready, (0,)
+    )
+
+    with pytest.raises((TypeError, ValueError), match=error):
+        _dynamic_plan(kernel)
+
+
+def test_dynamic_drain_writer_selection():
+    # Host-planted scalar: the terminal tile's pusher initializes the drain.
+    plan = _dynamic_plan(_dynamic_spec())
+    assert plan.drain.writer.name == "plant"
+
+    # Produced scalar: the producing tile initializes the drain.
+    kernel = KernelSpec("produced_scalar")
+    count_buf = kernel.tensor("count", (1,), "int32")
+    out = kernel.tensor("out", (64,), "int32")
+    n_tiles = kernel.scalar("n_tiles", source=(count_buf, (0,)), range=(1, 64))
+    ready = kernel.event("ready", (1,), 1)
+    ready2 = kernel.event("ready2", (1,), 1)
+    kernel.tile("plant", _MarkerTile(), (1, 1, 1)).notify(ready, (0,))
+    kernel.tile("mid", _MarkerTile(), (1, 1, 1), writes=[count_buf]).wait(ready, (0,)).notify(
+        ready2, (0,)
+    )
+    kernel.tile("mark", _MarkerTile(), (n_tiles, 1, 1), writes=[out]).wait(ready2, (0,))
+
+    plan = _dynamic_plan(kernel)
+    assert plan.drain.writer.name == "mid"
+
+
+def test_dynamic_var_only_drain_uses_seed_init():
+    kernel = KernelSpec("var_drain")
+    rows = kernel.var("rows", "int32", range=(1, 16))
+    kernel.tensor("t", (rows,), "float32")
+    ready = kernel.event("ready", (1,), 2)
+    kernel.tile("plant", _MarkerTile(), (2, 1, 1)).notify(ready, (0,))
+    kernel.tile("mark", _MarkerTile(), (rows, 1, 1)).wait(ready, (0,))
+
+    build = build_runtime_kernel(kernel, _dynamic_options())
+    (drain,) = build.drain_events
+    assert drain.static_count is None
+    assert not drain.runtime_initialized
+    # Two etensors (user event + drain) plus the two plant tasks.
+    assert len(build.central_tasks) == 2 + 2
+    script = build.module[kernel.name].script()
+    assert "65537" in script
+
+
+def test_dynamic_static_terminal_drain():
+    kernel = _chain_kernel("static_terminal")
+    build = build_runtime_kernel(kernel, _dynamic_options())
+    (drain,) = build.drain_events
+    assert drain.static_count == 2
+    assert not drain.runtime_initialized
+    # Three etensors (ready, done, drain) plus two producer tasks.
+    assert len(build.central_tasks) == 3 + 2
+
+
+def test_dynamic_scalar_expr_lowering():
+    kernel = _dynamic_spec()
+    options = _resolve_options(_dynamic_options())
+    plan = _prepare_dynamic_plan(kernel, options, _hardware_from_options(options))
+    builder = _RuntimeDynamicKernelBuilder(plan, _hardware_from_options(options))
+    n_tiles = next(iter(kernel.scalars.values()))
+    loads = []
+
+    def scalar_load(scalar):
+        loads.append(scalar.name)
+        return 7
+
+    value = _lower_runtime_expr(n_tiles * 12 + 1, {}, scalar_load, "test")
+    assert value == 7 * 12 + 1
+    assert loads == ["n_tiles"]
+    with pytest.raises(ValueError, match="unbound symbolic variable"):
+        _lower_runtime_expr(kernel.var("ghost", range=(1, 4)) + 1, {}, scalar_load, "test")
+    del builder
 
 
 # ---------------------------------------------------------------------------
@@ -432,3 +882,19 @@ def test_demo_two_stage_reduce_gpu(m):
 
     report = run_two_stage_reduce(m=m)
     assert report["max_abs_err"] < 1e-3
+
+
+def test_demo_dynamic_count_gpu():
+    _require_cuda_sm100()
+    from tvm.megakernel.demo.runner import run_dynamic_count
+
+    report = run_dynamic_count(counts=(1, 8, 37, 64))
+    assert all(check["ok"] for check in report["checks"])
+
+
+def test_demo_dynamic_count_gpu_profiler():
+    _require_cuda_sm100()
+    from tvm.megakernel.demo.runner import run_dynamic_count
+
+    report = run_dynamic_count(counts=(8,), profiler_on=True)
+    assert all(check["ok"] for check in report["checks"])
