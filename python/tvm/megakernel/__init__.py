@@ -14,7 +14,12 @@
 # KIND, either express or implied.  See the License for the
 # specific language governing permissions and limitations
 # under the License.
-"""Logical megakernel specifications and static TIRX lowering."""
+"""Logical megakernel specifications and static TIRX lowering.
+
+The parser-style runtime building blocks for megakernel emission live in the
+``tvm.megakernel.runtime`` subpackage (imported as a package, not re-exported
+here).
+"""
 
 from .transform import (
     LoweringOptions,
