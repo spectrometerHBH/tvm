@@ -209,8 +209,9 @@ Forbidden contexts, rejected by validation:
 Tiles whose `tile_num` depends on a runtime scalar cannot be pre-enumerated
 on the host.  The dynamic scheduler dispatches them at kernel runtime (see
 *Dynamic scheduling* below); the static scheduler enumerates the grid at the
-scalar upper bound and requires the tile to gate execution with a declared
-`megakernel.run_predicate` attr.  Validation degrades gracefully around
+scalar upper bound and gates each scalar-dependent axis on its runtime
+extent (auto-generated, or verified against a declared
+`megakernel.run_predicate` attr).  Validation degrades gracefully around
 runtime scalars: instance-enumeration proofs (event counts, static region
 bounds, disjoint writers, event-coordinate ordering) are skipped for tiles
 and events that depend on them, and tensor dataflow through them is checked
@@ -614,9 +615,12 @@ notifies twice: a *pre-notify* (−1) at the start of its dispatch branch and a
 completion *notify* (−base) after its run.  The pre-notify that observes
 `old % base == 1` is the last one for the cell and *triggers the push* of the
 downstream tile's tasks, so the scheduler is fed before the pushed work
-exists (this is what keeps the persistent workers deadlock-free).  Event
-cells are written by the init tasks with a plain store, and racing
-pre-notifies spin until the store lands, so initialization order is safe.
+exists (this is what keeps the persistent workers deadlock-free).  Push rules
+whose count reads a tile-produced runtime scalar move the whole
+pre-notify-and-push after the source's run instead — see *Trigger safety*
+below.  Event cells are written by the init tasks with a plain store, and
+racing pre-notifies spin until the store lands, so initialization order is
+safe.
 
 ### Dispatch synthesis
 
@@ -646,9 +650,32 @@ For each dispatched tile the rule is derived mechanically:
   `(push_idx // 12, push_idx % 12, 0)`-style maps.
 - **Push count**: the product of the free axes' extents, evaluated at kernel
   runtime — extents may load runtime scalars from their source buffers.
-- **Scalar ancestry**: every runtime scalar in the count must be host-planted
-  or produced by the pusher or one of its event-DAG ancestors, so the value
-  is written before the push can fire.
+- **Trigger safety**: when the push count is scalar-free or every scalar is
+  host-planted (written before launch), the push keeps its default
+  start-of-task placement.  When any scalar in the count is tile-produced,
+  the whole pre-notify-and-push moves after the source's run: the full-count
+  trigger (last post-run pre-notify) then fires only once every source run
+  is complete — for a strictly-upstream producer, a source run completes
+  only after the producer's event chain drained (so the write is visible),
+  and a self-produced scalar is covered by the same placement.  The
+  scheduler's start-position trigger cannot observe completions, so the
+  post-run placement is the only provably safe form; it is an intentional
+  divergence from the hand-written kernels' start-of-task push.  The
+  upstream case additionally requires the pusher's scheduled grid to fit
+  `sm_count`.  Anything else (producer not upstream, oversized pusher grid,
+  ambiguous producers) is a build error.
+
+### Scalar-dynamic event cardinality
+
+Spec validation skips event-count proofs for events touched by scalar-grid
+tiles, so the dynamic builder re-proves them at tile-index granularity: for
+every event produced or consumed by a scalar-grid tile, each producer's
+notify coord map must be analyzable and the per-coord notification count
+(the product of the producer axes the coord map does not reference) must be
+statically known and equal to the event's `init_count` — e.g. a
+`(routed_rows, 12, 1)` grid notifying at `(m,)` provides a provable 12 per
+cell, while runtime-count instances all notifying one coordinate are
+rejected.  Declared drain events are consistent by construction.
 
 ### Drain synthesis and kernel termination
 
@@ -678,17 +705,25 @@ n extent divisible by `q`.
 
 - `tile.attrs["megakernel.dispatch"]`: explicit push rule (escape hatch)
   overriding synthesis.  A dict with required `source` (pusher tile name),
-  `count` (int/ExprLike or `callable(m, n, k)`), and `indices`
-  (`callable(push_idx, m, n, k) -> (m, n, k)`); optional `event` (default:
-  the tile's single waited event), `pre_scope` (default: the source impl's
-  `pre_notify_scope`), and `push_level` (default: the pre-notify scope).
-  Validation rejects unknown/missing keys, unknown tiles/events, an event
-  the tile does not wait on, malformed scopes, and a `push_level` wider than
-  the pre-notify scope.
+  `count` (int/ExprLike or an analyzable `callable(m, n, k)`), and `indices`
+  (`callable(push_idx, m, n, k) -> (m, n, k)` or a 3-tuple); optional
+  `event` (default: the tile's single waited event), `pre_scope` (default:
+  the source impl's `pre_notify_scope`), and `push_level` (default: the
+  pre-notify scope).  Validation rejects unknown/missing keys, unknown
+  tiles/events, an event the tile does not wait on, malformed scopes, a
+  `push_level` wider than the pre-notify scope, and unanalyzable
+  count/indices.  The hatch does not bypass the proofs: the declared count
+  needs a static upper bound (used by the capacity proof as
+  source-grid × count), and a terminal reached through a hatch has its drain
+  count derived as source-grid × declared-count (a runtime-scalar terminal
+  `tile_num` combined with a hatch is rejected as underivable).
 - `tile.attrs["megakernel.run_predicate"]`: `(axis, op, expr)` with `op`
-  currently always `"lt"`; legalizes a *static* scalar grid by gating the
-  tile's run to instances with `indices[axis] < expr` while the host queue
-  enumerates the scalar upper bound.
+  currently always `"lt"`; gates the tile's run to instances with
+  `indices[axis] < expr` while the host queue enumerates the scalar upper
+  bound.  The declaration must name a scalar-dependent `tile_num` axis and
+  repeat that axis's extent expression (gating on the runtime extent, not a
+  static bound); without a declaration the builder generates one guard per
+  scalar-dependent axis.
 - `event.attrs["megakernel.drain"]`: marks a spec-declared drain event
   (shape `(1,)`, no wait/notify edges); see *Drain synthesis*.
 - `tile.attrs["megakernel.job_id"]`: pins the tile's physical job id (a

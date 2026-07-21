@@ -21,6 +21,7 @@ structure of the runtime-built static kernel, host-side central-queue
 derivation, and ``LoweringOptions.scheduler`` routing.
 """
 
+import re
 from enum import Enum
 from typing import ClassVar
 
@@ -211,14 +212,18 @@ def test_runtime_build_rejects_unsupported_wait_level():
         build_runtime_kernel(kernel, _static_options())
 
 
-def test_runtime_build_keeps_the_runtime_scalar_guard():
+def test_runtime_build_auto_generates_the_scalar_grid_guard():
     kernel = KernelSpec("scalar_grid")
     counter = kernel.tensor("counter", (1,), "int32")
+    out = kernel.tensor("out", (128,), "int32")
     routed = kernel.scalar("routed_rows", source=(counter, (0,)), range=(1, 128))
-    kernel.tile("stage", _MarkerTile(), (routed, 1, 1))
+    kernel.tile("stage", _MarkerTile(), (routed, 1, 1), writes=[out])
 
-    with pytest.raises(ValueError, match="runtime scalar"):
-        build_runtime_kernel(kernel, _static_options())
+    # No declared predicate: the static builder gates on the runtime extent.
+    build = build_runtime_kernel(kernel, _static_options())
+    func = build.module[kernel.name]
+    assert isinstance(func, tvm.tirx.PrimFunc)
+    assert "counter" in func.script()  # the guard loads the scalar buffer
 
 
 def test_runtime_build_callable_init_count():
@@ -740,20 +745,19 @@ def test_dynamic_coalesced_run_repeats_with_expanded_n():
 
 def test_dynamic_escape_hatch_declares_push_rule():
     kernel = KernelSpec("hatched")
-    count_buf = kernel.tensor("count", (1,), "int32")
+    kernel.tensor("count", (1,), "int32")
     out = kernel.tensor("out", (64,), "int32")
-    n_tiles = kernel.scalar("n_tiles", source=(count_buf, (0,)), range=(1, 64))
     ready = kernel.event("ready", (1,), 1)
     kernel.tile("plant", _MarkerTile(), (1, 1, 1)).notify(ready, (0,))
     kernel.tile(
         "mark",
         _MarkerTile(),
-        (n_tiles, 1, 1),
+        (8, 1, 1),
         writes=[out],
         attrs={
             "megakernel.dispatch": {
                 "source": "plant",
-                "count": n_tiles,
+                "count": 8,
                 "indices": lambda push_idx, m, n, k: (push_idx, 0, 0),
                 "pre_scope": ("warp", 0),
                 "push_level": "warp",
@@ -767,6 +771,7 @@ def test_dynamic_escape_hatch_declares_push_rule():
     assert rule.custom_indices is not None
     assert rule.pre_scope == ("warp", 0)
     assert rule.push_level == "warp"
+    assert rule.count_upper == 8
     build = build_runtime_kernel(kernel, _dynamic_options())
     assert build.event_workspace_size == 2
 
@@ -1177,6 +1182,273 @@ def test_emit_profiler_param_keeps_signature_without_profiler():
 
 
 # ---------------------------------------------------------------------------
+# Review findings: F1 scalar-driven push trigger tightening
+# ---------------------------------------------------------------------------
+
+
+def _case_a_spec(name="case_a", pusher_grid=1):
+    """entry -> writer (produces scalar) -> pusher -> mark (scalar grid)."""
+
+    kernel = KernelSpec(name)
+    count_buf = kernel.tensor("count", (1,), "int32")
+    out = kernel.tensor("out", (64,), "int32")
+    n_tiles = kernel.scalar("n_tiles", source=(count_buf, (0,)), range=(1, 64))
+    event_a = kernel.event("event_a", (1,), 1)
+    event_b = kernel.event("event_b", (1,), 1)
+    event_c = kernel.event("event_c", (1,), pusher_grid)
+    kernel.tile("entry", _MarkerTile(), (1, 1, 1)).notify(event_a, (0,))
+    kernel.tile("writer", _MarkerTile(), (1, 1, 1), writes=[count_buf]).wait(event_a, (0,)).notify(
+        event_b, (0,)
+    )
+    kernel.tile("pusher", _MarkerTile(), (pusher_grid, 1, 1)).wait(event_b, (0,)).notify(
+        event_c, (0,)
+    )
+    kernel.tile("mark", _MarkerTile(), (n_tiles, 1, 1), writes=[out]).wait(event_c, (0,))
+    return kernel
+
+
+def test_f1_scalar_free_push_keeps_started_trigger():
+    plan = _dynamic_plan(_dynamic_spec(scoped=False))
+    (rule,) = plan.dispatch_rules.values()
+    assert rule.trigger == "started"
+    assert not rule.post_run
+    build = build_runtime_kernel(_dynamic_spec(scoped=False), _dynamic_options())
+    script = build.module["dynamic_mark"].script()
+    assert "% 65536 == 1" in script
+    assert "% 65536 == 0" not in script
+
+
+def test_f1_upstream_scalar_push_moves_post_run():
+    plan = _dynamic_plan(_case_a_spec())
+    rule = next(rule for rule in plan.dispatch_rules.values() if rule.target.name == "mark")
+    assert rule.source.name == "pusher"
+    assert rule.post_run
+    assert rule.trigger == "started"
+    build = build_runtime_kernel(_case_a_spec(), _dynamic_options())
+    script = build.module["case_a"].script()
+    # The pusher's push (trigger check) lands after its own run marker, and
+    # the trigger keeps the production full-count form.
+    assert "% 65536 == 0" not in script
+    fences = [match.start() for match in re.finditer(re.escape("T.cuda.thread_fence()"), script)]
+    triggers = [match.start() for match in re.finditer(re.escape("% 65536 == 1"), script)]
+    assert len(triggers) == 4  # entry, writer, pusher (post-run), drain
+    assert triggers[0] < fences[0]  # entry's push stays at task start
+    assert fences[2] < triggers[2]  # the scalar-bearing push moved post-run
+
+
+def test_f1_oversized_pusher_grid_rejected():
+    with pytest.raises(ValueError, match="fit the persistent workers"):
+        _dynamic_plan(_case_a_spec("case_a_big", pusher_grid=200))
+
+
+def test_f1_self_produced_scalar_moves_push_post_run():
+    kernel = KernelSpec("case_b_post_run")
+    count_buf = kernel.tensor("count", (1,), "int32")
+    out = kernel.tensor("out", (64,), "int32")
+    n_tiles = kernel.scalar("n_tiles", source=(count_buf, (0,)), range=(1, 64))
+    ready = kernel.event("ready", (1,), 1)
+    kernel.tile("writer", _MarkerTile(), (1, 1, 1), writes=[count_buf]).notify(ready, (0,))
+    kernel.tile("mark", _MarkerTile(), (n_tiles, 1, 1), writes=[out]).wait(ready, (0,))
+
+    plan = _dynamic_plan(kernel)
+    (rule,) = plan.dispatch_rules.values()
+    assert rule.post_run
+    assert rule.trigger == "started"
+
+    build = build_runtime_kernel(kernel, _dynamic_options())
+    script = build.module["case_b_post_run"].script()
+    # The push (trigger check) lands after the pusher's run marker.
+    assert script.index("T.cuda.thread_fence()") < script.index("% 65536 == 1")
+
+
+def test_f1_racy_review_example_rejected_or_provably_safe():
+    # The review's racy shape: a runtime-count producer whose instances all
+    # notify one coordinate with init_count 1 — rejected (F3 cardinality).
+    kernel = KernelSpec("racy")
+    count_buf = kernel.tensor("count", (1,), "int32")
+    count2 = kernel.tensor("count2", (1,), "int32")
+    out = kernel.tensor("out", (64,), "int32")
+    n_prod = kernel.scalar("n_prod", source=(count2, (0,)), range=(1, 4))
+    n_tiles = kernel.scalar("n_tiles", source=(count_buf, (0,)), range=(1, 64))
+    ev0 = kernel.event("ev0", (1,), 1)
+    ready = kernel.event("ready", (1,), 1)
+    kernel.tile("entry", _MarkerTile(), (1, 1, 1)).notify(ev0, (0,))
+    kernel.tile("producer", _MarkerTile(), (n_prod, 1, 1), writes=[count_buf]).wait(
+        ev0, (0,)
+    ).notify(ready, (0,))
+    kernel.tile("mark", _MarkerTile(), (n_tiles, 1, 1), writes=[out]).wait(ready, (0,))
+    with pytest.raises(ValueError, match="statically provable"):
+        _dynamic_plan(kernel)
+
+    # The provably-safe variant (injective coords + upstream producer with a
+    # fitting pusher grid) builds with the post-run push placement.
+    build = build_runtime_kernel(_case_a_spec("racy_safe"), _dynamic_options())
+    assert "% 65536 == 0" not in build.module["racy_safe"].script()
+
+
+# ---------------------------------------------------------------------------
+# Review findings: F3 scalar-dynamic event cardinality
+# ---------------------------------------------------------------------------
+
+
+def test_f3_rejects_unprovable_per_coord_cardinality():
+    kernel = KernelSpec("bad_cardinality")
+    count_buf = kernel.tensor("count", (1,), "int32")
+    out = kernel.tensor("out", (64,), "int32")
+    n_prod = kernel.scalar("n_prod", source=(count_buf, (0,)), range=(1, 4))
+    n_tiles = kernel.scalar("n_tiles", source=(count_buf, (0,)), range=(1, 64))
+    ev0 = kernel.event("ev0", (1,), 1)
+    ready = kernel.event("ready", (1,), 1)
+    kernel.tile("entry", _MarkerTile(), (1, 1, 1)).notify(ev0, (0,))
+    kernel.tile("producer", _MarkerTile(), (n_prod, 1, 1), writes=[count_buf]).wait(
+        ev0, (0,)
+    ).notify(ready, (0,))
+    kernel.tile("mark", _MarkerTile(), (n_tiles, 1, 1), writes=[out]).wait(ready, (0,))
+
+    with pytest.raises(ValueError, match="statically provable"):
+        _dynamic_plan(kernel)
+
+
+def test_f3_rejects_non_integer_init_count_on_touched_event():
+    kernel = KernelSpec("callable_count_dynamic")
+    count_buf = kernel.tensor("count", (1,), "int32")
+    out = kernel.tensor("out", (64,), "int32")
+    n_tiles = kernel.scalar("n_tiles", source=(count_buf, (0,)), range=(1, 64))
+    ready = kernel.event("ready", (2,), lambda coord: 1)
+    kernel.tile("plant", _MarkerTile(), (2, 1, 1)).notify(ready, lambda m, n, k: (m,))
+    kernel.tile("mark", _MarkerTile(), (n_tiles, 1, 1), writes=[out]).wait(
+        ready, lambda m, n, k: (0,)
+    )
+
+    with pytest.raises(ValueError, match="plain integer"):
+        _dynamic_plan(kernel)
+
+
+def test_f3_moe_style_injective_maps_pass():
+    # gate_up-style: scalar grid (routed, 12, 1), coord (m,), 12 per cell.
+    kernel = KernelSpec("moe_style")
+    count_buf = kernel.tensor("count", (1,), "int32")
+    out = kernel.tensor("out", (64,), "int32")
+    n_tiles = kernel.scalar("n_tiles", source=(count_buf, (0,)), range=(1, 64))
+    ready = kernel.event("ready", (1,), 1)
+    gate_done = kernel.event("gate_done", (64,), 12)
+    kernel.tile("plant", _MarkerTile(), (1, 1, 1)).notify(ready, (0,))
+    kernel.tile("gate_up", _MarkerTile(), (n_tiles, 12, 1)).wait(ready, (0,)).notify(
+        gate_done, lambda m, n, k: (m,)
+    )
+    kernel.tile("down", _MarkerTile(), (n_tiles, 1, 1), writes=[out]).wait(
+        gate_done, lambda m, n, k: (m,)
+    )
+
+    plan = _dynamic_plan(kernel)
+    assert len(plan.dispatch_rules) == 2
+
+
+# ---------------------------------------------------------------------------
+# Review findings: F4 static scalar-grid run predicates
+# ---------------------------------------------------------------------------
+
+
+def test_f4_declared_predicate_must_match_scalar_axis_and_extent():
+    with pytest.raises(ValueError, match="not a scalar-dependent tile_num axis"):
+        build_runtime_kernel(_scalar_static_spec(predicate=(1, "lt", 1)), _static_options())
+    with pytest.raises(ValueError, match="does not match the axis's extent expression"):
+        build_runtime_kernel(_scalar_static_spec(predicate=(0, "lt", 1)), _static_options())
+
+
+def test_f4_correct_declaration_accepted():
+    build = build_runtime_kernel(_scalar_static_spec(), _static_options())
+    assert isinstance(build.module["scalar_static"], tvm.tirx.PrimFunc)
+
+
+# ---------------------------------------------------------------------------
+# Review findings: F5 escape hatch capacity and drain proofs
+# ---------------------------------------------------------------------------
+
+
+def _hatched_spec(name, *, count, tile_num=(8, 1, 1), source_grid=(1, 1, 1), scalar_range=(1, 64)):
+    kernel = KernelSpec(name)
+    count_buf = kernel.tensor("count", (1,), "int32")
+    out = kernel.tensor("out", (64,), "int32")
+    n_tiles = kernel.scalar("n_tiles", source=(count_buf, (0,)), range=scalar_range)
+    ready = kernel.event("ready", (1,), 1)
+    kernel.tile("plant", _MarkerTile(), source_grid).notify(ready, (0,))
+    kernel.tile(
+        "mark",
+        _MarkerTile(),
+        tile_num,
+        writes=[out],
+        attrs={
+            "megakernel.dispatch": {
+                "source": "plant",
+                "count": count(n_tiles) if callable(count) else count,
+                "indices": (0, 0, 0),
+            }
+        },
+    ).wait(ready, (0,))
+    return kernel
+
+
+def test_f5_rejects_unbounded_hatch_count():
+    kernel = _hatched_spec(
+        "unbounded_hatch",
+        count=lambda n_tiles: n_tiles,
+        scalar_range=None,
+    )
+    # A scalar without a range cannot prove a static count upper bound.
+    with pytest.raises(ValueError, match="upper bound"):
+        _dynamic_plan(kernel)
+
+
+def test_f5_capacity_uses_declared_count_bound():
+    # Source grid 200 x declared count 1000 -> 200000 enqueues, far beyond
+    # the target's tile_num volume; the capacity proof must use the declared
+    # bound and reject.
+    kernel = _hatched_spec(
+        "capacity_hatch",
+        count=1000,
+        tile_num=(8, 1, 1),
+        source_grid=(200, 1, 1),
+    )
+    with pytest.raises(ValueError, match="capacity"):
+        _dynamic_plan(kernel)
+
+
+def test_f5_rejects_drain_mismatch_for_scalar_terminal():
+    kernel = KernelSpec("drain_mismatch")
+    count_buf = kernel.tensor("count", (1,), "int32")
+    out = kernel.tensor("out", (64,), "int32")
+    n_tiles = kernel.scalar("n_tiles", source=(count_buf, (0,)), range=(1, 64))
+    ready = kernel.event("ready", (1,), 1)
+    kernel.tile("plant", _MarkerTile(), (1, 1, 1)).notify(ready, (0,))
+    kernel.tile(
+        "mark",
+        _MarkerTile(),
+        (n_tiles, 1, 1),
+        writes=[out],
+        attrs={
+            "megakernel.dispatch": {
+                "source": "plant",
+                "count": n_tiles,
+                "indices": (0, 0, 0),
+            }
+        },
+    ).wait(ready, (0,))
+    with pytest.raises(ValueError, match="underivable"):
+        _dynamic_plan(kernel)
+
+
+def test_f5_scalar_count_hatch_with_static_terminal_builds():
+    kernel = _hatched_spec("good_hatch", count=lambda n_tiles: n_tiles)
+    plan = _dynamic_plan(kernel)
+    (rule,) = plan.dispatch_rules.values()
+    assert rule.count_upper == 64
+    build = build_runtime_kernel(kernel, _dynamic_options())
+    (drain,) = build.drain_events
+    assert drain.runtime_initialized
+
+
+# ---------------------------------------------------------------------------
 # GPU numerical gate
 # ---------------------------------------------------------------------------
 
@@ -1216,4 +1488,24 @@ def test_demo_dynamic_count_gpu_profiler():
     from tvm.megakernel.demo.runner import run_dynamic_count
 
     report = run_dynamic_count(counts=(8,), profiler_on=True)
+    assert all(check["ok"] for check in report["checks"])
+
+
+def test_demo_static_count_auto_guard_gpu():
+    _require_cuda_sm100()
+    from tvm.megakernel.demo.runner import run_dynamic_count
+
+    # F4: the static path enumerates the scalar upper bound and the
+    # auto-generated guard gates execution on the runtime count.
+    report = run_dynamic_count(counts=(1, 8, 37, 64), scheduler="static")
+    assert all(check["ok"] for check in report["checks"])
+
+
+def test_demo_case_b_post_run_push_gpu():
+    _require_cuda_sm100()
+    from tvm.megakernel.demo.runner import run_case_b
+
+    # F1 case B: the pusher tile itself computes the dispatch count on
+    # device; the push must land after its run.
+    report = run_case_b(in_pairs=((3, 5), (20, 17), (1, 0), (63, 1)))
     assert all(check["ok"] for check in report["checks"])

@@ -1280,8 +1280,10 @@ def test_scalar_in_tile_num_accepted_and_static_build_rejected():
     kernel.tile("producer", RecordingTile(), (routed, 1, 1)).notify(ready, lambda m, n, k: (m,))
     kernel.tile("consumer", RecordingTile(), (routed, 1, 1)).wait(ready, lambda m, n, k: (m,))
     assert kernel.validate() is kernel
-    with pytest.raises(ValueError, match="dynamic dispatch"):
-        lower_to_tirx(kernel)
+    # The static builder enumerates the scalar upper bound and auto-generates
+    # the per-axis run guards; undeclared scalar grids lower successfully.
+    script = lower_to_tirx(kernel).script()
+    assert "num_tokens_post_pad" in script
 
     # Static event-count proofs do not apply to runtime-scalar grids: a count
     # that would fail static enumeration is accepted for dynamic dispatch.

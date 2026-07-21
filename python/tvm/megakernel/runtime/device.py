@@ -119,7 +119,6 @@ def atomic_add_int32(addr, value, pe, release=False):
         else:
             return atomic_add_int32_local(addr, value)
     else:
-        print(f"pe is not -1: {pe}, {type(pe)}")
         return atomic_add_int32_remote(addr, value, pe)
 
 
@@ -143,21 +142,21 @@ __forceinline__ __device__ void stg_remote(int32_t v, void* dst_addr, int32_t pe
     return T.cuda.func_call("stg_remote", v, dst_addr, pe, source_code=func)
 
 
-def stg_local(v, dst_addr, pe):
+def stg_local(v, dst_addr):
     func = """
-    __forceinline__ __device__ void stg_local(int32_t v, void* dst_addr, int32_t pe) {
+    __forceinline__ __device__ void stg_local(int32_t v, void* dst_addr) {
         asm volatile("st.global.release.gpu.b32 [%0], %1;"
                     :
                     : "l"(dst_addr), "r"(v)
                     : "memory");
     }
     """
-    return T.cuda.func_call("stg_local", v, dst_addr, pe, source_code=func)
+    return T.cuda.func_call("stg_local", v, dst_addr, source_code=func)
 
 
 def stg(v, dst_addr, pe):
     if is_const_minus_one(pe):
-        return stg_local(v, dst_addr, pe)
+        return stg_local(v, dst_addr)
     else:
         return stg_remote(v, dst_addr, pe)
 

@@ -84,6 +84,59 @@ def build_dynamic_count_spec(upper=UPPER):
 
 kernel = build_dynamic_count_spec()
 
+
+class WriteCountTile(TileImpl):
+    """Compute the dispatch count from input data at kernel runtime."""
+
+    def __init__(self, in_vals, count):
+        super().__init__()
+        self.in_vals = in_vals
+        self.count = count
+
+    def run(self, m_idx, n_idx, k_idx):
+        T.buffer_store(self.count, self.in_vals[0] + self.in_vals[1], [0])
+
+
+def build_case_b_spec(upper=UPPER):
+    """Case-B demo: the pusher tile itself produces the dispatch count.
+
+    The writer tile computes ``count[0]`` from ``in_vals`` during its run and
+    pushes the scalar-grid ``mark`` tile; the builder must move the push after
+    the writer's run (the trigger then implies the write is complete).
+    """
+
+    kernel = KernelSpec(
+        "dynamic_case_b",
+        attrs={
+            "source": "count[0] = in_vals[0] + in_vals[1]; out[m] = m + 1 for m < count[0]",
+        },
+    )
+    in_vals = kernel.tensor("in_vals", (2,), "int32")
+    count_buf = kernel.tensor("count", (1,), "int32")
+    out = kernel.tensor("out", (upper,), "int32")
+    n_tiles = kernel.scalar("n_tiles", source=(count_buf, (0,)), range=(1, upper))
+    ready = kernel.event(
+        "ready",
+        shape=(1,),
+        init_count=1,
+        attrs={"meaning": "the writer task has published the count"},
+    )
+    kernel.tile(
+        name="writer",
+        impl=WriteCountTile(in_vals, count_buf),
+        tile_num=(1, 1, 1),
+        reads=[in_vals],
+        writes=[count_buf],
+    ).notify(ready, coord_map=lambda m, n, k: (0,))
+    kernel.tile(
+        name="mark",
+        impl=MarkTile(out),
+        tile_num=(n_tiles, 1, 1),
+        writes=[out],
+    ).wait(ready, coord_map=lambda m, n, k: (0,))
+    return kernel
+
+
 # Verify the spec and build the dynamic kernel from the runtime-library
 # builder; the host-side MPMC seed arrays come from build_runtime_kernel.
 if __name__ == "__main__":
