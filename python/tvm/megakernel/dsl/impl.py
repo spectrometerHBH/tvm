@@ -100,14 +100,32 @@ class TileImpl(ABC):
     - ``notify_scope``: ``(scope, scope_id)`` pair at which the tile signals
       events; ``scope`` uses the same legal values as ``wait_level`` and
       ``scope_id`` is a non-negative integer.
+    - ``pre_notify_scope``: optional ``(scope, scope_id)`` pair for the
+      dynamic scheduler's pre-notify-and-push step; ``None`` (the default)
+      reuses ``notify_scope``.  Production kernels hand-tune this separately
+      from the completion notify (e.g. pre-notify at warp scope, post notify
+      at warpgroup scope).
+    - ``notify_release``: whether the tile's completion notifies use a
+      release-fenced atomic.  The builder default (``True``) is the
+      conservative choice; production kernels that prove ordering through
+      scope-level syncs and acquire-side waits declare ``False``.
 
-    The defaults (``"cta"``, full mask, ``("cta", 0)``) match the reference
-    static backend, so existing implementations need no changes.
+    The defaults (``"cta"``, full mask, ``("cta", 0)``, ``None``, ``True``)
+    match the reference static backend, so existing implementations need no
+    changes.
+
+    A tile may also set ``class_group`` to a class other than its own when
+    several implementations share class-level resources (the runtime wrapper
+    runs the class init/finalize hooks once per ``class_group``); ``None``
+    groups by the implementation class itself.
     """
 
     wait_level: ClassVar[str] = "cta"
     wait_mask: ClassVar[int] = 0xFFFFFFFF
     notify_scope: ClassVar[tuple[str, int]] = ("cta", 0)
+    pre_notify_scope: ClassVar[tuple[str, int] | None] = None
+    notify_release: ClassVar[bool] = True
+    class_group: ClassVar[type | None] = None
 
     @classmethod
     def class_name(cls):

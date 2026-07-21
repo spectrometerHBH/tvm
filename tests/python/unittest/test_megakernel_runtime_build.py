@@ -458,9 +458,9 @@ def test_dynamic_build_params_and_drain_layout():
         "count_handle",
         "out_handle",
         "event_workspace_handle",
-        "exec_task_handle",
-        "exec_head_handle",
-        "exec_tail_handle",
+        "exec_task",
+        "exec_head",
+        "exec_tail",
     ]
     buffers = [func.buffer_map[param] for param in func.params]
     # One user event cell plus the synthesized drain cell; no completion cell.
@@ -709,9 +709,10 @@ def test_dynamic_coalesced_run_repeats_with_expanded_n():
 
     build = build_runtime_kernel(kernel, _dynamic_options(attrs={"tile_coalescing": {"mark": 4}}))
     script = build.module[kernel.name].script()
-    # Four run hook invocations per task with n = n_idx * 4 + step.
-    assert script.count("T.cuda.thread_fence()") == 1 + 4
-    # The push count carries the divided extent.
+    # One serial run loop per task (the production per-task loop form) with
+    # the run hook inside; the push count carries the divided extent.
+    assert script.count("T.cuda.thread_fence()") == 2
+    assert "in range(4):" in script
     assert "count * 4" in script
 
 
@@ -855,6 +856,302 @@ def test_dynamic_scalar_expr_lowering():
     with pytest.raises(ValueError, match="unbound symbolic variable"):
         _lower_runtime_expr(kernel.var("ghost", range=(1, 4)) + 1, {}, scalar_load, "test")
     del builder
+
+
+# ---------------------------------------------------------------------------
+# Static scalar grids and run predicates
+# ---------------------------------------------------------------------------
+
+
+def _scalar_static_spec(name="scalar_static", predicate="default"):
+    """Scalar-grid static spec; ``predicate`` is "default", None, or an attr value."""
+
+    kernel = KernelSpec(name)
+    counter = kernel.tensor("counter", (1,), "int32")
+    out = kernel.tensor("out", (64,), "int32")
+    routed = kernel.scalar("routed_rows", source=(counter, (0,)), range=(1, 8))
+    ready = kernel.event("ready", (1,), 1)
+    kernel.tile("entry", _MarkerTile(), (1, 1, 1), reads=[counter]).notify(ready, (0,))
+    attrs = {}
+    if predicate == "default":
+        attrs["megakernel.run_predicate"] = (0, "lt", routed)
+    elif predicate is not None:
+        attrs["megakernel.run_predicate"] = predicate
+    kernel.tile("stage", _MarkerTile(), (routed, 1, 1), writes=[out], attrs=attrs).wait(ready, (0,))
+    return kernel
+
+
+def _buffer_load_buffers(func, name):
+    from tvm.tirx import BufferLoad
+    from tvm.tirx.stmt_functor import post_order_visit
+
+    loads = []
+
+    def visit(node):
+        if isinstance(node, BufferLoad) and node.buffer.name == name:
+            loads.append(node)
+
+    post_order_visit(func.body, visit)
+    return loads
+
+
+def test_static_scalar_grid_enumerates_upper_bound_with_run_predicate():
+    build = build_runtime_kernel(_scalar_static_spec(), _static_options())
+    # Two INIT tasks (event + completion), one entry task, one WAIT per SM,
+    # then the stage grid at the scalar upper bound.
+    hardware = HardwareConfig()
+    stage_tasks = [task for task in build.central_tasks if task[3] == 1]
+    assert stage_tasks == [(m_idx, 0, 0, 1) for m_idx in range(8)]
+    assert len(build.central_tasks) == 2 + 1 + hardware.sm_count + 8
+    # The run is guarded by the scalar load comparison; no push synthesis.
+    func = build.module["scalar_static"]
+    assert _buffer_load_buffers(func, "counter")
+    script = func.script()
+    assert script.count("T.cuda.thread_fence()") == 2
+
+
+def test_static_scalar_grid_run_predicate_validation():
+    with pytest.raises(ValueError, match="axis"):
+        build_runtime_kernel(_scalar_static_spec(predicate=(3, "lt", 1)), _static_options())
+    with pytest.raises(ValueError, match="lt"):
+        build_runtime_kernel(_scalar_static_spec(predicate=(0, "gt", 1)), _static_options())
+    with pytest.raises(TypeError, match="expr"):
+        build_runtime_kernel(_scalar_static_spec(predicate=(0, "lt", "x")), _static_options())
+    with pytest.raises(TypeError, match="triple"):
+        build_runtime_kernel(_scalar_static_spec(predicate=(0, "lt")), _static_options())
+
+
+def test_dynamic_builder_emits_vacuous_run_predicate():
+    kernel = KernelSpec("predicate_dynamic")
+    count_buf = kernel.tensor("count", (1,), "int32")
+    out = kernel.tensor("out", (64,), "int32")
+    n_tiles = kernel.scalar("n_tiles", source=(count_buf, (0,)), range=(1, 64))
+    ready = kernel.event("ready", (1,), 1)
+    kernel.tile("plant", _MarkerTile(), (1, 1, 1)).notify(ready, (0,))
+    kernel.tile(
+        "mark",
+        _MarkerTile(),
+        (n_tiles, 1, 1),
+        writes=[out],
+        attrs={"megakernel.run_predicate": (0, "lt", n_tiles)},
+    ).wait(ready, (0,))
+
+    build = build_runtime_kernel(kernel, _dynamic_options())
+    script = build.module[kernel.name].script()
+    # Dynamically dispatched tasks already match the runtime count, so the
+    # guard is emitted in its vacuously-true production form.
+    assert "T.Or(T.bool(True)" in script
+    assert script.count("T.cuda.thread_fence()") == 2
+
+
+# ---------------------------------------------------------------------------
+# Job id pinning and reserved id overrides
+# ---------------------------------------------------------------------------
+
+
+def test_job_id_pinning_and_reserved_id_overrides():
+    kernel = _chain_kernel("pinned_chain")
+    for tile, job_id in zip(kernel.tiles, (18, 19, 20)):
+        tile.attrs["megakernel.job_id"] = job_id
+    build = build_runtime_kernel(
+        kernel,
+        _static_options(attrs={"init_event_job_id": 28, "wait_event_init_job_id": 29}),
+    )
+    assert {task[3] for task in build.central_tasks} == {18, 19, 20, 28, 29}
+    assert build.init_event_job_id == 28
+    assert build.wait_event_init_job_id == 29
+    assert build.end_task_type == 31
+    written_columns = (len(build.central_tasks) + build.sm_count - 1) // build.sm_count + 1
+    packed_types = {
+        unpack_from_32bit_host(int(cell))[0]
+        for cell in build.exec_queue[:, :written_columns].reshape(-1)
+    }
+    assert packed_types == {18, 19, 20, 28, 29, 31}
+
+
+def test_job_id_pinning_validation():
+    kernel = _chain_kernel("duplicate_ids")
+    kernel.tiles[0].attrs["megakernel.job_id"] = 7
+    kernel.tiles[1].attrs["megakernel.job_id"] = 7
+    with pytest.raises(ValueError, match="duplicate"):
+        build_runtime_kernel(kernel, _static_options())
+
+    kernel = _chain_kernel("reserved_collision")
+    kernel.tiles[0].attrs["megakernel.job_id"] = 29
+    with pytest.raises(ValueError, match="reserved"):
+        build_runtime_kernel(kernel, _static_options())
+
+    kernel = _chain_kernel("wide_id")
+    kernel.tiles[0].attrs["megakernel.job_id"] = 32
+    with pytest.raises(ValueError, match="five-bit"):
+        build_runtime_kernel(kernel, _static_options())
+
+    kernel = _chain_kernel("bad_id_type")
+    kernel.tiles[0].attrs["megakernel.job_id"] = "18"
+    with pytest.raises(ValueError, match="non-negative integer"):
+        build_runtime_kernel(kernel, _static_options())
+
+    kernel = _chain_kernel("clashing_reserved")
+    with pytest.raises(ValueError, match="distinct"):
+        build_runtime_kernel(kernel, _static_options(attrs={"init_event_job_id": 31}))
+
+
+def test_dynamic_job_id_pinning_and_reserved_overrides():
+    kernel = _dynamic_spec("pinned_dynamic")
+    kernel.tiles[0].attrs["megakernel.job_id"] = 18
+    kernel.tiles[1].attrs["megakernel.job_id"] = 19
+    build = build_runtime_kernel(
+        kernel, _dynamic_options(attrs={"init_event_job_id": 28, "end_job_id": 30})
+    )
+    assert build.central_tasks == ((0, 0, 0, 28), (1, 0, 0, 28), (0, 0, 0, 18))
+    assert build.init_event_job_id == 28
+    assert build.end_task_type == 30
+    script = build.module[kernel.name].script()
+    assert "task_type: T.int32 = 30" in script
+
+    kernel = _dynamic_spec("dynamic_collision")
+    kernel.tiles[0].attrs["megakernel.job_id"] = 28
+    with pytest.raises(ValueError, match="reserved"):
+        build_runtime_kernel(kernel, _dynamic_options(attrs={"init_event_job_id": 28}))
+
+
+# ---------------------------------------------------------------------------
+# Declared drain events
+# ---------------------------------------------------------------------------
+
+
+def _declared_drain_spec(name="declared_drain", drain_shape=(1,)):
+    kernel = KernelSpec(name)
+    count_buf = kernel.tensor("count", (1,), "int32")
+    out = kernel.tensor("out", (64,), "int32")
+    n_tiles = kernel.scalar("n_tiles", source=(count_buf, (0,)), range=(1, 64))
+    ready = kernel.event("ready", (1,), 1)
+    kernel.event("drain_done", drain_shape, 64, attrs={"megakernel.drain": True})
+    kernel.tile("plant", _MarkerTile(), (1, 1, 1), reads=[count_buf]).notify(ready, (0,))
+    kernel.tile(
+        "mark",
+        _MarkerTile(),
+        (n_tiles, 1, 1),
+        writes=[out],
+        # Needed only by the static build (scalar grid guard); the dynamic
+        # builder ignores it.
+        attrs={"megakernel.run_predicate": (0, "lt", n_tiles)},
+    ).wait(ready, (0,))
+    return kernel
+
+
+def test_dynamic_declared_drain_event_layout():
+    build = build_runtime_kernel(_declared_drain_spec(), _dynamic_options())
+    (drain,) = build.drain_events
+    assert drain.name == "drain_done"
+    assert drain.workspace_offset == 1
+    assert drain.static_count is None
+    assert drain.runtime_initialized
+    # Two etensors (user event + declared drain) plus the single entry task.
+    assert len(build.central_tasks) == 3
+    assert build.event_workspace_size == 2
+    script = build.module["declared_drain"].script()
+    assert "65537 *" in script
+
+
+def test_static_declared_drain_event_is_an_ordinary_event():
+    build = build_runtime_kernel(_declared_drain_spec("declared_static"), _static_options())
+    # ready + drain_done + the completion cell; one INIT task per etensor.
+    assert build.event_workspace_size == 3
+    init_tasks = [task for task in build.central_tasks if task[3] == INIT_EVENT_JOB_ID]
+    assert init_tasks == [(idx, 0, 0, INIT_EVENT_JOB_ID) for idx in range(3)]
+
+
+def test_declared_drain_event_validation():
+    kernel = _declared_drain_spec("two_drains")
+    kernel.events["ready"].attrs["megakernel.drain"] = True
+    with pytest.raises(ValueError, match="at most one"):
+        build_runtime_kernel(kernel, _dynamic_options())
+
+    kernel = _declared_drain_spec("wide_drain", drain_shape=(2,))
+    with pytest.raises(ValueError, match="shape"):
+        build_runtime_kernel(kernel, _dynamic_options())
+
+    kernel = _declared_drain_spec("edged_drain")
+    drain = kernel.events["drain_done"]
+    kernel.tiles[0].notify(drain, (0,))
+    kernel.tiles[1].wait(drain, (0,))
+    with pytest.raises(ValueError, match="must not be"):
+        build_runtime_kernel(kernel, _dynamic_options())
+
+
+# ---------------------------------------------------------------------------
+# Pre-notify scope overrides and class groups
+# ---------------------------------------------------------------------------
+
+
+class _PreScopedTile(_MarkerTile):
+    notify_scope: ClassVar[tuple[str, int]] = ("cta", 0)
+    pre_notify_scope: ClassVar[tuple[str, int] | None] = ("warp", 0)
+
+
+class _GroupedTile(_MarkerTile):
+    class_group: ClassVar[type | None] = _MarkerTile
+
+
+def test_dynamic_pre_notify_scope_override():
+    kernel = KernelSpec("pre_scoped")
+    count_buf = kernel.tensor("count", (1,), "int32")
+    out = kernel.tensor("out", (64,), "int32")
+    n_tiles = kernel.scalar("n_tiles", source=(count_buf, (0,)), range=(1, 64))
+    ready = kernel.event("ready", (1,), 1)
+    kernel.tile("plant", _PreScopedTile(), (1, 1, 1)).notify(ready, (0,))
+    kernel.tile("mark", _MarkerTile(), (n_tiles, 1, 1), writes=[out]).wait(ready, (0,))
+
+    plan = _dynamic_plan(kernel)
+    (rule,) = plan.dispatch_rules.values()
+    # The pre-notify runs at the override scope, not the notify scope.
+    assert rule.pre_scope == ("warp", 0)
+    assert rule.push_level == "warp"
+
+
+def test_pre_notify_scope_metadata_validation():
+    class _BadScopeTile(_MarkerTile):
+        pre_notify_scope: ClassVar[tuple[str, int] | None] = ("socket", 0)
+
+    kernel = _dynamic_spec("bad_pre_scope")
+    kernel.tiles[0].impl = _BadScopeTile()
+    with pytest.raises(ValueError, match="pre_notify_scope scope"):
+        kernel.validate()
+
+    class _BadScopeIdTile(_MarkerTile):
+        pre_notify_scope: ClassVar[tuple[str, int] | None] = ("warp", -1)
+
+    kernel = _dynamic_spec("bad_pre_scope_id")
+    kernel.tiles[0].impl = _BadScopeIdTile()
+    with pytest.raises(ValueError, match="pre_notify_scope scope_id"):
+        kernel.validate()
+
+
+def test_wrapper_add_tile_honors_class_group():
+    from tvm.megakernel.runtime import MegaKernelWrapper
+
+    wrapper = MegaKernelWrapper()
+    wrapper._add_tile(_GroupedTile(), None)
+    assert wrapper.class_list == {_MarkerTile}
+    wrapper._add_tile(_DynScopedTile(), None)
+    assert wrapper.class_list == {_MarkerTile, _DynScopedTile}
+
+
+# ---------------------------------------------------------------------------
+# Profiler parameter ABI
+# ---------------------------------------------------------------------------
+
+
+def test_emit_profiler_param_keeps_signature_without_profiler():
+    build = build_runtime_kernel(
+        _chain_kernel("abi_chain"), _static_options(attrs={"emit_profiler_param": True})
+    )
+    assert not build.profiler_on
+    func = build.module["abi_chain"]
+    assert func.params[-1].name == "profiler_buffer_handle"
+    script = func.script()
+    assert "timer_init" not in script
 
 
 # ---------------------------------------------------------------------------

@@ -57,23 +57,47 @@ Dispatch synthesis derives, for each non-entry tile, its pusher from the
 event edge (the single producer of the single event it waits on), the push
 count and ``(m, n, k)`` index map from the tile's ``tile_num`` (with runtime
 scalars lowered to device loads), and the pre-notify scope from the pusher's
-``notify_scope`` metadata.  Wait/notify coord maps must be tuples (or
-callables returning tuples) whose entries are integer constants or bare
-``m``/``n``/``k`` axis references; anything richer needs the escape hatch.
-Exactly one terminal tile (no notifies) is required: a drain event is
-synthesized for it (shape ``(1,)``, after the user events in the workspace,
-no completion cell in dynamic mode), runtime-initialized with
+``pre_notify_scope`` metadata (falling back to ``notify_scope``).  Wait/notify
+coord maps must be tuples (or callables returning tuples) whose entries are
+integer constants or bare ``m``/``n``/``k`` axis references; anything richer
+needs the escape hatch.  Exactly one terminal tile (no notifies) is required:
+a drain event is synthesized for it (shape ``(1,)``, after the user events in
+the workspace, no completion cell in dynamic mode), runtime-initialized with
 ``(base + 1) * grid_count`` by the tile producing the scalar's source tensor
 (or by the terminal tile's pusher when the scalar is host-planted), and its
-last pre-notify pushes one END task per SM.  ``tile_coalescing`` in
-``options.attrs`` maps a tile name to an integer ``q`` grouping ``q`` n-axis
-slices per pushed task (the run hook is repeated with ``n = n_idx * q + i``).
+last pre-notify pushes one END task per SM.  A spec may instead declare the
+drain event itself with ``event.attrs["megakernel.drain"] = True`` (shape
+``(1,)``, no edges): the dynamic builder then runtime-initializes that event
+in place of the synthesized one, and the static builder treats it as an
+ordinary event, so one workspace layout serves both schedulers.
+``tile_coalescing`` in ``options.attrs`` maps a tile name to an integer ``q``:
+the tile's run becomes a serial loop with ``n = n_idx * q + i`` (kept even at
+``q = 1``, mirroring the hand-written per-task loop), and the dynamic grid is
+pre-divided by ``q``.
 
 Escape hatch: a tile may declare its push rule explicitly with
 ``tile.attrs["megakernel.dispatch"] = {...}``; see ``_ESCAPE_HATCH_KEY`` for
 the schema.  The dynamic persistent queue also requires the tile-level event
 dependency graph to be acyclic (persistent workers block on waits), matching
 the production policy check.
+
+Static grids over runtime scalars
+---------------------------------
+The static builder accepts a ``tile_num`` that depends on a runtime scalar
+only when the tile declares ``tile.attrs["megakernel.run_predicate"] =
+(axis, "lt", expr)``: the host central queue is then enumerated at the
+scalar's validated upper bound and the tile's run is emitted under
+``is_dynamic or indices[axis] < expr`` (e.g. production's routed-row guard,
+vacuously true in dynamic mode).  Statically known tiles are unaffected.
+
+Job ids
+-------
+Tiles take job ids in spec registration order unless pinned with
+``tile.attrs["megakernel.job_id"]``; the reserved event-init, wait-init, and
+end ids default to 29/30/31 and may be overridden with the
+``init_event_job_id``/``wait_event_init_job_id``/``end_job_id`` option attrs
+(all ids must fit the five-bit packed field and be distinct).  This exists so
+the packed queue bytes can match a pre-existing host ABI.
 
 Kernel parameter order
 ----------------------
@@ -87,7 +111,9 @@ Kernel parameter order
    dynamic: ``exec_task`` ``int32[DynamicTileScheduler.MAX_TASKS]`` and
    ``exec_head``/``exec_tail`` ``int32[1]``,
 5. ``profiler_buffer``: ``uint64[MegaKernelWrapper.PROFILER_BUFFER_SIZE]``
-   when ``options.attrs["profiler"]`` is truthy.
+   when ``options.attrs["profiler"]`` is truthy, or when
+   ``options.attrs["emit_profiler_param"]`` keeps the (unused) parameter for
+   ABI compatibility with profiling off.
 
 Emitted body order (mirrors ``moe.py`` ``fused_body``)
 ------------------------------------------------------
@@ -117,8 +143,11 @@ Endpoint scopes come from the ``TileImpl`` class attributes ``wait_level``,
 ``wait_mask``, and ``notify_scope`` (PR-3).  Both runtime semaphores
 implement ``cta`` and ``warp`` waits, so those are the only ``wait_level``
 values this builder accepts; all four notify scopes are supported.  In
-dynamic mode a pusher's ``notify_scope`` additionally drives its pre-notify
-and push scope.
+dynamic mode a pusher's ``pre_notify_scope`` (defaulting to its
+``notify_scope``) additionally drives its pre-notify and push scope.  When
+several tile implementations share class-level resources, they may name a
+common ``class_group`` so the wrapper runs the class hooks once for the
+group.
 
 Profiler wiring is duck-typed: a tile implementation may define a
 ``profile_event`` attribute (an ``Enum`` member or int consumed by
@@ -186,6 +215,7 @@ from .prepare import (
     TIRXLoweringPlan,
     VarBinding,
     _sanitize_identifier,
+    _tile_job_id,
     _upper_bound_shape_extents,
     _validate_event_counter_encoding,
     lower_expr_like,
@@ -277,9 +307,57 @@ def _prepare_runtime_plan(
     attrs["sm_count"] = hardware.sm_count
     # The runtime StaticTileScheduler stops at its fixed end task type and
     # loads exactly MAX_TASKS queue entries per SM; pin the plan to both.
-    attrs["end_job_id"] = DEFAULT_END_JOB_ID
+    attrs.setdefault("end_job_id", DEFAULT_END_JOB_ID)
     attrs["max_tasks"] = StaticTileScheduler.MAX_TASKS
-    return prepare_tirx_lowering_plan(kernel, replace(options, attrs=attrs))
+    plan = prepare_tirx_lowering_plan(
+        kernel, replace(options, attrs=attrs), allow_runtime_scalars=True
+    )
+    _validate_runtime_static_scalar_grids(plan)
+    return plan
+
+
+#: Tile attribute key declaring a run predicate for a tile whose
+#: ``tile_num`` over-enumerates at a scalar upper bound.  The value is
+#: ``(axis, op, expr)``: the tile's run is emitted under
+#: ``is_dynamic or indices[axis] < expr`` (``op`` is currently always
+#: ``"lt"``), where ``expr`` is an ExprLike that may load runtime scalars.
+#: Statically enumerated grids gate on the scalar load; dynamically
+#: dispatched tasks already match the runtime count, so the guard is
+#: vacuously true in dynamic mode (and kept, mirroring the hand-written
+#: kernels' ``is_dynamic or ...`` form).
+_RUN_PREDICATE_KEY = "megakernel.run_predicate"
+
+
+def _parse_run_predicate(tile: TileSpec) -> tuple[int, Any] | None:
+    """Read and validate a tile's optional run-predicate attribute."""
+
+    if _RUN_PREDICATE_KEY not in tile.attrs:
+        return None
+    label = f"tile {tile.name!r} attrs[{_RUN_PREDICATE_KEY!r}]"
+    value = tile.attrs[_RUN_PREDICATE_KEY]
+    if not isinstance(value, tuple | list) or len(value) != 3:
+        raise TypeError(f"{label} must be an (axis, op, expr) triple")
+    axis, op, expr = value
+    if isinstance(axis, bool) or not isinstance(axis, int) or axis not in (0, 1, 2):
+        raise ValueError(f"{label} axis must be 0, 1, or 2, got {axis!r}")
+    if op != "lt":
+        raise ValueError(f"{label} only supports the 'lt' run predicate, got {op!r}")
+    if not isinstance(expr, int | VarSpec | ExprSpec | ScalarSpec) or isinstance(expr, bool):
+        raise TypeError(f"{label} expr must be an int or ExprLike, got {expr!r}")
+    return axis, expr
+
+
+def _validate_runtime_static_scalar_grids(plan: TIRXLoweringPlan) -> None:
+    """Static scalar grids are legal only behind a declared run predicate."""
+
+    for tile in plan.kernel.tiles:
+        if expr_scalars(tile.tile_num) and _parse_run_predicate(tile) is None:
+            raise ValueError(
+                f"the runtime static builder cannot lower tile {tile.name!r} whose "
+                "tile_num depends on a runtime scalar: the host queue is enumerated "
+                f"at the scalar upper bound, so the tile must gate execution with "
+                f"tile.attrs[{_RUN_PREDICATE_KEY!r}] (or use dynamic dispatch)"
+            )
 
 
 def _validate_runtime_static_tiles(plan: TIRXLoweringPlan) -> None:
@@ -341,6 +419,28 @@ def _lower_runtime_expr(value, var_values, scalar_load, label: str):
     raise ValueError(f"{label} uses unsupported ExprSpec op {value.op!r}")
 
 
+def _declared_drain_writer(kernel: KernelSpec) -> Any:
+    """The tile that runtime-initializes a declared drain event, if pinned down.
+
+    Mirrors the dynamic drain-writer selection: the single producer of the
+    terminal tile's runtime-scalar source tensor.  The static builder uses
+    this to reproduce the hand-written kernel's (inert) runtime-init step.
+    """
+
+    if not any(event.attrs.get(_DRAIN_EVENT_KEY) for event in kernel.events.values()):
+        return None
+    terminal = [tile for tile in kernel.tiles if not tile.notifies]
+    if len(terminal) != 1:
+        return None
+    tensor_producers = _tensor_producers(kernel)
+    writers: list[TileSpec] = []
+    for scalar in expr_scalars(terminal[0].tile_num):
+        for producer in tensor_producers.get(id(scalar.source[0]), []):
+            if producer not in writers:
+                writers.append(producer)
+    return writers[0] if len(writers) == 1 else None
+
+
 class _RuntimeKernelBuilder:
     """Emit one persistent kernel from a spec via the runtime library."""
 
@@ -351,6 +451,9 @@ class _RuntimeKernelBuilder:
         self.hardware = hardware
         self.options = plan.options
         self.profiler_on = bool(plan.attrs.get("profiler", False))
+        self._run_repeats = _parse_coalescing(plan.kernel, self.options.attrs)
+        self._runtime_init_tile = _declared_drain_writer(plan.kernel)
+        self._runtime_init_tid = None
         self.var_values: dict[int, Any] = {}
         self.tensor_buffers: dict[int, Any] = {}
         self.tensor_patches: list[tuple[Any, str, Any]] = []
@@ -385,6 +488,13 @@ class _RuntimeKernelBuilder:
         T.alloc_buffer([1], "uint32", scope="local", align=8)
         T.alloc_buffer([1], "uint64", scope="local", align=8)
         wrapper.init_profiler(self.profiler_buffer)
+        for tile in kernel.tiles:
+            impl = tile.impl
+            # Production tile tasks take the wrapper profiler (or None) as a
+            # run argument; bind it when an impl declares the attribute.
+            if hasattr(impl, "profiler"):
+                self.tensor_patches.append((impl, "profiler", impl.profiler))
+                impl.profiler = wrapper.profiler
         smem = T.alloc_buffer([hardware.max_dynamic_smem], "uint8", scope="shared.dyn")
         wrapper.set_smem_manager(hardware.max_dynamic_smem, self.options.smem_chunk_size, smem.data)
         wrapper.device_init_all(wrapper.smem_manager)
@@ -392,6 +502,7 @@ class _RuntimeKernelBuilder:
         self._emit_events()
         self._init_scheduler()
         wrapper.smem_manager.init()
+        self._emit_hoisted_views()
 
         with T.While(wrapper.tile_scheduler.valid()):
             self._emit_dispatch()
@@ -404,6 +515,34 @@ class _RuntimeKernelBuilder:
     def restore_tensor_specs(self) -> None:
         for impl, name, value in reversed(self.tensor_patches):
             setattr(impl, name, value)
+
+    def _emit_hoisted_views(self) -> None:
+        """Emit the impl-declared shared buffer views before the dispatch loop.
+
+        A tile implementation may declare ``hoisted_views = ((attr,
+        source_attr, dims), ...)``: each source attribute (already patched to
+        its kernel buffer) is viewed once per distinct ``(buffer, dims)``
+        pair and the resulting view buffer is bound to every declaring impl,
+        reproducing the hand-written kernels' shared flattened views.
+        """
+
+        seen: dict[tuple[int, tuple], Any] = {}
+        for tile in self.plan.kernel.tiles:
+            impl = tile.impl
+            views = getattr(impl, "hoisted_views", ())
+            for entry in views:
+                if not isinstance(entry, tuple) or len(entry) != 3:
+                    raise TypeError(
+                        f"tile {tile.name!r} hoisted_views entries must be "
+                        "(attr, source_attr, dims) triples"
+                    )
+                attr, source_attr, dims = entry
+                source = getattr(impl, source_attr)
+                key = (id(source), tuple(dims))
+                if key not in seen:
+                    seen[key] = source.view(*dims)
+                self.tensor_patches.append((impl, attr, getattr(impl, attr, None)))
+                setattr(impl, attr, seen[key])
 
     def _emit_var_args(self) -> None:
         for binding in self.plan.var_bindings:
@@ -432,7 +571,10 @@ class _RuntimeKernelBuilder:
         self._emit_profiler_arg()
 
     def _emit_profiler_arg(self) -> None:
-        if self.profiler_on:
+        # ``emit_profiler_param`` keeps the profiler buffer in the kernel
+        # signature even with profiling off (ABI compatibility with callers
+        # that always pass it); the buffer is then simply unused.
+        if self.profiler_on or self.options.attrs.get("emit_profiler_param", False):
             self.profiler_buffer = T.arg(
                 "profiler_buffer",
                 T.Buffer((MegaKernelWrapper.PROFILER_BUFFER_SIZE,), "uint64"),
@@ -508,13 +650,15 @@ class _RuntimeKernelBuilder:
             self.queue,
             self.wrapper.smem_manager,
             self.plan.attrs.get("debug_scheduler", False),
+            self.plan.static_schedule.end_job_id,
         )
 
     def _dispatch_extra_entries(self) -> list[tuple[int, Any]]:
         if self.plan.event_layouts:
+            schedule = self.plan.static_schedule
             return [
-                (INIT_EVENT_JOB_ID, "init_event"),
-                (WAIT_EVENT_INIT_JOB_ID, "wait_event_init"),
+                (schedule.init_event_job_id, "init_event"),
+                (schedule.wait_event_init_job_id, "wait_event_init"),
             ]
         return []
 
@@ -544,26 +688,57 @@ class _RuntimeKernelBuilder:
             else_frames[index].__exit__(None, None, None)
             if_frames[index].__exit__(None, None, None)
 
-    def _run_repeat_count(self, tile) -> int:
-        return 1
-
     def _emit_tile_pre_steps(self, tile, indices) -> None:
         """Dynamic-only steps emitted before the tile's prefetch."""
 
     def _emit_tile_post_run_steps(self, tile, indices) -> None:
-        """Dynamic-only steps emitted after the run, before the notifies."""
+        """The runtime-init step of a declared drain event's writer tile.
+
+        Inert in static mode (the drain event is host-initialized there) but
+        emitted anyway, mirroring the hand-written kernel's shared tile body.
+        """
+
+        if tile is self._runtime_init_tile:
+            T.evaluate(T.cuda.cta_sync())
+            with T.If(self._runtime_init_tid == 0):
+                with T.Then():
+                    T.evaluate(0)
 
     def _emit_run(self, tile, indices) -> None:
         impl = tile.impl
-        repeat = self._run_repeat_count(tile)
-        for step in range(repeat):
-            run_indices = (
-                (indices[0], indices[1] * repeat + step, indices[2]) if repeat != 1 else indices
-            )
-            if self.profiler_on and getattr(impl, "profile_event", None) is not None:
-                self.wrapper.run_tile(impl, *run_indices)
+        repeat = self._run_repeats.get(tile.name, 1)
+        predicate = _parse_run_predicate(tile)
+
+        def emit_repeated_run() -> None:
+            if tile.name in self._run_repeats:
+                # Coalesced tiles run as a serial loop with the n index
+                # expanded (production's per-task-size loop, kept even at
+                # extent 1); the dynamic grid is pre-divided by the factor.
+                with T.serial(repeat) as step:
+                    run_indices = (indices[0], indices[1] * repeat + step, indices[2])
+                    # Always route through the wrapper: its lane-id binding
+                    # is part of the production emission even with profiling off.
+                    self.wrapper.run_tile(impl, *run_indices)
             else:
-                impl.run(*run_indices)
+                self.wrapper.run_tile(impl, *indices)
+
+        if predicate is None:
+            emit_repeated_run()
+            return
+        axis, expr = predicate
+        # Production form: ``is_dynamic or index < expr``.  Statically
+        # enumerated grids gate on the scalar load; dynamically dispatched
+        # tasks already match the runtime count, so the guard is vacuously
+        # true there (and kept, mirroring the hand-written kernel).
+        guard = T.Or(
+            T.bool(self.is_dynamic),
+            indices[axis] < self._lower_expr(expr, f"tile {tile.name!r} run predicate"),
+        )
+        if_frame = T.If(guard)
+        if_frame.__enter__()
+        with T.Then():
+            emit_repeated_run()
+        if_frame.__exit__(None, None, None)
 
     def _emit_tile(self, tile) -> None:
         wrapper = self.wrapper
@@ -571,6 +746,10 @@ class _RuntimeKernelBuilder:
         smem_manager = wrapper.smem_manager
         impl = tile.impl
         indices = (scheduler.m_idx, scheduler.n_idx, scheduler.k_idx)
+        if tile is self._runtime_init_tile:
+            # The runtime-init writer binds its thread id first, before any
+            # dispatch or wait step (the hand-written kernel does the same).
+            self._runtime_init_tid = T.thread_id([self.hardware.num_threads])
         smem_manager.enter_tile_runtime(impl)
         self._emit_tile_pre_steps(tile, indices)
         wrapper.run_tile_prefetch(impl, *indices)
@@ -592,7 +771,13 @@ class _RuntimeKernelBuilder:
                 return (1, -1, *coord)
 
             scope, scope_id = impl.notify_scope
-            scheduler.notify(semaphore, notify_func, scope=scope, scope_id=scope_id, release=True)
+            scheduler.notify(
+                semaphore,
+                notify_func,
+                scope=scope,
+                scope_id=scope_id,
+                release=getattr(impl, "notify_release", True),
+            )
         smem_manager.exit_tile_runtime()
 
 
@@ -669,6 +854,12 @@ def derive_static_central_tasks(
         extents = []
         for axis, extent in enumerate(phase.tile_num):
             value = eval_expr_like(extent, env)
+            if value is None and expr_scalars(extent):
+                # A runtime scalar never resolves on the host: enumerate its
+                # validated upper bound.  The affected tile must gate
+                # execution with a declared run predicate (checked when the
+                # runtime plan is prepared).
+                value = expr_bounds(extent, require_bounded=True)[1]
             if value is None:
                 raise ValueError(
                     f"static queue derivation for phase {phase.label!r} needs a "
@@ -727,12 +918,27 @@ def build_static_queues(
 #:   - ``event``: name of the trigger event (default: the tile's single
 #:     waited event).
 #:   - ``pre_scope``: ``(scope, scope_id)`` of the pre-notify (default: the
-#:     source impl's ``notify_scope``).
+#:     source impl's ``pre_notify_scope``, falling back to ``notify_scope``).
 #:   - ``push_level``: enqueue granularity (default: the pre-notify scope).
 _ESCAPE_HATCH_KEY = "megakernel.dispatch"
 
+#: Event attribute key marking an event as the terminal tile's drain event.
+#: A spec may declare its drain event explicitly (shape ``(1,)``, no wait or
+#: notify edges) instead of letting the dynamic builder synthesize one; the
+#: static builder then treats it as an ordinary event (using its declared
+#: ``init_count``), while the dynamic builder runtime-initializes it like the
+#: synthesized drain and pushes the END tasks from its last pre-notify.  This
+#: keeps one workspace layout shared by both schedulers.
+_DRAIN_EVENT_KEY = "megakernel.drain"
+
 _PUSH_SCOPES = ("thread", "warp", "warpgroup", "cta")
 _PUSH_SCOPE_ORDER = {scope: order for order, scope in enumerate(_PUSH_SCOPES)}
+
+
+def _impl_pre_notify_scope(impl) -> tuple[str, int]:
+    """Pre-notify scope of one pusher: the explicit override or its notify scope."""
+
+    return getattr(impl, "pre_notify_scope", None) or impl.notify_scope
 
 
 @dataclass(frozen=True)
@@ -792,6 +998,8 @@ class _DynamicPlan:
     scheduled: dict[int, tuple]
     coalescing: dict[str, int]
     event_workspace_size: int
+    init_event_job_id: int
+    end_job_id: int
 
 
 class _AxisProbe:
@@ -931,8 +1139,7 @@ def _parse_coalescing(kernel: KernelSpec, attrs: dict[str, Any]) -> dict[str, in
             raise ValueError(f"tile_coalescing names unknown tile {name!r}")
         if isinstance(value, bool) or not isinstance(value, int) or value < 1:
             raise ValueError(f"tile_coalescing[{name!r}] must be a positive integer")
-        if value != 1:
-            coalescing[name] = value
+        coalescing[name] = value
     return coalescing
 
 
@@ -1019,7 +1226,7 @@ def _synthesize_dispatch_rule(
                 f"tile {tile.name!r} escape hatch source {source.name!r} must notify "
                 f"event {event_name!r} exactly once"
             )
-        pre_scope = hatch.get("pre_scope", source.impl.notify_scope)
+        pre_scope = hatch.get("pre_scope", _impl_pre_notify_scope(source.impl))
         push_level = hatch.get("push_level", pre_scope[0])
         _check_push_scopes(source, pre_scope, push_level)
         return _DispatchRule(
@@ -1096,7 +1303,7 @@ def _synthesize_dispatch_rule(
                 f"written by tile {scalar_producers[0].name!r}, which is not "
                 f"upstream of pusher {source.name!r}; {hint}"
             )
-    pre_scope = source.impl.notify_scope
+    pre_scope = _impl_pre_notify_scope(source.impl)
     push_level = pre_scope[0]
     _check_push_scopes(source, pre_scope, push_level)
     return _DispatchRule(
@@ -1118,12 +1325,13 @@ def _synthesize_drain(
     scheduled,
     rules: dict[int, _DispatchRule],
     tensor_producers,
+    declared: EventSpec | None = None,
 ) -> _DrainPlan:
     """Synthesize the terminal tile's drain event and its initialization."""
 
     del kernel
     extents = scheduled[id(terminal)]
-    name = f"__drain_{terminal.name}__"
+    name = declared.name if declared is not None else f"__drain_{terminal.name}__"
     scalars = expr_scalars(extents)
     if not scalars and not expr_vars(extents):
         static_count = 1
@@ -1197,6 +1405,62 @@ def _validate_dynamic_capacity(
         )
 
 
+def _resolve_reserved_job_ids(attrs) -> tuple[int, int]:
+    """Resolve the reserved dynamic job ids (INIT seed marker and END)."""
+
+    init_event_job_id = attrs.get("init_event_job_id", INIT_EVENT_JOB_ID)
+    end_job_id = attrs.get("end_job_id", DEFAULT_END_JOB_ID)
+    for label, value in (("init_event_job_id", init_event_job_id), ("end_job_id", end_job_id)):
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0 or value >= 32:
+            raise ValueError(f"attrs[{label!r}] must fit the five-bit queue field, got {value!r}")
+    if init_event_job_id == end_job_id:
+        raise ValueError("init/end job ids must be distinct")
+    return init_event_job_id, end_job_id
+
+
+def _validate_dynamic_job_ids(tile_plans, init_event_job_id: int, end_job_id: int) -> None:
+    """Dynamic job ids must be unique and clear of the reserved markers."""
+
+    seen = set()
+    for tile_plan in tile_plans:
+        job_id = tile_plan.job_id
+        if job_id >= 32:
+            raise ValueError(
+                f"tile {tile_plan.tile.name!r} job id {job_id} does not fit the "
+                "five-bit queue field"
+            )
+        if job_id in (init_event_job_id, end_job_id):
+            raise ValueError(
+                f"tile {tile_plan.tile.name!r} job id {job_id} collides with a reserved job id"
+            )
+        if job_id in seen:
+            raise ValueError("lowering plan contains duplicate tile job ids")
+        seen.add(job_id)
+
+
+def _find_declared_drain(kernel: KernelSpec) -> EventSpec | None:
+    """Return the spec-declared drain event, validating its shape and isolation."""
+
+    declared = [event for event in kernel.events.values() if event.attrs.get(_DRAIN_EVENT_KEY)]
+    if not declared:
+        return None
+    if len(declared) > 1:
+        names = [event.name for event in declared]
+        raise ValueError(f"at most one event may be declared as the drain event, got {names}")
+    event = declared[0]
+    shape = _upper_bound_shape_extents(event.shape, f"drain event {event.name!r} shape")
+    if shape != (1,):
+        raise ValueError(f"drain event {event.name!r} must have shape (1,), got {shape}")
+    for tile in kernel.tiles:
+        for kind, dependencies in (("wait", tile.waits), ("notify", tile.notifies)):
+            if any(waited is event for waited, _ in dependencies):
+                raise ValueError(
+                    f"drain event {event.name!r} must not be {kind}ed by any tile "
+                    f"(tile {tile.name!r} does)"
+                )
+    return event
+
+
 def _prepare_dynamic_plan(
     kernel: KernelSpec, options: LoweringOptions, hardware: HardwareConfig
 ) -> _DynamicPlan:
@@ -1217,15 +1481,16 @@ def _prepare_dynamic_plan(
 
     if not kernel.tiles:
         raise ValueError("dynamic scheduling requires at least one tile")
-    if len(kernel.tiles) > INIT_EVENT_JOB_ID:
-        raise ValueError(
-            f"dynamic kernels support at most {INIT_EVENT_JOB_ID} tiles "
-            f"(job ids 0..{INIT_EVENT_JOB_ID - 1}), got {len(kernel.tiles)}"
-        )
-    tile_plans = tuple(TileLoweringPlan(tile, job_id) for job_id, tile in enumerate(kernel.tiles))
+    init_event_job_id, end_job_id = _resolve_reserved_job_ids(attrs)
+    tile_plans = tuple(
+        TileLoweringPlan(tile, _tile_job_id(tile, job_id))
+        for job_id, tile in enumerate(kernel.tiles)
+    )
+    _validate_dynamic_job_ids(tile_plans, init_event_job_id, end_job_id)
     _validate_dynamic_event_encoding(kernel, options)
     _validate_dynamic_acyclic(kernel)
     coalescing = _parse_coalescing(kernel, attrs)
+    declared_drain = _find_declared_drain(kernel)
 
     entry_tiles = tuple(tile for tile in kernel.tiles if not tile.waits)
     terminal_tiles = [tile for tile in kernel.tiles if not tile.notifies]
@@ -1303,18 +1568,24 @@ def _prepare_dynamic_plan(
                 "by dynamic dispatch"
             )
 
-    drain = _synthesize_drain(kernel, terminal, scheduled, rules, tensor_producers)
+    drain = _synthesize_drain(
+        kernel, terminal, scheduled, rules, tensor_producers, declared=declared_drain
+    )
 
     event_layouts: list[_DynamicEventLayout] = []
     offset = 0
     for event in kernel.events.values():
         shape = _upper_bound_shape_extents(event.shape, f"event {event.name!r} shape")
-        event_layouts.append(_DynamicEventLayout(event, event.name, shape, offset, False))
+        is_drain = event is declared_drain
+        event_layouts.append(
+            _DynamicEventLayout(None if is_drain else event, event.name, shape, offset, is_drain)
+        )
         offset += upper_bound_shape_product(
             event.shape, f"event {event.name!r} shape", require_bounded=True
         )
-    event_layouts.append(_DynamicEventLayout(None, drain.name, (1,), offset, True))
-    offset += 1
+    if declared_drain is None:
+        event_layouts.append(_DynamicEventLayout(None, drain.name, (1,), offset, True))
+        offset += 1
 
     _validate_dynamic_capacity(kernel, scheduled, entry_tiles, event_layouts, hardware)
 
@@ -1333,6 +1604,8 @@ def _prepare_dynamic_plan(
         scheduled=scheduled,
         coalescing=coalescing,
         event_workspace_size=offset,
+        init_event_job_id=init_event_job_id,
+        end_job_id=end_job_id,
     )
 
 
@@ -1344,6 +1617,7 @@ class _RuntimeDynamicKernelBuilder(_RuntimeKernelBuilder):
     def __init__(self, plan: _DynamicPlan, hardware: HardwareConfig):
         super().__init__(plan, hardware)
         self.drain_sem = None
+        self._runtime_init_tile = plan.drain.writer
         self._job_ids = {id(tile_plan.tile): tile_plan.job_id for tile_plan in plan.tile_plans}
 
     def _emit_special_args(self) -> None:
@@ -1352,9 +1626,21 @@ class _RuntimeDynamicKernelBuilder(_RuntimeKernelBuilder):
                 "event_workspace",
                 T.Buffer((self.plan.event_workspace_size,), "int32"),
             )
-        self.queue_tasks = T.arg("exec_task", T.Buffer((DynamicTileScheduler.MAX_TASKS,), "int32"))
-        self.queue_head = T.arg("exec_head", T.Buffer((1,), "int32"))
-        self.queue_tail = T.arg("exec_tail", T.Buffer((1,), "int32"))
+        # The dynamic queue buffers keep the production declaration style:
+        # raw handles matched with offset_factor=1.
+        self.queue_tasks = T.match_buffer(
+            T.arg("exec_task", T.handle()),
+            [DynamicTileScheduler.MAX_TASKS],
+            "int32",
+            scope="global",
+            offset_factor=1,
+        )
+        self.queue_head = T.match_buffer(
+            T.arg("exec_head", T.handle()), [1], "int32", scope="global", offset_factor=1
+        )
+        self.queue_tail = T.match_buffer(
+            T.arg("exec_tail", T.handle()), [1], "int32", scope="global", offset_factor=1
+        )
         self._emit_profiler_arg()
 
     def _drain_f_init(self, drain: _DrainPlan):
@@ -1412,15 +1698,13 @@ class _RuntimeDynamicKernelBuilder(_RuntimeKernelBuilder):
             self.wrapper.smem_manager,
             self.wrapper.profiler,
             self.plan.attrs.get("debug_scheduler", False),
+            self.plan.end_job_id,
         )
 
     def _dispatch_extra_entries(self) -> list[tuple[int, Any]]:
         if self.plan.event_layouts:
-            return [(INIT_EVENT_JOB_ID, "init_event")]
+            return [(self.plan.init_event_job_id, "init_event")]
         return []
-
-    def _run_repeat_count(self, tile) -> int:
-        return self.plan.coalescing.get(tile.name, 1)
 
     def _emit_tile_pre_steps(self, tile, indices) -> None:
         rule = self.plan.dispatch_rules.get(id(tile))
@@ -1433,13 +1717,17 @@ class _RuntimeDynamicKernelBuilder(_RuntimeKernelBuilder):
         drain = self.plan.drain
         if drain is not None and drain.writer is tile:
             T.evaluate(T.cuda.cta_sync())
-            tid = T.thread_id([self.hardware.num_threads])
+            tid = self._runtime_init_tid
             with T.If(tid == 0):
                 with T.Then():
-                    value = 1
+                    # (base + 1) folds in first, then each non-trivial grid
+                    # extent — the production runtime-init expression shape.
+                    value = SemaphoreBase.base + 1
                     for extent in drain.count_extents:
+                        if isinstance(extent, int) and extent == 1:
+                            continue
                         value = value * self._lower_expr(extent, "drain event count")
-                    T.buffer_store(self.drain_sem.sem, (SemaphoreBase.base + 1) * value, [0])
+                    T.buffer_store(self.drain_sem.sem, value, [0])
 
     def _emit_pre_notify_and_push(self, rule: _DispatchRule, indices) -> None:
         scheduler = self.wrapper.tile_scheduler
@@ -1492,9 +1780,13 @@ class _RuntimeDynamicKernelBuilder(_RuntimeKernelBuilder):
             self._lower_expr(extent, f"tile {rule.target.name!r} push count")
             for extent in rule.free_extents
         ]
-        count = 1
+        count = None
         for extent in free_extents:
-            count = count * extent
+            if isinstance(extent, int) and extent == 1:
+                continue
+            count = extent if count is None else count * extent
+        if count is None:
+            count = 1
 
         def push_fn(push_idx):
             values: dict[int, Any] = {}
@@ -1504,8 +1796,13 @@ class _RuntimeDynamicKernelBuilder(_RuntimeKernelBuilder):
                     later = 1
                     for extent in free_extents[pos + 1 :]:
                         later = later * extent
-                    values[axis] = remaining // later
-                    remaining = remaining % later
+                    if isinstance(later, int) and later == 1:
+                        # A unit trailing product cannot change the index.
+                        values[axis] = remaining
+                        remaining = 0
+                    else:
+                        values[axis] = remaining // later
+                        remaining = remaining % later
                 else:
                     values[axis] = remaining
             for axis, (kind, payload) in rule.pinned:
@@ -1516,13 +1813,13 @@ class _RuntimeDynamicKernelBuilder(_RuntimeKernelBuilder):
 
     def _emit_drain_push(self, tile) -> None:
         scheduler = self.wrapper.tile_scheduler
-        scope, scope_id = tile.impl.notify_scope
+        scope, scope_id = _impl_pre_notify_scope(tile.impl)
 
         def notify_func(_notify_idx):
             return (1, -1, 0)
 
         def push_fn(_push_idx):
-            return (DEFAULT_END_JOB_ID, self.hardware.sm_count, 0, 0, 0)
+            return (self.plan.end_job_id, self.hardware.sm_count, 0, 0, 0)
 
         def trigger_fn(_trigger_idx):
             return push_fn
@@ -1542,7 +1839,7 @@ def derive_dynamic_seed_tasks(
     limits = (packing.max_m_idx, packing.max_n_idx, packing.max_k_idx)
     tasks = []
     for etensor_idx in range(len(plan.event_layouts)):
-        tasks.append((etensor_idx, 0, 0, INIT_EVENT_JOB_ID))
+        tasks.append((etensor_idx, 0, 0, plan.init_event_job_id))
     job_ids = {id(tile_plan.tile): tile_plan.job_id for tile_plan in plan.tile_plans}
     for tile in plan.entry_tiles:
         extents = []
@@ -1620,8 +1917,8 @@ def build_runtime_kernel(
             event_workspace_size=plan.event_workspace_size,
             sm_count=hardware.sm_count,
             max_tasks=DynamicTileScheduler.MAX_TASKS,
-            end_task_type=DEFAULT_END_JOB_ID,
-            init_event_job_id=INIT_EVENT_JOB_ID,
+            end_task_type=plan.end_job_id,
+            init_event_job_id=plan.init_event_job_id,
             wait_event_init_job_id=WAIT_EVENT_INIT_JOB_ID,
             profiler_on=bool(plan.attrs.get("profiler", False)),
             drain_events=_drain_event_infos(plan),
@@ -1639,8 +1936,8 @@ def build_runtime_kernel(
         sm_count=hardware.sm_count,
         max_tasks=StaticTileScheduler.MAX_TASKS,
         end_task_type=plan.static_schedule.end_job_id,
-        init_event_job_id=INIT_EVENT_JOB_ID,
-        wait_event_init_job_id=WAIT_EVENT_INIT_JOB_ID,
+        init_event_job_id=plan.static_schedule.init_event_job_id,
+        wait_event_init_job_id=plan.static_schedule.wait_event_init_job_id,
         profiler_on=bool(plan.attrs.get("profiler", False)),
     )
 

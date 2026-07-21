@@ -34,8 +34,6 @@ from tvm.tirx import PrimFunc
 
 from ..dsl import KernelSpec, TensorSpec
 from .prepare import (
-    INIT_EVENT_JOB_ID,
-    WAIT_EVENT_INIT_JOB_ID,
     TIRXLoweringPlan,
     lower_shape,
     prepare_tirx_lowering_plan,
@@ -210,10 +208,11 @@ class _StaticKernelBuilder:
     def _emit_dispatch(self, indices) -> None:
         items: list[tuple[int, Any]] = []
         if self.event_buffers:
+            schedule = self.plan.static_schedule
             items.extend(
                 [
-                    (INIT_EVENT_JOB_ID, "init_event"),
-                    (WAIT_EVENT_INIT_JOB_ID, "wait_event_init"),
+                    (schedule.init_event_job_id, "init_event"),
+                    (schedule.wait_event_init_job_id, "wait_event_init"),
                 ]
             )
         items.extend((tile_plan.job_id, tile_plan.tile) for tile_plan in self.plan.tile_plans)

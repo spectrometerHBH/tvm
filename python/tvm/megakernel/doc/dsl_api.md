@@ -478,6 +478,8 @@ class MyTile(TileImpl):
     wait_level: str = "cta"                     # "thread" | "warp" | "warpgroup" | "cta"
     wait_mask: int = 0xFFFFFFFF                 # 32-bit thread mask
     notify_scope: tuple[str, int] = ("cta", 0)  # (scope, scope_id)
+    pre_notify_scope: tuple[str, int] | None = None  # dynamic pre-notify; defaults to notify_scope
+    notify_release: bool = True                 # release-fenced completion notifies
 ```
 
 These optional class attributes declare the physical sync granularity the
@@ -485,7 +487,10 @@ tile implementation uses for its event endpoints: the scope at which it
 waits on events (`wait_level` plus the participating `wait_mask`) and the
 scope at which it signals them (`notify_scope`, a `(scope, scope_id)` pair
 with the same legal scope values and a non-negative integer id).  One
-consistent set applies to all of the tile's endpoints.
+consistent set applies to all of the tile's endpoints.  `pre_notify_scope`
+overrides the scope of the dynamic scheduler's pre-notify-and-push step when
+it must differ from the completion notify, and `notify_release` controls the
+release fence on completion notifies.
 
 Scope is impl metadata rather than spec data because it describes the tile's
 internal cooperative granularity: a warpgroup-cooperative GEMM signals at

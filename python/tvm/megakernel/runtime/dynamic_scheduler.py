@@ -531,7 +531,10 @@ class DynamicTileScheduler(TileSchedulerBase):
                         self.idx = idx_in_scope_map[scope][push_level]
                         while self.idx < notify_num:
                             evt.state[0] = self.semaphore_state[
-                                new_scope_id * self.hardware.warpgroup_size + self.idx
+                                new_scope_id
+                                * self.hardware.num_threads
+                                // self.hardware.warpgroup_count
+                                + self.idx
                             ]
                             if evt.is_triggered():
                                 self._enqueue(self.idx, func_trigger_list, push_level)

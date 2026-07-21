@@ -145,7 +145,10 @@ class MegaKernelWrapper:
 
     def _add_tile(self, tile, profiler_event_type, predicate=True):
         self.tile_attr[tile] = (profiler_event_type, predicate)
-        self.class_list.add(tile.__class__)
+        # Tiles that share class-level resources (e.g. a common GEMM base
+        # whose class init allocates shared barriers once) name the shared
+        # class through the duck-typed ``class_group`` attribute.
+        self.class_list.add(getattr(tile, "class_group", None) or tile.__class__)
         return tile
 
     @T.inline
@@ -170,21 +173,22 @@ class MegaKernelWrapper:
         event_type = T.meta_var(self.tile_attr[tile][0])
         self.smem_manager.enter_tile_runtime(tile)
         lane_id = T.lane_id([self.hardware.warp_size])
-        if self.profiler_on:
+        if self.profiler_on and event_type is not None:
             self.profiler.start(event_type, lane_id == 0)
         tile.run(*args, **kwargs)
-        if self.profiler_on:
+        if self.profiler_on and event_type is not None:
             self.profiler.end(event_type, lane_id == 0)
 
     @T.inline
     def run_tile_prefetch(self, tile: TileImpl, *args):
         self.smem_manager.enter_tile_runtime(tile)
-        lane_id = T.lane_id([self.hardware.warp_size])
         if self.profiler_on:
+            lane_id = T.lane_id([self.hardware.warp_size])
             self.profiler.start(self.prefetch_event, lane_id == 0)
-        tile.prefetch(*args)
-        if self.profiler_on:
+            tile.prefetch(*args)
             self.profiler.end(self.prefetch_event, lane_id == 0)
+        else:
+            tile.prefetch(*args)
 
     def add_etensor(self, sem_class, etensor_workspace, shape, f_init):
         size = functools.reduce(lambda x, y: x * y, shape, 1)

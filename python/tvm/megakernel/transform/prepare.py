@@ -110,6 +110,8 @@ class StaticSchedulePlan:
     sm_count: int
     max_tasks: int
     end_job_id: int
+    init_event_job_id: int = INIT_EVENT_JOB_ID
+    wait_event_init_job_id: int = WAIT_EVENT_INIT_JOB_ID
 
 
 @dataclass(frozen=True)
@@ -151,12 +153,32 @@ def _reject_runtime_scalar_dependencies(kernel: KernelSpec) -> None:
                     )
 
 
-def prepare_tirx_lowering_plan(kernel: KernelSpec, options: LoweringOptions) -> TIRXLoweringPlan:
+#: Tile attribute key pinning the tile's physical job id in the packed task
+#: wire format.  Unpinned tiles take their index in spec registration order.
+_JOB_ID_ATTR_KEY = "megakernel.job_id"
+
+
+def _tile_job_id(tile: TileSpec, default: int) -> int:
+    """Resolve one tile's job id from its optional pinning attribute."""
+
+    if _JOB_ID_ATTR_KEY not in tile.attrs:
+        return default
+    label = f"tile {tile.name!r} attrs[{_JOB_ID_ATTR_KEY!r}]"
+    value = tile.attrs[_JOB_ID_ATTR_KEY]
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise ValueError(f"{label} must be a non-negative integer, got {value!r}")
+    return value
+
+
+def prepare_tirx_lowering_plan(
+    kernel: KernelSpec, options: LoweringOptions, *, allow_runtime_scalars: bool = False
+) -> TIRXLoweringPlan:
     """Prepare and validate the default backend's private lowering state."""
 
     attrs = dict(options.attrs)
 
-    _reject_runtime_scalar_dependencies(kernel)
+    if not allow_runtime_scalars:
+        _reject_runtime_scalar_dependencies(kernel)
 
     used_names: set[str] = set()
     var_bindings = tuple(
@@ -199,7 +221,10 @@ def prepare_tirx_lowering_plan(kernel: KernelSpec, options: LoweringOptions) -> 
             1,
         )
 
-    tile_plans = tuple(TileLoweringPlan(tile, job_id) for job_id, tile in enumerate(kernel.tiles))
+    tile_plans = tuple(
+        TileLoweringPlan(tile, _tile_job_id(tile, job_id))
+        for job_id, tile in enumerate(kernel.tiles)
+    )
     static_schedule = None
     if options.schedule == "static":
         static_schedule = _build_static_schedule(
@@ -310,16 +335,24 @@ def _build_static_schedule(
 ) -> StaticSchedulePlan:
     sm_count = _positive_int(attrs.get("sm_count", 1), "sm_count")
     end_job_id = _nonnegative_int(attrs.get("end_job_id", DEFAULT_END_JOB_ID), "end_job_id")
+    init_event_job_id = _nonnegative_int(
+        attrs.get("init_event_job_id", INIT_EVENT_JOB_ID), "init_event_job_id"
+    )
+    wait_event_init_job_id = _nonnegative_int(
+        attrs.get("wait_event_init_job_id", WAIT_EVENT_INIT_JOB_ID), "wait_event_init_job_id"
+    )
+    if len({init_event_job_id, wait_event_init_job_id, end_job_id}) != 3:
+        raise ValueError("init/wait/end event job ids must be distinct")
     phases = []
     if event_count:
-        phases.append(TaskPhase("grid", INIT_EVENT_JOB_ID, (event_count + 1, 1, 1), "init_events"))
+        phases.append(TaskPhase("grid", init_event_job_id, (event_count + 1, 1, 1), "init_events"))
     entry = [tile_plan for tile_plan in tile_plans if not tile_plan.tile.waits]
     waiting = [tile_plan for tile_plan in tile_plans if tile_plan.tile.waits]
     waiting = _stable_topological_tile_plans(waiting, tile_adjacency)
     phases.extend(_tile_phase(tile_plan) for tile_plan in entry)
     if event_count:
         phases.append(
-            TaskPhase("grid", WAIT_EVENT_INIT_JOB_ID, (sm_count, 1, 1), "wait_event_init")
+            TaskPhase("grid", wait_event_init_job_id, (sm_count, 1, 1), "wait_event_init")
         )
     phases.extend(_tile_phase(tile_plan) for tile_plan in waiting)
     phases.append(TaskPhase("grid", end_job_id, (sm_count, 1, 1), "end"))
@@ -336,7 +369,9 @@ def _build_static_schedule(
         attrs.get("max_tasks", max(DEFAULT_MAX_TASKS, required_per_sm)),
         "max_tasks",
     )
-    return StaticSchedulePlan(tuple(phases), sm_count, max_tasks, end_job_id)
+    return StaticSchedulePlan(
+        tuple(phases), sm_count, max_tasks, end_job_id, init_event_job_id, wait_event_init_job_id
+    )
 
 
 def _stable_topological_tile_plans(tile_plans, tile_adjacency):
@@ -401,9 +436,14 @@ def _validate_event_layout(plan: TIRXLoweringPlan) -> None:
 
 
 def _validate_job_ids(plan: TIRXLoweringPlan) -> None:
-    reserved = {INIT_EVENT_JOB_ID, WAIT_EVENT_INIT_JOB_ID}
     if plan.static_schedule is not None:
-        reserved.add(plan.static_schedule.end_job_id)
+        reserved = {
+            plan.static_schedule.init_event_job_id,
+            plan.static_schedule.wait_event_init_job_id,
+            plan.static_schedule.end_job_id,
+        }
+    else:
+        reserved = {INIT_EVENT_JOB_ID, WAIT_EVENT_INIT_JOB_ID}
     seen = set()
     kernel_tile_ids = {id(tile) for tile in plan.kernel.tiles}
     for tile_plan in plan.tile_plans:
@@ -427,7 +467,7 @@ def _validate_static_schedule(plan: TIRXLoweringPlan) -> None:
         raise ValueError("static lowering requires a static schedule plan")
     if schedule.end_job_id >= 32:
         raise ValueError("end job id must fit the five-bit queue field")
-    if schedule.end_job_id in {INIT_EVENT_JOB_ID, WAIT_EVENT_INIT_JOB_ID}:
+    if schedule.end_job_id in {schedule.init_event_job_id, schedule.wait_event_init_job_id}:
         raise ValueError("end job id collides with an event initialization job")
     phase_job_ids = {phase.job_id for phase in schedule.phases}
     for tile_plan in plan.tile_plans:

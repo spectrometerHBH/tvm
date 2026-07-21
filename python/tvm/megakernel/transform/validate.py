@@ -316,6 +316,26 @@ def _validate_endpoint_metadata(tile: TileSpec) -> None:
         raise ValueError(
             f"{label} notify_scope scope_id must be a non-negative integer, got {scope_id!r}"
         )
+    pre_scope = getattr(impl, "pre_notify_scope", None)
+    if pre_scope is not None:
+        if not isinstance(pre_scope, tuple) or len(pre_scope) != 2:
+            raise TypeError(
+                f"{label} pre_notify_scope must be a (scope, scope_id) tuple, got {pre_scope!r}"
+            )
+        pre_scope_name, pre_scope_id = pre_scope
+        if not isinstance(pre_scope_name, str) or pre_scope_name not in _ENDPOINT_SCOPES:
+            raise ValueError(
+                f"{label} pre_notify_scope scope must be one of {_ENDPOINT_SCOPES}, "
+                f"got {pre_scope_name!r}"
+            )
+        if isinstance(pre_scope_id, bool) or not isinstance(pre_scope_id, int) or pre_scope_id < 0:
+            raise ValueError(
+                f"{label} pre_notify_scope scope_id must be a non-negative integer, "
+                f"got {pre_scope_id!r}"
+            )
+    release = getattr(impl, "notify_release", True)
+    if not isinstance(release, bool):
+        raise TypeError(f"{label} notify_release must be a bool, got {release!r}")
 
 
 def _shape_items(
