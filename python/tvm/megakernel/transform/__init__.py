@@ -23,11 +23,14 @@ from .lower import (
     lower_to_tirx,
     lower_to_tirx_module,
 )
+from .runtime_build import RuntimeKernelBuild, build_runtime_kernel
 from .validate import validate_kernel
 
 __all__ = [
     "LowerMegakernelDSL",
     "LoweringOptions",
+    "RuntimeKernelBuild",
+    "build_runtime_kernel",
     "lower_static_queue_init_to_tirx",
     "lower_to_tirx",
     "lower_to_tirx_module",

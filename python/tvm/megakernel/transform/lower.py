@@ -67,11 +67,19 @@ def _wait_event_init_complete(buffer, coord, sm_count, warp_count):
 
 @dataclass(frozen=True)
 class LoweringOptions:
-    """Options for the default single-device static backend."""
+    """Options for the default single-device static backend.
+
+    ``scheduler`` selects the build path: ``None`` keeps the legacy direct
+    emitter below, ``"static"`` routes to the runtime-library builder in
+    ``transform.runtime_build``, and ``"dynamic"`` is reserved for the
+    runtime dynamic builder (not yet implemented).  ``schedule`` is the
+    legacy emitter's own scheduling knob and is unrelated to routing.
+    """
 
     smem_max_bytes: int = 228 * 1024
     smem_chunk_size: int = 16 * 1024
     schedule: str = "static"
+    scheduler: str | None = None
     attrs: dict[str, Any] = field(default_factory=dict)
 
 
@@ -446,6 +454,30 @@ def _resolve_options(options: LoweringOptions | None) -> LoweringOptions:
     return options
 
 
+def _route_scheduler(options: LoweringOptions) -> str | None:
+    """Validate the routing knob; return the selected backend name or None."""
+
+    scheduler = options.scheduler
+    if scheduler is None:
+        return None
+    if scheduler == "dynamic":
+        raise NotImplementedError(
+            "scheduler='dynamic' is not yet supported by the megakernel runtime "
+            "builder; use scheduler=None (legacy emitter) or scheduler='static'"
+        )
+    if scheduler != "static":
+        raise ValueError(
+            f"unsupported scheduler {scheduler!r}; expected None, 'static', or 'dynamic'"
+        )
+    return scheduler
+
+
+def _emit_with_runtime_builder(kernel: KernelSpec, options: LoweringOptions) -> IRModule:
+    from .runtime_build import emit_runtime_module  # local import avoids a cycle
+
+    return emit_runtime_module(kernel, options)
+
+
 def _prepare(kernel: KernelSpec, options: LoweringOptions) -> TIRXLoweringPlan:
     if options.schedule != "static":
         raise NotImplementedError("the default backend supports only static scheduling")
@@ -457,6 +489,8 @@ def lower_to_tirx(kernel: KernelSpec, options: LoweringOptions | None = None) ->
     """Validate a spec and lower it to the default static persistent kernel."""
 
     resolved = _resolve_options(options)
+    if _route_scheduler(resolved) == "static":
+        return _emit_with_runtime_builder(kernel, resolved)[kernel.name]
     plan = _prepare(kernel, resolved)
     builder = _StaticKernelBuilder(plan)
     try:
@@ -471,6 +505,13 @@ def lower_static_queue_init_to_tirx(
     """Build the queue initializer matching the default static kernel."""
 
     resolved = _resolve_options(options)
+    if _route_scheduler(resolved) == "static":
+        raise ValueError(
+            "the runtime static builder (scheduler='static') derives the exec "
+            "queue on the host; use "
+            "tvm.megakernel.transform.build_runtime_kernel and its "
+            "RuntimeKernelBuild.exec_queue instead of a queue-init kernel"
+        )
     plan = _prepare(kernel, resolved)
     return _queue_init_entry.specialize(emitter=_QueueInitEmitter(plan))
 
@@ -479,6 +520,8 @@ def lower_to_tirx_module(kernel: KernelSpec, options: LoweringOptions | None = N
     """Lower a spec to its device kernel and static queue initializer."""
 
     resolved = _resolve_options(options)
+    if _route_scheduler(resolved) == "static":
+        return _emit_with_runtime_builder(kernel, resolved)
     return IRModule(
         {
             kernel.name: lower_to_tirx(kernel, resolved),

@@ -24,6 +24,8 @@ here).
 from .transform import (
     LoweringOptions,
     LowerMegakernelDSL,
+    RuntimeKernelBuild,
+    build_runtime_kernel,
     lower_static_queue_init_to_tirx,
     lower_to_tirx,
     lower_to_tirx_module,
@@ -33,6 +35,8 @@ from .transform import (
 __all__ = [
     "LowerMegakernelDSL",
     "LoweringOptions",
+    "RuntimeKernelBuild",
+    "build_runtime_kernel",
     "lower_static_queue_init_to_tirx",
     "lower_to_tirx",
     "lower_to_tirx_module",

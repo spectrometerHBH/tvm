@@ -16,7 +16,7 @@
 # under the License.
 
 from tvm.megakernel.dsl import KernelSpec, SmemManager, TileImpl
-from tvm.megakernel.transform import lower_to_tirx_module
+from tvm.megakernel.transform import LoweringOptions, lower_to_tirx_module
 from tvm.tirx.script import tile as Tx
 
 # Configuration parameters
@@ -124,73 +124,83 @@ class Stage2ReduceTile(TileImpl):
 # ============================================================
 
 
-kernel = KernelSpec(
-    "two_stage_reduce",
-    attrs={
-        "source": "B = reduce_each_n_block(A); C = reduce_all_n_blocks(B)",
-    },
-)
+def build_kernel_spec(m=M, n=N, block_m=BLOCK_M, block_n=BLOCK_N):
+    """Build the two-stage reduce spec for one problem size."""
 
-A = kernel.tensor(
-    "A",
-    shape=(M, N),
-    dtype="float32",
-)
+    num_block_m = m // block_m
+    num_block_n = n // block_n
+    kernel = KernelSpec(
+        "two_stage_reduce",
+        attrs={
+            "source": "B = reduce_each_n_block(A); C = reduce_all_n_blocks(B)",
+        },
+    )
 
-B = kernel.tensor(
-    "B",
-    shape=(M, NUM_BLOCK_N),
-    dtype="float32",
-)
+    A = kernel.tensor(
+        "A",
+        shape=(m, n),
+        dtype="float32",
+    )
 
-C = kernel.tensor(
-    "C",
-    shape=(M, 1),
-    dtype="float32",
-)
+    B = kernel.tensor(
+        "B",
+        shape=(m, num_block_n),
+        dtype="float32",
+    )
 
-row_ready = kernel.event(
-    "row_ready",
-    shape=(NUM_BLOCK_M,),
-    init_count=NUM_BLOCK_N,
-    attrs={
-        "meaning": "all n-block reductions for one m-block have written B",
-    },
-)
+    C = kernel.tensor(
+        "C",
+        shape=(m, 1),
+        dtype="float32",
+    )
 
-stage1 = kernel.tile(
-    name="stage1_partial_reduce",
-    impl=Stage1ReduceTile(
-        A,
-        B,
-        block_m=BLOCK_M,
-        block_n=BLOCK_N,
-    ),
-    tile_num=(NUM_BLOCK_M, NUM_BLOCK_N, 1),
-    reads=[A],
-    writes=[B],
-    attrs={
-        "source_stage": "B = reduce_each_n_block(A)",
-    },
-).notify(row_ready, coord_map=lambda m, n, k: (m,))
+    row_ready = kernel.event(
+        "row_ready",
+        shape=(num_block_m,),
+        init_count=num_block_n,
+        attrs={
+            "meaning": "all n-block reductions for one m-block have written B",
+        },
+    )
 
-stage2 = kernel.tile(
-    name="stage2_final_reduce",
-    impl=Stage2ReduceTile(
-        B,
-        C,
-        block_m=BLOCK_M,
-        num_block_n=NUM_BLOCK_N,
-    ),
-    tile_num=(NUM_BLOCK_M, 1, 1),
-    reads=[B],
-    writes=[C],
-    attrs={
-        "source_stage": "C = reduce_all_n_blocks(B)",
-    },
-).wait(row_ready, coord_map=lambda m, n, k: (m,))
+    kernel.tile(
+        name="stage1_partial_reduce",
+        impl=Stage1ReduceTile(
+            A,
+            B,
+            block_m=block_m,
+            block_n=block_n,
+        ),
+        tile_num=(num_block_m, num_block_n, 1),
+        reads=[A],
+        writes=[B],
+        attrs={
+            "source_stage": "B = reduce_each_n_block(A)",
+        },
+    ).notify(row_ready, coord_map=lambda m, n, k: (m,))
 
-# Verify the spec and build the static kernel plus its queue initializer
-# directly from the KernelSpec; there is no intermediate plan object.
+    kernel.tile(
+        name="stage2_final_reduce",
+        impl=Stage2ReduceTile(
+            B,
+            C,
+            block_m=block_m,
+            num_block_n=num_block_n,
+        ),
+        tile_num=(num_block_m, 1, 1),
+        reads=[B],
+        writes=[C],
+        attrs={
+            "source_stage": "C = reduce_all_n_blocks(B)",
+        },
+    ).wait(row_ready, coord_map=lambda m, n, k: (m,))
+
+    return kernel
+
+
+kernel = build_kernel_spec()
+
+# Verify the spec and build the static kernel from the runtime-library
+# builder; the host-side exec queue comes from build_runtime_kernel.
 if __name__ == "__main__":
-    print(lower_to_tirx_module(kernel.validate()).script())
+    print(lower_to_tirx_module(kernel.validate(), LoweringOptions(scheduler="static")).script())

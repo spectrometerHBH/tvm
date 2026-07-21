@@ -829,6 +829,8 @@ def test_transform_exports_only_the_verify_and_build_contract():
     assert set(transform.__all__) == {
         "LowerMegakernelDSL",
         "LoweringOptions",
+        "RuntimeKernelBuild",
+        "build_runtime_kernel",
         "lower_static_queue_init_to_tirx",
         "lower_to_tirx",
         "lower_to_tirx_module",
@@ -841,12 +843,14 @@ def test_demo_uses_current_verify_and_build_api_and_lowers():
 
     assert validate_kernel(demo.kernel) is demo.kernel
     assert set(demo.kernel.tensors) == {"A", "B", "C"}
-    assert [tensor.name for tensor in demo.stage1.reads] == ["A"]
-    assert [tensor.name for tensor in demo.stage1.writes] == ["B"]
-    assert [tensor.name for tensor in demo.stage2.reads] == ["B"]
-    assert [tensor.name for tensor in demo.stage2.writes] == ["C"]
+    stage1, stage2 = demo.kernel.tiles
+    assert (stage1.name, stage2.name) == ("stage1_partial_reduce", "stage2_final_reduce")
+    assert [tensor.name for tensor in stage1.reads] == ["A"]
+    assert [tensor.name for tensor in stage1.writes] == ["B"]
+    assert [tensor.name for tensor in stage2.reads] == ["B"]
+    assert [tensor.name for tensor in stage2.writes] == ["C"]
     assert not hasattr(demo.kernel, "input")
-    assert not hasattr(demo.stage1, "read")
+    assert not hasattr(stage1, "read")
 
     lowered = demo.kernel.lower()
     assert lowered.attrs["global_symbol"] == "two_stage_reduce"
