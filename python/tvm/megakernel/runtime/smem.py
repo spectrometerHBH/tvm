@@ -17,10 +17,8 @@
 """Chunked shared-memory manager with the mbarrier phase protocol.
 
 Migrated from the production ``tirx_kernels.megakernel.utils.base.SmemManager``.
-This is a second concrete manager alongside
-``tvm.megakernel.transform.smem.TIRXSmemManager``; the duplication is
-deliberate for now (the two back ends converge in future work).  Both
-implement the ``tvm.megakernel.dsl.SmemManager`` abstract API.
+It implements the ``tvm.megakernel.dsl.SmemManager`` abstract API and is the
+shared-memory manager used by the runtime-library builder.
 """
 
 from __future__ import annotations

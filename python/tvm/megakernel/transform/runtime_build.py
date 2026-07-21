@@ -159,14 +159,12 @@ mode the scheduler itself emits FETCH/PUSH events.
 Private-copy notes
 ------------------
 The static event-workspace layout, job ids, static phase order, and all
-static safety guards are shared with the legacy emitter through
-``transform.prepare`` (no copy); the dynamic path derives its own plan
-(bindings, layouts, dispatch rules) from the same prepare helpers because the
-legacy plan rejects runtime scalars by construction.  ``_replace_tensor_specs``
-and the coord-map handling of ``transform.lower`` are re-implemented here as
-small private copies (extended to lower symbolic and runtime-scalar coord
-entries); importing the legacy emitter module from this one would needlessly
-couple the two backends.
+static safety guards are shared through ``transform.prepare`` (no copy); the
+dynamic path derives its own plan (bindings, layouts, dispatch rules) from
+the same prepare helpers because the shared static plan rejects runtime
+scalars in seed grids by construction.  ``_replace_tensor_specs`` is a small
+private re-implementation (extended to lower symbolic and runtime-scalar
+coord entries).
 """
 
 from __future__ import annotations
@@ -267,18 +265,13 @@ def _resolve_options(options: LoweringOptions | None) -> LoweringOptions:
     from .lower import LoweringOptions  # local import avoids a module cycle
 
     if options is None:
-        return LoweringOptions(scheduler="static")
+        return LoweringOptions()
     if not isinstance(options, LoweringOptions):
         raise TypeError("options must be a LoweringOptions instance or None")
     if options.scheduler not in ("static", "dynamic"):
         raise ValueError(
             "the runtime builder requires LoweringOptions(scheduler='static' or "
             f"'dynamic'), got scheduler={options.scheduler!r}"
-        )
-    if options.schedule != "static":
-        raise ValueError(
-            "the runtime builder requires options.schedule to remain "
-            f"'static', got {options.schedule!r}"
         )
     return options
 
@@ -370,7 +363,7 @@ def _validate_runtime_static_tiles(plan: TIRXLoweringPlan) -> None:
 
 
 def _replace_tensor_specs(value: Any, buffers: dict[int, Any]) -> Any:
-    """Private copy of the legacy emitter's TensorSpec-to-buffer rewrite."""
+    """Rewrite impl-held TensorSpecs to the emitted parameter buffers."""
 
     if isinstance(value, TensorSpec) and id(value.base_tensor) in buffers:
         return buffers[id(value.base_tensor)]

@@ -38,7 +38,6 @@ from tvm.megakernel.runtime import (
 from tvm.megakernel.transform import (
     LoweringOptions,
     build_runtime_kernel,
-    lower_static_queue_init_to_tirx,
     lower_to_tirx,
     lower_to_tirx_module,
 )
@@ -370,15 +369,19 @@ def test_build_static_queues_capacity_error():
 # ---------------------------------------------------------------------------
 
 
-def test_scheduler_none_keeps_legacy_behavior():
-    kernel = _chain_kernel("legacy_chain")
+def test_scheduler_default_is_the_runtime_static_builder():
+    kernel = _chain_kernel("default_chain")
     default_module = lower_to_tirx_module(kernel)
-    explicit_module = lower_to_tirx_module(kernel, LoweringOptions(scheduler=None))
-    assert {gv.name_hint for gv in default_module.functions} == {
-        "legacy_chain",
-        "legacy_chain_init_queue",
-    }
+    explicit_module = lower_to_tirx_module(kernel, LoweringOptions(scheduler="static"))
+    assert [gv.name_hint for gv in default_module.functions] == ["default_chain"]
+    assert "exec_queue" in default_module["default_chain"].script()
     assert default_module.script() == explicit_module.script()
+
+
+def test_scheduler_none_is_rejected():
+    kernel = _chain_kernel("none_chain")
+    with pytest.raises(ValueError, match="unsupported scheduler"):
+        lower_to_tirx_module(kernel, LoweringOptions(scheduler=None))
 
 
 def test_scheduler_static_routes_to_runtime_builder():
@@ -390,12 +393,6 @@ def test_scheduler_static_routes_to_runtime_builder():
     func = lower_to_tirx(kernel, _static_options())
     assert isinstance(func, tvm.tirx.PrimFunc)
     assert func.attrs["global_symbol"] == "routed_chain"
-
-
-def test_scheduler_static_has_no_queue_init_kernel():
-    kernel = _chain_kernel("no_queue_init")
-    with pytest.raises(ValueError, match="exec queue"):
-        lower_static_queue_init_to_tirx(kernel, _static_options())
 
 
 def test_scheduler_dynamic_routes_to_runtime_builder():
@@ -415,10 +412,35 @@ def test_scheduler_garbage_rejected():
         lower_to_tirx_module(kernel, LoweringOptions(scheduler="round-robin"))
 
 
-def test_build_runtime_kernel_requires_runtime_scheduler():
+def test_build_runtime_kernel_rejects_none_scheduler():
     kernel = _chain_kernel("misrouted_chain")
     with pytest.raises(ValueError, match="scheduler="):
-        build_runtime_kernel(kernel, LoweringOptions())
+        build_runtime_kernel(kernel, LoweringOptions(scheduler=None))
+
+
+class _MixedPolicyTile(_MarkerTile):
+    def device_init(self, smem_manager, m_idx, n_idx, k_idx):
+        smem_manager.alloc((16,), "uint8", policy="shared")
+        smem_manager.alloc((16,), "uint8", policy="exclusive")
+
+
+class _OversizedSmemTile(_MarkerTile):
+    def device_init(self, smem_manager, m_idx, n_idx, k_idx):
+        smem_manager.alloc((40000,), "uint8")
+
+
+def test_runtime_build_rejects_mixed_smem_policies():
+    kernel = KernelSpec("mixed_smem_policy")
+    kernel.tile("managed", _MixedPolicyTile(), (1, 1, 1))
+    with pytest.raises(tvm.error.DiagnosticError, match="Cannot use both"):
+        build_runtime_kernel(kernel, _static_options())
+
+
+def test_runtime_build_rejects_smem_overflow():
+    kernel = KernelSpec("smem_overflow")
+    kernel.tile("managed", _OversizedSmemTile(), (1, 1, 1))
+    with pytest.raises(tvm.error.DiagnosticError, match="exceeds the chunked region"):
+        build_runtime_kernel(kernel, _static_options(attrs={"max_dynamic_smem": 32768}))
 
 
 # ---------------------------------------------------------------------------

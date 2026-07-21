@@ -39,7 +39,6 @@ from tvm.megakernel.dsl import (
 from tvm.megakernel.dsl.spec import expr_scalars
 from tvm.megakernel.transform import (
     LoweringOptions,
-    lower_static_queue_init_to_tirx,
     lower_to_tirx,
     lower_to_tirx_module,
     validate_kernel,
@@ -101,112 +100,6 @@ _GLOBAL_COORD_HOLDER = CapturedVarHolder()
 
 def _global_captured_coord(m, n, k):
     return (_GLOBAL_COORD_HOLDER.target + 1,) if m == 2 else (m,)
-
-
-class DeviceInitManagedSmemTile(RecordingTile):
-    @T.inline
-    def device_init(self, smem_manager, m_idx, n_idx, k_idx):
-        smem_manager.alloc((16,), "uint8", name="device_init_managed")
-
-
-class RunManagedSmemTile(RecordingTile):
-    @classmethod
-    def init_shared_resources(cls, smem_manager):
-        cls.smem_manager = smem_manager
-
-    @T.inline
-    def run(self, m_idx, n_idx, k_idx):
-        self.smem_manager.alloc((16,), "uint8", name="run_managed")
-        self.smem_manager.acquire_all()
-        self.smem_manager.release_all()
-        self.smem_manager.advance()
-
-
-class ClassManagedSmemTile(RecordingTile):
-    @classmethod
-    def init_shared_resources(cls, smem_manager):
-        cls.smem_manager = smem_manager
-        cls.buffer = smem_manager.alloc((16,), "uint8", name="class_managed")
-
-
-class SynchronizedClassManagedSmemTile(ClassManagedSmemTile):
-    @T.inline
-    def run(self, m_idx, n_idx, k_idx):
-        self.smem_manager.acquire_all()
-        self.smem_manager.release_all()
-        self.smem_manager.advance()
-
-
-class MissingAdvanceManagedSmemTile(ClassManagedSmemTile):
-    @T.inline
-    def run(self, m_idx, n_idx, k_idx):
-        self.smem_manager.acquire_all()
-        self.smem_manager.release_all()
-
-
-class WrongOrderManagedSmemTile(ClassManagedSmemTile):
-    @T.inline
-    def run(self, m_idx, n_idx, k_idx):
-        self.smem_manager.advance()
-        self.smem_manager.acquire_all()
-        self.smem_manager.release_all()
-
-
-class ClassAndDeviceManagedSmemTile(RecordingTile):
-    @classmethod
-    def init_shared_resources(cls, smem_manager):
-        cls.smem_manager = smem_manager
-        cls.class_buffer = smem_manager.alloc((64,), "uint8", name="class_layout")
-
-    @T.inline
-    def device_init(self, smem_manager, m_idx, n_idx, k_idx):
-        smem_manager.alloc((64,), "uint8", name="tile_layout")
-
-    @T.inline
-    def run(self, m_idx, n_idx, k_idx):
-        self.smem_manager.acquire_all()
-        self.smem_manager.release_all()
-        self.smem_manager.advance()
-
-
-class ClassSharedDeviceExclusiveSmemTile(ClassAndDeviceManagedSmemTile):
-    @T.inline
-    def device_init(self, smem_manager, m_idx, n_idx, k_idx):
-        smem_manager.alloc((64,), "uint8", name="exclusive_tile_layout", policy="exclusive")
-
-
-class OversizedClassSmemTile(RecordingTile):
-    @classmethod
-    def init_shared_resources(cls, smem_manager):
-        cls.smem_manager = smem_manager
-        cls.buffer = smem_manager.alloc((5120,), "uint8", name="oversized_class")
-
-    @T.inline
-    def run(self, m_idx, n_idx, k_idx):
-        self.smem_manager.acquire_all()
-        self.smem_manager.release_all()
-        self.smem_manager.advance()
-
-
-class SmallClassSmemTile(RecordingTile):
-    @classmethod
-    def init_shared_resources(cls, smem_manager):
-        cls.smem_manager = smem_manager
-        cls.buffer = smem_manager.alloc((16,), "uint8", name="small_class")
-
-    @T.inline
-    def run(self, m_idx, n_idx, k_idx):
-        self.smem_manager.acquire_all()
-        self.smem_manager.release_all()
-        self.smem_manager.advance()
-
-
-class FinalizeOwnerTile(RecordingTile):
-    finalized_key = None
-
-    @classmethod
-    def finalize_shared_resources(cls, smem_manager):
-        cls.finalized_key = smem_manager.cur_tile_name
 
 
 def _two_stage_kernel():
@@ -817,11 +710,14 @@ def test_transform_exports_only_the_verify_and_build_contract():
         "SemanticEdge",
         "SemanticPlan",
         "TIRXStaticBackend",
+        "TIRXSmemManager",
+        "TIRXSemaphore",
         "TileProgram",
         "WaitStep",
         "build_semantic_plan",
         "logical_edges",
         "lower_execution_plan",
+        "lower_static_queue_init_to_tirx",
         "make_static_execution_plan",
         "validate_semantic_plan",
     ):
@@ -831,7 +727,6 @@ def test_transform_exports_only_the_verify_and_build_contract():
         "LoweringOptions",
         "RuntimeKernelBuild",
         "build_runtime_kernel",
-        "lower_static_queue_init_to_tirx",
         "lower_to_tirx",
         "lower_to_tirx_module",
         "validate_kernel",
@@ -1019,20 +914,6 @@ def test_static_schedule_topologically_orders_waiting_tile_phases():
     assert labels == ["entry", "middle", "consumer"]
 
 
-def test_static_queue_initializer_partitions_rows_by_cta():
-    kernel = KernelSpec("partitioned_queue")
-    kernel.tile("tile", RecordingTile(), (4, 1, 1))
-
-    script = lower_static_queue_init_to_tirx(
-        kernel,
-        LoweringOptions(attrs={"sm_count": 4}),
-    ).script()
-
-    assert "v = T.cta_id([4])" in script
-    assert "if buffer % 4 == v:" in script
-    assert "queue[v, buffer // 4]" in script
-
-
 def test_static_schedule_uses_coordinate_projection_to_break_coarse_cycle():
     kernel = KernelSpec("coordinate_projected_phase_order")
     first_ready = kernel.event("first_ready", (2,), 1)
@@ -1104,110 +985,8 @@ def test_default_backend_lowers_release_event_publication():
     kernel.tile("producer", RecordingTile(), (1, 1, 1)).notify(event, (0,))
     kernel.tile("consumer", RecordingTile(), (1, 1, 1)).wait(event, (0,))
     script = lower_to_tirx(kernel).script()
-    fence = script.index("T.cuda.thread_fence()")
-    atomic = script.index("T.cuda.atomic_add", fence)
-    assert fence < atomic
-
-
-def test_managed_smem_requires_acquire_and_release_for_the_same_tile_key():
-    kernel = KernelSpec("missing_smem_phase")
-    kernel.tile("managed", DeviceInitManagedSmemTile(), (1, 1, 1))
-
-    with pytest.raises(
-        tvm.error.DiagnosticError,
-        match=r"tile 'managed'.*acquire_all\(\).*release_all\(\)",
-    ):
-        lower_to_tirx(kernel)
-
-
-def test_class_managed_smem_requires_each_tile_to_acquire_and_release():
-    invalid = KernelSpec("missing_class_smem_phase")
-    invalid.tile("managed", ClassManagedSmemTile(), (1, 1, 1))
-    with pytest.raises(
-        tvm.error.DiagnosticError,
-        match=r"tile 'managed'.*acquire_all\(\).*release_all\(\)",
-    ):
-        lower_to_tirx(invalid)
-
-    valid = KernelSpec("synchronized_class_smem_phase")
-    valid.tile("managed", SynchronizedClassManagedSmemTile(), (1, 1, 1))
-    script = lower_to_tirx(valid).script()
-    assert "T.ptx.mbarrier.try_wait" in script
-    assert "T.ptx.mbarrier.arrive" in script
-
-
-def test_managed_smem_requires_phase_advance_after_release():
-    kernel = KernelSpec("missing_smem_advance")
-    kernel.tile("managed", MissingAdvanceManagedSmemTile(), (1, 1, 1))
-
-    with pytest.raises(tvm.error.DiagnosticError, match=r"tile 'managed'.*advance\(\)"):
-        lower_to_tirx(kernel)
-
-
-def test_managed_smem_requires_acquire_release_advance_order():
-    kernel = KernelSpec("wrong_smem_phase_order")
-    kernel.tile("managed", WrongOrderManagedSmemTile(), (1, 1, 1))
-
-    with pytest.raises(
-        tvm.error.DiagnosticError,
-        match=r"tile 'managed'.*acquire_all\(\).*release_all\(\).*advance\(\).*in order",
-    ):
-        lower_to_tirx(kernel)
-
-
-def test_run_alloc_without_device_init_uses_the_tile_owner():
-    kernel = KernelSpec("run_smem_without_device_init")
-    kernel.tile("managed", RunManagedSmemTile(), (1, 1, 1))
-
-    lowered = lower_to_tirx(kernel)
-    assert RunManagedSmemTile.smem_manager.tiles["managed"]["shared"]
-    assert "T.ptx.mbarrier.try_wait" in lowered.script()
-    assert "T.ptx.mbarrier.arrive" in lowered.script()
-
-
-def test_class_and_tile_transient_smem_layouts_do_not_alias():
-    kernel = KernelSpec("class_and_tile_smem_layout")
-    kernel.tile("managed", ClassAndDeviceManagedSmemTile(), (1, 1, 1))
-
-    lower_to_tirx(kernel)
-    manager = ClassAndDeviceManagedSmemTile.smem_manager
-    class_info = manager.tiles[str(ClassAndDeviceManagedSmemTile)]["shared"][0]
-    tile_info = manager.tiles["managed"]["shared"][0]
-    _, class_begin, class_size, _ = class_info
-    _, tile_begin, tile_size, _ = tile_info
-    assert (class_begin, class_begin + class_size) == (0, 64)
-    assert (tile_begin, tile_begin + tile_size) == (64, 128)
-
-
-def test_class_and_tile_transient_smem_reject_mixed_policies():
-    kernel = KernelSpec("class_and_tile_smem_policy")
-    kernel.tile("managed", ClassSharedDeviceExclusiveSmemTile(), (1, 1, 1))
-
-    with pytest.raises(
-        tvm.error.DiagnosticError,
-        match="cannot mix shared and exclusive smem allocation policies",
-    ):
-        lower_to_tirx(kernel)
-
-
-def test_class_smem_records_are_not_overwritten_by_later_classes():
-    kernel = KernelSpec("class_smem_records")
-    kernel.tile("oversized", OversizedClassSmemTile(), (1, 1, 1))
-    kernel.tile("small", SmallClassSmemTile(), (1, 1, 1))
-
-    with pytest.raises(tvm.error.DiagnosticError, match="configured capacity"):
-        lower_to_tirx(
-            kernel,
-            options=LoweringOptions(smem_max_bytes=4096, smem_chunk_size=1024),
-        )
-
-
-def test_finalize_shared_resources_uses_its_class_allocation_key():
-    kernel = KernelSpec("finalize_class_smem_key")
-    kernel.tile("tile", FinalizeOwnerTile(), (1, 1, 1))
-
-    lower_to_tirx(kernel)
-    assert FinalizeOwnerTile.finalized_key == str(FinalizeOwnerTile)
+    # Completion notifies are published with a device-scope release atomic.
+    assert "atomic_add_int32_release" in script
 
 
 def test_host_init_is_emitted_before_device_entry():
@@ -1328,7 +1107,7 @@ def test_static_schedule_auto_sizes_max_tasks():
     assert prepared.static_schedule.max_tasks == 64
 
 
-def test_lower_to_tirx_module_contains_kernel_and_queue_init():
+def test_lower_to_tirx_module_contains_the_persistent_kernel():
     kernel = KernelSpec("module_two_stage")
     rows = kernel.var("rows", "int32", range=(1, 16))
     tensor_a = kernel.tensor("A", (rows, 4), "float16")
@@ -1343,10 +1122,9 @@ def test_lower_to_tirx_module_contains_kernel_and_queue_init():
 
     mod = lower_to_tirx_module(kernel, LoweringOptions(attrs={"sm_count": 2}))
 
-    assert {gv.name_hint for gv in mod.functions} == {
-        "module_two_stage",
-        "module_two_stage_init_queue",
-    }
+    # The runtime builder derives the static queue host-side; the module
+    # carries only the persistent device kernel.
+    assert [gv.name_hint for gv in mod.functions] == ["module_two_stage"]
 
 
 def test_kernel_lower_uses_the_default_static_backend():
@@ -1520,8 +1298,8 @@ def test_scalar_in_coord_map_and_init_count_accepted():
     kernel.tile("producer", RecordingTile(), (2, 1, 1)).notify(ready, lambda m, n, k: (routed - 1,))
     kernel.tile("consumer", RecordingTile(), (2, 1, 1)).wait(ready, lambda m, n, k: (m,))
     assert kernel.validate() is kernel
-    with pytest.raises(ValueError, match="dynamic dispatch"):
-        lower_to_tirx(kernel)
+    # The runtime builder lowers scalar-dependent coordinates to device loads.
+    assert isinstance(lower_to_tirx(kernel), tvm.tirx.PrimFunc)
 
     captured, _, routed = _scalar_kernel("init_count_capture")
     ready = captured.event("ready", (2,), lambda coord: routed.range[1] // 128)

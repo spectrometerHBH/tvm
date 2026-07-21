@@ -59,8 +59,9 @@ The logical spec and implementation layers are not responsible for:
 ```
 
 Those tasks belong to input interpretation, planning, validation, and transform
-layers around the logical model.  This package's `transform/` module includes a
-reference single-device static TIRX backend that consumes the spec directly.
+layers around the logical model.  This package's `transform/` module includes
+the runtime-library TIRX builder (static and dynamic schedulers) that consumes
+the spec directly.
 
 ## Compiler Plan Boundaries
 
@@ -235,9 +236,14 @@ agent to repair the DSL.
 
 ## Step 6: Lower To TIRX Megakernel
 
-After `validate_kernel` verifies the spec, the build step derives its private
-lowering state and lowers the spec together with the tile implementations to a
-TIRX megakernel (`lower_to_tirx_module`).
+After `validate_kernel` verifies the spec, the build step lowers the spec
+together with the tile implementations to a TIRX megakernel through the
+runtime-library builder: `lower_to_tirx_module` (or `lower_to_tirx`) for the
+device kernel module, and `build_runtime_kernel` when the host also needs the
+queue arrays and event-workspace size.  `LoweringOptions.scheduler` selects
+the persistent scheduler: `"static"` (default) for the central-queue
+scheduler, `"dynamic"` for the MPMC scheduler with runtime-scalar dispatch
+synthesis.
 
 This lowering decides concrete implementation details, including:
 
@@ -251,6 +257,7 @@ This lowering decides concrete implementation details, including:
 7. runtime integration
 ```
 
-This package includes the reference executable static lowering described above.
-It is an implementation integration rather than part of the logical spec or an
-agent's planning output; other integrations may build from the same spec.
+This package includes the executable static and dynamic lowering described
+above.  It is an implementation integration rather than part of the logical
+spec or an agent's planning output; other integrations may build from the
+same spec.

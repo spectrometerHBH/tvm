@@ -618,7 +618,7 @@ class KernelSpec:
         return validate_kernel(self)
 
     def lower(self, options=None):
-        """Lower this graph with the default single-device static policy."""
+        """Lower this graph with the runtime-library builder (static by default)."""
 
         from tvm.megakernel.transform import lower_to_tirx
 

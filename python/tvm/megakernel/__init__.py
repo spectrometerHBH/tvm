@@ -14,7 +14,7 @@
 # KIND, either express or implied.  See the License for the
 # specific language governing permissions and limitations
 # under the License.
-"""Logical megakernel specifications and static TIRX lowering.
+"""Logical megakernel specifications and runtime-builder TIRX lowering.
 
 The parser-style runtime building blocks for megakernel emission live in the
 ``tvm.megakernel.runtime`` subpackage (imported as a package, not re-exported
@@ -26,7 +26,6 @@ from .transform import (
     LowerMegakernelDSL,
     RuntimeKernelBuild,
     build_runtime_kernel,
-    lower_static_queue_init_to_tirx,
     lower_to_tirx,
     lower_to_tirx_module,
     validate_kernel,
@@ -37,7 +36,6 @@ __all__ = [
     "LoweringOptions",
     "RuntimeKernelBuild",
     "build_runtime_kernel",
-    "lower_static_queue_init_to_tirx",
     "lower_to_tirx",
     "lower_to_tirx_module",
     "validate_kernel",

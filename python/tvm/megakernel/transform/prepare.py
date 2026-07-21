@@ -14,12 +14,12 @@
 # KIND, either express or implied.  See the License for the
 # specific language governing permissions and limitations
 # under the License.
-"""Backend-private preparation for the default TIRX lowering backend.
+"""Backend-private preparation for the runtime-library static builder.
 
-These helpers are consumed only by ``transform.lower``.  They derive the
-parameter bindings, event-workspace layout, job IDs, and static queue
-schedule for one already-validated ``KernelSpec``; none of this is a public
-contract.
+These helpers are consumed by ``transform.runtime_build`` (and its tests).
+They derive the parameter bindings, event-workspace layout, job IDs, and
+static queue schedule for one already-validated ``KernelSpec``; none of this
+is a public contract.
 """
 
 from __future__ import annotations
@@ -41,7 +41,7 @@ from ..dsl import (
     expr_bounds,
 )
 from ..dsl.spec import expr_scalars
-from .scheduler import TIRXSemaphore
+from ..runtime.semaphore import SemaphoreBase
 from .validate import _coord_map_output_scalars, _spec_view, _static_event_tile_adjacency
 
 if TYPE_CHECKING:
@@ -53,7 +53,7 @@ EVENT_INIT_COMPLETE_NAME = "__event_init_complete__"
 DEFAULT_END_JOB_ID = 31
 DEFAULT_MAX_TASKS = 128
 _EVENT_INIT_COUNT_PROOF_LIMIT = 262_144
-_MAX_EVENT_COUNTER_COUNT = ((1 << 31) - 1) // (TIRXSemaphore.base + 1)
+_MAX_EVENT_COUNTER_COUNT = ((1 << 31) - 1) // (SemaphoreBase.base + 1)
 
 
 @dataclass(frozen=True)
@@ -225,14 +225,12 @@ def prepare_tirx_lowering_plan(
         TileLoweringPlan(tile, _tile_job_id(tile, job_id))
         for job_id, tile in enumerate(kernel.tiles)
     )
-    static_schedule = None
-    if options.schedule == "static":
-        static_schedule = _build_static_schedule(
-            tile_plans,
-            len(event_layouts),
-            attrs,
-            _static_event_tile_adjacency(_spec_view(kernel)),
-        )
+    static_schedule = _build_static_schedule(
+        tile_plans,
+        len(event_layouts),
+        attrs,
+        _static_event_tile_adjacency(_spec_view(kernel)),
+    )
 
     plan = TIRXLoweringPlan(
         kernel=kernel,
@@ -254,10 +252,7 @@ def validate_tirx_lowering_plan(plan: TIRXLoweringPlan) -> TIRXLoweringPlan:
     _validate_event_counter_encoding(plan)
     _validate_event_layout(plan)
     _validate_job_ids(plan)
-    if plan.options.schedule == "static":
-        _validate_static_schedule(plan)
-    elif plan.static_schedule is not None:
-        raise ValueError("non-static lowering cannot carry a static schedule")
+    _validate_static_schedule(plan)
     return plan
 
 

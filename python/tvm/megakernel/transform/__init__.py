@@ -14,12 +14,11 @@
 # KIND, either express or implied.  See the License for the
 # specific language governing permissions and limitations
 # under the License.
-"""Megakernel spec validation and static TIRX lowering."""
+"""Megakernel spec validation and runtime-builder TIRX lowering."""
 
 from .lower import (
     LoweringOptions,
     LowerMegakernelDSL,
-    lower_static_queue_init_to_tirx,
     lower_to_tirx,
     lower_to_tirx_module,
 )
@@ -31,7 +30,6 @@ __all__ = [
     "LoweringOptions",
     "RuntimeKernelBuild",
     "build_runtime_kernel",
-    "lower_static_queue_init_to_tirx",
     "lower_to_tirx",
     "lower_to_tirx_module",
     "validate_kernel",
