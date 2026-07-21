@@ -170,6 +170,7 @@ coord entries).
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
+from itertools import product
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
@@ -205,6 +206,7 @@ from ..runtime import (
 )
 from ..runtime.device import f_init_const
 from .prepare import (
+    _EVENT_INIT_COUNT_PROOF_LIMIT,
     DEFAULT_END_JOB_ID,
     INIT_EVENT_JOB_ID,
     WAIT_EVENT_INIT_JOB_ID,
@@ -306,6 +308,7 @@ def _prepare_runtime_plan(
         kernel, replace(options, attrs=attrs), allow_runtime_scalars=True
     )
     _validate_runtime_static_scalar_grids(plan)
+    _validate_static_scalar_event_cardinality(plan)
     return plan
 
 
@@ -372,12 +375,12 @@ def _expr_structurally_equal(lhs, rhs) -> bool:
 
 
 def _resolve_run_predicates(tile: TileSpec) -> list[tuple[int, Any]]:
-    """Resolve one tile's run guards: a verified declaration or generated axes.
+    """Resolve one tile's run guards per axis: verified declaration + generated.
 
-    A declared ``megakernel.run_predicate`` must name a scalar-dependent
-    ``tile_num`` axis and repeat that axis's extent expression (gating on the
-    runtime extent, not a static bound).  Without a declaration, one guard is
-    generated per scalar-dependent axis.
+    A declared ``megakernel.run_predicate`` covers its axis: it must name a
+    scalar-dependent ``tile_num`` axis and repeat that axis's extent
+    expression (gating on the runtime extent, not a static bound).  Every
+    other scalar-dependent axis gets an auto-generated guard.
     """
 
     scalar_axes = [axis for axis, extent in enumerate(tile.tile_num) if expr_scalars(extent)]
@@ -395,7 +398,9 @@ def _resolve_run_predicates(tile: TileSpec) -> list[tuple[int, Any]]:
             f"{label} expr does not match the axis's extent expression; the "
             "guard must gate on the runtime extent itself, not a static bound"
         )
-    return [(axis, expr)]
+    return [(axis, expr)] + [
+        (other, tile.tile_num[other]) for other in scalar_axes if other != axis
+    ]
 
 
 def _validate_runtime_static_scalar_grids(plan: TIRXLoweringPlan) -> None:
@@ -752,20 +757,17 @@ class _RuntimeKernelBuilder:
     def _emit_run(self, tile, indices) -> None:
         impl = tile.impl
         repeat = self._run_repeats.get(tile.name, 1)
-        declared = _parse_run_predicate(tile)
-        if declared is not None:
-            predicates = [declared]
-        elif self.is_dynamic:
-            # Dynamically dispatched grids already match the runtime count.
-            predicates = []
+        if self.is_dynamic:
+            # Dynamically dispatched grids already match the runtime count;
+            # only a declared predicate is kept (vacuously true, mirroring
+            # the hand-written kernels).
+            declared = _parse_run_predicate(tile)
+            predicates = [declared] if declared is not None else []
         else:
-            # Static grids are enumerated at the scalar upper bound: gate
-            # each scalar-dependent axis on its runtime extent.
-            predicates = [
-                (axis, tile.tile_num[axis])
-                for axis in range(3)
-                if expr_scalars(tile.tile_num[axis])
-            ]
+            # Static grids are enumerated at the scalar upper bound: the
+            # declared predicate covers its axis, every other scalar axis
+            # gets an auto-generated guard.
+            predicates = _resolve_run_predicates(tile)
 
         def emit_repeated_run() -> None:
             if tile.name in self._run_repeats:
@@ -1042,9 +1044,11 @@ class _DispatchRule:
     # kept for introspection and is always "started" today.
     trigger: str = "started"
     post_run: bool = False
-    # Escape-hatch proofs: analyzable count form and its static upper bound.
+    # Escape-hatch proofs: normalized count/index forms (evaluated once)
+    # and the count's static upper bound.
     count_expr: Any = None
     count_upper: int | None = None
+    index_exprs: tuple | None = None
 
 
 @dataclass(frozen=True)
@@ -1260,6 +1264,40 @@ def _check_push_scopes(source: TileSpec, pre_scope, push_level) -> None:
         )
 
 
+def _wait_sync_covers(tile: TileSpec, scope: tuple[str, int], hardware: HardwareConfig) -> bool:
+    """Whether the tile's wait synchronizes the pushing scope's threads.
+
+    A cta-level wait joins every thread (its ``syncthreads_and`` is a CTA
+    barrier per poll), so it covers every scope regardless of the mask.  A
+    warp-level wait joins only the masked warps (each waiting warp's lanes
+    join through the warp-collective load): a scope is covered when all its
+    threads sit in masked warps.  A tile without waits has no synchronization
+    to rely on (its own write only orders with its own threads via a barrier).
+    """
+
+    if not tile.waits:
+        return False
+    impl = tile.impl
+    if impl.wait_level == "cta":
+        return True
+    # The only other supported wait level is "warp".
+    mask = impl.wait_mask
+    name, scope_id = scope
+    warp_size = hardware.warp_size
+    if name == "thread":
+        return (mask >> (scope_id // warp_size)) & 1 == 1
+    if name == "warp":
+        return (mask >> scope_id) & 1 == 1
+    if name == "warpgroup":
+        per_group = hardware.warps_per_warpgroup
+        group_mask = ((1 << per_group) - 1) << (scope_id * per_group)
+        return mask & group_mask == group_mask
+    if name == "cta":
+        full = (1 << hardware.warp_count) - 1
+        return mask & full == full
+    return False
+
+
 def _classify_push_scalars(
     count_exprs,
     source: TileSpec,
@@ -1330,34 +1368,58 @@ def _classify_push_scalars(
     return "started", True
 
 
-def _hatch_safety_exprs(hatch: dict[str, Any], label: str) -> tuple[Any, tuple]:
-    """Collect the analyzable count/index expressions of an escape hatch.
+class _PushIdxSentinel:
+    """Push-index placeholder used when normalizing escape-hatch indices."""
 
-    Returns ``(count_expr, safety_exprs)``: the count in analyzable form plus
-    every expression the trigger-safety classification must consider.
+
+#: ScalarSpec-typed push-index hole: hatch index callables may build
+#: ExprSpec trees over it; codegen substitutes the real push index back.
+_PUSH_IDX = ScalarSpec(
+    name="__push_idx__",
+    source=(TensorSpec(name="__push_idx_tensor__", shape=(1,), dtype="int32"), (0,)),
+)
+
+
+def _eval_pure(func, args, label: str):
+    """Call ``func`` twice at the same probe args, requiring equal results."""
+
+    try:
+        first = func(*args)
+        second = func(*args)
+    except Exception as err:  # pylint: disable=broad-exception-caught
+        raise ValueError(f"{label} is not analyzable: {err}") from err
+    if type(first) is not type(second) or first != second:  # pylint: disable=unidiomatic-typecheck
+        raise ValueError(f"{label} must be a pure deterministic callable")
+    return first
+
+
+def _normalize_hatch(hatch: dict[str, Any], label: str) -> tuple[Any, tuple, tuple]:
+    """Evaluate the hatch's count/indices exactly once into analyzable forms.
+
+    Returns ``(count_expr, index_exprs, safety_exprs)``: the count and the
+    3-tuple of index expressions (with ``_PUSH_IDX`` standing in for the
+    push index), plus every expression the trigger-safety classification
+    must consider.  The same normalized trees drive the bound proof, the
+    drain/capacity accounting, and codegen — the callables are never
+    re-called.
     """
 
     count = hatch["count"]
     if callable(count):
-        try:
-            count = count(_AxisProbe(0), _AxisProbe(1), _AxisProbe(2))
-        except Exception as err:  # pylint: disable=broad-exception-caught
-            raise ValueError(
-                f"{label}['count'] is not analyzable; use an ExprLike count so "
-                "the builder can prove trigger safety"
-            ) from err
+        count = _eval_pure(
+            count, (_AxisProbe(0), _AxisProbe(1), _AxisProbe(2)), f"{label}['count']"
+        )
     indices = hatch["indices"]
     if callable(indices):
-        try:
-            indices = indices(0, _AxisProbe(0), _AxisProbe(1), _AxisProbe(2))
-        except Exception as err:  # pylint: disable=broad-exception-caught
-            raise ValueError(
-                f"{label}['indices'] is not analyzable; use a 3-tuple or an "
-                "analyzable callable so the builder can prove trigger safety"
-            ) from err
-    exprs = [count]
-    exprs.extend(entry for entry in indices if not isinstance(entry, _AxisProbe))
-    return count, tuple(exprs)
+        indices = _eval_pure(
+            indices, (_PUSH_IDX, _AxisProbe(0), _AxisProbe(1), _AxisProbe(2)), f"{label}['indices']"
+        )
+    if not isinstance(indices, tuple | list) or len(indices) != 3:
+        raise TypeError(f"{label}['indices'] must return a 3-tuple")
+    index_exprs = tuple(indices)
+    safety_exprs = [count]
+    safety_exprs.extend(entry for entry in index_exprs if not isinstance(entry, _AxisProbe))
+    return count, index_exprs, tuple(safety_exprs)
 
 
 def _synthesize_dispatch_rule(
@@ -1395,7 +1457,7 @@ def _synthesize_dispatch_rule(
                 f"event {event_name!r} exactly once"
             )
         label = f"tile {tile.name!r} attrs[{_ESCAPE_HATCH_KEY!r}]"
-        count_expr, safety_exprs = _hatch_safety_exprs(hatch, label)
+        count_expr, index_exprs, safety_exprs = _normalize_hatch(hatch, label)
         try:
             count_lo, count_hi = expr_bounds(count_expr, require_bounded=True)
         except (TypeError, ValueError) as err:
@@ -1434,6 +1496,7 @@ def _synthesize_dispatch_rule(
             post_run=post_run,
             count_expr=count_expr,
             count_upper=count_hi,
+            index_exprs=index_exprs,
         )
 
     if len(tile.waits) != 1:
@@ -1670,6 +1733,51 @@ def _find_declared_drain(kernel: KernelSpec) -> EventSpec | None:
     return event
 
 
+def _check_event_cardinality(
+    event: EventSpec, coord_map_sets, extent_of, context: str, init_count=None
+) -> None:
+    """Fiber-level per-coord notification count proof for one event.
+
+    ``coord_map_sets`` holds ``(producer_tile, coord_maps)`` pairs and
+    ``extent_of(tile, axis)`` resolves an axis to a statically known fiber
+    extent (or None when not provable).  ``init_count`` defaults to the
+    event's declared count.
+    """
+
+    expected = event.init_count if init_count is None else init_count
+    if not isinstance(expected, int) or isinstance(expected, bool):
+        raise ValueError(
+            f"event {event.name!r} {context}: its init_count must be a plain "
+            "integer for the cardinality proof"
+        )
+    for producer, coord_maps in coord_map_sets:
+        if len(coord_maps) != 1:
+            raise ValueError(
+                f"tile {producer.name!r} notifies event {event.name!r} "
+                f"{len(coord_maps)} times; per-coord cardinality is not provable"
+            )
+        entries = _probe_coord_map(coord_maps[0], f"tile {producer.name!r} notify")
+        used_axes = {payload for kind, payload in entries if kind == "axis"}
+        fiber = 1
+        for axis in range(3):
+            if axis in used_axes:
+                continue
+            extent = extent_of(producer, axis)
+            if extent is None:
+                raise ValueError(
+                    f"event {event.name!r}: tile {producer.name!r} notifies a "
+                    "coordinate whose per-coord notification count is not "
+                    f"statically provable (fiber over non-static axis {axis}); "
+                    f"{context}"
+                )
+            fiber *= extent
+        if fiber != expected:
+            raise ValueError(
+                f"event {event.name!r}: tile {producer.name!r} provides {fiber} "
+                f"notifications per coordinate, but init_count is {expected}"
+            )
+
+
 def _validate_scalar_dynamic_event_cardinality(
     kernel: KernelSpec, scheduled, event_producers
 ) -> None:
@@ -1697,42 +1805,116 @@ def _validate_scalar_dynamic_event_cardinality(
         )
         if not touched or event.attrs.get(_DRAIN_EVENT_KEY):
             continue
-        if not isinstance(event.init_count, int) or isinstance(event.init_count, bool):
-            raise ValueError(
-                f"event {event.name!r} is touched by a scalar-grid tile; its "
-                "init_count must be a plain integer for the dynamic builder's "
-                "cardinality proof"
+
+        def scheduled_extent(tile, axis, *, _scheduled=scheduled):
+            extent = _scheduled[id(tile)][axis]
+            return extent if isinstance(extent, int) and not isinstance(extent, bool) else None
+
+        coord_map_sets = [
+            (producer, [cm for notified, cm in producer.notifies if notified is event])
+            for producer in event_producers.get(id(event), [])
+        ]
+        _check_event_cardinality(
+            event,
+            coord_map_sets,
+            scheduled_extent,
+            "is touched by a scalar-grid tile; scalar-dynamic events require "
+            "coord maps whose fibers have static extents",
+        )
+
+
+def _validate_static_scalar_event_cardinality(plan: TIRXLoweringPlan) -> None:
+    """Prove per-coord producer cardinality for static scalar-grid events.
+
+    Statically enumerated producers notify unconditionally (the run guard
+    wraps only the run), so every event touched by a static scalar-grid tile
+    must have its per-coord notification count over the full
+    upper-bound-enumerated grid equal its init count.  Callable init counts
+    must evaluate to that fiber count at every upper-domain coordinate; a
+    runtime-scalar init count is rejected.
+    """
+
+    kernel = plan.kernel
+    scalar_grid = {id(tile) for tile in kernel.tiles if expr_scalars(tile.tile_num)}
+    if not scalar_grid:
+        return
+    event_producers = _event_tile_producers(kernel)
+    consumers: dict[int, list[TileSpec]] = {}
+    for tile in kernel.tiles:
+        for event, _ in tile.waits:
+            consumers.setdefault(id(event), []).append(tile)
+
+    def upper_extent(tile, axis):
+        try:
+            return expr_bounds(tile.tile_num[axis], require_bounded=True)[1]
+        except (TypeError, ValueError):
+            return None
+
+    for event in kernel.events.values():
+        touched = any(
+            id(tile) in scalar_grid
+            for tile in event_producers.get(id(event), []) + consumers.get(id(event), [])
+        )
+        if not touched or event.attrs.get(_DRAIN_EVENT_KEY):
+            continue
+        coord_map_sets = [
+            (producer, [cm for notified, cm in producer.notifies if notified is event])
+            for producer in event_producers.get(id(event), [])
+        ]
+        if isinstance(event.init_count, int) and not isinstance(event.init_count, bool):
+            _check_event_cardinality(
+                event,
+                coord_map_sets,
+                upper_extent,
+                "is touched by a static scalar-grid tile; enumerated "
+                "producers must match init_count per coordinate",
             )
-        for producer in event_producers.get(id(event), []):
-            coord_maps = [cm for notified, cm in producer.notifies if notified is event]
+            continue
+        # Callable init count: it must return the fiber count as a plain
+        # integer at every upper-domain coordinate (never a runtime scalar).
+        shape = _upper_bound_shape_extents(event.shape, f"event {event.name!r} shape")
+        domain = 1
+        for extent in shape:
+            domain *= extent
+        if domain > _EVENT_INIT_COUNT_PROOF_LIMIT:
+            raise ValueError(
+                f"event {event.name!r} is touched by a static scalar-grid tile; "
+                f"its callable init_count spans {domain} coordinates, beyond "
+                "the cardinality proof limit"
+            )
+        for producer, coord_maps in coord_map_sets:
             if len(coord_maps) != 1:
                 raise ValueError(
-                    f"tile {producer.name!r} notifies scalar-dynamic event "
-                    f"{event.name!r} {len(coord_maps)} times; per-coord "
-                    "cardinality is not provable"
+                    f"tile {producer.name!r} notifies event {event.name!r} "
+                    f"{len(coord_maps)} times; per-coord cardinality is not provable"
                 )
             entries = _probe_coord_map(coord_maps[0], f"tile {producer.name!r} notify")
             used_axes = {payload for kind, payload in entries if kind == "axis"}
             fiber = 1
             for axis in range(3):
-                if axis in used_axes:
-                    continue
-                extent = scheduled[id(producer)][axis]
-                if not isinstance(extent, int) or isinstance(extent, bool):
+                if axis not in used_axes:
+                    extent = upper_extent(producer, axis)
+                    if extent is None:
+                        raise ValueError(
+                            f"event {event.name!r}: tile {producer.name!r} "
+                            "notifies a coordinate whose per-coord "
+                            "notification count is not statically provable"
+                        )
+                    fiber *= extent
+            for coord in product(*(range(extent) for extent in shape)):
+                value = _eval_pure(event.init_count, coord, f"event {event.name!r} init_count")
+                if not isinstance(value, int) or isinstance(value, bool):
                     raise ValueError(
-                        f"event {event.name!r}: tile {producer.name!r} notifies "
-                        "a coordinate whose per-coord notification count is not "
-                        f"statically provable (fiber over non-static axis {axis}); "
-                        "scalar-dynamic events require coord maps whose fibers "
-                        "have static extents"
+                        f"event {event.name!r} is touched by a static "
+                        "scalar-grid tile; a runtime-scalar init_count is "
+                        "not allowed (it must return plain integers)"
                     )
-                fiber *= extent
-            if fiber != event.init_count:
-                raise ValueError(
-                    f"event {event.name!r}: tile {producer.name!r} provides "
-                    f"{fiber} notifications per coordinate, but init_count is "
-                    f"{event.init_count}"
-                )
+                if value != fiber:
+                    raise ValueError(
+                        f"event {event.name!r}: tile {producer.name!r} "
+                        f"provides {fiber} notifications per coordinate, "
+                        f"but init_count at {coord} is {value}"
+                    )
 
 
 def _prepare_dynamic_plan(
@@ -2007,6 +2189,12 @@ class _RuntimeDynamicKernelBuilder(_RuntimeKernelBuilder):
                     T.buffer_store(self.drain_sem.sem, value, [0])
         rule = self.plan.dispatch_rules.get(id(tile))
         if rule is not None and rule.post_run:
+            if not _wait_sync_covers(tile, rule.pre_scope, self.hardware):
+                # The pushing scope is not synchronized with the waiting
+                # threads: a CTA barrier joins them, so the wait's acquire
+                # (and the tile's own write) happens before the push reads
+                # the scalar on every thread.
+                T.evaluate(T.cuda.cta_sync())
             # The pusher writes the scalar itself: the push goes out only
             # after its run, so the full-count trigger implies every one of
             # its runs (and hence the write) is complete.
@@ -2036,27 +2224,44 @@ class _RuntimeDynamicKernelBuilder(_RuntimeKernelBuilder):
             scope_id=rule.pre_scope[1],
         )
 
+    def _lower_push_index(self, value, push_idx, indices, label: str):
+        """Lower a normalized hatch index expression at one push index."""
+
+        if value is _PUSH_IDX:
+            return push_idx
+        if isinstance(value, _AxisProbe):
+            # A bare source-axis reference from the normalized indices.
+            return indices[value.axis]
+        if isinstance(value, ExprSpec):
+            args = [self._lower_push_index(arg, push_idx, indices, label) for arg in value.args]
+            if value.op == "add":
+                return args[0] + args[1]
+            if value.op == "sub":
+                return args[0] - args[1]
+            if value.op == "mul":
+                return args[0] * args[1]
+            if value.op == "floordiv":
+                return args[0] // args[1]
+            if value.op == "mod":
+                return args[0] % args[1]
+            if value.op == "neg":
+                return -args[0]
+            if value.op == "ceildiv":
+                return -((-args[0]) // args[1])
+            raise ValueError(f"{label} uses unsupported ExprSpec op {value.op!r}")
+        return self._lower_expr(value, label)
+
     def _make_push_fn(self, rule: _DispatchRule, indices):
         target_job = self._job_ids[id(rule.target)]
         if rule.custom_indices is not None:
-            count = rule.custom_count
-            if callable(count):
-                count = count(*indices)
-            if isinstance(count, int | VarSpec | ExprSpec | ScalarSpec):
-                count = self._lower_expr(count, f"tile {rule.target.name!r} push count")
+            # The count/indices were normalized exactly once at plan time;
+            # codegen lowers those same trees (never re-calls the hatch).
+            count = self._lower_expr(rule.count_expr, f"tile {rule.target.name!r} push count")
 
             def push_fn(push_idx):
-                if callable(rule.custom_indices):
-                    mapped = rule.custom_indices(push_idx, *indices)
-                else:
-                    mapped = rule.custom_indices
-                if not isinstance(mapped, tuple | list) or len(mapped) != 3:
-                    raise TypeError("escape-hatch indices must return a 3-tuple")
                 mapped = tuple(
-                    self._lower_expr(entry, "push indices")
-                    if isinstance(entry, int | VarSpec | ExprSpec | ScalarSpec)
-                    else entry
-                    for entry in mapped
+                    self._lower_push_index(entry, push_idx, indices, "push indices")
+                    for entry in rule.index_exprs
                 )
                 return (target_job, count, *mapped)
 

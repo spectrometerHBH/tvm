@@ -1449,6 +1449,293 @@ def test_f5_scalar_count_hatch_with_static_terminal_builds():
 
 
 # ---------------------------------------------------------------------------
+# Round-2 review findings
+# ---------------------------------------------------------------------------
+
+
+class _MaskedWarpTile(_MarkerTile):
+    """The reviewer's narrow-wait pusher: warp wait, mask 0x1, thread-32 push."""
+
+    wait_level: ClassVar[str] = "warp"
+    wait_mask: ClassVar[int] = 0x1
+    notify_scope: ClassVar[tuple[str, int]] = ("thread", 32)
+    pre_notify_scope: ClassVar[tuple[str, int]] = ("thread", 32)
+
+
+class _CoveredWarpTile(_MarkerTile):
+    """Warp wait whose mask covers the pushing warp (mask 0x3, warp 0 push)."""
+
+    wait_level: ClassVar[str] = "warp"
+    wait_mask: ClassVar[int] = 0x3
+    notify_scope: ClassVar[tuple[str, int]] = ("warp", 0)
+    pre_notify_scope: ClassVar[tuple[str, int]] = ("warp", 0)
+
+
+def _r21_spec(name, pusher_impl):
+    kernel = KernelSpec(name)
+    count_buf = kernel.tensor("count", (1,), "int32")
+    out = kernel.tensor("out", (64,), "int32")
+    n_tiles = kernel.scalar("n_tiles", source=(count_buf, (0,)), range=(1, 64))
+    event_a = kernel.event("event_a", (1,), 1)
+    event_b = kernel.event("event_b", (1,), 1)
+    event_c = kernel.event("event_c", (1,), 1)
+    kernel.tile("entry", _MarkerTile(), (1, 1, 1)).notify(event_a, (0,))
+    kernel.tile("writer", _MarkerTile(), (1, 1, 1), writes=[count_buf]).wait(event_a, (0,)).notify(
+        event_b, (0,)
+    )
+    kernel.tile("pusher", pusher_impl, (1, 1, 1)).wait(event_b, (0,)).notify(event_c, (0,))
+    kernel.tile("mark", _MarkerTile(), (n_tiles, 1, 1), writes=[out]).wait(event_c, (0,))
+    return kernel
+
+
+def _pusher_branch_order(script, fence_ord=3):
+    """(fence, cta_sync, trigger) indices inside the pusher's dispatch branch."""
+
+    fences = [match.start() for match in re.finditer(re.escape("T.cuda.thread_fence()"), script)]
+    fence = fences[fence_ord - 1]
+    sync = (
+        script.index("T.cuda.cta_sync()", fence) if "T.cuda.cta_sync()" in script[fence:] else None
+    )
+    trigger = script.index("% 65536 == 1", fence)
+    return fence, sync, trigger
+
+
+def test_r21_masked_wait_gets_cta_barrier_before_push():
+    plan = _dynamic_plan(_r21_spec("r21_masked", _MaskedWarpTile()))
+    rule = next(rule for rule in plan.dispatch_rules.values() if rule.target.name == "mark")
+    assert rule.post_run
+
+    build = build_runtime_kernel(_r21_spec("r21_masked", _MaskedWarpTile()), _dynamic_options())
+    script = build.module["r21_masked"].script()
+    _, sync, trigger = _pusher_branch_order(script)
+    # The uncovered pushing scope is joined by a CTA barrier before the push.
+    assert sync is not None
+    assert sync < trigger
+
+
+def test_r21_cta_wait_needs_no_barrier():
+    build = build_runtime_kernel(_r21_spec("r21_cta", _MarkerTile()), _dynamic_options())
+    script = build.module["r21_cta"].script()
+    _, sync, _ = _pusher_branch_order(script)
+    assert sync is None
+
+
+def test_r21_covering_warp_wait_needs_no_barrier():
+    build = build_runtime_kernel(_r21_spec("r21_covered", _CoveredWarpTile()), _dynamic_options())
+    script = build.module["r21_covered"].script()
+    _, sync, _ = _pusher_branch_order(script)
+    assert sync is None
+
+
+def test_r21_wait_free_pusher_gets_barrier():
+    kernel = KernelSpec("r21_no_wait")
+    count_buf = kernel.tensor("count", (1,), "int32")
+    out = kernel.tensor("out", (64,), "int32")
+    n_tiles = kernel.scalar("n_tiles", source=(count_buf, (0,)), range=(1, 64))
+    ready = kernel.event("ready", (1,), 1)
+    kernel.tile("writer", _MarkerTile(), (1, 1, 1), writes=[count_buf]).notify(ready, (0,))
+    kernel.tile("mark", _MarkerTile(), (n_tiles, 1, 1), writes=[out]).wait(ready, (0,))
+
+    build = build_runtime_kernel(kernel, _dynamic_options())
+    script = build.module["r21_no_wait"].script()
+    fence = script.index("T.cuda.thread_fence()")
+    sync = script.index("T.cuda.cta_sync()", fence)
+    trigger = script.index("% 65536 == 1", fence)
+    assert fence < sync < trigger
+
+
+def test_r22_stateful_count_callable_rejected():
+    kernel = KernelSpec("r22_stateful")
+    kernel.tensor("count", (1,), "int32")
+    out = kernel.tensor("out", (64,), "int32")
+    ready = kernel.event("ready", (1,), 1)
+    kernel.tile("plant", _MarkerTile(), (1, 1, 1)).notify(ready, (0,))
+    calls = {"n": 0}
+
+    def stateful_count(m, n, k):
+        calls["n"] += 1
+        return 1 if calls["n"] == 1 else 40000
+
+    kernel.tile(
+        "mark",
+        _MarkerTile(),
+        (8, 1, 1),
+        writes=[out],
+        attrs={
+            "megakernel.dispatch": {
+                "source": "plant",
+                "count": stateful_count,
+                "indices": (0, 0, 0),
+            }
+        },
+    ).wait(ready, (0,))
+
+    with pytest.raises(ValueError, match="pure deterministic"):
+        _dynamic_plan(kernel)
+
+
+def test_r22_stateful_indices_callable_rejected():
+    kernel = KernelSpec("r22_stateful_idx")
+    kernel.tensor("count", (1,), "int32")
+    out = kernel.tensor("out", (64,), "int32")
+    ready = kernel.event("ready", (1,), 1)
+    kernel.tile("plant", _MarkerTile(), (1, 1, 1)).notify(ready, (0,))
+    calls = {"n": 0}
+
+    def stateful_indices(push_idx, m, n, k):
+        calls["n"] += 1
+        return (push_idx, 0, 0) if calls["n"] == 1 else (40000, 0, 0)
+
+    kernel.tile(
+        "mark",
+        _MarkerTile(),
+        (8, 1, 1),
+        writes=[out],
+        attrs={
+            "megakernel.dispatch": {
+                "source": "plant",
+                "count": 8,
+                "indices": stateful_indices,
+            }
+        },
+    ).wait(ready, (0,))
+
+    with pytest.raises(ValueError, match="pure deterministic"):
+        _dynamic_plan(kernel)
+
+
+def test_r22_legitimate_callable_evaluated_once():
+    kernel = KernelSpec("r22_pure")
+    count_buf = kernel.tensor("count", (1,), "int32")
+    out = kernel.tensor("out", (64,), "int32")
+    n_tiles = kernel.scalar("n_tiles", source=(count_buf, (0,)), range=(1, 64))
+    ready = kernel.event("ready", (1,), 1)
+    kernel.tile("plant", _MarkerTile(), (1, 1, 1)).notify(ready, (0,))
+    calls = {"n": 0}
+
+    def pure_count(m, n, k):
+        calls["n"] += 1
+        return n_tiles
+
+    kernel.tile(
+        "mark",
+        _MarkerTile(),
+        (8, 1, 1),
+        writes=[out],
+        attrs={
+            "megakernel.dispatch": {
+                "source": "plant",
+                "count": pure_count,
+                "indices": lambda push_idx, m, n, k: (push_idx, 0, 0),
+            }
+        },
+    ).wait(ready, (0,))
+
+    build = build_runtime_kernel(kernel, _dynamic_options())
+    # Exactly the purity double-call at the same probe args; never re-called.
+    assert calls["n"] == 2
+    plan = _dynamic_plan(kernel)
+    (rule,) = plan.dispatch_rules.values()
+    assert rule.count_upper == 64
+    script = build.module["r22_pure"].script()
+    # Codegen lowered the captured tree (the scalar load), not a re-call.
+    assert "count" in script
+
+
+def test_r23_rejects_static_scalar_cardinality_mismatch():
+    kernel = KernelSpec("r23_repro")
+    counter = kernel.tensor("counter", (1,), "int32")
+    out = kernel.tensor("out", (64,), "int32")
+    routed = kernel.scalar("routed", source=(counter, (0,)), range=(1, 4))
+    ready = kernel.event("ready", (1,), 1)
+    kernel.tile("producer", _MarkerTile(), (routed, 1, 1), writes=[out]).notify(ready, (0,))
+    kernel.tile("consumer", _MarkerTile(), (1, 1, 1)).wait(ready, (0,))
+
+    with pytest.raises(ValueError, match="provides 4 notifications per coordinate"):
+        build_runtime_kernel(kernel, _static_options())
+
+
+def test_r23_moe_style_enumerated_fiber_passes():
+    kernel = KernelSpec("r23_moe_style")
+    counter = kernel.tensor("counter", (1,), "int32")
+    out = kernel.tensor("out", (64,), "int32")
+    routed = kernel.scalar("routed", source=(counter, (0,)), range=(1, 4))
+    ready = kernel.event("ready", (4,), 12)
+    kernel.tile("producer", _MarkerTile(), (routed, 12, 1), writes=[out]).notify(
+        ready, lambda m, n, k: (m,)
+    )
+    kernel.tile("consumer", _MarkerTile(), (routed, 1, 1)).wait(ready, lambda m, n, k: (m,))
+
+    build = build_runtime_kernel(kernel, _static_options())
+    assert isinstance(build.module["r23_moe_style"], tvm.tirx.PrimFunc)
+
+
+def test_r23_rejects_scalar_reading_init_count():
+    kernel = KernelSpec("r23_scalar_init")
+    counter = kernel.tensor("counter", (1,), "int32")
+    out = kernel.tensor("out", (64,), "int32")
+    routed = kernel.scalar("routed", source=(counter, (0,)), range=(1, 4))
+    ready = kernel.event("ready", (1,), lambda coord: routed)
+    kernel.tile("producer", _MarkerTile(), (routed, 1, 1), writes=[out]).notify(ready, (0,))
+    kernel.tile("consumer", _MarkerTile(), (1, 1, 1)).wait(ready, (0,))
+
+    # Spec validation already requires plain positive integers from init
+    # count callables, so a scalar-reading callable never reaches the
+    # builder; the builder-side branch is defense in depth.
+    with pytest.raises(ValueError, match="positive integer"):
+        build_runtime_kernel(kernel, _static_options())
+
+
+def test_r23_rejects_fiber_mismatched_callable_init_count():
+    kernel = KernelSpec("r23_bad_callable")
+    counter = kernel.tensor("counter", (1,), "int32")
+    out = kernel.tensor("out", (64,), "int32")
+    routed = kernel.scalar("routed", source=(counter, (0,)), range=(1, 4))
+    ready = kernel.event("ready", (1,), lambda coord: 2)
+    kernel.tile("producer", _MarkerTile(), (routed, 1, 1), writes=[out]).notify(ready, (0,))
+    kernel.tile("consumer", _MarkerTile(), (1, 1, 1)).wait(ready, (0,))
+
+    with pytest.raises(ValueError, match="provides 4 notifications per coordinate"):
+        build_runtime_kernel(kernel, _static_options())
+
+
+def test_r23_callable_init_count_plain_int_passes():
+    kernel = KernelSpec("r23_callable")
+    counter = kernel.tensor("counter", (1,), "int32")
+    out = kernel.tensor("out", (64,), "int32")
+    routed = kernel.scalar("routed", source=(counter, (0,)), range=(1, 4))
+    ready = kernel.event("ready", (1,), lambda coord: 4)
+    kernel.tile("producer", _MarkerTile(), (routed, 1, 1), writes=[out]).notify(ready, (0,))
+    kernel.tile("consumer", _MarkerTile(), (1, 1, 1)).wait(ready, (0,))
+
+    build = build_runtime_kernel(kernel, _static_options())
+    assert isinstance(build.module["r23_callable"], tvm.tirx.PrimFunc)
+
+
+def test_r24_declared_axis_plus_auto_axis():
+    kernel = KernelSpec("r24")
+    count_r = kernel.tensor("count_r", (1,), "int32")
+    count_c = kernel.tensor("count_c", (1,), "int32")
+    out = kernel.tensor("out", (8, 8), "int32")
+    rows = kernel.scalar("rows", source=(count_r, (0,)), range=(1, 8))
+    cols = kernel.scalar("cols", source=(count_c, (0,)), range=(1, 8))
+    kernel.tile(
+        "t",
+        _MarkerTile(),
+        (rows, cols, 1),
+        writes=[out],
+        attrs={"megakernel.run_predicate": (0, "lt", rows)},
+    )
+
+    build = build_runtime_kernel(kernel, _static_options())
+    script = build.module["r24"].script()
+    # The declared rows guard and the auto-generated cols guard both load
+    # their scalar buffers.
+    assert "count_r" in script
+    assert "count_c" in script
+
+
+# ---------------------------------------------------------------------------
 # GPU numerical gate
 # ---------------------------------------------------------------------------
 
@@ -1509,3 +1796,51 @@ def test_demo_case_b_post_run_push_gpu():
     # device; the push must land after its run.
     report = run_case_b(in_pairs=((3, 5), (20, 17), (1, 0), (63, 1)))
     assert all(check["ok"] for check in report["checks"])
+
+
+def test_r24_two_scalar_axes_gpu():
+    _require_cuda_sm100()
+    import numpy as np
+
+    class FillTile(TileImpl):
+        def __init__(self, out):
+            super().__init__()
+            self.out = out
+
+        def run(self, m_idx, n_idx, k_idx):
+            T.buffer_store(self.out, m_idx * 8 + n_idx + 1, [m_idx, n_idx])
+
+    kernel = KernelSpec("r24_gpu")
+    count_r = kernel.tensor("count_r", (1,), "int32")
+    count_c = kernel.tensor("count_c", (1,), "int32")
+    out_spec = kernel.tensor("out", (8, 8), "int32")
+    rows = kernel.scalar("rows", source=(count_r, (0,)), range=(1, 8))
+    cols = kernel.scalar("cols", source=(count_c, (0,)), range=(1, 8))
+    kernel.tile(
+        "fill",
+        FillTile(out_spec),
+        (rows, cols, 1),
+        writes=[out_spec],
+        attrs={"megakernel.run_predicate": (0, "lt", rows)},
+    )
+    kernel.validate()
+    build = build_runtime_kernel(kernel, LoweringOptions(scheduler="static"))
+    lib = tvm.compile(build.module, tvm.target.Target("cuda"), tir_pipeline="tirx")
+
+    dev = tvm.cuda(0)
+    cr_dev = tvm.runtime.tensor(np.zeros((1,), dtype=np.int32), dev)
+    cc_dev = tvm.runtime.tensor(np.zeros((1,), dtype=np.int32), dev)
+    out_dev = tvm.runtime.tensor(np.zeros((8, 8), dtype=np.int32), dev)
+    queue_dev = tvm.runtime.tensor(build.exec_queue.copy(), dev)
+    func = lib["r24_gpu"]
+    for rows_v, cols_v in ((3, 5), (8, 1), (1, 8)):
+        cr_dev.copyfrom(np.array([rows_v], dtype=np.int32))
+        cc_dev.copyfrom(np.array([cols_v], dtype=np.int32))
+        out_dev.copyfrom(np.zeros((8, 8), dtype=np.int32))
+        func(cr_dev, cc_dev, out_dev, queue_dev)
+        dev.sync()
+        expected = np.zeros((8, 8), dtype=np.int32)
+        expected[:rows_v, :cols_v] = np.arange(1, 65, dtype=np.int32).reshape(8, 8)[
+            :rows_v, :cols_v
+        ]
+        np.testing.assert_array_equal(out_dev.numpy(), expected)

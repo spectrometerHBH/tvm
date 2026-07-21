@@ -663,7 +663,13 @@ For each dispatched tile the rule is derived mechanically:
   divergence from the hand-written kernels' start-of-task push.  The
   upstream case additionally requires the pusher's scheduled grid to fit
   `sm_count`.  Anything else (producer not upstream, oversized pusher grid,
-  ambiguous producers) is a build error.
+  ambiguous producers) is a build error.  The post-run placement still
+  requires the *pushing* threads to be synchronized with the *waiting*
+  threads: a cta wait covers every scope and a warp/masked wait covers only
+  the waiting warps' lanes — when the push scope (the source impl's
+  `pre_notify_scope`, or the hatch's) is not covered, the builder emits a
+  CTA barrier immediately before the push so the wait's acquire (or the
+  tile's own write) happens-before the scalar read on every thread.
 
 ### Scalar-dynamic event cardinality
 
@@ -675,7 +681,12 @@ notify coord map must be analyzable and the per-coord notification count
 statically known and equal to the event's `init_count` — e.g. a
 `(routed_rows, 12, 1)` grid notifying at `(m,)` provides a provable 12 per
 cell, while runtime-count instances all notifying one coordinate are
-rejected.  Declared drain events are consistent by construction.
+rejected.  Declared drain events are consistent by construction.  The
+static builder applies the same proof over the full upper-bound-enumerated
+grid (enumerated producers notify unconditionally — the run guard wraps
+only the run — so `init_count` must count every enumerated instance per
+coordinate; callable init counts must return that fiber count as plain
+integers at every upper-domain coordinate).
 
 ### Drain synthesis and kernel termination
 
@@ -711,19 +722,23 @@ n extent divisible by `q`.
   the source impl's `pre_notify_scope`), and `push_level` (default: the
   pre-notify scope).  Validation rejects unknown/missing keys, unknown
   tiles/events, an event the tile does not wait on, malformed scopes, a
-  `push_level` wider than the pre-notify scope, and unanalyzable
-  count/indices.  The hatch does not bypass the proofs: the declared count
-  needs a static upper bound (used by the capacity proof as
-  source-grid × count), and a terminal reached through a hatch has its drain
-  count derived as source-grid × declared-count (a runtime-scalar terminal
-  `tile_num` combined with a hatch is rejected as underivable).
+  `push_level` wider than the pre-notify scope, unanalyzable
+  count/indices, and impure callables (each callable is evaluated exactly
+  once into a normalized expression tree — with a purity double-call at the
+  probe arguments — and that same tree drives the bound proof, the
+  drain/capacity accounting, and codegen).  The hatch does not bypass the
+  proofs: the declared count needs a static upper bound (used by the
+  capacity proof as source-grid × count), and a terminal reached through a
+  hatch has its drain count derived as source-grid × declared-count (a
+  runtime-scalar terminal `tile_num` combined with a hatch is rejected as
+  underivable).
 - `tile.attrs["megakernel.run_predicate"]`: `(axis, op, expr)` with `op`
   currently always `"lt"`; gates the tile's run to instances with
   `indices[axis] < expr` while the host queue enumerates the scalar upper
-  bound.  The declaration must name a scalar-dependent `tile_num` axis and
-  repeat that axis's extent expression (gating on the runtime extent, not a
-  static bound); without a declaration the builder generates one guard per
-  scalar-dependent axis.
+  bound.  The declaration covers its axis: it must name a scalar-dependent
+  `tile_num` axis and repeat that axis's extent expression (gating on the
+  runtime extent, not a static bound); every other scalar-dependent axis
+  gets an auto-generated guard.
 - `event.attrs["megakernel.drain"]`: marks a spec-declared drain event
   (shape `(1,)`, no wait/notify edges); see *Drain synthesis*.
 - `tile.attrs["megakernel.job_id"]`: pins the tile's physical job id (a
