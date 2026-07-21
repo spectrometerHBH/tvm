@@ -14,28 +14,22 @@
 # KIND, either express or implied.  See the License for the
 # specific language governing permissions and limitations
 # under the License.
-"""Logical megakernel specifications and execution-plan lowering."""
+"""Logical megakernel specifications and static TIRX lowering."""
 
 from .transform import (
     LoweringOptions,
     LowerMegakernelDSL,
-    SemanticPlan,
-    build_semantic_plan,
-    lower_execution_plan,
     lower_static_queue_init_to_tirx,
     lower_to_tirx,
     lower_to_tirx_module,
-    validate_semantic_plan,
+    validate_kernel,
 )
 
 __all__ = [
     "LowerMegakernelDSL",
     "LoweringOptions",
-    "SemanticPlan",
-    "build_semantic_plan",
-    "lower_execution_plan",
     "lower_static_queue_init_to_tirx",
     "lower_to_tirx",
     "lower_to_tirx_module",
-    "validate_semantic_plan",
+    "validate_kernel",
 ]

@@ -14,75 +14,22 @@
 # KIND, either express or implied.  See the License for the
 # specific language governing permissions and limitations
 # under the License.
-"""Megakernel execution plans, physical programs, and lowering backends."""
+"""Megakernel spec validation and static TIRX lowering."""
 
 from .lower import (
     LoweringOptions,
     LowerMegakernelDSL,
-    TIRXStaticBackend,
-    lower_execution_plan,
     lower_static_queue_init_to_tirx,
     lower_to_tirx,
     lower_to_tirx_module,
 )
-from .model import (
-    BarrierStep,
-    DeviceRegionPlan,
-    EdgePlacement,
-    ExecutionPlan,
-    ExecutionPlanBackend,
-    FetchGuardStep,
-    HookStep,
-    HostCallStep,
-    HostRegionPlan,
-    HostSyncStep,
-    LogicalEdge,
-    MidBodyPortStep,
-    NotifyStep,
-    ProgramStep,
-    QueuePushStep,
-    RegionDependencyPlan,
-    RunStep,
-    RuntimeEventInitStep,
-    TileProgram,
-    WaitStep,
-    logical_edges,
-    make_static_execution_plan,
-)
-from .semantic import SemanticEdge, SemanticPlan, build_semantic_plan, validate_semantic_plan
+from .validate import validate_kernel
 
 __all__ = [
-    "BarrierStep",
-    "DeviceRegionPlan",
-    "EdgePlacement",
-    "ExecutionPlan",
-    "ExecutionPlanBackend",
-    "FetchGuardStep",
-    "HookStep",
-    "HostCallStep",
-    "HostRegionPlan",
-    "HostSyncStep",
-    "LogicalEdge",
     "LowerMegakernelDSL",
     "LoweringOptions",
-    "MidBodyPortStep",
-    "NotifyStep",
-    "ProgramStep",
-    "QueuePushStep",
-    "RegionDependencyPlan",
-    "RunStep",
-    "RuntimeEventInitStep",
-    "SemanticEdge",
-    "SemanticPlan",
-    "TIRXStaticBackend",
-    "TileProgram",
-    "WaitStep",
-    "build_semantic_plan",
-    "logical_edges",
-    "lower_execution_plan",
     "lower_static_queue_init_to_tirx",
     "lower_to_tirx",
     "lower_to_tirx_module",
-    "make_static_execution_plan",
-    "validate_semantic_plan",
+    "validate_kernel",
 ]

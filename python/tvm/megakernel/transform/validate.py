@@ -14,7 +14,15 @@
 # KIND, either express or implied.  See the License for the
 # specific language governing permissions and limitations
 # under the License.
-"""Semantic validation for logical megakernel graphs."""
+"""Validation for logical megakernel specifications.
+
+``validate_kernel`` runs every backend-independent check directly on a
+``KernelSpec``.  It derives the variables, tensors, events, tiles, and
+logical event edges it needs from the spec itself; there is no separate
+plan object.  Logical edges are derived per event as the cross product of
+{tiles notifying the event} x {tiles waiting on the event}, in stable tile
+order.
+"""
 
 from __future__ import annotations
 
@@ -23,23 +31,24 @@ import math
 import random
 from collections import defaultdict
 from collections.abc import Iterable
+from dataclasses import dataclass
 from itertools import product
 from typing import Any
 
-from ...dsl import (
+from ..dsl import (
     EventSpec,
     ExprSpec,
+    KernelSpec,
     RegionRange,
     RegionSpec,
     TensorSpec,
     TileImpl,
+    TileSpec,
     VarSpec,
     eval_expr_like,
     expr_bounds,
     expr_vars,
 )
-from .build import event_init_count, semantic_edges
-from .model import SemanticPlan
 
 _EXACT_ENUMERATION_LIMIT = 262_144
 _SYMBOLIC_ENVIRONMENT_LIMIT = 4_096
@@ -56,19 +65,79 @@ _EXPR_ARITY = {
 }
 
 
-def validate_semantic_plan(plan: SemanticPlan) -> SemanticPlan:
-    """Validate the backend-independent meaning of a megakernel graph."""
+@dataclass(frozen=True, eq=False)
+class _LogicalEdge:
+    """One derived producer-to-consumer edge induced by a logical event."""
 
-    if not isinstance(plan, SemanticPlan):
-        raise TypeError("semantic validation requires a SemanticPlan")
-    kernel = plan.kernel
+    event: EventSpec
+    producer: TileSpec
+    consumer: TileSpec
+
+
+@dataclass(frozen=True)
+class _SpecView:
+    """Internal derived view of one ``KernelSpec`` consumed by the checkers."""
+
+    kernel: KernelSpec
+    vars: tuple[VarSpec, ...]
+    tensors: tuple[TensorSpec, ...]
+    events: tuple[EventSpec, ...]
+    tiles: tuple[TileSpec, ...]
+    logical_edges: tuple[_LogicalEdge, ...]
+
+
+def _spec_view(kernel: KernelSpec) -> _SpecView:
+    """Derive the internal validation view of one ``KernelSpec``."""
+
+    return _SpecView(
+        kernel=kernel,
+        vars=tuple(kernel.vars.values()),
+        tensors=tuple(kernel.tensors.values()),
+        events=tuple(kernel.events.values()),
+        tiles=tuple(kernel.tiles),
+        logical_edges=_logical_edges(kernel),
+    )
+
+
+def _logical_edges(kernel: KernelSpec) -> tuple[_LogicalEdge, ...]:
+    """Return logical event edges in stable event and tile order."""
+
+    producers: dict[int, list] = {id(event): [] for event in kernel.events.values()}
+    consumers: dict[int, list] = {id(event): [] for event in kernel.events.values()}
+    for tile in kernel.tiles:
+        for event, _ in tile.notifies:
+            if all(candidate is not tile for candidate in producers.setdefault(id(event), [])):
+                producers[id(event)].append(tile)
+        for event, _ in tile.waits:
+            if all(candidate is not tile for candidate in consumers.setdefault(id(event), [])):
+                consumers[id(event)].append(tile)
+
+    result = []
+    for event in kernel.events.values():
+        for producer in producers.get(id(event), ()):
+            for consumer in consumers.get(id(event), ()):
+                result.append(_LogicalEdge(event, producer, consumer))
+    return tuple(result)
+
+
+def _event_init_count(event: EventSpec, coord: tuple[int, ...]) -> int:
+    """Evaluate one logical event count at a concrete coordinate."""
+
+    return event.init_count(coord) if callable(event.init_count) else event.init_count
+
+
+def validate_kernel(kernel: KernelSpec) -> KernelSpec:
+    """Validate the backend-independent meaning of a megakernel spec."""
+
+    if not isinstance(kernel, KernelSpec):
+        raise TypeError("kernel validation requires a KernelSpec")
     if not isinstance(kernel.attrs, dict):
         raise TypeError("kernel attrs must be a dict")
-    _validate_plan_snapshot(plan)
+    view = _spec_view(kernel)
 
-    var_ids = {id(var) for var in plan.vars}
-    tensor_ids = {id(tensor) for tensor in plan.tensors}
-    event_ids = {id(event) for event in plan.events}
+    var_ids = {id(var) for var in view.vars}
+    tensor_ids = {id(tensor) for tensor in view.tensors}
+    event_ids = {id(event) for event in view.events}
     event_ranks: dict[int, int] = {}
 
     for registry_name, var in kernel.vars.items():
@@ -105,7 +174,7 @@ def validate_semantic_plan(plan: SemanticPlan) -> SemanticPlan:
     tensor_writers: dict[int, list[tuple[Any, TensorSpec]]] = defaultdict(list)
     tensor_readers: dict[int, list[tuple[Any, TensorSpec]]] = defaultdict(list)
     tile_names: set[str] = set()
-    for tile in plan.tiles:
+    for tile in view.tiles:
         if tile.name in tile_names:
             raise ValueError(f"Duplicate tile: {tile.name}")
         tile_names.add(tile.name)
@@ -146,37 +215,20 @@ def validate_semantic_plan(plan: SemanticPlan) -> SemanticPlan:
                 targets = producers if kind == "notify" else consumers
                 targets[id(event)].append(tile)
 
-    _validate_tensor_access_regions(plan)
-    _validate_tensor_writers(tensor_writers, plan)
-    for event in plan.events:
+    _validate_tensor_access_regions(view)
+    _validate_tensor_writers(tensor_writers, view)
+    for event in view.events:
         if consumers[id(event)] and not producers[id(event)]:
             raise ValueError(f"event {event.name!r} is waited on but has no notifier")
         if producers[id(event)] and not consumers[id(event)]:
             raise ValueError(f"event {event.name!r} is notified but has no consumer")
-        _validate_event_counts(event, producers[id(event)], consumers[id(event)], plan.vars)
+        _validate_event_counts(event, producers[id(event)], consumers[id(event)], view.vars)
 
-    event_adjacency = _event_adjacency(plan)
+    event_adjacency = _event_adjacency(view)
     event_ordering = _transitive_closure(event_adjacency)
-    _validate_waited_region_sources(plan, tensor_writers)
-    _validate_tensor_dependencies(plan, tensor_writers, tensor_readers, event_ordering)
-    return plan
-
-
-def _validate_plan_snapshot(plan: SemanticPlan) -> None:
-    kernel = plan.kernel
-    snapshots = (
-        (plan.vars, tuple(kernel.vars.values()), "variables"),
-        (plan.tensors, tuple(kernel.tensors.values()), "tensors"),
-        (plan.events, tuple(kernel.events.values()), "events"),
-        (plan.tiles, tuple(kernel.tiles), "tiles"),
-    )
-    for actual, expected, label in snapshots:
-        if len(actual) != len(expected) or any(
-            lhs is not rhs for lhs, rhs in zip(actual, expected)
-        ):
-            raise ValueError(f"semantic plan {label} do not match its KernelSpec")
-    if plan.logical_edges != semantic_edges(kernel):
-        raise ValueError("semantic plan logical edges do not match its KernelSpec")
+    _validate_waited_region_sources(view, tensor_writers)
+    _validate_tensor_dependencies(view, tensor_writers, tensor_readers, event_ordering)
+    return kernel
 
 
 def _validate_var_range(var: VarSpec) -> None:
@@ -459,8 +511,8 @@ def _event_validation_values(event, producers, consumers) -> tuple[Any, ...]:
     return tuple(values)
 
 
-def _validate_tensor_writers(writers, plan: SemanticPlan) -> None:
-    for tensor in plan.tensors:
+def _validate_tensor_writers(writers, view: _SpecView) -> None:
+    for tensor in view.tensors:
         entries = writers[id(tensor)]
         distinct_tiles = []
         for tile, _ in entries:
@@ -470,13 +522,13 @@ def _validate_tensor_writers(writers, plan: SemanticPlan) -> None:
         if len(distinct_tiles) > 1 and not all_static:
             raise ValueError(f"tensor {tensor.name!r} has multiple producers")
         if entries and all_static:
-            _validate_writer_regions_disjoint(tensor, entries, plan.vars)
+            _validate_writer_regions_disjoint(tensor, entries, view.vars)
 
 
-def _validate_tensor_access_regions(plan: SemanticPlan) -> None:
+def _validate_tensor_access_regions(view: _SpecView) -> None:
     static_accesses = [
         (tile, access, kind)
-        for tile in plan.tiles
+        for tile in view.tiles
         for kind, accesses in (("read", tile.reads), ("write", tile.writes))
         for access in accesses
         if access.has_region and not access.region_dynamic
@@ -484,7 +536,7 @@ def _validate_tensor_access_regions(plan: SemanticPlan) -> None:
     if not static_accesses:
         return
     for tile, access, kind in static_accesses:
-        variables = _related_variables(plan.vars, *_region_validation_values(tile, access))
+        variables = _related_variables(view.vars, *_region_validation_values(tile, access))
         environments = _bounded_environments(
             variables,
             "static tensor-region bounds validation",
@@ -690,7 +742,7 @@ def _validate_event_counts(event, producers, consumers, variables) -> None:
             event_coords, _ = _grid_indices(event_shape, _EXACT_ENUMERATION_LIMIT)
         count_coords = tuple(dict.fromkeys((*event_coords, *counts, *waited_coords)))
         for coord in count_coords:
-            expected = event_init_count(event, coord)
+            expected = _event_init_count(event, coord)
             if not _is_int(expected) or expected <= 0:
                 raise ValueError(
                     f"event {event.name!r} init_count at coord {coord} must be a positive integer"
@@ -705,9 +757,9 @@ def _validate_event_counts(event, producers, consumers, variables) -> None:
                 )
 
 
-def _event_adjacency(plan: SemanticPlan) -> dict[int, set[int]]:
-    adjacency = {id(tile): set() for tile in plan.tiles}
-    for edge in plan.logical_edges:
+def _event_adjacency(view: _SpecView) -> dict[int, set[int]]:
+    adjacency = {id(tile): set() for tile in view.tiles}
+    for edge in view.logical_edges:
         if edge.producer is not edge.consumer:
             adjacency[id(edge.producer)].add(id(edge.consumer))
     return adjacency
@@ -791,8 +843,8 @@ class _InstanceEventGraph:
         return any(visit(node) for node in self.adjacency)
 
 
-def _event_graph_validation_values(plan: SemanticPlan, tiles=None) -> tuple[Any, ...]:
-    tiles = tuple(plan.tiles if tiles is None else tiles)
+def _event_graph_validation_values(view: _SpecView, tiles=None) -> tuple[Any, ...]:
+    tiles = tuple(view.tiles if tiles is None else tiles)
     referenced_events = {
         id(event): event for tile in tiles for event, _ in (*tile.notifies, *tile.waits)
     }
@@ -808,8 +860,8 @@ def _event_graph_validation_values(plan: SemanticPlan, tiles=None) -> tuple[Any,
     return tuple(values)
 
 
-def _build_instance_event_graph(plan: SemanticPlan, env, tiles=None) -> _InstanceEventGraph:
-    tiles = tuple(plan.tiles if tiles is None else tiles)
+def _build_instance_event_graph(view: _SpecView, env, tiles=None) -> _InstanceEventGraph:
+    tiles = tuple(view.tiles if tiles is None else tiles)
     referenced_events = {
         id(event): event for tile in tiles for event, _ in (*tile.notifies, *tile.waits)
     }
@@ -877,8 +929,8 @@ def _adjacency_has_cycle(adjacency) -> bool:
     return any(visit(node) for node in adjacency)
 
 
-def _tiles_on_dependency_paths(plan: SemanticPlan, producer, consumer):
-    adjacency = _event_adjacency(plan)
+def _tiles_on_dependency_paths(view: _SpecView, producer, consumer):
+    adjacency = _event_adjacency(view)
     reverse = {tile_id: set() for tile_id in adjacency}
     for source, targets in adjacency.items():
         for target in targets:
@@ -896,20 +948,20 @@ def _tiles_on_dependency_paths(plan: SemanticPlan, producer, consumer):
 
     candidate_ids = reachable(adjacency, id(producer)) & reachable(reverse, id(consumer))
     candidate_ids.update((id(producer), id(consumer)))
-    return tuple(tile for tile in plan.tiles if id(tile) in candidate_ids)
+    return tuple(tile for tile in view.tiles if id(tile) in candidate_ids)
 
 
-def _tiles_in_dependency_cycles(plan: SemanticPlan):
-    adjacency = {id(tile): set() for tile in plan.tiles}
-    for edge in plan.logical_edges:
+def _tiles_in_dependency_cycles(view: _SpecView):
+    adjacency = {id(tile): set() for tile in view.tiles}
+    for edge in view.logical_edges:
         adjacency[id(edge.producer)].add(id(edge.consumer))
     closure = _transitive_closure(adjacency)
     cyclic_ids = {tile_id for tile_id, reachable in closure.items() if tile_id in reachable}
-    return adjacency, tuple(tile for tile in plan.tiles if id(tile) in cyclic_ids)
+    return adjacency, tuple(tile for tile in view.tiles if id(tile) in cyclic_ids)
 
 
 def _tile_pair_ordered_by_event_coords(
-    plan: SemanticPlan,
+    view: _SpecView,
     event_ordering,
     producer,
     consumer,
@@ -919,9 +971,9 @@ def _tile_pair_ordered_by_event_coords(
 
     if not _tiles_ordered_by_events(event_ordering, producer, consumer):
         return False
-    candidate_tiles = _tiles_on_dependency_paths(plan, producer, consumer)
-    values = _event_graph_validation_values(plan, candidate_tiles)
-    variables = _related_variables(plan.vars, *values)
+    candidate_tiles = _tiles_on_dependency_paths(view, producer, consumer)
+    values = _event_graph_validation_values(view, candidate_tiles)
+    variables = _related_variables(view.vars, *values)
     environments = _bounded_environments(
         variables,
         "tensor event-coordinate dependency validation",
@@ -937,7 +989,7 @@ def _tile_pair_ordered_by_event_coords(
         )
         graph = graph_cache.get(key)
         if graph is None:
-            graph = _build_instance_event_graph(plan, env, candidate_tiles)
+            graph = _build_instance_event_graph(view, env, candidate_tiles)
             graph_cache[key] = graph
         ordering = graph.tiles_ordered(producer, consumer)
         if ordering is False:
@@ -950,15 +1002,15 @@ def _tile_pair_ordered_by_event_coords(
     return True
 
 
-def _static_event_tile_adjacency(plan: SemanticPlan):
+def _static_event_tile_adjacency(view: _SpecView):
     """Return the exact tile-phase DAG required by the default static queue."""
 
-    coarse, cyclic_tiles = _tiles_in_dependency_cycles(plan)
+    coarse, cyclic_tiles = _tiles_in_dependency_cycles(view)
     if not _adjacency_has_cycle(coarse):
         return coarse
 
-    values = _event_graph_validation_values(plan, cyclic_tiles)
-    variables = _related_variables(plan.vars, *values)
+    values = _event_graph_validation_values(view, cyclic_tiles)
+    variables = _related_variables(view.vars, *values)
     environments, environments_exact = _validation_environments(
         variables,
         "static event dependency cycle validation",
@@ -970,7 +1022,7 @@ def _static_event_tile_adjacency(plan: SemanticPlan):
     all_exact = environments_exact
     matched_projection = {id(tile): set() for tile in cyclic_tiles}
     for env in environments:
-        graph = _build_instance_event_graph(plan, env, cyclic_tiles)
+        graph = _build_instance_event_graph(view, env, cyclic_tiles)
         if graph.has_cycle():
             raise ValueError(
                 "the default static schedule requires event dependencies to be acyclic"
@@ -1005,16 +1057,16 @@ def _static_event_tile_adjacency(plan: SemanticPlan):
     return result
 
 
-def _validate_tensor_dependencies(plan, writers, readers, event_ordering) -> None:
+def _validate_tensor_dependencies(view, writers, readers, event_ordering) -> None:
     tile_pair_graph_cache = {}
-    if not any(access.has_region for tile in plan.tiles for access in (*tile.reads, *tile.writes)):
-        for tensor in plan.tensors:
+    if not any(access.has_region for tile in view.tiles for access in (*tile.reads, *tile.writes)):
+        for tensor in view.tensors:
             for producer, _ in writers[id(tensor)]:
                 for consumer, _ in readers[id(tensor)]:
                     if producer is consumer:
                         continue
                     if not _tile_pair_ordered_by_event_coords(
-                        plan,
+                        view,
                         event_ordering,
                         producer,
                         consumer,
@@ -1027,14 +1079,14 @@ def _validate_tensor_dependencies(plan, writers, readers, event_ordering) -> Non
         return
 
     static_pairs = []
-    for tensor in plan.tensors:
+    for tensor in view.tensors:
         for producer, write_access in writers[id(tensor)]:
             for consumer, read_access in readers[id(tensor)]:
                 if producer is consumer:
                     continue
                 if write_access.region_dynamic or read_access.region_dynamic:
                     if not _tile_pair_ordered_by_event_coords(
-                        plan,
+                        view,
                         event_ordering,
                         producer,
                         consumer,
@@ -1052,9 +1104,9 @@ def _validate_tensor_dependencies(plan, writers, readers, event_ordering) -> Non
         return
 
     for tensor, producer, write_access, consumer, read_access in static_pairs:
-        candidate_tiles = _tiles_on_dependency_paths(plan, producer, consumer)
-        event_graph_values = _event_graph_validation_values(plan, candidate_tiles)
-        event_graph_variables = _related_variables(plan.vars, *event_graph_values)
+        candidate_tiles = _tiles_on_dependency_paths(view, producer, consumer)
+        event_graph_values = _event_graph_validation_values(view, candidate_tiles)
+        event_graph_variables = _related_variables(view.vars, *event_graph_values)
         event_graph_work = _validation_work_upper_bound(
             *(tile.tile_num for tile in candidate_tiles)
         )
@@ -1063,13 +1115,13 @@ def _validate_tensor_dependencies(plan, writers, readers, event_ordering) -> Non
             *_region_validation_values(producer, write_access),
             *_region_validation_values(consumer, read_access),
         )
-        region_variables = _related_variables(plan.vars, *region_values)
+        region_variables = _related_variables(view.vars, *region_values)
         _require_bounded_variables(
             region_variables,
             "static tensor-region dependency validation",
         )
         variables = _related_variables(
-            plan.vars,
+            view.vars,
             *region_values,
             *event_graph_values,
         )
@@ -1084,7 +1136,7 @@ def _validate_tensor_dependencies(plan, writers, readers, event_ordering) -> Non
             graph_key = tuple(env[var] for var in event_graph_variables) if env is not None else ()
             instance_graph = graph_cache.get(graph_key)
             if instance_graph is None:
-                instance_graph = _build_instance_event_graph(plan, env, candidate_tiles)
+                instance_graph = _build_instance_event_graph(view, env, candidate_tiles)
                 graph_cache[graph_key] = instance_graph
             shape = _resolve_tuple(tensor.shape, env)
             if shape is None:
@@ -1140,12 +1192,12 @@ def _tiles_ordered_by_events(event_ordering, producer, consumer) -> bool:
     return id(consumer) in event_ordering[id(producer)]
 
 
-def _validate_waited_region_sources(plan: SemanticPlan, writers) -> None:
+def _validate_waited_region_sources(view: _SpecView, writers) -> None:
     """Ensure a waited event coordinate protects each related static read region."""
 
     relevant = [
         (consumer, read_access, wait_event, wait_map)
-        for consumer in plan.tiles
+        for consumer in view.tiles
         for read_access in consumer.reads
         if read_access.has_region and not read_access.region_dynamic
         for wait_event, wait_map in consumer.waits
@@ -1169,7 +1221,7 @@ def _validate_waited_region_sources(plan: SemanticPlan, writers) -> None:
             if all(existing is not producer for existing in candidate_producers):
                 candidate_producers.append(producer)
         variables = _related_variables(
-            plan.vars,
+            view.vars,
             *_region_validation_values(consumer, read_access),
             *(
                 value
@@ -1528,4 +1580,4 @@ def _is_expr_like(value: Any) -> bool:
     return _is_int(value) or isinstance(value, VarSpec | ExprSpec)
 
 
-__all__ = ["validate_semantic_plan"]
+__all__ = ["validate_kernel"]

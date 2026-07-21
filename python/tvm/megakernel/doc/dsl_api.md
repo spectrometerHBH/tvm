@@ -32,16 +32,16 @@ The user-facing DSL has two layers:
 The spec layer corresponds to Step 3 in [workflow.md](workflow.md).  The impl
 layer corresponds to Step 4.
 
-Compiler transforms keep the following contracts separate:
+The compiler works directly on the spec in two actions:
 
 ```text
-KernelSpec -> SemanticPlan -> ExecutionPlan -> backend-private lowering plan
+verify: validate_kernel(spec)  -> all backend-independent checks
+build:  lower_to_tirx_module(spec, LoweringOptions(...)) -> TIRX module
 ```
 
-`SemanticPlan` is the validated, implementation-independent meaning of the
-spec.  `ExecutionPlan` records explicit physical regions and ordered programs.
-The default TIRX backend then prepares its own bindings, event layout, job IDs,
-and queue phases; that last object is intentionally not a user API.
+There is no intermediate plan object.  The build step derives its parameter
+bindings, event-workspace layout, job IDs, and static queue phases from the
+validated spec through private helpers that are not a user API.
 
 ## `KernelSpec`
 
@@ -144,7 +144,7 @@ producer = kernel.tile(
 )
 ```
 
-Static regions let semantic validation check bounds, disjoint writers, and
+Static regions let spec validation check bounds, disjoint writers, and
 producer/consumer ordering.  Validation proves these properties when it can
 exactly enumerate at most 4,096 bounded symbolic environments, 65,536 tile
 points or tile pairs for one check, and 4,194,304 combined environment-point
@@ -431,74 +431,51 @@ stage2 = kernel.tile(
 ).wait(row_ready, lambda m, n, k: (m,))
 ```
 
-## Physical Execution Plan
+## Lowering
 
-`kernel.semantic_plan()` builds and validates a `SemanticPlan` before any
-physical policy is selected.  The plan snapshots variables, tensors, events,
-tiles, and logical event edges; validation rejects a stale snapshot.
-
-Lowering policies produce one `ExecutionPlan`.  Its device regions contain
-ordered `TileProgram` objects, and each program contains the `ProgramStep`
-sequence that a backend lowers.  Host regions explicitly list their logical
-ownership in `HostRegionPlan.owned_tiles`.  Validation requires every logical
-tile to belong to exactly one device or host region.  For example, the default
-static policy emits device initialization, prefetch, waits, `RunStep`, and
-notifications in source order:
+The default single-device static backend exposes two actions on a spec:
 
 ```python
-from tvm.megakernel.transform import make_static_execution_plan
+from tvm.megakernel.transform import (
+    LoweringOptions,
+    lower_to_tirx_module,
+    validate_kernel,
+)
 
-plan = make_static_execution_plan(kernel)
-for program in plan.device_regions[0].tile_programs:
-    print(program.tile.name, program.smem_scope, program.steps)
+validate_kernel(kernel)  # verify: every backend-independent check
+mod = lower_to_tirx_module(  # build: device kernel + static queue initializer
+    kernel,
+    LoweringOptions(attrs={"sm_count": 132}),
+)
 ```
 
-`TileProgram.smem_scope` is one of `"none"`, `"program"`, or `"run_to_end"`.
-Logical edge locations are not stored separately.  `plan.edge_placements()`
-validates the programs and returns the read-only `EdgePlacement` values derived
-from the steps carrying each edge.
+`validate_kernel` runs all validation directly on the `KernelSpec` and returns
+the spec for chaining; `KernelSpec.validate()` is the same call.  `lower_to_tirx`
+returns just the persistent device kernel, `lower_static_queue_init_to_tirx`
+just the queue initializer, and `lower_to_tirx_module` both in one `IRModule`.
+`LoweringOptions` carries the shared-memory budget (`smem_max_bytes`,
+`smem_chunk_size`), the scheduler kind (`schedule="static"`), and backend
+`attrs` such as `sm_count`, `num_threads`, `max_tasks`, and `end_job_id`.
 
-`DeviceRegionPlan.fetch_steps` belongs to the general execution-plan contract
-for custom schedulers and distributed backends.  The reference static backend
-rejects it explicitly; it is distinct from a tile's early `prefetch` hook.
-`RuntimeEventInitStep` is likewise reserved for custom backends because the
-reference backend owns one built-in event initialization phase.  Each logical
-edge in the reference backend must bind exactly one CTA-wide wait and notify,
-reuse the logical coordinate maps, and publish the notification with a
-device-scope release fence before its atomic signal.  Remote ranks and batched
-endpoint counts are not supported by this single-device backend.
-
-Each default tile program contains exactly one canonical `RunStep`: waits must
-precede it, notifications must follow it, and predicate, repeat, index-map, and
-profiling modifiers require a custom backend that validates their mapping to
-logical tile instances.  The device epilogue ends with exactly one
-`HookStep("smem_commit")`, which commits the dynamic shared-memory extent used
-by the persistent scheduler and tile programs.
+The static build emits one persistent kernel.  A central per-SM task queue is
+filled by the queue initializer, striped so CTA `b` writes tasks
+`b, b + sm_count, ...` of the flattened phase list.  Queue phases are:
+event initialization (job 29), waiting-free tile grids, the event-init
+barrier (job 30), waiting tile grids in stable topological order, and the
+end marker (job 31).  `max_tasks` defaults to 128 and grows automatically to
+fit the largest per-SM task count.  Inside the persistent loop, each tile
+instance runs `device_init`, `prefetch`, its declared waits, `run`, and its
+declared notifications in that order; every notification is published with a
+device-scope release fence before its atomic signal, and every wait is
+CTA-wide.
 
 The reference static persistent queue also requires the concrete
 tile-instance/event-coordinate dependency graph to be acyclic.  It checks a
 coarse logical cycle at concrete coordinates and accepts it only when exact
 enumeration proves that the coordinate-level graph and its tile-phase
-projection are acyclic.  Other backends may implement cyclic protocols.  For a
-coarse acyclic graph, waiting tile phases are emitted in stable topological
-order so a persistent CTA does not
-block on a later producer phase.
-
-A custom backend implements a single entry point and owns traversal of regions
-and programs:
-
-```python
-from tvm.megakernel.transform import ExecutionPlanBackend, lower_execution_plan
-
-
-class MyBackend(ExecutionPlanBackend):
-    def lower(self, plan):
-        for region in plan.regions_in_dependency_order():
-            ...
-
-
-result = lower_execution_plan(plan, backend=MyBackend())
-```
+projection are acyclic.  For a coarse acyclic graph, waiting tile phases are
+emitted in stable topological order so a persistent CTA does not block on a
+later producer phase.
 
 ## `KernelSpec.lower`
 
@@ -506,5 +483,5 @@ result = lower_execution_plan(plan, backend=MyBackend())
 prim_func = kernel.lower(options=None)
 ```
 
-Validates and lowers the graph with the default single-device static policy,
-or with the execution plan and backend supplied through `LoweringOptions`.
+Validates and lowers the spec with the default single-device static backend;
+equivalent to `lower_to_tirx(kernel, options)`.

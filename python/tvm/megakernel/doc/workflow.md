@@ -60,28 +60,24 @@ The logical spec and implementation layers are not responsible for:
 
 Those tasks belong to input interpretation, planning, validation, and transform
 layers around the logical model.  This package's `transform/` module includes a
-reference single-device static TIRX backend; custom backends may consume the
-same `ExecutionPlan` contract.
+reference single-device static TIRX backend that consumes the spec directly.
 
 ## Compiler Plan Boundaries
 
-The compiler does not use one catch-all plan object:
+The compiler does not use one catch-all plan object; it works on the spec in
+two actions:
 
 ```text
 KernelSpec
-  -> SemanticPlan
-  -> ExecutionPlan
-  -> backend-private TIRXLoweringPlan
-  -> TIRX
+  -> verify: validate_kernel (all backend-independent checks)
+  -> build:  lower_to_tirx_module (private derivation -> TIRX)
 ```
 
-`SemanticPlan` owns backend-independent meaning and validation.  It includes
-logical tile/event edges and optional tensor access regions.  `ExecutionPlan`
-owns explicit physical regions and source-ordered `ProgramStep` sequences.
-The default backend's private plan owns sanitized parameter bindings, bounded
-event-workspace offsets, packed job IDs, and static queue phases.  Backends may
-prepare different private plans without changing the semantic or physical
-contracts.
+Verification owns backend-independent meaning: registry consistency, logical
+tile/event edges, event counts, and tensor access regions.  The build step
+derives its sanitized parameter bindings, bounded event-workspace offsets,
+packed job IDs, and static queue phases from the validated spec through
+private helpers; those derivations are not a separate public contract.
 
 ## Agent Workflow
 
@@ -239,9 +235,9 @@ agent to repair the DSL.
 
 ## Step 6: Lower To TIRX Megakernel
 
-After semantic validation and physical-policy selection, the backend prepares
-its private lowering plan and lowers it together with the tile implementations
-to a TIRX megakernel.
+After `validate_kernel` verifies the spec, the build step derives its private
+lowering state and lowers the spec together with the tile implementations to a
+TIRX megakernel (`lower_to_tirx_module`).
 
 This lowering decides concrete implementation details, including:
 
@@ -257,4 +253,4 @@ This lowering decides concrete implementation details, including:
 
 This package includes the reference executable static lowering described above.
 It is an implementation integration rather than part of the logical spec or an
-agent's planning output; other integrations may lower the same execution plan.
+agent's planning output; other integrations may build from the same spec.

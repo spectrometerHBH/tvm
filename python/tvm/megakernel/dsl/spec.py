@@ -496,23 +496,9 @@ class KernelSpec:
     def validate(self):
         """Validate the implementation-independent logical specification."""
 
-        from tvm.megakernel.transform.semantic import (
-            build_semantic_plan,
-            validate_semantic_plan,
-        )
+        from tvm.megakernel.transform import validate_kernel
 
-        validate_semantic_plan(build_semantic_plan(self))
-        return self
-
-    def semantic_plan(self):
-        """Build and validate the backend-independent semantic plan."""
-
-        from tvm.megakernel.transform.semantic import (
-            build_semantic_plan,
-            validate_semantic_plan,
-        )
-
-        return validate_semantic_plan(build_semantic_plan(self))
+        return validate_kernel(self)
 
     def lower(self, options=None):
         """Lower this graph with the default single-device static policy."""

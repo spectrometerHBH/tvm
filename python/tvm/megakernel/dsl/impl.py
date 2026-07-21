@@ -88,7 +88,7 @@ class TileImpl(ABC):
     """Local parser-style implementation of one logical tile kind.
 
     Global scheduling, dependency placement, profiling, and region lifecycle
-    are represented by an execution plan.  Implementations own only their
+    are owned by the lowering backend.  Implementations own only their
     tensors and local resources.
     """
 
