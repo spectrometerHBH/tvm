@@ -41,6 +41,7 @@ from ..dsl import (
     KernelSpec,
     RegionRange,
     RegionSpec,
+    ScalarSpec,
     TensorSpec,
     TileImpl,
     TileSpec,
@@ -49,6 +50,7 @@ from ..dsl import (
     expr_bounds,
     expr_vars,
 )
+from ..dsl.spec import expr_scalars
 
 _EXACT_ENUMERATION_LIMIT = 262_144
 _SYMBOLIC_ENVIRONMENT_LIMIT = 4_096
@@ -80,6 +82,7 @@ class _SpecView:
 
     kernel: KernelSpec
     vars: tuple[VarSpec, ...]
+    scalars: tuple[ScalarSpec, ...]
     tensors: tuple[TensorSpec, ...]
     events: tuple[EventSpec, ...]
     tiles: tuple[TileSpec, ...]
@@ -92,6 +95,7 @@ def _spec_view(kernel: KernelSpec) -> _SpecView:
     return _SpecView(
         kernel=kernel,
         vars=tuple(kernel.vars.values()),
+        scalars=tuple(kernel.scalars.values()),
         tensors=tuple(kernel.tensors.values()),
         events=tuple(kernel.events.values()),
         tiles=tuple(kernel.tiles),
@@ -136,6 +140,7 @@ def validate_kernel(kernel: KernelSpec) -> KernelSpec:
     view = _spec_view(kernel)
 
     var_ids = {id(var) for var in view.vars}
+    scalar_ids = {id(scalar) for scalar in view.scalars}
     tensor_ids = {id(tensor) for tensor in view.tensors}
     event_ids = {id(event) for event in view.events}
     event_ranks: dict[int, int] = {}
@@ -147,7 +152,7 @@ def validate_kernel(kernel: KernelSpec) -> KernelSpec:
             raise ValueError("VarSpec names must be non-empty")
         if not isinstance(var.dtype, str) or not var.dtype:
             raise TypeError(f"var {registry_name!r} dtype must be a non-empty string")
-        _validate_var_range(var)
+        _validate_range_bounds("var", var.name, var.range)
 
     for registry_name, tensor in kernel.tensors.items():
         if tensor.name != registry_name:
@@ -157,6 +162,16 @@ def validate_kernel(kernel: KernelSpec) -> KernelSpec:
         _shape_items(tensor.shape, f"tensor {registry_name!r} shape", var_ids)
         if not isinstance(tensor.dtype, str) or not tensor.dtype:
             raise TypeError(f"tensor {registry_name!r} dtype must be a non-empty string")
+
+    for registry_name, scalar in kernel.scalars.items():
+        if scalar.name != registry_name:
+            raise ValueError(f"scalar registry name mismatch: {registry_name}")
+        if not scalar.name:
+            raise ValueError("ScalarSpec names must be non-empty")
+        if not isinstance(scalar.dtype, str) or not scalar.dtype:
+            raise TypeError(f"scalar {registry_name!r} dtype must be a non-empty string")
+        _validate_range_bounds("scalar", scalar.name, scalar.range)
+        _validate_scalar_source(scalar, tensor_ids, var_ids)
 
     for registry_name, event in kernel.events.items():
         if event.name != registry_name:
@@ -180,9 +195,10 @@ def validate_kernel(kernel: KernelSpec) -> KernelSpec:
         tile_names.add(tile.name)
         if not isinstance(tile.impl, TileImpl) or inspect.isabstract(type(tile.impl)):
             raise TypeError(f"tile {tile.name!r} impl must be a concrete TileImpl instance")
+        _validate_endpoint_metadata(tile)
         if not isinstance(tile.tile_num, tuple | list) or len(tile.tile_num) != 3:
             raise ValueError(f"tile {tile.name!r} tile_num must contain exactly three axes")
-        _shape_items(tile.tile_num, f"tile {tile.name!r} tile_num", var_ids)
+        _shape_items(tile.tile_num, f"tile {tile.name!r} tile_num", var_ids, scalar_ids)
         if not isinstance(tile.attrs, dict):
             raise TypeError(f"tile {tile.name!r} attrs must be a dict")
 
@@ -211,10 +227,12 @@ def validate_kernel(kernel: KernelSpec) -> KernelSpec:
                     rank=event_ranks[id(event)],
                     label=f"tile {tile.name!r} {kind} coord_map",
                     var_ids=var_ids,
+                    scalar_ids=scalar_ids,
                 )
                 targets = producers if kind == "notify" else consumers
                 targets[id(event)].append(tile)
 
+    _validate_scalar_ownership(view, scalar_ids)
     _validate_tensor_access_regions(view)
     _validate_tensor_writers(tensor_writers, view)
     for event in view.events:
@@ -222,6 +240,11 @@ def validate_kernel(kernel: KernelSpec) -> KernelSpec:
             raise ValueError(f"event {event.name!r} is waited on but has no notifier")
         if producers[id(event)] and not consumers[id(event)]:
             raise ValueError(f"event {event.name!r} is notified but has no consumer")
+        if _event_is_scalar_dynamic(event, view):
+            # Runtime-scalar grids and coordinates cannot be pre-enumerated, so
+            # static event-count proofs do not apply; a backend with dynamic
+            # dispatch owns their runtime correctness.
+            continue
         _validate_event_counts(event, producers[id(event)], consumers[id(event)], view.vars)
 
     event_adjacency = _event_adjacency(view)
@@ -231,37 +254,92 @@ def validate_kernel(kernel: KernelSpec) -> KernelSpec:
     return kernel
 
 
-def _validate_var_range(var: VarSpec) -> None:
-    if var.range is None:
+def _validate_range_bounds(kind: str, name: str, range_value: tuple[int, int] | None) -> None:
+    if range_value is None:
         return
     if (
-        not isinstance(var.range, tuple)
-        or len(var.range) != 2
-        or any(not _is_int(value) for value in var.range)
+        not isinstance(range_value, tuple)
+        or len(range_value) != 2
+        or any(not _is_int(value) for value in range_value)
     ):
-        raise TypeError(f"var {var.name!r} range must be a tuple of two integers")
-    if var.range[0] <= 0 or var.range[0] > var.range[1]:
-        raise ValueError(f"var {var.name!r} range must satisfy 0 < minimum <= maximum")
+        raise TypeError(f"{kind} {name!r} range must be a tuple of two integers")
+    if range_value[0] <= 0 or range_value[0] > range_value[1]:
+        raise ValueError(f"{kind} {name!r} range must satisfy 0 < minimum <= maximum")
 
 
-def _shape_items(shape: Any, label: str, var_ids: set[int]) -> tuple[Any, ...]:
+def _validate_scalar_source(scalar: ScalarSpec, tensor_ids: set[int], var_ids: set[int]) -> None:
+    label = f"scalar {scalar.name!r} source"
+    source = scalar.source
+    if not isinstance(source, tuple | list) or len(source) != 2:
+        raise TypeError(f"{label} must be a (TensorSpec, index) pair")
+    tensor, index = source
+    if not isinstance(tensor, TensorSpec) or id(tensor) not in tensor_ids:
+        raise ValueError(f"{label} references a tensor outside this kernel")
+    if tensor.base is not None or tensor.has_region:
+        raise ValueError(f"{label} tensor must be a registered base tensor, not a region view")
+    if not isinstance(index, tuple | list):
+        raise TypeError(f"{label} index must be a tuple or list")
+    rank = len(_shape_tuple(tensor.shape))
+    if len(index) != rank:
+        raise ValueError(
+            f"{label} index rank {len(index)} does not match tensor {tensor.name!r} rank {rank}"
+        )
+    for entry in index:
+        if expr_scalars(entry):
+            raise ValueError(f"{label} index must not reference runtime scalars")
+        _validate_expr(entry, label, var_ids)
+
+
+_ENDPOINT_SCOPES = ("thread", "warp", "warpgroup", "cta")
+
+
+def _validate_endpoint_metadata(tile: TileSpec) -> None:
+    """Check the impl endpoint-scope metadata of one registered tile."""
+
+    impl = tile.impl
+    label = f"tile {tile.name!r} impl"
+    level = impl.wait_level
+    if not isinstance(level, str) or level not in _ENDPOINT_SCOPES:
+        raise ValueError(f"{label} wait_level must be one of {_ENDPOINT_SCOPES}, got {level!r}")
+    mask = impl.wait_mask
+    if isinstance(mask, bool) or not isinstance(mask, int) or not 0 <= mask <= 0xFFFFFFFF:
+        raise ValueError(f"{label} wait_mask must be a 32-bit integer mask, got {mask!r}")
+    scope = impl.notify_scope
+    if not isinstance(scope, tuple) or len(scope) != 2:
+        raise TypeError(f"{label} notify_scope must be a (scope, scope_id) tuple, got {scope!r}")
+    scope_name, scope_id = scope
+    if not isinstance(scope_name, str) or scope_name not in _ENDPOINT_SCOPES:
+        raise ValueError(
+            f"{label} notify_scope scope must be one of {_ENDPOINT_SCOPES}, got {scope_name!r}"
+        )
+    if isinstance(scope_id, bool) or not isinstance(scope_id, int) or scope_id < 0:
+        raise ValueError(
+            f"{label} notify_scope scope_id must be a non-negative integer, got {scope_id!r}"
+        )
+
+
+def _shape_items(
+    shape: Any, label: str, var_ids: set[int], scalar_ids: set[int] | None = None
+) -> tuple[Any, ...]:
     if _is_expr_like(shape):
         values = (shape,)
     elif isinstance(shape, tuple | list):
         values = tuple(shape)
     else:
-        raise TypeError(f"{label} must be an int, VarSpec, ExprSpec, tuple, or list")
+        raise TypeError(f"{label} must be an int, VarSpec, ScalarSpec, ExprSpec, tuple, or list")
     if not values:
         raise ValueError(f"{label} must have at least one extent")
     for extent in values:
-        _validate_expr(extent, label, var_ids)
+        _validate_expr(extent, label, var_ids, scalar_ids)
         bounds = expr_bounds(extent, require_bounded=False)
         if bounds is not None and bounds[0] <= 0:
             raise ValueError(f"{label} extents must be positive")
     return values
 
 
-def _validate_expr(value: Any, label: str, var_ids: set[int]) -> None:
+def _validate_expr(
+    value: Any, label: str, var_ids: set[int], scalar_ids: set[int] | None = None
+) -> None:
     if _is_int(value):
         return
     if isinstance(value, VarSpec):
@@ -270,6 +348,14 @@ def _validate_expr(value: Any, label: str, var_ids: set[int]) -> None:
         if id(value) not in var_ids:
             raise ValueError(f"{label} references a VarSpec outside this kernel")
         return
+    if isinstance(value, ScalarSpec):
+        if not value.name:
+            raise ValueError(f"{label} ScalarSpec names must be non-empty")
+        if scalar_ids is None:
+            raise ValueError(f"{label} must not reference runtime scalar {value.name!r}")
+        if id(value) not in scalar_ids:
+            raise ValueError(f"{label} references a ScalarSpec outside this kernel")
+        return
     if isinstance(value, ExprSpec):
         expected_arity = _EXPR_ARITY.get(value.op)
         if expected_arity is None:
@@ -277,10 +363,10 @@ def _validate_expr(value: Any, label: str, var_ids: set[int]) -> None:
         if len(value.args) != expected_arity:
             raise ValueError(f"{label} ExprSpec op {value.op!r} expects {expected_arity} arguments")
         for arg in value.args:
-            _validate_expr(arg, label, var_ids)
+            _validate_expr(arg, label, var_ids, scalar_ids)
         expr_bounds(value, require_bounded=False)
         return
-    raise TypeError(f"{label} extents must be int, VarSpec, or ExprSpec")
+    raise TypeError(f"{label} extents must be int, VarSpec, ScalarSpec, or ExprSpec")
 
 
 def _validate_init_count(event: EventSpec, rank: int) -> None:
@@ -301,7 +387,9 @@ def _validate_init_count(event: EventSpec, rank: int) -> None:
         raise ValueError(f"{label} must return a positive integer")
 
 
-def _validate_coord_map(coord_map, rank: int, label: str, var_ids: set[int]) -> None:
+def _validate_coord_map(
+    coord_map, rank: int, label: str, var_ids: set[int], scalar_ids=None
+) -> None:
     coordinates = _call_coord_map(coord_map, (0, 0, 0), label)
     other = _call_coord_map(coord_map, (1, 2, 3), label)
     if type(coordinates) is not type(other):  # pylint: disable=unidiomatic-typecheck
@@ -313,7 +401,7 @@ def _validate_coord_map(coord_map, rank: int, label: str, var_ids: set[int]) -> 
     for coordinate in coordinates:
         if not _is_expr_like(coordinate):
             raise TypeError(f"{label} coordinates must be integers or logical expressions")
-        _validate_expr(coordinate, label, var_ids)
+        _validate_expr(coordinate, label, var_ids, scalar_ids)
 
 
 def _call_coord_map(coord_map, indices: tuple[int, int, int], label: str):
@@ -485,6 +573,151 @@ def _value_variables(value: Any) -> tuple[VarSpec, ...]:
     return tuple(result)
 
 
+def _value_scalars(value: Any) -> tuple[ScalarSpec, ...]:
+    """Return runtime scalars referenced by an expression or captured by a callable.
+
+    Unlike variable discovery, callable globals are not scanned: a module
+    namespace may hold scalars owned by other kernels, so only closure cells,
+    defaults, and bound objects count as captures.
+    """
+
+    result: list[ScalarSpec] = []
+    seen_scalars: set[int] = set()
+    seen_values: set[int] = set()
+
+    def record(scalar: ScalarSpec) -> None:
+        if id(scalar) not in seen_scalars:
+            seen_scalars.add(id(scalar))
+            result.append(scalar)
+
+    def visit(item: Any, *, inspect_attrs: bool = False) -> None:
+        if isinstance(item, ScalarSpec):
+            record(item)
+            return
+        if isinstance(item, ExprSpec):
+            for scalar in expr_scalars(item):
+                record(scalar)
+            return
+        if item is None or isinstance(item, str | bytes | int | float | bool | VarSpec):
+            return
+        item_id = id(item)
+        if item_id in seen_values:
+            return
+        seen_values.add(item_id)
+        if isinstance(item, dict):
+            for key, child in item.items():
+                visit(key, inspect_attrs=inspect_attrs)
+                visit(child, inspect_attrs=inspect_attrs)
+            return
+        if isinstance(item, tuple | list | set | frozenset):
+            for child in item:
+                visit(child, inspect_attrs=inspect_attrs)
+            return
+        if callable(item):
+            visit_callable(item)
+            return
+        if inspect_attrs:
+            try:
+                attributes = vars(item)
+            except TypeError:
+                return
+            for child in attributes.values():
+                visit(child)
+
+    def visit_callable(func: Any) -> None:
+        bound_self = getattr(func, "__self__", None)
+        if bound_self is not None:
+            visit(bound_self, inspect_attrs=True)
+
+        target = getattr(func, "__func__", func)
+        visit(getattr(target, "__defaults__", None), inspect_attrs=True)
+        visit(getattr(target, "__kwdefaults__", None), inspect_attrs=True)
+        for cell in getattr(target, "__closure__", None) or ():
+            try:
+                captured = cell.cell_contents
+            except ValueError:
+                continue
+            visit(captured, inspect_attrs=True)
+
+        # Callable instances keep their bound values on the object rather than
+        # in ``__self__`` or a Python function closure.
+        if target is func and not inspect.isfunction(func):
+            try:
+                attributes = vars(func)
+            except TypeError:
+                attributes = {}
+            for child in attributes.values():
+                visit(child)
+
+    visit(value)
+    return tuple(result)
+
+
+def _validate_scalar_ownership(view: _SpecView, scalar_ids: set[int]) -> None:
+    """Ensure every runtime scalar referenced by the spec is registered here."""
+
+    labelled_values: list[tuple[str, Any]] = []
+    for tile in view.tiles:
+        labelled_values.append((f"tile {tile.name!r} tile_num", tile.tile_num))
+        for kind, dependencies in (("wait", tile.waits), ("notify", tile.notifies)):
+            for _, coord_map in dependencies:
+                labelled_values.append((f"tile {tile.name!r} {kind} coord_map", coord_map))
+    for event in view.events:
+        if callable(event.init_count):
+            labelled_values.append((f"event {event.name!r} init_count", event.init_count))
+    for label, value in labelled_values:
+        for scalar in _value_scalars(value):
+            if id(scalar) not in scalar_ids:
+                raise ValueError(f"{label} references a ScalarSpec outside this kernel")
+
+
+def _coord_map_output_scalars(coord_map) -> tuple[ScalarSpec, ...]:
+    """Return scalars produced by a coord map at the validation sample points."""
+
+    if not callable(coord_map):
+        return expr_scalars(coord_map)
+    result: list[ScalarSpec] = []
+    seen: set[int] = set()
+    for indices in ((0, 0, 0), (1, 2, 3)):
+        coord = _call_coord_map(coord_map, indices, "coord_map runtime-scalar discovery")
+        for scalar in expr_scalars(coord):
+            if id(scalar) not in seen:
+                seen.add(id(scalar))
+                result.append(scalar)
+    return tuple(result)
+
+
+def _event_is_scalar_dynamic(event: EventSpec, view: _SpecView) -> bool:
+    """Whether an event's producers/consumers depend on runtime scalars."""
+
+    for tile in view.tiles:
+        dependencies = [
+            (kind, dependency_event, coord_map)
+            for kind, pairs in (("wait", tile.waits), ("notify", tile.notifies))
+            for dependency_event, coord_map in pairs
+            if dependency_event is event
+        ]
+        if not dependencies:
+            continue
+        if expr_scalars(tile.tile_num):
+            return True
+        if any(_coord_map_output_scalars(coord_map) for _, _, coord_map in dependencies):
+            return True
+    return False
+
+
+def _tiles_support_instance_graph(view: _SpecView, tiles) -> bool:
+    """Whether concrete tile/event-coordinate enumeration is scalar-free."""
+
+    for tile in tiles:
+        if expr_scalars(tile.tile_num):
+            return False
+        for _, coord_map in (*tile.notifies, *tile.waits):
+            if _coord_map_output_scalars(coord_map):
+                return False
+    return True
+
+
 def _region_validation_values(tile, access: TensorSpec) -> tuple[Any, ...]:
     values = [tile.tile_num, access.base_tensor.shape, access.region_map]
     if access.has_region and not access.region_dynamic:
@@ -518,7 +751,10 @@ def _validate_tensor_writers(writers, view: _SpecView) -> None:
         for tile, _ in entries:
             if all(candidate is not tile for candidate in distinct_tiles):
                 distinct_tiles.append(tile)
-        all_static = all(access.has_region and not access.region_dynamic for _, access in entries)
+        all_static = all(
+            access.has_region and not access.region_dynamic and not expr_scalars(tile.tile_num)
+            for tile, access in entries
+        )
         if len(distinct_tiles) > 1 and not all_static:
             raise ValueError(f"tensor {tensor.name!r} has multiple producers")
         if entries and all_static:
@@ -536,6 +772,10 @@ def _validate_tensor_access_regions(view: _SpecView) -> None:
     if not static_accesses:
         return
     for tile, access, kind in static_accesses:
+        if expr_scalars(tile.tile_num):
+            # Runtime-scalar grids are dispatched dynamically, so per-instance
+            # region bounds cannot be proven by static enumeration.
+            continue
         variables = _related_variables(view.vars, *_region_validation_values(tile, access))
         environments = _bounded_environments(
             variables,
@@ -972,6 +1212,10 @@ def _tile_pair_ordered_by_event_coords(
     if not _tiles_ordered_by_events(event_ordering, producer, consumer):
         return False
     candidate_tiles = _tiles_on_dependency_paths(view, producer, consumer)
+    if not _tiles_support_instance_graph(view, candidate_tiles):
+        # Runtime-scalar grids or coordinates cannot be pre-enumerated; the
+        # coarse logical ordering is the only static proof available.
+        return True
     values = _event_graph_validation_values(view, candidate_tiles)
     variables = _related_variables(view.vars, *values)
     environments = _bounded_environments(
@@ -1105,6 +1349,15 @@ def _validate_tensor_dependencies(view, writers, readers, event_ordering) -> Non
 
     for tensor, producer, write_access, consumer, read_access in static_pairs:
         candidate_tiles = _tiles_on_dependency_paths(view, producer, consumer)
+        if not _tiles_support_instance_graph(view, candidate_tiles):
+            # Runtime-scalar grids or coordinates cannot be pre-enumerated;
+            # require the coarse logical event ordering instead.
+            if not _tiles_ordered_by_events(event_ordering, producer, consumer):
+                raise ValueError(
+                    f"tile {consumer.name!r} reads tensor {tensor.name!r} written "
+                    f"by tile {producer.name!r} without an event dependency"
+                )
+            continue
         event_graph_values = _event_graph_validation_values(view, candidate_tiles)
         event_graph_variables = _related_variables(view.vars, *event_graph_values)
         event_graph_work = _validation_work_upper_bound(
@@ -1192,6 +1445,20 @@ def _tiles_ordered_by_events(event_ordering, producer, consumer) -> bool:
     return id(consumer) in event_ordering[id(producer)]
 
 
+def _waited_region_source_is_static(consumer, wait_event, wait_map, candidates) -> bool:
+    """Whether a waited-region source proof avoids runtime-scalar dependence."""
+
+    if expr_scalars(consumer.tile_num) or _coord_map_output_scalars(wait_map):
+        return False
+    for producer, _ in candidates:
+        if expr_scalars(producer.tile_num):
+            return False
+        for event, notify_map in producer.notifies:
+            if event is wait_event and _coord_map_output_scalars(notify_map):
+                return False
+    return True
+
+
 def _validate_waited_region_sources(view: _SpecView, writers) -> None:
     """Ensure a waited event coordinate protects each related static read region."""
 
@@ -1216,6 +1483,10 @@ def _validate_waited_region_sources(view: _SpecView, writers) -> None:
             if producer is not consumer
             and any(event is wait_event for event, _ in producer.notifies)
         ]
+        if not _waited_region_source_is_static(consumer, wait_event, wait_map, candidates):
+            # Runtime-scalar grids or coordinates cannot be pre-enumerated, so
+            # the waited-coordinate source proof does not apply.
+            continue
         candidate_producers = []
         for producer, _ in candidates:
             if all(existing is not producer for existing in candidate_producers):
@@ -1577,7 +1848,7 @@ def _is_int(value: Any) -> bool:
 
 
 def _is_expr_like(value: Any) -> bool:
-    return _is_int(value) or isinstance(value, VarSpec | ExprSpec)
+    return _is_int(value) or isinstance(value, VarSpec | ExprSpec | ScalarSpec)
 
 
 __all__ = ["validate_kernel"]

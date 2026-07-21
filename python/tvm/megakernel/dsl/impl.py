@@ -90,7 +90,24 @@ class TileImpl(ABC):
     Global scheduling, dependency placement, profiling, and region lifecycle
     are owned by the lowering backend.  Implementations own only their
     tensors and local resources.
+
+    The optional endpoint-scope class attributes describe the physical sync
+    granularity this implementation uses for its event endpoints:
+
+    - ``wait_level``: scope at which the tile waits on events, one of
+      ``"thread"``, ``"warp"``, ``"warpgroup"``, or ``"cta"``.
+    - ``wait_mask``: 32-bit thread mask participating in each wait.
+    - ``notify_scope``: ``(scope, scope_id)`` pair at which the tile signals
+      events; ``scope`` uses the same legal values as ``wait_level`` and
+      ``scope_id`` is a non-negative integer.
+
+    The defaults (``"cta"``, full mask, ``("cta", 0)``) match the reference
+    static backend, so existing implementations need no changes.
     """
+
+    wait_level: ClassVar[str] = "cta"
+    wait_mask: ClassVar[int] = 0xFFFFFFFF
+    notify_scope: ClassVar[tuple[str, int]] = ("cta", 0)
 
     @classmethod
     def class_name(cls):

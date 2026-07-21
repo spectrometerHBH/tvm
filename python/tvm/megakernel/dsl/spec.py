@@ -128,7 +128,65 @@ class ExprSpec:
         return _binary_expr("ceildiv", self, other)
 
 
-ExprLike = int | VarSpec | ExprSpec
+@dataclass(frozen=True, eq=False)
+class ScalarSpec:
+    """Symbolic integer read from a device buffer at kernel runtime.
+
+    A runtime scalar is neither a host constant nor a kernel parameter: its
+    value is loaded at kernel runtime from ``source``, a registered base
+    tensor plus a static index into it.  Tiles whose ``tile_num`` depends on
+    a runtime scalar cannot be pre-enumerated on the host and require dynamic
+    dispatch from the backend.
+
+    ``range`` is an optional inclusive ``(minimum, maximum)`` bound used only
+    for validation bound proofs, mirroring ``VarSpec.range`` semantics.
+    """
+
+    name: str
+    source: tuple[TensorSpec, tuple[ExprLike, ...]]
+    dtype: str = "int32"
+    range: tuple[int, int] | None = None
+
+    def __add__(self, other):
+        return _binary_expr("add", self, other)
+
+    def __radd__(self, other):
+        return _binary_expr("add", other, self)
+
+    def __sub__(self, other):
+        return _binary_expr("sub", self, other)
+
+    def __rsub__(self, other):
+        return _binary_expr("sub", other, self)
+
+    def __mul__(self, other):
+        return _binary_expr("mul", self, other)
+
+    def __rmul__(self, other):
+        return _binary_expr("mul", other, self)
+
+    def __floordiv__(self, other):
+        return _binary_expr("floordiv", self, other)
+
+    def __rfloordiv__(self, other):
+        return _binary_expr("floordiv", other, self)
+
+    def __mod__(self, other):
+        return _binary_expr("mod", self, other)
+
+    def __rmod__(self, other):
+        return _binary_expr("mod", other, self)
+
+    def __neg__(self):
+        return ExprSpec("neg", (self,))
+
+    def ceildiv(self, other):
+        """Return ``ceildiv(self, other)`` as a logical integer expression."""
+
+        return _binary_expr("ceildiv", self, other)
+
+
+ExprLike = int | VarSpec | ExprSpec | ScalarSpec
 ShapeType = ExprLike | tuple[ExprLike, ...] | list[ExprLike]
 CoordMapType = (
     Callable[[int, int, int], tuple[ExprLike, ...]] | tuple[ExprLike, ...] | list[ExprLike]
@@ -139,10 +197,11 @@ TileNumType = tuple[ExprLike, ExprLike, ExprLike] | list[ExprLike]
 def _as_expr_like(value: Any) -> ExprLike:
     if isinstance(value, bool):
         raise TypeError("boolean values are not valid megakernel expressions")
-    if isinstance(value, int | VarSpec | ExprSpec):
+    if isinstance(value, int | VarSpec | ExprSpec | ScalarSpec):
         return value
     raise TypeError(
-        f"megakernel expression operands must be int, VarSpec, or ExprSpec, got {value!r}"
+        "megakernel expression operands must be int, VarSpec, ScalarSpec, or ExprSpec, "
+        f"got {value!r}"
     )
 
 
@@ -172,6 +231,28 @@ def expr_vars(value: Any) -> tuple[VarSpec, ...]:
     return tuple(result)
 
 
+def expr_scalars(value: Any) -> tuple[ScalarSpec, ...]:
+    """Return the ``ScalarSpec`` leaves referenced by an expression or shape."""
+
+    result: list[ScalarSpec] = []
+    seen: set[ScalarSpec] = set()
+
+    def visit(item: Any) -> None:
+        if isinstance(item, ScalarSpec):
+            if item not in seen:
+                seen.add(item)
+                result.append(item)
+        elif isinstance(item, ExprSpec):
+            for arg in item.args:
+                visit(arg)
+        elif isinstance(item, tuple | list):
+            for child in item:
+                visit(child)
+
+    visit(value)
+    return tuple(result)
+
+
 def eval_expr_like(value: Any, env: dict[VarSpec, int] | None = None) -> int | None:
     """Evaluate a logical integer expression in a concrete variable environment."""
 
@@ -179,6 +260,10 @@ def eval_expr_like(value: Any, env: dict[VarSpec, int] | None = None) -> int | N
         return value
     if isinstance(value, VarSpec):
         return None if env is None else env.get(value)
+    if isinstance(value, ScalarSpec):
+        # Runtime scalars are read from device memory at kernel runtime; they
+        # never resolve in a static variable environment.
+        return None
     if isinstance(value, ExprSpec):
         args = [eval_expr_like(arg, env) for arg in value.args]
         if any(arg is None for arg in args):
@@ -216,9 +301,15 @@ def expr_bounds(value: Any, *, require_bounded: bool = True) -> tuple[int, int] 
                 raise ValueError(f"symbolic VarSpec({value.name!r}) has no range")
             return None
         return value.range
+    if isinstance(value, ScalarSpec):
+        if value.range is None:
+            if require_bounded:
+                raise ValueError(f"runtime ScalarSpec({value.name!r}) has no range")
+            return None
+        return value.range
     if not isinstance(value, ExprSpec):
         if require_bounded:
-            raise TypeError(f"expected int, VarSpec, or ExprSpec, got {value!r}")
+            raise TypeError(f"expected int, VarSpec, ScalarSpec, or ExprSpec, got {value!r}")
         return None
     arg_bounds = [expr_bounds(arg, require_bounded=require_bounded) for arg in value.args]
     if any(bound is None for bound in arg_bounds):
@@ -407,6 +498,7 @@ class KernelSpec:
         self.name = name
         self.attrs = attrs or {}
         self.vars: dict[str, VarSpec] = {}
+        self.scalars: dict[str, ScalarSpec] = {}
         self.tensors: dict[str, TensorSpec] = {}
         self.events: dict[str, EventSpec] = {}
         self.tiles: list[TileSpec] = []
@@ -433,6 +525,31 @@ class KernelSpec:
         var = VarSpec(name=name, dtype=dtype, range=range)
         self.vars[name] = var
         return var
+
+    def scalar(
+        self,
+        name: str,
+        source: tuple[TensorSpec, tuple[ExprLike, ...] | list[ExprLike]],
+        dtype: str = "int32",
+        range: tuple[int, int] | None = None,
+    ):
+        """Register a runtime scalar loaded from a device buffer at kernel runtime."""
+
+        if name in self.scalars:
+            raise ValueError(f"Duplicate scalar: {name}")
+        tensor, index = _normalize_scalar_source(name, source)
+        if range is not None:
+            if (
+                not isinstance(range, tuple)
+                or len(range) != 2
+                or any(not _is_int(value) for value in range)
+            ):
+                raise TypeError("scalar range must be a tuple of two integers")
+            if range[0] <= 0 or range[0] > range[1]:
+                raise ValueError("scalar range must satisfy 0 < minimum <= maximum")
+        scalar = ScalarSpec(name=name, source=(tensor, index), dtype=dtype, range=range)
+        self.scalars[name] = scalar
+        return scalar
 
     def tensor(self, name: str, shape: ShapeType, dtype: str):
         """Register a logical tensor."""
@@ -506,6 +623,32 @@ class KernelSpec:
         from tvm.megakernel.transform import lower_to_tirx
 
         return lower_to_tirx(self, options)
+
+
+def _normalize_scalar_source(name: str, source) -> tuple[TensorSpec, tuple[ExprLike, ...]]:
+    label = f"scalar {name!r} source"
+    if not isinstance(source, tuple | list) or len(source) != 2:
+        raise TypeError(f"{label} must be a (TensorSpec, index) pair")
+    tensor, index = source
+    if not isinstance(tensor, TensorSpec):
+        raise TypeError(f"{label} tensor must be a TensorSpec, got {tensor!r}")
+    if tensor.base is not None or tensor.has_region:
+        raise ValueError(f"{label} tensor must be a registered base tensor, not a region view")
+    if not isinstance(index, tuple | list):
+        raise TypeError(f"{label} index must be a tuple or list, got {index!r}")
+    rank = _shape_rank(tensor.shape)
+    if len(index) != rank:
+        raise ValueError(
+            f"{label} index rank {len(index)} does not match tensor {tensor.name!r} rank {rank}"
+        )
+    normalized = tuple(_as_expr_like(entry) for entry in index)
+    if expr_scalars(normalized):
+        raise ValueError(f"{label} index must not reference runtime scalars")
+    return tensor, normalized
+
+
+def _shape_rank(shape: ShapeType) -> int:
+    return len(shape) if isinstance(shape, tuple | list) else 1
 
 
 def _normalize_accesses(accesses, label: str) -> list[TensorSpec]:

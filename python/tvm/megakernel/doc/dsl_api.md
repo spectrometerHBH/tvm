@@ -23,9 +23,9 @@ This document lists the user-facing API in `tvm.megakernel.dsl`.
 
 The user-facing DSL has two layers:
 
-- Spec layer: `KernelSpec`, `VarSpec`, `TensorSpec`, `EventSpec`, and
-  `TileSpec`.  This layer describes tile stages, tensors, logical events, and
-  tuple-form wait/notify dependencies.
+- Spec layer: `KernelSpec`, `VarSpec`, `ScalarSpec`, `TensorSpec`,
+  `EventSpec`, and `TileSpec`.  This layer describes tile stages, tensors,
+  runtime scalars, logical events, and tuple-form wait/notify dependencies.
 - Impl layer: `TileImpl`.  This layer connects a logical tile to the concrete
   implementation of that tile.
 
@@ -154,6 +154,66 @@ instead of failing.  Variables used by a static region still require explicit
 ranges.  If a region is data-dependent rather than symbolically bounded,
 declare it dynamic and give a non-empty reason.  Dynamic access still requires
 an event dependency between its producer and consumer.
+
+## Runtime scalars
+
+```python
+scalar = kernel.scalar(
+    name: str,
+    source: tuple[TensorSpec, tuple[ExprLike, ...]],
+    dtype: str = "int32",
+    range: tuple[int, int] | None = None,
+)
+```
+
+Registers a runtime scalar: a symbolic integer whose value is read from a
+device buffer at kernel runtime.  It is neither a host constant nor a kernel
+parameter.  `source` is a `(tensor, index)` pair: `tensor` must be a
+registered base tensor (not a region view), and `index` a static coordinate
+into it whose rank matches the tensor rank.  Index entries are `int`,
+`VarSpec`, or `ExprSpec` values whose variables are owned by this kernel;
+they must not reference runtime scalars.
+
+```python
+num_tokens_post_pad = kernel.tensor("num_tokens_post_pad", (1,), "int32")
+routed_rows = kernel.scalar(
+    "routed_rows",
+    source=(num_tokens_post_pad, (0,)),
+    range=(1, 8192),
+)
+```
+
+A `ScalarSpec` participates in integer expressions exactly like a `VarSpec`
+(`+`, `-`, `*`, `//`, `%`, unary `-`, `.ceildiv(...)`), but it never
+evaluates to a concrete value during validation: concrete evaluation of an
+expression containing a runtime scalar is unresolved, and bound proofs use
+its `range` when present (unbounded otherwise).  `range` follows
+`VarSpec.range` semantics: an inclusive `(minimum, maximum)` pair with
+`0 < minimum <= maximum`, used only for validation bound proofs.
+
+Allowed contexts:
+
+- `tile_num` axes.
+- `wait`/`notify` coord_map return values.
+- `init_count` callables, which may capture a runtime scalar (the callable
+  itself must still return concrete positive integers during validation).
+
+Forbidden contexts, rejected by validation:
+
+- tensor shapes and event shapes, which must stay statically bounded so the
+  backend can reserve storage;
+- the scalar's own source index;
+- tensor region starts and extents — use a dynamic tensor region with a
+  non-empty reason for data-dependent access instead.
+
+Tiles whose `tile_num` depends on a runtime scalar cannot be pre-enumerated
+on the host; they are dynamically dispatched by backends that support it.
+The default static backend rejects such specs at build time.  Validation
+degrades gracefully around runtime scalars: instance-enumeration proofs
+(event counts, static region bounds, disjoint writers, event-coordinate
+ordering) are skipped for tiles and events that depend on them, and tensor
+dataflow through them is checked against the coarse logical event ordering
+instead.
 
 ## `KernelSpec.event`
 
@@ -410,6 +470,28 @@ def run(self, m_idx, n_idx, k_idx): ...
 
 Required.  Defines the computation for one logical tile instance at index
 `(m_idx, n_idx, k_idx)`.
+
+### Endpoint scopes
+
+```python
+class MyTile(TileImpl):
+    wait_level: str = "cta"                     # "thread" | "warp" | "warpgroup" | "cta"
+    wait_mask: int = 0xFFFFFFFF                 # 32-bit thread mask
+    notify_scope: tuple[str, int] = ("cta", 0)  # (scope, scope_id)
+```
+
+These optional class attributes declare the physical sync granularity the
+tile implementation uses for its event endpoints: the scope at which it
+waits on events (`wait_level` plus the participating `wait_mask`) and the
+scope at which it signals them (`notify_scope`, a `(scope, scope_id)` pair
+with the same legal scope values and a non-negative integer id).  One
+consistent set applies to all of the tile's endpoints.
+
+Scope is impl metadata rather than spec data because it describes the tile's
+internal cooperative granularity: a warpgroup-cooperative GEMM signals at
+warpgroup scope regardless of which spec it runs in.  The defaults match the
+reference static backend (CTA-wide waits with a full mask, CTA-scope
+notifies), so the simple path stays correct without declaring anything.
 
 ## DSL Example
 

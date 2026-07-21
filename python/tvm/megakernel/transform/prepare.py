@@ -30,9 +30,19 @@ from dataclasses import dataclass
 from itertools import product
 from typing import TYPE_CHECKING, Any
 
-from ..dsl import EventSpec, ExprSpec, KernelSpec, TensorSpec, TileSpec, VarSpec, expr_bounds
+from ..dsl import (
+    EventSpec,
+    ExprSpec,
+    KernelSpec,
+    ScalarSpec,
+    TensorSpec,
+    TileSpec,
+    VarSpec,
+    expr_bounds,
+)
+from ..dsl.spec import expr_scalars
 from .scheduler import TIRXSemaphore
-from .validate import _spec_view, _static_event_tile_adjacency
+from .validate import _coord_map_output_scalars, _spec_view, _static_event_tile_adjacency
 
 if TYPE_CHECKING:
     from .lower import LoweringOptions
@@ -122,10 +132,31 @@ class TIRXLoweringPlan:
         return 0 if layout is None else layout.workspace_offset + layout.reserved_size
 
 
+def _reject_runtime_scalar_dependencies(kernel: KernelSpec) -> None:
+    """The default static backend requires statically enumerable grids."""
+
+    for tile in kernel.tiles:
+        if expr_scalars(tile.tile_num):
+            raise ValueError(
+                f"the default static backend cannot lower tile {tile.name!r} whose "
+                "tile_num depends on a runtime scalar; dynamic dispatch is required"
+            )
+        for kind, dependencies in (("wait", tile.waits), ("notify", tile.notifies)):
+            for _, coord_map in dependencies:
+                if _coord_map_output_scalars(coord_map):
+                    raise ValueError(
+                        f"the default static backend cannot lower tile {tile.name!r} whose "
+                        f"{kind} coord_map depends on a runtime scalar; dynamic dispatch "
+                        "is required"
+                    )
+
+
 def prepare_tirx_lowering_plan(kernel: KernelSpec, options: LoweringOptions) -> TIRXLoweringPlan:
     """Prepare and validate the default backend's private lowering state."""
 
     attrs = dict(options.attrs)
+
+    _reject_runtime_scalar_dependencies(kernel)
 
     used_names: set[str] = set()
     var_bindings = tuple(
@@ -462,8 +493,13 @@ def lower_expr_like(value, var_values: dict[int, Any], label: str):
         if id(value) not in var_values:
             raise ValueError(f"{label} contains an unbound symbolic variable")
         return var_values[id(value)]
+    if isinstance(value, ScalarSpec):
+        raise ValueError(
+            f"{label} depends on runtime scalar {value.name!r}, which the default "
+            "static backend cannot lower; dynamic dispatch is required"
+        )
     if not isinstance(value, ExprSpec):
-        raise TypeError(f"{label} must contain only int, VarSpec, or ExprSpec values")
+        raise TypeError(f"{label} must contain only int, VarSpec, ScalarSpec, or ExprSpec values")
     args = [lower_expr_like(arg, var_values, label) for arg in value.args]
     if value.op == "add":
         return args[0] + args[1]

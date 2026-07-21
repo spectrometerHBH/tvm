@@ -27,13 +27,16 @@ from tvm.megakernel.dsl import (
     KernelSpec,
     R,
     RegionSpec,
+    ScalarSpec,
     TensorSpec,
     TileImpl,
     TileSpec,
     VarSpec,
     eval_expr_like,
     expr_bounds,
+    expr_vars,
 )
+from tvm.megakernel.dsl.spec import expr_scalars
 from tvm.megakernel.transform import (
     LoweringOptions,
     lower_static_queue_init_to_tirx,
@@ -1377,6 +1380,229 @@ def test_kernel_lower_binds_tensor_specs_and_tuple_events():
         "intermediate_handle",
         "destination_handle",
     ]
+
+
+def _scalar_kernel(name="runtime_scalar"):
+    kernel = KernelSpec(name)
+    counter = kernel.tensor("num_tokens_post_pad", (1,), "int32")
+    routed = kernel.scalar("routed_rows", source=(counter, (0,)), range=(1, 128))
+    return kernel, counter, routed
+
+
+def _foreign_scalar():
+    kernel = KernelSpec("foreign")
+    counter = kernel.tensor("counter", (1,), "int32")
+    return kernel.scalar("foreign_rows", source=(counter, (0,)), range=(1, 8))
+
+
+def test_runtime_scalar_registration_and_expression_behavior():
+    kernel, counter, routed = _scalar_kernel()
+
+    assert kernel.scalars["routed_rows"] is routed
+    assert routed.source == (counter, (0,))
+    assert routed.dtype == "int32"
+    assert routed.range == (1, 128)
+
+    expr = (routed + 1) * 2
+    assert isinstance(expr, ExprSpec)
+    assert eval_expr_like(expr) is None
+    assert eval_expr_like(expr, {}) is None
+    assert expr_bounds(expr) == (4, 258)
+    assert expr_vars(expr) == ()
+    assert expr_scalars(expr) == (routed,)
+
+    rows = kernel.var("rows")
+    mixed = rows + routed
+    assert expr_vars(mixed) == (rows,)
+    assert expr_scalars(mixed) == (routed,)
+
+    unbounded = KernelSpec("unbounded_scalar")
+    tensor = unbounded.tensor("counter", (1,), "int32")
+    scalar = unbounded.scalar("active", source=(tensor, (0,)))
+    assert expr_bounds(scalar, require_bounded=False) is None
+    with pytest.raises(ValueError, match="has no range"):
+        expr_bounds(scalar, require_bounded=True)
+    assert kernel.validate() is kernel
+
+
+def test_scalar_specs_use_identity_equality_and_hashing():
+    kernel, counter, _ = _scalar_kernel()
+    first = ScalarSpec("rows", (counter, (0,)))
+    second = ScalarSpec("rows", (counter, (0,)))
+
+    assert first is not second
+    assert first != second
+    assert len({first, second}) == 2
+
+
+def test_scalar_registration_rejects_duplicates_and_bad_ranges():
+    kernel, counter, _ = _scalar_kernel()
+    with pytest.raises(ValueError, match="Duplicate scalar"):
+        kernel.scalar("routed_rows", source=(counter, (0,)))
+
+    for bounds, error in [((0, 4), "0 < minimum"), ((5, 4), "0 < minimum"), ([1, 4], "tuple")]:
+        with pytest.raises((TypeError, ValueError), match=error):
+            kernel.scalar(f"bad_{bounds}", source=(counter, (0,)), range=bounds)
+
+
+def test_scalar_source_validation():
+    kernel = KernelSpec("scalar_source")
+    counter = kernel.tensor("counter", (2, 2), "int32")
+
+    with pytest.raises(ValueError, match="region view"):
+        kernel.scalar("view", source=(counter.region(lambda m, n, k: (m, n)), (0, 0)))
+    with pytest.raises(ValueError, match="rank"):
+        kernel.scalar("rank", source=(counter, (0,)))
+    with pytest.raises(TypeError, match="pair"):
+        kernel.scalar("shape", source=(counter,))
+    with pytest.raises(TypeError, match="boolean"):
+        kernel.scalar("bool", source=(counter, (True, 0)))
+    with pytest.raises(TypeError, match="expression operands"):
+        kernel.scalar("opaque", source=(counter, (object(), 0)))
+
+    routed = kernel.scalar("routed", source=(counter, (0, 0)))
+    with pytest.raises(ValueError, match="must not reference runtime scalars"):
+        kernel.scalar("self_ref", source=(counter, (routed, 0)))
+
+    rows = kernel.var("rows", range=(1, 2))
+    kernel.scalar("var_index", source=(counter, (rows - 1, 0)))
+    assert kernel.validate() is kernel
+
+    foreign_var = KernelSpec("foreign_var")
+    foreign_counter = foreign_var.tensor("counter", (1,), "int32")
+    foreign_var.scalar("bad", source=(foreign_counter, (VarSpec("x"),)))
+    with pytest.raises(ValueError, match="VarSpec outside this kernel"):
+        foreign_var.validate()
+
+    owner = KernelSpec("foreign_tensor")
+    owner.scalar("bad", source=(KernelSpec("other").tensor("x", (1,), "int32"), (0,)))
+    with pytest.raises(ValueError, match="tensor outside this kernel"):
+        owner.validate()
+
+
+def test_validate_rejects_scalar_in_tensor_and_event_shapes():
+    kernel, _, routed = _scalar_kernel()
+    kernel.tensor("A", (routed,), "float32")
+    with pytest.raises(ValueError, match="must not reference runtime scalar"):
+        kernel.validate()
+
+    kernel, _, routed = _scalar_kernel("event_shape_scalar")
+    kernel.event("ready", (routed,), 1)
+    with pytest.raises(ValueError, match="must not reference runtime scalar"):
+        kernel.validate()
+
+
+def test_scalar_in_tile_num_accepted_and_static_build_rejected():
+    kernel, _, routed = _scalar_kernel()
+    ready = kernel.event("ready", (128,), 1)
+    kernel.tile("producer", RecordingTile(), (routed, 1, 1)).notify(ready, lambda m, n, k: (m,))
+    kernel.tile("consumer", RecordingTile(), (routed, 1, 1)).wait(ready, lambda m, n, k: (m,))
+    assert kernel.validate() is kernel
+    with pytest.raises(ValueError, match="dynamic dispatch"):
+        lower_to_tirx(kernel)
+
+    # Static event-count proofs do not apply to runtime-scalar grids: a count
+    # that would fail static enumeration is accepted for dynamic dispatch.
+    mismatched, _, routed = _scalar_kernel("runtime_count_scalar")
+    ready = mismatched.event("ready", (128,), 5)
+    mismatched.tile("producer", RecordingTile(), (routed, 1, 1)).notify(ready, lambda m, n, k: (m,))
+    mismatched.tile("consumer", RecordingTile(), (routed, 1, 1)).wait(ready, lambda m, n, k: (m,))
+    assert mismatched.validate() is mismatched
+
+
+def test_scalar_in_coord_map_and_init_count_accepted():
+    kernel, _, routed = _scalar_kernel()
+    ready = kernel.event("ready", (128,), 1)
+    kernel.tile("producer", RecordingTile(), (2, 1, 1)).notify(ready, lambda m, n, k: (routed - 1,))
+    kernel.tile("consumer", RecordingTile(), (2, 1, 1)).wait(ready, lambda m, n, k: (m,))
+    assert kernel.validate() is kernel
+    with pytest.raises(ValueError, match="dynamic dispatch"):
+        lower_to_tirx(kernel)
+
+    captured, _, routed = _scalar_kernel("init_count_capture")
+    ready = captured.event("ready", (2,), lambda coord: routed.range[1] // 128)
+    captured.tile("producer", RecordingTile(), (2, 1, 1)).notify(ready, lambda m, n, k: (m,))
+    captured.tile("consumer", RecordingTile(), (2, 1, 1)).wait(ready, lambda m, n, k: (m,))
+    assert captured.validate() is captured
+    lower_to_tirx(captured)
+
+
+def test_validate_rejects_unregistered_scalar_references():
+    kernel = KernelSpec("foreign_tile_num")
+    kernel.tile("tile", RecordingTile(), (_foreign_scalar(), 1, 1))
+    with pytest.raises(ValueError, match="ScalarSpec outside this kernel"):
+        kernel.validate()
+
+    kernel = KernelSpec("foreign_coord")
+    ready = kernel.event("ready", (8,), 1)
+    kernel.tile("producer", RecordingTile(), (1, 1, 1)).notify(ready, (_foreign_scalar(),))
+    kernel.tile("consumer", RecordingTile(), (1, 1, 1)).wait(ready, (0,))
+    with pytest.raises(ValueError, match="ScalarSpec outside this kernel"):
+        kernel.validate()
+
+    kernel = KernelSpec("foreign_coord_capture")
+    foreign = _foreign_scalar()
+    ready = kernel.event("ready", (8,), 1)
+    kernel.tile("producer", RecordingTile(), (1, 1, 1)).notify(
+        ready, lambda m, n, k: (foreign - 1,)
+    )
+    kernel.tile("consumer", RecordingTile(), (1, 1, 1)).wait(ready, (0,))
+    with pytest.raises(ValueError, match="ScalarSpec outside this kernel"):
+        kernel.validate()
+
+    kernel = KernelSpec("foreign_init_count")
+    foreign = _foreign_scalar()
+    ready = kernel.event("ready", (2,), lambda coord: foreign.range[0])
+    kernel.tile("producer", RecordingTile(), (2, 1, 1)).notify(ready, lambda m, n, k: (m,))
+    kernel.tile("consumer", RecordingTile(), (2, 1, 1)).wait(ready, lambda m, n, k: (m,))
+    with pytest.raises(ValueError, match="init_count references a ScalarSpec outside this kernel"):
+        kernel.validate()
+
+
+def test_endpoint_scope_defaults_and_custom_values_accepted():
+    impl = RecordingTile()
+    assert impl.wait_level == "cta"
+    assert impl.wait_mask == 0xFFFFFFFF
+    assert impl.notify_scope == ("cta", 0)
+
+    kernel = KernelSpec("default_scopes")
+    kernel.tile("tile", impl, (1, 1, 1))
+    assert kernel.validate() is kernel
+
+    class WarpgroupTile(RecordingTile):
+        wait_level = "warpgroup"
+        wait_mask = 0xFFFF
+        notify_scope = ("warp", 1)
+
+    kernel = KernelSpec("custom_scopes")
+    kernel.tile("tile", WarpgroupTile(), (1, 1, 1))
+    assert kernel.validate() is kernel
+
+
+@pytest.mark.parametrize(
+    "attrs,error",
+    [
+        ({"wait_level": "block"}, "wait_level"),
+        ({"wait_level": 0}, "wait_level"),
+        ({"wait_level": True}, "wait_level"),
+        ({"wait_mask": True}, "wait_mask"),
+        ({"wait_mask": -1}, "wait_mask"),
+        ({"wait_mask": 0x100000000}, "wait_mask"),
+        ({"wait_mask": "full"}, "wait_mask"),
+        ({"notify_scope": "cta"}, "notify_scope"),
+        ({"notify_scope": ("cta", 0, 0)}, "notify_scope"),
+        ({"notify_scope": ("block", 0)}, "notify_scope scope"),
+        ({"notify_scope": ("cta", -1)}, "scope_id"),
+        ({"notify_scope": ("cta", True)}, "scope_id"),
+        ({"notify_scope": ("cta", "0")}, "scope_id"),
+    ],
+)
+def test_validate_rejects_invalid_endpoint_scopes(attrs, error):
+    impl = type("CustomScopeTile", (RecordingTile,), attrs)()
+    kernel = KernelSpec("invalid_scopes")
+    kernel.tile("tile", impl, (1, 1, 1))
+    with pytest.raises((TypeError, ValueError), match=error):
+        kernel.validate()
 
 
 if __name__ == "__main__":
