@@ -25,7 +25,7 @@ from tvm.ir import PointerType, PrimType, assert_structural_equal
 from tvm.script import ir as I
 from tvm.script import tirx as T
 from tvm.script.tirx import tile as Tx
-from tvm.tirx.layout import laneid, warpid
+from tvm.tirx.layout import TCol, TLane, laneid, warpid
 
 
 def from_source(code):
@@ -2109,6 +2109,67 @@ def test_vector_annotation_syntax_multidim():
     assert "alloc_local((4, 8)" in code or "float32[4, 8]" in code
     assert from_source(code).script() == code
     assert_structural_equal(func, from_source(code))
+
+
+def test_buffer_sub_tmem_offset_uses_physical_columns():
+    """A tmem layout measures TCol in elements, but allocated_addr measures
+    physical 32-bit columns.  Folding a sub-view offset must scale by dtype
+    width exactly once (the FlashMLA Q-tail view is the bf16 regression)."""
+
+    # fmt: off
+    @T.prim_func
+    def func() -> None:
+        T.device_entry()
+        Q = T.decl_buffer(
+            (2, 64, 288), "bfloat16", scope="tmem", allocated_addr=256,
+            layout=T.TileLayout(T.S[(2, 64, 288) : (64 @ TLane, 1 @ TLane, 1 @ TCol)]),
+        )
+        Q_tail = Q.sub[:, :, 256:288]
+        F8 = T.decl_buffer(
+            (64, 128), "float8_e4m3fn", scope="tmem", allocated_addr=32,
+            layout=T.TileLayout(T.S[(64, 128) : (1 @ TLane, 1 @ TCol)]),
+        )
+        F8_tail = F8.sub[:, 64:96]
+        F32 = T.decl_buffer(
+            (64, 128), "float32", scope="tmem", allocated_addr=64,
+            layout=T.TileLayout(T.S[(64, 128) : (1 @ TLane, 1 @ TCol)]),
+        )
+        F32_tail = F32.sub[:, 32:64]
+        T.evaluate(Q_tail[0, 0, 0])
+        T.evaluate(F8_tail[0, 0])
+        T.evaluate(F32_tail[0, 0])
+        # fmt: on
+
+    bufs = _collect_buffers(func)
+    assert int(bufs["Q_tail"].allocated_addr[0]) == 384  # 256 + 256 * 16 / 32
+    assert int(bufs["F8_tail"].allocated_addr[0]) == 48  # 32 + 64 * 8 / 32
+    assert int(bufs["F32_tail"].allocated_addr[0]) == 96  # 64 + 32 * 32 / 32
+    for name in ("Q_tail", "F8_tail", "F32_tail"):
+        assert int(bufs[name].layout.offset.get(TCol, 0)) == 0
+
+    code = func.script()
+    assert from_source(code).script() == code
+    assert_structural_equal(func, from_source(code))
+
+
+def test_buffer_sub_tmem_rejects_partial_column_offset():
+    buf_layout = tvm.tirx.layout.TileLayout(T.S[(64, 16) : (1 @ TLane, 1 @ TCol)])
+
+    def build():
+        # fmt: off
+        @T.prim_func
+        def func() -> None:
+            T.device_entry()
+            A = T.decl_buffer(
+                (64, 16), "bfloat16", scope="tmem", allocated_addr=0, layout=buf_layout,
+            )
+            _ = A.sub[:, 1:3]
+            # fmt: on
+
+        return func
+
+    with pytest.raises(tvm.error.DiagnosticError, match="aligned to a physical 32-bit column"):
+        build()
 
 
 def test_vector_annotation_shorthand_aliases():

@@ -383,6 +383,44 @@ def test_thread_extent_region_extracted_as_device_kernel():
     tvm.ir.assert_structural_equal(After, Expected)
 
 
+def test_cuda_launch_preserves_flag_and_value_metadata():
+    @I.ir_module
+    class Before:
+        @T.prim_func(s_tir=True)
+        def main(A: T.Buffer(16, "float32")):
+            T.func_attr(
+                {
+                    "target": T.target("cuda", host="llvm"),
+                    "tirx.kernel_launch_params": [
+                        "threadIdx.x",
+                        "tirx.use_programtic_dependent_launch",
+                        "tirx.max_dynamic_shared_memory",
+                    ],
+                }
+            )
+            T.attr(T.target("cuda"), "target", 0)
+            T.attr(0, "tirx.max_dynamic_shared_memory", 2080)
+            tx = T.launch_thread("threadIdx.x", 16)
+            A[tx] = 0.0
+
+    after = tvm.tirx.transform.SplitHostDevice()(Before)
+    kernel = after["main_kernel"]
+    assert list(kernel.attrs["tirx.kernel_launch_params"]) == [
+        "threadIdx.x",
+        "tirx.use_programtic_dependent_launch",
+        "tirx.max_dynamic_shared_memory",
+    ]
+    assert int(kernel.attrs["tirx.max_dynamic_shared_memory"]) == 2080
+
+    launch = after["main"].body.value
+    assert isinstance(launch, tvm.ir.Call)
+    # Programmatic launch is flag-only.  The packed launch operands are the
+    # device argument, thread extent, then the function-attribute byte ceiling.
+    assert len(launch.args) == 4
+    assert int(launch.args[-2]) == 16
+    assert int(launch.args[-1]) == 2080
+
+
 def test_device_scope_region_extracted_as_device_kernel():
     """A bare device_scope is annotated and extracted as a device kernel."""
 

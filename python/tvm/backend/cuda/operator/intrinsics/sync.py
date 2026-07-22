@@ -18,7 +18,8 @@
 """Synchronization primitives.
 
 PTX side:
-* ``bar.arrive`` / ``bar.sync`` — named-barrier alias of ``barrier.arrive/sync``
+* ``bar.arrive`` / ``bar.sync`` — aligned named-barrier aliases
+* ``barrier.sync`` — unaligned named barrier for divergent control flow
 * ``fence{.sem}.scope`` / ``fence.proxy.async`` / ``fence.mbarrier_init``
 * ``barrier.cluster.arrive`` / ``barrier.cluster.wait``
 * ``mbarrier.init`` / ``mbarrier.arrive[.expect_tx]`` (local + remote) / ``mbarrier.try_wait``
@@ -58,9 +59,11 @@ def _as_bool(value) -> bool:
 
 
 # =============================================================================
-# bar.arrive / bar.sync — alias of barrier.arrive/sync. 1 form each.
+# bar.arrive / bar.sync — aligned named-barrier aliases. 1 form each.
 #   bar.sync   a, b ;
 #   bar.arrive a, b ;
+# barrier.sync — unaligned named barrier. 1 form.
+#   barrier.sync a, b ;
 # =============================================================================
 device_intrinsic(
     "ptx_bar_arrive",
@@ -74,6 +77,14 @@ device_intrinsic(
     c_signature="(int name_bar_id, int thread_count)",
     body=(
         '    asm volatile("bar.sync %0, %1;" : : "r"(name_bar_id), "r"(thread_count) : "memory");'
+    ),
+)
+device_intrinsic(
+    "ptx_barrier_sync",
+    c_signature="(int name_bar_id, int thread_count)",
+    body=(
+        '    asm volatile("barrier.sync %0, %1;" : : '
+        '"r"(name_bar_id), "r"(thread_count) : "memory");'
     ),
 )
 

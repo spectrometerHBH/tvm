@@ -291,9 +291,12 @@ namespace attr {
  *
  * Call(f,
  *      [arg1, arg2, ..., arg_n,
- *       work_size_1, work_size_2, ... work_size_m, dyn_shmem_size])
+ *       work_size_1, work_size_2, ... work_size_m,
+ *       max_dyn_shmem_size, dyn_shmem_size])
  *
- * Here n = len(arg), m = len(work_size) = len(launch_params)-1.
+ * Flag-only launch tags do not add packed operands.  The two shared-memory
+ * operands are present only when their corresponding value-bearing tag is
+ * listed.
  *
  * The list of kernel launch params indicates which additional
  * parameters will be provided to the ffi::Function by the calling
@@ -319,12 +322,22 @@ namespace attr {
  *
  * - tvm::runtime::launch_param::kUseDynamicSharedMemoryTag
  *
- *   The size of the shared memory that may be allocated internally by
- *   the kernel.  For example, exposed as the
- *   CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES attribute in
- *   CUDA.
+ *   The dynamic shared-memory byte count passed for this launch.
  *
  *   Defined as "tirx.use_dyn_shared_memory".
+ *
+ * - tvm::runtime::launch_param::kMaxDynamicSharedMemoryTag
+ *
+ *   A CUDA function-attribute ceiling exposed as
+ *   CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES.  This value is
+ *   independent of the launch-time dynamic byte count.
+ *
+ *   Defined as "tirx.max_dynamic_shared_memory".
+ *
+ * - tvm::runtime::launch_param::kUseProgramaticDependentLaunch
+ * - tvm::runtime::launch_param::kUseCooperativeLaunch
+ *
+ *   Flag-only launch attributes.  These tags add no packed operand.
  *
  * \sa tvm::CallingConv::kDeviceKernelLaunch
  */
@@ -338,11 +351,41 @@ constexpr const char* kKernelLaunchParams = "tirx.kernel_launch_params";
 constexpr const char* kLaunchBoundsMinBlocksPerSM = "tirx.launch_bounds_min_blocks_per_sm";
 
 /*!
+ * \brief CUDA launch bound maximum CTAs per cluster.
+ *
+ * Type: IntImm
+ */
+constexpr const char* kLaunchBoundsMaxBlocksPerCluster =
+    "tirx.launch_bounds_max_blocks_per_cluster";
+
+/*!
+ * \brief CUDA function attribute ceiling for dynamic shared memory in bytes.
+ *
+ * This is independent of the dynamic shared-memory byte count supplied at
+ * launch time.
+ *
+ * Type: IntImm
+ */
+constexpr const char* kMaxDynamicSharedMemory = "tirx.max_dynamic_shared_memory";
+
+/*!
  * \brief Whether to set noalias rule on the function arguments.
  *
  * Type: IntImm
  */
 constexpr const char* kNoAlias = "tirx.noalias";
+
+/*!
+ * \brief Buffer parameters that may be passed as FFI ``None``.
+ *
+ * The named parameters must be present in the PrimFunc's buffer map.  A
+ * nullable buffer cannot be the sole source of symbolic buffer metadata;
+ * its shape, strides, element offset, and device metadata must already be
+ * determined by scalar parameters or preceding non-null buffers.
+ *
+ * Type: ffi::Array<ffi::String>
+ */
+constexpr const char* kNullableBufferParams = "tirx.nullable_buffer_params";
 
 /*!
  * \brief Mark the function as the entry function of

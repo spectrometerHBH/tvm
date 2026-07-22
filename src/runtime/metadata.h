@@ -50,6 +50,8 @@ namespace launch_param {
 
 /*! \brief A tag to specify whether or not dynamic shared memory is used */
 constexpr const char* kUseDynamicSharedMemoryTag = "tirx.use_dyn_shared_memory";
+/*! \brief A tag carrying the CUDA function's dynamic shared-memory ceiling */
+constexpr const char* kMaxDynamicSharedMemoryTag = "tirx.max_dynamic_shared_memory";
 /*! \brief A tag to specify whether or not use programatic dependent launch */
 constexpr const char* kUseProgramaticDependentLaunch = "tirx.use_programtic_dependent_launch";
 /*! \brief A tag to specify whether or not use cooperative launch */

@@ -248,14 +248,30 @@ void CodeGenCUDA::PrintExtraAttrs(const PrimFunc& f, std::ostream& os) {
       return;
     }
     auto min_blocks_per_sm = f->GetAttr<int64_t>(tirx::attr::kLaunchBoundsMinBlocksPerSM);
+    auto max_blocks_per_cluster = f->GetAttr<int64_t>(tirx::attr::kLaunchBoundsMaxBlocksPerCluster);
     if (min_blocks_per_sm.has_value()) {
       TVM_FFI_ICHECK_GT(min_blocks_per_sm.value(), 0);
-      os << " __launch_bounds__(" << threadIdx_ext_int->value << ", " << min_blocks_per_sm.value()
-         << ")";
+      os << " __launch_bounds__(" << threadIdx_ext_int->value << ", " << min_blocks_per_sm.value();
+      if (max_blocks_per_cluster.has_value()) {
+        TVM_FFI_ICHECK_GT(max_blocks_per_cluster.value(), 0);
+        os << ", " << max_blocks_per_cluster.value();
+      }
+      os << ")";
     } else {
+      TVM_FFI_ICHECK(!max_blocks_per_cluster.has_value())
+          << tirx::attr::kLaunchBoundsMaxBlocksPerCluster << " requires "
+          << tirx::attr::kLaunchBoundsMinBlocksPerSM;
       os << " __launch_bounds__(" << threadIdx_ext_int->value << ")";
     }
   }
+}
+
+void CodeGenCUDA::VisitStmt_(const ReturnNode* op) {
+  const auto* value = op->value.as<IntImmNode>();
+  TVM_FFI_ICHECK(value && value->value == 0)
+      << "CUDA device kernel may only contain a successful early return, return 0";
+  PrintIndent();
+  stream << "return;\n";
 }
 
 std::string CodeGenCUDA::Finish() {
@@ -277,6 +293,15 @@ std::string CodeGenCUDA::Finish() {
 }
 
 void CodeGenCUDA::VisitStmt_(const tirx::ForNode* op) {
+  // Materialize the loop bounds before emitting an unroll pragma.  PrintExpr
+  // may introduce temporaries (for example, for a Select expression).  CUDA
+  // requires #pragma unroll to immediately precede the loop it controls; if
+  // those declarations are printed between the pragma and the for statement,
+  // nvcc is free to unroll the loop despite disable_unroll.
+  std::string begin_str = PrintExpr(op->min);
+  PrimExpr end = is_zero(op->min) ? op->extent : arith::Analyzer()->Simplify(op->min + op->extent);
+  std::string end_str = PrintExpr(end);
+  std::string step_str = op->step.has_value() ? PrintExpr(*op->step) : "";
   if (op->annotations.count("disable_unroll")) {
     PrintIndent();
     stream << "#pragma unroll 1\n";
@@ -284,7 +309,22 @@ void CodeGenCUDA::VisitStmt_(const tirx::ForNode* op) {
     PrintIndent();
     stream << "#pragma unroll\n";
   }
-  CodeGenC::VisitStmt_(op);
+  PrintIndent();
+  std::string vid = AllocVarID(op->loop_var.get());
+  stream << "for (";
+  PrintType(op->loop_var.ty(), stream);
+  stream << ' ' << vid << " = " << begin_str << "; " << vid << " < " << end_str << "; ";
+  if (step_str.empty()) {
+    stream << "++" << vid;
+  } else {
+    stream << vid << " += " << step_str;
+  }
+  stream << ") {\n";
+  int for_scope = BeginScope();
+  PrintStmt(op->body);
+  this->EndScope(for_scope);
+  PrintIndent();
+  stream << "}\n";
 }
 
 void CodeGenCUDA::VisitStmt_(const WhileNode* op) {

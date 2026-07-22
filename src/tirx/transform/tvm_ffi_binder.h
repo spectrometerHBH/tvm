@@ -36,6 +36,7 @@
 
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -113,13 +114,15 @@ class TVMFFIABIBuilder {
    * \param func_name The function name.
    * \param params The function parameters.
    * \param buffer_map The buffer map from parameters to buffers.
+   * \param nullable_buffer_params Buffer-map parameter names that accept FFI ``None``.
    * \param v_packed_args The packed args variable (used for struct_get calls).
    * \param v_num_packed_args The variable holding the actual number of packed args.
    * \param device_type The expected device type expression.
    * \param device_id The device id variable (may be defined during buffer binding).
    */
   TVMFFIABIBuilder(const ffi::String& func_name, const ffi::Array<Var>& params,
-                   const ffi::Map<Var, Buffer>& buffer_map, const Var& v_packed_args,
+                   const ffi::Map<Var, Buffer>& buffer_map,
+                   const ffi::Array<ffi::String>& nullable_buffer_params, const Var& v_packed_args,
                    const Var& v_num_packed_args, const PrimExpr& device_type,
                    const PrimExpr& device_id);
 
@@ -285,10 +288,12 @@ class TVMFFIABIBuilder {
    * \param handle The variable holding the DLTensor handle.
    * \param arg_name Human-readable name for error messages.
    * \param base_path Base ffi::reflection::AccessPath for the tensor parameter.
+   * \param nullable Whether FFI ``None`` is accepted for this tensor.
    */
   void DecodeParamDLTensor(const Buffer& buffer, const PrimExpr& device_type,
                            const PrimExpr& device_id, const Var& handle,
-                           const std::string& arg_name, ffi::reflection::AccessPath base_path);
+                           const std::string& arg_name, ffi::reflection::AccessPath base_path,
+                           bool nullable);
 
   // ── DLTensor sub-helpers ───────────────────────────────────────
 
@@ -298,9 +303,11 @@ class TVMFFIABIBuilder {
    * \param handle The DLTensor handle variable.
    * \param field_kind kDLTensorShape or kDLTensorStrides.
    * \param var_name Name for the pointer variable.
+   * \param nullable Whether the DLTensor handle may be null.
    * \return A Var holding the field pointer.
    */
-  Var DLTensorGetFieldPtr(const Var& handle, int field_kind, const std::string& var_name);
+  Var DLTensorGetFieldPtr(const Var& handle, int field_kind, const std::string& var_name,
+                          bool nullable);
 
   /*!
    * \brief Load an element from a shape/strides int64 array pointer.
@@ -333,10 +340,13 @@ class TVMFFIABIBuilder {
    * \param shape_ptr The shape pointer variable (for computing C-contiguous strides).
    * \param v_strides_is_null Expression checking if strides pointer is NULL.
    * \param param_path ffi::reflection::AccessPath for the tensor parameter.
+   * \param buffer_is_null Expression checking if the DLTensor itself is NULL.
+   * \param nullable Whether the DLTensor handle may be null.
    */
   void BindRegularStrides(const Buffer& buffer, const Var& strides_ptr, const Var& shape_ptr,
                           const PrimExpr& v_strides_is_null,
-                          const ffi::reflection::AccessPath& param_path);
+                          const ffi::reflection::AccessPath& param_path,
+                          const PrimExpr& buffer_is_null, bool nullable);
 
   // ── Error message helpers ──────────────────────────────────────
 
@@ -407,6 +417,8 @@ class TVMFFIABIBuilder {
   ffi::Array<Var> params_;
   /*! \brief The buffer map from parameters to buffers. */
   ffi::Map<Var, Buffer> buffer_map_;
+  /*! \brief Buffer-map parameter names that accept FFI ``None``. */
+  std::unordered_set<std::string> nullable_buffer_params_;
   /*! \brief The packed args variable. */
   Var v_packed_args_;
   /*! \brief The expected device type expression. */

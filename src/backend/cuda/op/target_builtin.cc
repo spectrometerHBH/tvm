@@ -242,6 +242,7 @@ const DeviceIntrinsicRegistration kDeviceIntrinsics[] = {
     TIRX_DEVICE_INTRIN_ALIAS(ptx_atom_scalar, ptx, kOpaque),
     TIRX_DEVICE_INTRIN_ALIAS(ptx_bar_arrive, ptx, kOpaque),
     TIRX_DEVICE_INTRIN_ALIAS(ptx_bar_sync, ptx, kOpaque),
+    TIRX_DEVICE_INTRIN_ALIAS(ptx_barrier_sync, ptx, kOpaque),
     TIRX_DEVICE_INTRIN_ALIAS(ptx_barrier_cluster_arrive, ptx, kOpaque),
     TIRX_DEVICE_INTRIN_ALIAS(ptx_barrier_cluster_wait, ptx, kOpaque),
     TIRX_DEVICE_INTRIN_ALIAS(ptx_clc_query_cancel, ptx, kOpaque),

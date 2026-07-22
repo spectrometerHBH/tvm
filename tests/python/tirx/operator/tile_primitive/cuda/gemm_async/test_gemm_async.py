@@ -2517,7 +2517,7 @@ def test_gemm_tf32_with_tfloat32_tma():
     )
 
 
-def _build_smem_desc_kernel(smem_desc):
+def _build_smem_desc_kernel(smem_desc, warp_scope=False):
     """Minimal cta_group=1 fp16 gemm_async kernel parametrized on ``smem_desc``."""
     C_shape, C_dtype, C_region = (128, 512), "float32", [(0, 128), (256, 384)]
     A_shape, A_dtype, A_sw = (3, 128, 64), "float16", 3
@@ -2567,9 +2567,15 @@ def _build_smem_desc_kernel(smem_desc):
             T.ptx.mbarrier.arrive.expect_tx(tma_mbar.ptr_to([0]), total_bytes)
         T.ptx.mbarrier.try_wait(tma_mbar.ptr_to([0]), 0)
         T.cuda.cta_sync()
-        if tid_in_wg == 0:
-            Tx.gemm_async(tmem[tuple(r_tmem_C)], A_smem[tuple(r_smem_A)], B_smem[tuple(r_smem_B)], dispatch="tcgen05", smem_desc=smem_desc)  # noqa: E501
-            T.ptx.tcgen05.commit(mma_mbar.ptr_to([0]), cta_group=1)
+        if warp_scope:
+            if warp_id == 0:
+                Tx.warp.gemm_async(tmem[tuple(r_tmem_C)], A_smem[tuple(r_smem_A)], B_smem[tuple(r_smem_B)], dispatch="tcgen05", smem_desc=smem_desc)  # noqa: E501
+                if T.ptx.elect_sync() != T.uint32(0):
+                    T.ptx.tcgen05.commit(mma_mbar.ptr_to([0]), cta_group=1)
+        else:
+            if tid_in_wg == 0:
+                Tx.gemm_async(tmem[tuple(r_tmem_C)], A_smem[tuple(r_smem_A)], B_smem[tuple(r_smem_B)], dispatch="tcgen05", smem_desc=smem_desc)  # noqa: E501
+                T.ptx.tcgen05.commit(mma_mbar.ptr_to([0]), cta_group=1)
         T.ptx.mbarrier.try_wait(mma_mbar.ptr_to([0]), 0)
         T.cuda.cta_sync()
         T.ptx.tcgen05.fence.after_thread_sync()
@@ -2594,9 +2600,11 @@ def test_gemm_smem_desc_hoist_vs_recompute(smem_desc):
     """Compile-only: the SMEM matrix descriptor is built per-MMA from the buffer
     base address, selected by the ``smem_desc`` config.
 
-    - ``hoist`` (default): allocate + encode one warp-uniform descriptor per
-      operand (``descA`` / ``descB`` + ``smem_desc_make_lo_uniform``) and add the
-      per-MMA 16B offset via ``smem_desc_add_16B_offset``.
+    - ``hoist`` (default): allocate + encode one descriptor per operand
+      (``descA`` / ``descB``), then add the per-MMA 16B offset via
+      ``smem_desc_add_16B_offset``.  This builder uses a single-thread scope,
+      where the encoding thread is also the consumer and no warp shuffle is
+      valid or needed.
     - ``recompute``: build the full descriptor inline per MMA (``_uniform_desc``)
       with no allocated/encoded descriptor cell — trades a few ALU ops for one
       fewer live register on the hot path.
@@ -2614,7 +2622,8 @@ def test_gemm_smem_desc_hoist_vs_recompute(smem_desc):
     assert "tcgen05.mma" in src, f"mma not emitted; src=\n{src}"
 
     if smem_desc == "hoist":
-        assert "smem_desc_make_lo_uniform" in src, "hoist mode must encode a uniform descriptor"
+        assert "encode_matrix_descriptor" in src, "hoist mode must encode a descriptor"
+        assert "smem_desc_make_lo_uniform" not in src, "hoist mode must not warp-shuffle"
         assert "smem_desc_add_16B_offset" in src, "hoist mode must add the per-MMA 16B offset"
     else:
         assert "smem_desc_make_lo_uniform" not in src, "recompute mode must not hoist a descriptor"
@@ -2716,7 +2725,7 @@ def _run_dense_gemm(
     np.testing.assert_allclose(C_t.numpy().astype("float32"), C_ref, atol=atol, rtol=rtol)
 
 
-def _build_smem_desc_kernel(smem_desc, weight_stationary=False, pass_descI=False):
+def _build_smem_desc_kernel(smem_desc, weight_stationary=False, pass_descI=False, warp_scope=False):
     """Minimal cta_group=1 fp16 gemm_async kernel parametrized on ``smem_desc``."""
     C_shape, C_dtype, C_region = (128, 512), "float32", [(0, 128), (256, 384)]
     A_shape, A_dtype, A_sw = (3, 128, 64), "float16", 3
@@ -2766,25 +2775,47 @@ def _build_smem_desc_kernel(smem_desc, weight_stationary=False, pass_descI=False
             T.ptx.mbarrier.arrive.expect_tx(tma_mbar.ptr_to([0]), total_bytes)
         T.ptx.mbarrier.try_wait(tma_mbar.ptr_to([0]), 0)
         T.cuda.cta_sync()
-        if tid_in_wg == 0:
-            if pass_descI:
-                desc_i: T.uint32
-                T.ptx.tcgen05.encode_instr_descriptor(
-                    T.address_of(desc_i),  # noqa: F821
-                    d_dtype=C_dtype,
-                    a_dtype=A_dtype,
-                    b_dtype=B_dtype,
-                    M=128,
-                    N=width,
-                    K=16,
-                    trans_a=False,
-                    trans_b=False,
-                    n_cta_groups=1,
-                )
-                Tx.gemm_async(tmem[tuple(r_tmem_C)], A_smem[tuple(r_smem_A)], B_smem[tuple(r_smem_B)], dispatch="tcgen05", smem_desc=smem_desc, weight_stationary=weight_stationary, descI=desc_i)  # noqa: E501, F821
-            else:
-                Tx.gemm_async(tmem[tuple(r_tmem_C)], A_smem[tuple(r_smem_A)], B_smem[tuple(r_smem_B)], dispatch="tcgen05", smem_desc=smem_desc, weight_stationary=weight_stationary)  # noqa: E501
-            T.ptx.tcgen05.commit(mma_mbar.ptr_to([0]), cta_group=1)
+        if warp_scope:
+            if warp_id == 0:
+                if pass_descI:
+                    desc_i: T.uint32
+                    T.ptx.tcgen05.encode_instr_descriptor(
+                        T.address_of(desc_i),  # noqa: F821
+                        d_dtype=C_dtype,
+                        a_dtype=A_dtype,
+                        b_dtype=B_dtype,
+                        M=128,
+                        N=width,
+                        K=16,
+                        trans_a=False,
+                        trans_b=False,
+                        n_cta_groups=1,
+                    )
+                    Tx.warp.gemm_async(tmem[tuple(r_tmem_C)], A_smem[tuple(r_smem_A)], B_smem[tuple(r_smem_B)], dispatch="tcgen05", smem_desc=smem_desc, weight_stationary=weight_stationary, descI=desc_i)  # noqa: E501, F821
+                else:
+                    Tx.warp.gemm_async(tmem[tuple(r_tmem_C)], A_smem[tuple(r_smem_A)], B_smem[tuple(r_smem_B)], dispatch="tcgen05", smem_desc=smem_desc, weight_stationary=weight_stationary)  # noqa: E501
+                if T.ptx.elect_sync() != T.uint32(0):
+                    T.ptx.tcgen05.commit(mma_mbar.ptr_to([0]), cta_group=1)
+        else:
+            if tid_in_wg == 0:
+                if pass_descI:
+                    desc_i: T.uint32
+                    T.ptx.tcgen05.encode_instr_descriptor(
+                        T.address_of(desc_i),  # noqa: F821
+                        d_dtype=C_dtype,
+                        a_dtype=A_dtype,
+                        b_dtype=B_dtype,
+                        M=128,
+                        N=width,
+                        K=16,
+                        trans_a=False,
+                        trans_b=False,
+                        n_cta_groups=1,
+                    )
+                    Tx.gemm_async(tmem[tuple(r_tmem_C)], A_smem[tuple(r_smem_A)], B_smem[tuple(r_smem_B)], dispatch="tcgen05", smem_desc=smem_desc, weight_stationary=weight_stationary, descI=desc_i)  # noqa: E501, F821
+                else:
+                    Tx.gemm_async(tmem[tuple(r_tmem_C)], A_smem[tuple(r_smem_A)], B_smem[tuple(r_smem_B)], dispatch="tcgen05", smem_desc=smem_desc, weight_stationary=weight_stationary)  # noqa: E501
+                T.ptx.tcgen05.commit(mma_mbar.ptr_to([0]), cta_group=1)
         T.ptx.mbarrier.try_wait(mma_mbar.ptr_to([0]), 0)
         T.cuda.cta_sync()
         T.ptx.tcgen05.fence.after_thread_sync()
@@ -2808,9 +2839,11 @@ def test_gemm_smem_desc_modes_codegen(smem_desc):
     """Compile-only: the SMEM matrix descriptor is built per-MMA from the buffer
     base address, selected by the ``smem_desc`` config.
 
-    - ``hoist`` (default): allocate + encode one warp-uniform descriptor per
-      operand (``descA`` / ``descB`` + ``smem_desc_make_lo_uniform``) and add the
-      per-MMA 16B offset via ``smem_desc_add_16B_offset``.
+    - ``hoist`` (default): allocate + encode one descriptor per operand
+      (``descA`` / ``descB``), then add the per-MMA 16B offset via
+      ``smem_desc_add_16B_offset``.  This builder uses a single-thread scope,
+      where the encoding thread is also the consumer and no warp shuffle is
+      valid or needed.
     - ``recompute``: build the full descriptor inline per MMA (``_uniform_desc``)
       with no allocated/encoded descriptor cell — trades a few ALU ops for one
       fewer live register on the hot path.
@@ -2833,7 +2866,8 @@ def test_gemm_smem_desc_modes_codegen(smem_desc):
     assert "tcgen05.mma" in src, f"mma not emitted; src=\n{src}"
 
     if smem_desc == "hoist":
-        assert "smem_desc_make_lo_uniform" in src, "hoist mode must encode a uniform descriptor"
+        assert "encode_matrix_descriptor" in src, "hoist mode must encode a descriptor"
+        assert "smem_desc_make_lo_uniform" not in src, "hoist mode must not warp-shuffle"
         assert "smem_desc_add_16B_offset" in src, "hoist mode must add the per-MMA 16B offset"
     elif smem_desc == "local_hoist":
         assert "descA_local" in src and "descB_local" in src
@@ -2846,6 +2880,28 @@ def test_gemm_smem_desc_modes_codegen(smem_desc):
         assert "smem_desc_make_lo_uniform" not in src, "recompute mode must not hoist a descriptor"
         assert "smem_desc_add_16B_offset" not in src, "recompute mode must not add a 16B offset"
         assert "encode_matrix_descriptor" not in src, "recompute mode must not encode a descriptor"
+
+
+def test_gemm_smem_desc_hoist_warp_scope_codegen():
+    """Warp-scoped MMA uniformizes descriptors before electing one issuer."""
+
+    target = tvm.target.Target("cuda")
+    with target:
+        mod = tvm.compile(
+            tvm.IRModule({"main": _build_smem_desc_kernel("hoist", warp_scope=True)}),
+            target=target,
+            tir_pipeline="tirx",
+        )
+    src = mod.mod.imports[0].inspect_source()
+    assert "tcgen05.mma" in src
+    assert "elect_one_sync" in src
+    assert "encode_matrix_descriptor" in src
+    assert "smem_desc_add_16B_offset" in src
+    assert "smem_desc_make_lo_uniform" in src
+    uniform_call = src.find("smem_desc_make_lo_uniform_((&")
+    elect_call = src.find("tvm_builtin_elect_one_sync_op", uniform_call)
+    mma_call = src.find("ptx_tcgen05_mma_", elect_call)
+    assert 0 <= uniform_call < elect_call < mma_call
 
 
 def test_gemm_tcgen05_weight_stationary_codegen():

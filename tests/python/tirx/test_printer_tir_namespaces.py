@@ -118,6 +118,7 @@ def test_printer_ptx_more():
     )
     _assert_print(cuda_op.ptx_bar_arrive(0, 128), "T.ptx.bar.arrive(0, 128)")
     _assert_print(cuda_op.ptx_bar_sync(0, 128), "T.ptx.bar.sync(0, 128)")
+    _assert_print(cuda_op.ptx_barrier_sync(0, 128), "T.ptx.barrier.sync(0, 128)")
     _assert_print(
         cuda_op.ptx_tcgen05_alloc(s, 64, 1), "s = T.handle()\nT.ptx.tcgen05.alloc(s, 64, 1)"
     )

@@ -600,13 +600,50 @@ class Buffer(Object, Scriptable):
         )
         new_layout = self._rewrap_swizzle(new_layout, swizzle)
         if is_tmem:
-            # tmem addresses by physical column: narrowing shifts allocated_addr
-            # (col base), not elem_offset; extra_offset is a TCol column count.
-            return self._redecl(new_shape, new_layout, addr_offset=extra_offset)
+            # Layout TCol offsets are expressed in buffer-element units, while
+            # allocated_addr is expressed in physical 32-bit TMEM columns.
+            # Narrowing therefore has to convert the former into the latter
+            # exactly once before moving the offset into the column base.
+            addr_offset = self._tmem_element_offset_to_column_offset(extra_offset)
+            return self._redecl(new_shape, new_layout, addr_offset=addr_offset)
         elem_offset = self.elem_offset
         if extra_offset is not None:
             elem_offset = elem_offset + extra_offset
         return self._redecl(new_shape, new_layout, elem_offset=elem_offset)
+
+    def _tmem_element_offset_to_column_offset(self, element_offset):
+        """Convert a TCol element offset to a physical 32-bit column offset.
+
+        A tmem ``TileLayout`` measures TCol spans and strides in elements of
+        the buffer dtype.  In contrast, ``allocated_addr`` and the tcgen05
+        address operand count 32-bit cells.  A view offset may be folded into
+        ``allocated_addr`` only when it lands on a whole cell; rejecting an
+        unprovably aligned offset prevents a half-column view from being
+        silently rounded down.
+        """
+        if element_offset is None:
+            return None
+
+        bits = tvm.DataType(self.dtype).bits
+        bit_offset = element_offset * bits
+        bit_offset_c = self._concrete_int(bit_offset)
+        if bit_offset_c is not None:
+            if bit_offset_c % 32 != 0:
+                raise ValueError(
+                    "sub: tmem TCol offset must be aligned to a physical "
+                    f"32-bit column; got {element_offset} elements of {self.dtype}"
+                )
+            return bit_offset_c // 32
+
+        from ..arith import Analyzer  # pylint: disable=import-outside-toplevel
+
+        analyzer = Analyzer()
+        if not analyzer.can_prove_equal(tvm.tirx.floormod(bit_offset, 32), 0):
+            raise ValueError(
+                "sub: tmem TCol offset must be provably aligned to a physical "
+                f"32-bit column; got {element_offset} elements of {self.dtype}"
+            )
+        return analyzer.simplify(tvm.tirx.floordiv(bit_offset, 32))
 
     def rearrange(self, pattern: str, **sizes) -> "Buffer":
         """einops-style relayout in one line: ``buf.rearrange("b (2 r) -> 2 b r")``.
@@ -821,10 +858,13 @@ class Buffer(Object, Scriptable):
 
 
 def _tmem_offset_axis_check(buf, group_iters, start_c, what):
-    """tmem views fold sub offsets into ``allocated_addr`` as a *column*
-    count, so a nonzero (or non-provably-zero) pick/narrow is only valid on
-    TCol-stride layout iters — a lane-axis offset would be silently
-    misaddressed. No-op for non-tmem buffers."""
+    """Check that a tmem view offset can move into ``allocated_addr``.
+
+    Layout offsets are in buffer-element units and are converted separately
+    to physical 32-bit columns.  Only TCol-stride iters may contribute: a
+    lane-axis offset cannot be represented by the column-only address base.
+    No-op for non-tmem buffers.
+    """
     if buf.allocated_addr is None or len(buf.allocated_addr) == 0:
         return
     if start_c == 0:
