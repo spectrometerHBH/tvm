@@ -723,7 +723,6 @@ def test_transform_exports_only_the_verify_and_build_contract():
     ):
         assert not hasattr(transform, removed_name)
     assert set(transform.__all__) == {
-        "LowerMegakernelDSL",
         "LoweringOptions",
         "RuntimeKernelBuild",
         "build_runtime_kernel",
@@ -1249,6 +1248,18 @@ def test_scalar_source_validation():
     rows = kernel.var("rows", range=(1, 2))
     kernel.scalar("var_index", source=(counter, (rows - 1, 0)))
     assert kernel.validate() is kernel
+
+    out_of_bounds = KernelSpec("scalar_source_oob")
+    small = out_of_bounds.tensor("counter", (2, 2), "int32")
+    out_of_bounds.scalar("bad", source=(small, (2, 0)))
+    with pytest.raises(ValueError, match="out of bounds"):
+        out_of_bounds.validate()
+
+    negative = KernelSpec("scalar_source_negative")
+    small = negative.tensor("counter", (2, 2), "int32")
+    negative.scalar("bad", source=(small, (-1, 0)))
+    with pytest.raises(ValueError, match="out of bounds"):
+        negative.validate()
 
     foreign_var = KernelSpec("foreign_var")
     foreign_counter = foreign_var.tensor("counter", (1,), "int32")

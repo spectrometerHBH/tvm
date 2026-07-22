@@ -36,7 +36,7 @@ the module.  The host-side products live behind the richer entry point::
     build.queue_tasks/head/tail # dynamic: MPMC seed arrays (int32)
     build.event_workspace_size  # int32 cells to allocate and ZERO before launch
 
-``var_values`` provides concrete integers for symbolic ``VarSpec``\ s; it is
+``var_values`` provides concrete integers for symbolic ``VarSpec`` objects; it is
 only needed by the host queue derivation (seed/static grids must be
 enumerable) and may be omitted when every seeded ``tile_num`` is concrete.
 Between launches the host must re-upload the queue arrays and re-zero the
@@ -299,6 +299,13 @@ def _prepare_runtime_plan(
     """Derive the shared lowering plan, pinning it to the runtime scheduler."""
 
     attrs = dict(options.attrs)
+    static_coalescing = _parse_coalescing(kernel, attrs)
+    unsupported = {name: factor for name, factor in static_coalescing.items() if factor != 1}
+    if unsupported:
+        raise ValueError(
+            "tile_coalescing factors greater than one are supported only with "
+            f"scheduler='dynamic', got {unsupported}"
+        )
     attrs["sm_count"] = hardware.sm_count
     # The runtime StaticTileScheduler stops at its fixed end task type and
     # loads exactly MAX_TASKS queue entries per SM; pin the plan to both.
@@ -410,13 +417,44 @@ def _validate_runtime_static_scalar_grids(plan: TIRXLoweringPlan) -> None:
         _resolve_run_predicates(tile)
 
 
-def _validate_runtime_static_tiles(plan: TIRXLoweringPlan) -> None:
+def _validate_endpoint_scope(
+    tile: TileSpec,
+    metadata_name: str,
+    scope: tuple[str, int],
+    hardware: HardwareConfig,
+) -> None:
+    scope_name, scope_id = scope
+    limits = {
+        "thread": hardware.num_threads,
+        "warp": hardware.warp_count,
+        "warpgroup": hardware.warpgroup_count,
+        "cta": 1,
+    }
+    if scope_id >= limits[scope_name]:
+        raise ValueError(
+            f"tile {tile.name!r} impl {metadata_name} {scope!r} exceeds the "
+            f"configured {scope_name} count {limits[scope_name]}"
+        )
+
+
+def _validate_runtime_static_tiles(plan: TIRXLoweringPlan, hardware: HardwareConfig) -> None:
     for tile in plan.kernel.tiles:
         if tile.impl.wait_level not in _STATIC_WAIT_LEVELS:
             raise ValueError(
                 f"tile {tile.name!r}: the static runtime builder supports "
                 f"wait_level {_STATIC_WAIT_LEVELS} only, got {tile.impl.wait_level!r}"
             )
+        if tile.waits and tile.impl.wait_level == "warp":
+            valid_mask = (1 << hardware.warp_count) - 1
+            if (tile.impl.wait_mask & valid_mask) == 0:
+                raise ValueError(
+                    f"tile {tile.name!r} impl wait_mask {tile.impl.wait_mask:#x} must "
+                    f"select at least one configured warp from {valid_mask:#x}"
+                )
+        _validate_endpoint_scope(tile, "notify_scope", tile.impl.notify_scope, hardware)
+        pre_scope = getattr(tile.impl, "pre_notify_scope", None)
+        if pre_scope is not None:
+            _validate_endpoint_scope(tile, "pre_notify_scope", pre_scope, hardware)
 
 
 def _replace_tensor_specs(value: Any, buffers: dict[int, Any]) -> Any:
@@ -827,7 +865,7 @@ class _RuntimeKernelBuilder:
             semaphore = self.event_sems[id(event)]
 
             def notify_func(_notify_idx, coord=coord):
-                return (1, -1, *coord)
+                return (1, *coord)
 
             scope, scope_id = impl.notify_scope
             scheduler.notify(
@@ -852,14 +890,17 @@ def _emit_runtime_func(
     hardware = _hardware_from_options(options)
     if options.scheduler == "dynamic":
         plan = _prepare_dynamic_plan(kernel, options, hardware)
-        _validate_runtime_static_tiles(plan)
+        _validate_runtime_static_tiles(plan, hardware)
         builder: _RuntimeKernelBuilder = _RuntimeDynamicKernelBuilder(plan, hardware)
     else:
         plan = _prepare_runtime_plan(kernel, options, hardware)
-        _validate_runtime_static_tiles(plan)
+        _validate_runtime_static_tiles(plan, hardware)
         builder = _RuntimeKernelBuilder(plan, hardware)
     try:
         func = _runtime_kernel_entry.specialize(emitter=builder)
+        protocol_errors = builder.wrapper.smem_manager.protocol_errors
+        if protocol_errors:
+            raise ValueError(protocol_errors[0])
     finally:
         builder.restore_tensor_specs()
     return func, plan, hardware
@@ -885,6 +926,10 @@ def _var_env(kernel: KernelSpec, var_values: dict[str, int] | None) -> dict[VarS
             raise ValueError(f"queue derivation got a value for unknown var {name!r}")
         if not isinstance(value, int) or isinstance(value, bool):
             raise TypeError(f"var {name!r} queue value must be an integer")
+        if var.range is not None and not var.range[0] <= value <= var.range[1]:
+            raise ValueError(
+                f"var {name!r} queue value {value} is outside its declared range {var.range}"
+            )
         env[var] = value
     return env
 
@@ -1078,6 +1123,42 @@ class _AxisProbe:
 
     def __init__(self, axis: int):
         self.axis = axis
+
+    def __add__(self, other):
+        return ExprSpec("add", (self, other))
+
+    def __radd__(self, other):
+        return ExprSpec("add", (other, self))
+
+    def __sub__(self, other):
+        return ExprSpec("sub", (self, other))
+
+    def __rsub__(self, other):
+        return ExprSpec("sub", (other, self))
+
+    def __mul__(self, other):
+        return ExprSpec("mul", (self, other))
+
+    def __rmul__(self, other):
+        return ExprSpec("mul", (other, self))
+
+    def __floordiv__(self, other):
+        return ExprSpec("floordiv", (self, other))
+
+    def __rfloordiv__(self, other):
+        return ExprSpec("floordiv", (other, self))
+
+    def __mod__(self, other):
+        return ExprSpec("mod", (self, other))
+
+    def __rmod__(self, other):
+        return ExprSpec("mod", (other, self))
+
+    def __neg__(self):
+        return ExprSpec("neg", (self,))
+
+    def ceildiv(self, other):
+        return ExprSpec("ceildiv", (self, other))
 
 
 def _probe_coord_map(coord_map, label: str) -> tuple[tuple[str, Any], ...]:
@@ -1285,7 +1366,10 @@ def _wait_sync_covers(tile: TileSpec, scope: tuple[str, int], hardware: Hardware
     name, scope_id = scope
     warp_size = hardware.warp_size
     if name == "thread":
-        return (mask >> (scope_id // warp_size)) & 1 == 1
+        # Only lane 0 performs the acquire load; ``any_sync`` broadcasts the
+        # predicate, not the acquire ordering itself.  A thread-scoped pusher
+        # is therefore covered only when it is that acquiring lane.
+        return scope_id % warp_size == 0 and (mask >> (scope_id // warp_size)) & 1 == 1
     if name == "warp":
         return (mask >> scope_id) & 1 == 1
     if name == "warpgroup":
@@ -1422,6 +1506,95 @@ def _normalize_hatch(hatch: dict[str, Any], label: str) -> tuple[Any, tuple, tup
     return count, index_exprs, tuple(safety_exprs)
 
 
+def _interval_op(op: str, bounds: list[tuple[int, int]]) -> tuple[int, int]:
+    """Apply one ExprSpec operator to conservative inclusive intervals."""
+
+    if op == "add":
+        return bounds[0][0] + bounds[1][0], bounds[0][1] + bounds[1][1]
+    if op == "sub":
+        return bounds[0][0] - bounds[1][1], bounds[0][1] - bounds[1][0]
+    if op == "mul":
+        values = [lhs * rhs for lhs in bounds[0] for rhs in bounds[1]]
+        return min(values), max(values)
+    if op == "neg":
+        return -bounds[0][1], -bounds[0][0]
+    if op in ("floordiv", "ceildiv", "mod"):
+        divisor_min, divisor_max = bounds[1]
+        if divisor_min <= 0 <= divisor_max:
+            raise ValueError(f"{op} expression divisor range must not include zero")
+        if op == "mod":
+            if divisor_min > 0:
+                return 0, divisor_max - 1
+            return divisor_min + 1, 0
+        if op == "floordiv":
+            values = [lhs // rhs for lhs in bounds[0] for rhs in bounds[1]]
+        else:
+            values = [-((-lhs) // rhs) for lhs in bounds[0] for rhs in bounds[1]]
+        return min(values), max(values)
+    raise ValueError(f"unsupported ExprSpec op {op!r}")
+
+
+def _hatch_expr_bounds(
+    value,
+    source_axis_bounds: tuple[tuple[int, int], ...],
+    push_idx_bounds: tuple[int, int] | None,
+) -> tuple[int, int]:
+    """Bound a normalized hatch expression, including axis/push sentinels."""
+
+    if value is _PUSH_IDX:
+        if push_idx_bounds is None:
+            raise ValueError("push_idx is not available in the dispatch count")
+        return push_idx_bounds
+    if isinstance(value, _AxisProbe):
+        return source_axis_bounds[value.axis]
+    if isinstance(value, ExprSpec):
+        return _interval_op(
+            value.op,
+            [_hatch_expr_bounds(arg, source_axis_bounds, push_idx_bounds) for arg in value.args],
+        )
+    return expr_bounds(value, require_bounded=True)
+
+
+def _validate_hatch_indices(
+    label: str,
+    source: TileSpec,
+    target: TileSpec,
+    scheduled,
+    count_expr,
+    count_bounds: tuple[int, int],
+    index_exprs: tuple,
+) -> None:
+    """Prove every custom pushed task index fits its target grid and wire fields."""
+
+    source_axis_bounds = tuple(
+        (0, expr_bounds(extent, require_bounded=True)[1] - 1) for extent in scheduled[id(source)]
+    )
+    push_idx_bounds = (0, count_bounds[1] - 1)
+    packing = TaskPacking()
+    packing_limits = (packing.max_m_idx, packing.max_n_idx, packing.max_k_idx)
+    for axis, (entry, target_extent, packing_limit) in enumerate(
+        zip(index_exprs, scheduled[id(target)], packing_limits)
+    ):
+        index_lo, index_hi = _hatch_expr_bounds(entry, source_axis_bounds, push_idx_bounds)
+        target_lo, _ = expr_bounds(target_extent, require_bounded=True)
+        # A direct push_idx enumerates [0, count).  Preserve the common dynamic
+        # case where count and target extent are the same logical expression;
+        # otherwise the interval proof must fit the smallest target grid.
+        fits_target = (
+            entry is _PUSH_IDX and _expr_structurally_equal(count_expr, target_extent)
+        ) or index_hi < target_lo
+        if index_lo < 0 or not fits_target:
+            raise ValueError(
+                f"{label}['indices'] axis {axis} range [{index_lo}, {index_hi}] "
+                f"is outside target tile {target.name!r} extent {target_extent!r}"
+            )
+        if index_hi >= packing_limit:
+            raise ValueError(
+                f"{label}['indices'] axis {axis} upper bound {index_hi} exceeds "
+                f"the packed-task limit {packing_limit - 1}"
+            )
+
+
 def _synthesize_dispatch_rule(
     tile: TileSpec,
     kernel: KernelSpec,
@@ -1458,8 +1631,12 @@ def _synthesize_dispatch_rule(
             )
         label = f"tile {tile.name!r} attrs[{_ESCAPE_HATCH_KEY!r}]"
         count_expr, index_exprs, safety_exprs = _normalize_hatch(hatch, label)
+        source_axis_bounds = tuple(
+            (0, expr_bounds(extent, require_bounded=True)[1] - 1)
+            for extent in scheduled[id(source)]
+        )
         try:
-            count_lo, count_hi = expr_bounds(count_expr, require_bounded=True)
+            count_lo, count_hi = _hatch_expr_bounds(count_expr, source_axis_bounds, None)
         except (TypeError, ValueError) as err:
             raise type(err)(
                 f"{label}['count'] needs a provable static upper bound for "
@@ -1467,6 +1644,15 @@ def _synthesize_dispatch_rule(
             ) from err
         if count_lo <= 0:
             raise ValueError(f"{label}['count'] must be positive")
+        _validate_hatch_indices(
+            label,
+            source,
+            tile,
+            scheduled,
+            count_expr,
+            (count_lo, count_hi),
+            index_exprs,
+        )
         trigger, post_run = _classify_push_scalars(
             safety_exprs,
             source,
@@ -1734,7 +1920,13 @@ def _find_declared_drain(kernel: KernelSpec) -> EventSpec | None:
 
 
 def _check_event_cardinality(
-    event: EventSpec, coord_map_sets, extent_of, context: str, init_count=None
+    event: EventSpec,
+    coord_map_sets,
+    extent_of,
+    context: str,
+    init_count=None,
+    *,
+    aggregate=False,
 ) -> None:
     """Fiber-level per-coord notification count proof for one event.
 
@@ -1745,6 +1937,52 @@ def _check_event_cardinality(
     """
 
     expected = event.init_count if init_count is None else init_count
+    if aggregate:
+        shape = _upper_bound_shape_extents(event.shape, f"event {event.name!r} shape")
+        domain = 1
+        for extent in shape:
+            domain *= extent
+        if domain > _EVENT_INIT_COUNT_PROOF_LIMIT:
+            raise ValueError(
+                f"event {event.name!r} {context}: its coordinate domain {domain} "
+                "exceeds the cardinality proof limit"
+            )
+        analyzed = [
+            (
+                producer,
+                [
+                    _probe_coord_map(coord_map, f"tile {producer.name!r} notify")
+                    for coord_map in coord_maps
+                ],
+            )
+            for producer, coord_maps in coord_map_sets
+        ]
+        for coord in product(*(range(extent) for extent in shape)):
+            actual = sum(
+                _coord_map_fiber(entries, producer, extent_of, coord, event, context)
+                for producer, entry_sets in analyzed
+                for entries in entry_sets
+            )
+            if actual == 0:
+                continue
+            value = (
+                _eval_pure(expected, (coord,), f"event {event.name!r} init_count")
+                if callable(expected)
+                else expected
+            )
+            if not isinstance(value, int) or isinstance(value, bool):
+                raise ValueError(
+                    f"event {event.name!r} {context}: its init_count must return "
+                    "plain integers for the cardinality proof"
+                )
+            if actual != value:
+                raise ValueError(
+                    f"event {event.name!r}: its static producer aggregate provides "
+                    f"{actual} notifications per coordinate at {coord}, but "
+                    f"init_count is {value}"
+                )
+        return
+
     if not isinstance(expected, int) or isinstance(expected, bool):
         raise ValueError(
             f"event {event.name!r} {context}: its init_count must be a plain "
@@ -1776,6 +2014,44 @@ def _check_event_cardinality(
                 f"event {event.name!r}: tile {producer.name!r} provides {fiber} "
                 f"notifications per coordinate, but init_count is {expected}"
             )
+
+
+def _coord_map_fiber(entries, producer, extent_of, coord, event, context) -> int:
+    """Notification multiplicity of one axis/constant coord map at ``coord``."""
+
+    axis_values = {}
+    for coordinate, (kind, payload) in zip(coord, entries):
+        if kind == "const":
+            if coordinate != payload:
+                return 0
+            continue
+        previous = axis_values.setdefault(payload, coordinate)
+        if previous != coordinate:
+            return 0
+        extent = extent_of(producer, payload)
+        if extent is None:
+            raise ValueError(
+                f"event {event.name!r}: tile {producer.name!r} notifies a "
+                "coordinate whose per-coord notification count is not "
+                f"statically provable (fiber over non-static axis {payload}); "
+                f"{context}"
+            )
+        if coordinate >= extent:
+            return 0
+    fiber = 1
+    for axis in range(3):
+        if axis in axis_values:
+            continue
+        extent = extent_of(producer, axis)
+        if extent is None:
+            raise ValueError(
+                f"event {event.name!r}: tile {producer.name!r} notifies a "
+                "coordinate whose per-coord notification count is not "
+                f"statically provable (fiber over non-static axis {axis}); "
+                f"{context}"
+            )
+        fiber *= extent
+    return fiber
 
 
 def _validate_scalar_dynamic_event_cardinality(
@@ -1861,60 +2137,14 @@ def _validate_static_scalar_event_cardinality(plan: TIRXLoweringPlan) -> None:
             (producer, [cm for notified, cm in producer.notifies if notified is event])
             for producer in event_producers.get(id(event), [])
         ]
-        if isinstance(event.init_count, int) and not isinstance(event.init_count, bool):
-            _check_event_cardinality(
-                event,
-                coord_map_sets,
-                upper_extent,
-                "is touched by a static scalar-grid tile; enumerated "
-                "producers must match init_count per coordinate",
-            )
-            continue
-        # Callable init count: it must return the fiber count as a plain
-        # integer at every upper-domain coordinate (never a runtime scalar).
-        shape = _upper_bound_shape_extents(event.shape, f"event {event.name!r} shape")
-        domain = 1
-        for extent in shape:
-            domain *= extent
-        if domain > _EVENT_INIT_COUNT_PROOF_LIMIT:
-            raise ValueError(
-                f"event {event.name!r} is touched by a static scalar-grid tile; "
-                f"its callable init_count spans {domain} coordinates, beyond "
-                "the cardinality proof limit"
-            )
-        for producer, coord_maps in coord_map_sets:
-            if len(coord_maps) != 1:
-                raise ValueError(
-                    f"tile {producer.name!r} notifies event {event.name!r} "
-                    f"{len(coord_maps)} times; per-coord cardinality is not provable"
-                )
-            entries = _probe_coord_map(coord_maps[0], f"tile {producer.name!r} notify")
-            used_axes = {payload for kind, payload in entries if kind == "axis"}
-            fiber = 1
-            for axis in range(3):
-                if axis not in used_axes:
-                    extent = upper_extent(producer, axis)
-                    if extent is None:
-                        raise ValueError(
-                            f"event {event.name!r}: tile {producer.name!r} "
-                            "notifies a coordinate whose per-coord "
-                            "notification count is not statically provable"
-                        )
-                    fiber *= extent
-            for coord in product(*(range(extent) for extent in shape)):
-                value = _eval_pure(event.init_count, coord, f"event {event.name!r} init_count")
-                if not isinstance(value, int) or isinstance(value, bool):
-                    raise ValueError(
-                        f"event {event.name!r} is touched by a static "
-                        "scalar-grid tile; a runtime-scalar init_count is "
-                        "not allowed (it must return plain integers)"
-                    )
-                if value != fiber:
-                    raise ValueError(
-                        f"event {event.name!r}: tile {producer.name!r} "
-                        f"provides {fiber} notifications per coordinate, "
-                        f"but init_count at {coord} is {value}"
-                    )
+        _check_event_cardinality(
+            event,
+            coord_map_sets,
+            upper_extent,
+            "is touched by a static scalar-grid tile; enumerated producers "
+            "must match init_count per coordinate",
+            aggregate=True,
+        )
 
 
 def _prepare_dynamic_plan(
@@ -2208,7 +2438,7 @@ class _RuntimeDynamicKernelBuilder(_RuntimeKernelBuilder):
         )
 
         def notify_func(_notify_idx):
-            return (1, -1, *coord)
+            return (1, *coord)
 
         push_fn = self._make_push_fn(rule, indices)
 
@@ -2256,7 +2486,12 @@ class _RuntimeDynamicKernelBuilder(_RuntimeKernelBuilder):
         if rule.custom_indices is not None:
             # The count/indices were normalized exactly once at plan time;
             # codegen lowers those same trees (never re-calls the hatch).
-            count = self._lower_expr(rule.count_expr, f"tile {rule.target.name!r} push count")
+            count = self._lower_push_index(
+                rule.count_expr,
+                0,
+                indices,
+                f"tile {rule.target.name!r} push count",
+            )
 
             def push_fn(push_idx):
                 mapped = tuple(
@@ -2307,7 +2542,7 @@ class _RuntimeDynamicKernelBuilder(_RuntimeKernelBuilder):
         scope, scope_id = _impl_pre_notify_scope(tile.impl)
 
         def notify_func(_notify_idx):
-            return (1, -1, 0)
+            return (1, 0)
 
         def push_fn(_push_idx):
             return (self.plan.end_job_id, self.hardware.sm_count, 0, 0, 0)

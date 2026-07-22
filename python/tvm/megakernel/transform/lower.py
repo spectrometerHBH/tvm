@@ -28,7 +28,6 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
-import tvm
 from tvm.ir import IRModule
 from tvm.tirx import PrimFunc
 
@@ -92,21 +91,7 @@ def lower_to_tirx_module(kernel: KernelSpec, options: LoweringOptions | None = N
     return _emit_with_runtime_builder(kernel, resolved)
 
 
-@tvm.transform.module_pass(opt_level=0, name="LowerMegakernelDSL")
-class LowerMegakernelDSL:
-    """Module pass wrapper around runtime-builder megakernel lowering."""
-
-    def __init__(self, kernel: KernelSpec, options: LoweringOptions | None = None):
-        self.kernel = kernel
-        self.options = options
-
-    def transform_module(self, mod: IRModule, _ctx: tvm.transform.PassContext) -> IRModule:
-        lowered = lower_to_tirx_module(self.kernel, self.options)
-        return IRModule({**mod.functions, **lowered.functions}, attrs=mod.attrs)
-
-
 __all__ = [
-    "LowerMegakernelDSL",
     "LoweringOptions",
     "lower_to_tirx",
     "lower_to_tirx_module",

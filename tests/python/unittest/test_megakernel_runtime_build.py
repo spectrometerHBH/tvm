@@ -96,6 +96,27 @@ class _ProfiledTile(_MarkerTile):
     profile_event: ClassVar[Enum] = _ProfileEvent.STAGE
 
 
+class _MissingSmemPhaseTile(TileImpl):
+    def device_init(self, smem_manager, m_idx, n_idx, k_idx):
+        self.smem_manager = smem_manager
+        self.scratch = smem_manager.alloc((64,), "int32")
+
+    def run(self, m_idx, n_idx, k_idx):
+        T.buffer_store(self.scratch, 1, [0])
+
+
+class _RunAllocatedSmemTile(TileImpl):
+    def device_init(self, smem_manager, m_idx, n_idx, k_idx):
+        self.smem_manager = smem_manager
+
+    def run(self, m_idx, n_idx, k_idx):
+        scratch = self.smem_manager.alloc((64,), "int32")
+        self.smem_manager.acquire_all("cta")
+        T.buffer_store(scratch, 1, [0])
+        self.smem_manager.release_all("cta")
+        self.smem_manager.advance()
+
+
 def _chain_kernel(name="chain"):
     """producer -> consumer (warp wait/warpgroup notify) -> sink event chain."""
 
@@ -199,6 +220,22 @@ def test_runtime_build_without_events_skips_event_machinery():
     assert all(
         task[3] not in (INIT_EVENT_JOB_ID, WAIT_EVENT_INIT_JOB_ID) for task in build.central_tasks
     )
+
+
+def test_runtime_build_rejects_missing_managed_smem_phase_hooks():
+    kernel = KernelSpec("missing_smem_phase")
+    kernel.tile("stage", _MissingSmemPhaseTile(), (1, 1, 1))
+
+    with pytest.raises(ValueError, match="runtime hook violates.*phase protocol"):
+        build_runtime_kernel(kernel, _static_options())
+
+
+def test_runtime_build_tracks_smem_allocated_in_run_without_custom_init_hook():
+    kernel = KernelSpec("run_allocated_smem")
+    kernel.tile("stage", _RunAllocatedSmemTile(), (1, 1, 1))
+
+    build = build_runtime_kernel(kernel, _static_options())
+    assert isinstance(build.module["run_allocated_smem"], tvm.tirx.PrimFunc)
 
 
 def test_runtime_build_rejects_unsupported_wait_level():
@@ -774,6 +811,50 @@ def test_dynamic_escape_hatch_declares_push_rule():
     assert rule.count_upper == 8
     build = build_runtime_kernel(kernel, _dynamic_options())
     assert build.event_workspace_size == 2
+
+
+@pytest.mark.parametrize("bad_index", [(-1, 0, 0), (8, 0, 0), (999, 0, 0)])
+def test_dynamic_escape_hatch_rejects_indices_outside_target_grid(bad_index):
+    kernel = KernelSpec("hatched_oob")
+    ready = kernel.event("ready", (1,), 1)
+    kernel.tile("plant", _MarkerTile(), (1, 1, 1)).notify(ready, (0,))
+    kernel.tile(
+        "mark",
+        _MarkerTile(),
+        (8, 1, 1),
+        attrs={
+            "megakernel.dispatch": {
+                "source": "plant",
+                "count": 1,
+                "indices": bad_index,
+            }
+        },
+    ).wait(ready, (0,))
+
+    with pytest.raises(ValueError, match="outside target tile"):
+        _dynamic_plan(kernel)
+
+
+def test_dynamic_escape_hatch_accepts_source_axis_count_and_push_index():
+    kernel = KernelSpec("hatched_axis_count")
+    ready = kernel.event("ready", (4,), 1)
+    kernel.tile("plant", _MarkerTile(), (4, 1, 1)).notify(ready, lambda m, n, k: (m,))
+    kernel.tile(
+        "mark",
+        _MarkerTile(),
+        (4, 1, 1),
+        attrs={
+            "megakernel.dispatch": {
+                "source": "plant",
+                "count": lambda m, n, k: m + 1,
+                "indices": lambda push_idx, m, n, k: (push_idx, 0, 0),
+            }
+        },
+    ).wait(ready, lambda m, n, k: (m,))
+
+    plan = _dynamic_plan(kernel)
+    (rule,) = plan.dispatch_rules.values()
+    assert rule.count_upper == 4
 
 
 @pytest.mark.parametrize(
@@ -1471,6 +1552,15 @@ class _CoveredWarpTile(_MarkerTile):
     pre_notify_scope: ClassVar[tuple[str, int]] = ("warp", 0)
 
 
+class _CoveredWarpThreadTile(_MarkerTile):
+    """Warp 1 waits, but non-acquiring lane 33 performs the scalar push."""
+
+    wait_level: ClassVar[str] = "warp"
+    wait_mask: ClassVar[int] = 0x2
+    notify_scope: ClassVar[tuple[str, int]] = ("thread", 33)
+    pre_notify_scope: ClassVar[tuple[str, int]] = ("thread", 33)
+
+
 def _r21_spec(name, pusher_impl):
     kernel = KernelSpec(name)
     count_buf = kernel.tensor("count", (1,), "int32")
@@ -1525,6 +1615,16 @@ def test_r21_covering_warp_wait_needs_no_barrier():
     script = build.module["r21_covered"].script()
     _, sync, _ = _pusher_branch_order(script)
     assert sync is None
+
+
+def test_r21_non_acquiring_lane_in_waiting_warp_gets_barrier():
+    build = build_runtime_kernel(
+        _r21_spec("r21_non_acquiring_lane", _CoveredWarpThreadTile()), _dynamic_options()
+    )
+    script = build.module["r21_non_acquiring_lane"].script()
+    _, sync, trigger = _pusher_branch_order(script)
+    assert sync is not None
+    assert sync < trigger
 
 
 def test_r21_wait_free_pusher_gets_barrier():
@@ -1620,7 +1720,7 @@ def test_r22_legitimate_callable_evaluated_once():
     kernel.tile(
         "mark",
         _MarkerTile(),
-        (8, 1, 1),
+        (64, 1, 1),
         writes=[out],
         attrs={
             "megakernel.dispatch": {
@@ -1712,6 +1812,49 @@ def test_r23_callable_init_count_plain_int_passes():
     assert isinstance(build.module["r23_callable"], tvm.tirx.PrimFunc)
 
 
+def test_static_scalar_cardinality_aggregates_multiple_producers():
+    kernel = KernelSpec("static_aggregate")
+    counter = kernel.tensor("counter", (1,), "int32")
+    routed = kernel.scalar("routed", source=(counter, (0,)), range=(1, 4))
+    ready = kernel.event("ready", (1,), 8)
+    kernel.tile("producer_a", _MarkerTile(), (routed, 1, 1)).notify(ready, (0,))
+    kernel.tile("producer_b", _MarkerTile(), (routed, 1, 1)).notify(ready, (0,))
+    kernel.tile("consumer", _MarkerTile(), (1, 1, 1)).wait(ready, (0,))
+
+    build = build_runtime_kernel(kernel, _static_options())
+    assert isinstance(build.module["static_aggregate"], tvm.tirx.PrimFunc)
+
+
+def test_static_scalar_cardinality_callable_receives_coordinate_tuple():
+    kernel = KernelSpec("static_coord_count")
+    counter = kernel.tensor("counter", (1,), "int32")
+    routed = kernel.scalar("routed", source=(counter, (0,)), range=(1, 4))
+    ready = kernel.event("ready", (2,), lambda coord: 4 if coord == (0,) else 8)
+    kernel.tile("producer_zero", _MarkerTile(), (routed, 1, 1)).notify(ready, (0,))
+    kernel.tile("producer_one", _MarkerTile(), (routed, 2, 1)).notify(ready, (1,))
+    kernel.tile("consumer", _MarkerTile(), (2, 1, 1)).wait(ready, lambda m, n, k: (m,))
+
+    build = build_runtime_kernel(kernel, _static_options())
+    assert isinstance(build.module["static_coord_count"], tvm.tirx.PrimFunc)
+
+
+def test_static_rejects_tile_coalescing_greater_than_one():
+    kernel = KernelSpec("static_coalescing")
+    kernel.tile("stage", _MarkerTile(), (1, 4, 1))
+
+    with pytest.raises(ValueError, match="supported only.*dynamic"):
+        build_runtime_kernel(
+            kernel,
+            _static_options(attrs={"tile_coalescing": {"stage": 4}}),
+        )
+
+    build = build_runtime_kernel(
+        kernel,
+        _static_options(attrs={"tile_coalescing": {"stage": 1}}),
+    )
+    assert isinstance(build.module["static_coalescing"], tvm.tirx.PrimFunc)
+
+
 def test_r24_declared_axis_plus_auto_axis():
     kernel = KernelSpec("r24")
     count_r = kernel.tensor("count_r", (1,), "int32")
@@ -1733,6 +1876,67 @@ def test_r24_declared_axis_plus_auto_axis():
     # their scalar buffers.
     assert "count_r" in script
     assert "count_c" in script
+
+
+@pytest.mark.parametrize("value", [0, 17])
+def test_host_queue_rejects_var_values_outside_declared_range(value):
+    kernel = KernelSpec("bounded_host_value")
+    rows = kernel.var("rows", range=(1, 16))
+    kernel.tile("stage", _MarkerTile(), (rows, 1, 1))
+    plan = _prepare_runtime_plan(kernel, _static_options(), HardwareConfig())
+
+    with pytest.raises(ValueError, match="outside its declared range"):
+        derive_static_central_tasks(plan, {"rows": value})
+
+
+@pytest.mark.parametrize(
+    ("metadata", "scope"),
+    [
+        ("notify_scope", ("thread", 256)),
+        ("notify_scope", ("warp", 8)),
+        ("notify_scope", ("warpgroup", 2)),
+        ("notify_scope", ("cta", 1)),
+        ("pre_notify_scope", ("thread", 256)),
+    ],
+)
+def test_runtime_builder_rejects_endpoint_scope_outside_hardware(metadata, scope):
+    class OutOfRangeTile(_MarkerTile):
+        notify_scope = ("thread", 0)
+
+    setattr(OutOfRangeTile, metadata, scope)
+    kernel = KernelSpec(f"bad_{metadata}_{scope[0]}")
+    kernel.tile("stage", OutOfRangeTile(), (1, 1, 1))
+
+    with pytest.raises(ValueError, match=f"{metadata}.*exceeds"):
+        build_runtime_kernel(kernel, _static_options())
+
+
+@pytest.mark.parametrize("mask", [0, 0x100])
+def test_runtime_builder_rejects_invalid_warp_wait_mask(mask):
+    class BadMaskTile(_MarkerTile):
+        wait_level = "warp"
+        wait_mask = mask
+
+    kernel = KernelSpec(f"bad_wait_mask_{mask}")
+    ready = kernel.event("ready", (1,), 1)
+    kernel.tile("producer", _MarkerTile(), (1, 1, 1)).notify(ready, (0,))
+    kernel.tile("consumer", BadMaskTile(), (1, 1, 1)).wait(ready, (0,))
+
+    with pytest.raises(ValueError, match="wait_mask"):
+        build_runtime_kernel(kernel, _static_options())
+
+
+def test_runtime_builder_accepts_full_warp_wait_mask():
+    class FullMaskTile(_MarkerTile):
+        wait_level = "warp"
+        wait_mask = 0xFFFFFFFF
+
+    kernel = KernelSpec("full_wait_mask")
+    ready = kernel.event("ready", (1,), 1)
+    kernel.tile("producer", _MarkerTile(), (1, 1, 1)).notify(ready, (0,))
+    kernel.tile("consumer", FullMaskTile(), (1, 1, 1)).wait(ready, (0,))
+
+    build_runtime_kernel(kernel, _static_options())
 
 
 # ---------------------------------------------------------------------------

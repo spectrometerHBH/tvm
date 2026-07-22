@@ -230,7 +230,7 @@ class MegaKernelWrapper:
             if self.tile_scheduler.m_idx < len(self.etensor_and_f_init_pairs):
                 self.tile_scheduler.notify(
                     self.evt_etensor_init_complete,
-                    lambda notify_idx: (1, -1, 0),
+                    lambda notify_idx: (1, 0),
                     scope="cta",
                     release=True,
                 )

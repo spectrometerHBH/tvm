@@ -55,7 +55,7 @@ class SemaphoreBase:
     def semaphore_wait(self, *coord, level, mask):
         raise NotImplementedError
 
-    def semaphore_notify(self, *coord, rank=-1):
+    def semaphore_notify(self, *coord):
         raise NotImplementedError
 
 

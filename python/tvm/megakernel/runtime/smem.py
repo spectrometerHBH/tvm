@@ -55,6 +55,8 @@ class SmemManager(DslSmemManager):
         self.persistent_pool_allocator = T.SMEMPool(None if fusion_mode else ptr)
         self.tiles = {}
         self.runtime_tile_chunk_count = {}
+        self.runtime_tile_advance_count = {}
+        self.protocol_errors = []
         self.bufs = {}
         self.persistent_bufs = {}
         self.cur_tile_name = ""
@@ -210,14 +212,19 @@ class SmemManager(DslSmemManager):
             self.cur_tile_name = "default"
         else:
             self.cur_tile_name = str(cur_tile)
-        self.tiles[self.cur_tile_name] = [
-            -1,
-            {"exclusive": [], "shared": []},
-            [0 for _ in range(self.chunk_num)],
-        ]
-        self.runtime_tile_chunk_count[self.cur_tile_name] = [
-            [0 for _ in range(self.chunk_num)] for _ in range(2)
-        ]
+        self.tiles.setdefault(
+            self.cur_tile_name,
+            [
+                -1,
+                {"exclusive": [], "shared": []},
+                [0 for _ in range(self.chunk_num)],
+            ],
+        )
+        self.runtime_tile_chunk_count.setdefault(
+            self.cur_tile_name,
+            [[0 for _ in range(self.chunk_num)] for _ in range(2)],
+        )
+        self.runtime_tile_advance_count.setdefault(self.cur_tile_name, 0)
         self.reguler_pool_allocator.move_base_to(0)
 
     def _assert_cond(self, cond, message="smem manager protocol violation"):
@@ -226,7 +233,13 @@ class SmemManager(DslSmemManager):
 
     @T.inline
     def advance(self):
+        self._mark_advance()
         self.cur_phase[0] = self.cur_phase[0] ^ 1
+
+    def _mark_advance(self):
+        self.runtime_tile_advance_count[self.cur_tile_name] = (
+            self.runtime_tile_advance_count[self.cur_tile_name] + 1
+        )
 
     def enter_tile_runtime(self, cur_tile):
         self.cur_tile_name = str(cur_tile)
@@ -236,10 +249,82 @@ class SmemManager(DslSmemManager):
         self.cur_tile_name = ""
 
     def _check_runtime(self):
-        pass
+        tile = self.tiles.get(self.cur_tile_name)
+        if tile is None:
+            self.protocol_errors.append(
+                f"tile {self.cur_tile_name!r} runtime hook has no smem allocation plan"
+            )
+            return
+        allocations = tile[1]["shared"] + tile[1]["exclusive"]
+        if not allocations:
+            return
+        waits, arrivals = self.runtime_tile_chunk_count[self.cur_tile_name]
+        missing_waits = [chunk for chunk, count in enumerate(waits) if count == 0]
+        missing_arrivals = [chunk for chunk, count in enumerate(arrivals) if count == 0]
+        mismatched = [
+            chunk
+            for chunk, (wait_count, arrive_count) in enumerate(zip(waits, arrivals))
+            if wait_count != arrive_count
+        ]
+        if missing_waits or missing_arrivals or mismatched:
+            self.protocol_errors.append(
+                f"tile {self.cur_tile_name!r} runtime hook violates the managed smem "
+                "phase protocol: every chunk must be acquired and released equally; "
+                f"missing acquire={missing_waits}, missing release={missing_arrivals}, "
+                f"mismatched={mismatched}"
+            )
+            return
+        advance_count = self.runtime_tile_advance_count[self.cur_tile_name]
+        if advance_count != 1:
+            self.protocol_errors.append(
+                f"tile {self.cur_tile_name!r} runtime hook must call advance() exactly "
+                f"once after managed smem release, got {advance_count}"
+            )
+
+    def _mark_chunk_range(self, kind: Literal["wait", "arrive"], beg: int, end: int):
+        counts = self.runtime_tile_chunk_count[self.cur_tile_name][0 if kind == "wait" else 1]
+        for chunk_id in range(beg, end + 1):
+            counts[chunk_id] += 1
+
+    def _buffer_chunk_range(self, buffer, split_idx: int) -> tuple[int, int]:
+        split, beg, size, _ = self.bufs[buffer]
+        split_size = size // split
+        return (
+            (beg + split_size * split_idx) // self.chunk_size,
+            (beg + split_size * (split_idx + 1) - 1) // self.chunk_size,
+        )
+
+    def _mark_buffer_chunks(self, kind: Literal["wait", "arrive"], buffer, split_idx) -> None:
+        if isinstance(split_idx, int) and not isinstance(split_idx, bool):
+            beg_chunk_id, end_chunk_id = self._buffer_chunk_range(buffer, split_idx)
+        else:
+            _, beg, size, _ = self.bufs[buffer]
+            beg_chunk_id = beg // self.chunk_size
+            end_chunk_id = (beg + size - 1) // self.chunk_size
+        self._mark_chunk_range(kind, beg_chunk_id, end_chunk_id)
+
+    def _mark_runtime_chunk(self, kind: Literal["wait", "arrive"], chunk_id):
+        if isinstance(chunk_id, bool) or not isinstance(chunk_id, int):
+            raise ValueError(
+                f"tile {self.cur_tile_name!r} runtime hook uses a dynamic smem chunk id; "
+                "the phase protocol requires statically identifiable chunks"
+            )
+        if not 0 <= chunk_id < self.chunk_num:
+            raise ValueError(f"managed smem chunk id {chunk_id} is out of range")
+        self._mark_chunk_range(kind, chunk_id, chunk_id)
+
+    def _mark_unused_chunks(self, kind: Literal["wait", "arrive"], cur_tile):
+        # Keep this bookkeeping outside the inline macro's local assignment.
+        # The TIRX parser materializes ``first_unused`` as a BufferLoad for the
+        # emitted predicate, while the allocation-plan value is still a Python
+        # integer here and can be audited exactly.
+        first_unused = self.tiles[str(cur_tile)][0] + 1
+        if first_unused < self.chunk_num:
+            self._mark_chunk_range(kind, first_unused, self.chunk_num - 1)
 
     @T.inline
     def wait_all(self, level: Literal["cta", "warpgroup"] = "cta"):
+        self._mark_chunk_range("wait", 0, self.chunk_num - 1)
         lane_id = T.lane_id([self.hardware.warp_size])
         warp_id = T.warp_id([self.hardware.warp_count])
         wg_id = T.warpgroup_id([self.hardware.warpgroup_count])
@@ -268,14 +353,8 @@ class SmemManager(DslSmemManager):
         self._assert_cond(
             self.bufs[buffer][3] == "exclusive", "wait_specific requires an exclusive buffer"
         )
-        beg_chunk_id = (
-            self.bufs[buffer][1] + self.bufs[buffer][2] // self.bufs[buffer][0] * split_idx
-        ) // self.chunk_size
-        end_chunk_id = (
-            self.bufs[buffer][1]
-            + self.bufs[buffer][2] // self.bufs[buffer][0] * (split_idx + 1)
-            - 1
-        ) // self.chunk_size
+        beg_chunk_id, end_chunk_id = self._buffer_chunk_range(buffer, split_idx)
+        self._mark_buffer_chunks("wait", buffer, split_idx)
         if (lane_id >= beg_chunk_id) & (lane_id <= end_chunk_id):
             T.ptx.mbarrier.try_wait(self.mbar.ptr_to([lane_id]), self.cur_phase[0])
 
@@ -285,11 +364,14 @@ class SmemManager(DslSmemManager):
             len(self.tiles[self.cur_tile_name][1]["shared"]) == 0,
             "wait_unused requires exclusive-only allocations",
         )
-        if (lane_id < self.chunk_num) & (lane_id > self.tiles[str(cur_tile)][0]):
+        self._mark_unused_chunks("wait", cur_tile)
+        first_unused = self.tiles[str(cur_tile)][0] + 1
+        if (lane_id < self.chunk_num) & (lane_id >= first_unused):
             T.ptx.mbarrier.try_wait(self.mbar.ptr_to([lane_id]), self.cur_phase[0])
 
     @T.inline
     def wait_chunk(self, chunk_id):
+        self._mark_runtime_chunk("wait", chunk_id)
         T.ptx.mbarrier.try_wait(self.mbar.ptr_to([chunk_id]), self.cur_phase[0])
 
     @T.inline
@@ -302,19 +384,14 @@ class SmemManager(DslSmemManager):
             self.bufs[buffer][3] == "exclusive",
             "wait_specific_one_thread requires an exclusive buffer",
         )
-        beg_chunk_id = (
-            self.bufs[buffer][1] + self.bufs[buffer][2] // self.bufs[buffer][0] * split_idx
-        ) // self.chunk_size
-        end_chunk_id = (
-            self.bufs[buffer][1]
-            + self.bufs[buffer][2] // self.bufs[buffer][0] * (split_idx + 1)
-            - 1
-        ) // self.chunk_size
+        beg_chunk_id, end_chunk_id = self._buffer_chunk_range(buffer, split_idx)
+        self._mark_buffer_chunks("wait", buffer, split_idx)
         for idx in T.serial(0, end_chunk_id - beg_chunk_id + 1):
             T.ptx.mbarrier.try_wait(self.mbar.ptr_to([beg_chunk_id + idx]), self.cur_phase[0])
 
     @T.inline
     def arrive_all(self, level: Literal["cta", "warpgroup"] = "cta"):
+        self._mark_chunk_range("arrive", 0, self.chunk_num - 1)
         lane_id = T.lane_id([self.hardware.warp_size])
         warp_id = T.warp_id([self.hardware.warp_count])
         wg_id = T.warpgroup_id([self.hardware.warpgroup_count])
@@ -358,14 +435,8 @@ class SmemManager(DslSmemManager):
         self._assert_cond(
             self.bufs[buffer][3] == "exclusive", "arrive_specific requires an exclusive buffer"
         )
-        beg_chunk_id = (
-            self.bufs[buffer][1] + self.bufs[buffer][2] // self.bufs[buffer][0] * split_idx
-        ) // self.chunk_size
-        end_chunk_id = (
-            self.bufs[buffer][1]
-            + self.bufs[buffer][2] // self.bufs[buffer][0] * (split_idx + 1)
-            - 1
-        ) // self.chunk_size
+        beg_chunk_id, end_chunk_id = self._buffer_chunk_range(buffer, split_idx)
+        self._mark_buffer_chunks("arrive", buffer, split_idx)
         if (lane_id >= beg_chunk_id) & (lane_id <= end_chunk_id):
             T.ptx.mbarrier.arrive(self.mbar.ptr_to([lane_id]))
 
@@ -375,11 +446,14 @@ class SmemManager(DslSmemManager):
             len(self.tiles[self.cur_tile_name][1]["shared"]) == 0,
             "arrive_unused requires exclusive-only allocations",
         )
-        if (lane_id < self.chunk_num) & (lane_id > self.tiles[str(cur_tile)][0]):
+        self._mark_unused_chunks("arrive", cur_tile)
+        first_unused = self.tiles[str(cur_tile)][0] + 1
+        if (lane_id < self.chunk_num) & (lane_id >= first_unused):
             T.ptx.mbarrier.arrive(self.mbar.ptr_to([lane_id]))
 
     @T.inline
     def arrive_chunk(self, chunk_id):
+        self._mark_runtime_chunk("arrive", chunk_id)
         T.ptx.mbarrier.arrive(self.mbar.ptr_to([chunk_id]))
 
     def commit(self):

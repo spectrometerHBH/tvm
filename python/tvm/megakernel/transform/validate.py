@@ -171,7 +171,7 @@ def validate_kernel(kernel: KernelSpec) -> KernelSpec:
         if not isinstance(scalar.dtype, str) or not scalar.dtype:
             raise TypeError(f"scalar {registry_name!r} dtype must be a non-empty string")
         _validate_range_bounds("scalar", scalar.name, scalar.range)
-        _validate_scalar_source(scalar, tensor_ids, var_ids)
+        _validate_scalar_source(scalar, tensor_ids, var_ids, view.vars)
 
     for registry_name, event in kernel.events.items():
         if event.name != registry_name:
@@ -267,7 +267,12 @@ def _validate_range_bounds(kind: str, name: str, range_value: tuple[int, int] | 
         raise ValueError(f"{kind} {name!r} range must satisfy 0 < minimum <= maximum")
 
 
-def _validate_scalar_source(scalar: ScalarSpec, tensor_ids: set[int], var_ids: set[int]) -> None:
+def _validate_scalar_source(
+    scalar: ScalarSpec,
+    tensor_ids: set[int],
+    var_ids: set[int],
+    variables: tuple[VarSpec, ...],
+) -> None:
     label = f"scalar {scalar.name!r} source"
     source = scalar.source
     if not isinstance(source, tuple | list) or len(source) != 2:
@@ -288,6 +293,24 @@ def _validate_scalar_source(scalar: ScalarSpec, tensor_ids: set[int], var_ids: s
         if expr_scalars(entry):
             raise ValueError(f"{label} index must not reference runtime scalars")
         _validate_expr(entry, label, var_ids)
+    related = _related_variables(variables, tensor.shape, index)
+    environments = _bounded_environments(
+        related,
+        f"{label} bounds validation",
+        require_bounded=True,
+    )
+    for env in environments:
+        shape = _resolve_tuple(tensor.shape, env)
+        if shape is None:
+            raise ValueError(f"tensor {tensor.name!r} shape cannot be resolved")
+        resolved_index = tuple(eval_expr_like(entry, env) for entry in index)
+        if any(not _is_int(value) for value in resolved_index):
+            raise ValueError(f"{label} index cannot be resolved")
+        if any(value < 0 or value >= extent for value, extent in zip(resolved_index, shape)):
+            raise ValueError(
+                f"{label} index {resolved_index} is out of bounds for tensor "
+                f"{tensor.name!r} shape {shape}"
+            )
 
 
 _ENDPOINT_SCOPES = ("thread", "warp", "warpgroup", "cta")

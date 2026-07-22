@@ -81,16 +81,16 @@ class Semaphore(SemaphoreBase):
             assert False
 
     @T.inline
-    def semaphore_notify(self, *coord, pre_notify=False, rank=-1, release=False):
+    def semaphore_notify(self, *coord, pre_notify=False, release=False):
         number = T.meta_var(1 if pre_notify else self.base)
         # the old value will be stored in self.state
-        self.state[0] = atomic_add_int32(self.sem.ptr_to(coord), -number, rank, release=release)
+        self.state[0] = atomic_add_int32(self.sem.ptr_to(coord), -number, release=release)
         if self.state[0] <= 0:
             while 1:
                 T.ptx.ld_global_acquire(self.state[0], self.sem.ptr_to(coord))
                 if gt(self.state[0], 0):
                     self.state[0] = atomic_add_int32(
-                        self.sem.ptr_to(coord), -number, rank, release=release
+                        self.sem.ptr_to(coord), -number, release=release
                     )
                     break
                 sleep_time = T.meta_var(800 if pre_notify else 40)
@@ -146,13 +146,13 @@ class MPMCQueue:
         self._alloc()
 
     @T.inline
-    def enqueue(self, rank, func_push, level: Literal["thread", "warp", "warpgroup", "cta"]):
+    def enqueue(self, func_push, level: Literal["thread", "warp", "warpgroup", "cta"]):
         if level == "thread":
             task_type, enqueue_num, m_idx, n_idx, k_idx = func_push(0)
             if self.debug:
                 T.cuda.trap_when_assert_failed(enqueue_num == 1)  # notes: enqueue_num must be 1
             self.tail_r = atomic_add_int32(
-                self.tail.access_ptr("rw", offset=self.tail.elem_offset_of([T.int32(0)])), 1, rank
+                self.tail.access_ptr("rw", offset=self.tail.elem_offset_of([T.int32(0)])), 1
             )
             self.masked_pos = self.tail_r & self.mask
             task_info = T.meta_var(
@@ -161,7 +161,6 @@ class MPMCQueue:
             stg(
                 task_info,
                 self.tasks.access_ptr("rw", offset=self.tasks.elem_offset_of([self.masked_pos])),
-                rank,
             )
         else:
             lane_id = T.lane_id([self.hardware.warp_size])
@@ -187,7 +186,6 @@ class MPMCQueue:
                     self.tail_r = atomic_add_int32(
                         self.tail.access_ptr("rw", offset=self.tail.elem_offset_of([T.int32(0)])),
                         enqueue_num,
-                        rank,
                     )
                 self.tail_r = T.tvm_warp_shuffle(
                     self.hardware.full_mask,
@@ -201,7 +199,6 @@ class MPMCQueue:
                     self.tail_smem[scope_idx] = atomic_add_int32(
                         self.tail.access_ptr("rw", offset=self.tail.elem_offset_of([T.int32(0)])),
                         enqueue_num,
-                        rank,
                     )
                 if level == "warpgroup":
                     T.ptx.bar.sync(6 + wg_id, self.hardware.warpgroup_size)
@@ -221,7 +218,6 @@ class MPMCQueue:
                     self.tasks.access_ptr(
                         "rw", offset=self.tasks.elem_offset_of([self.masked_pos])
                     ),
-                    rank,
                 )
                 self.idx += tid_stride
 
@@ -351,7 +347,7 @@ class DynamicTileScheduler(TileSchedulerBase):
         # Notes: Here each thread will notify only at most one time,
         #        and the tids of the threads involved among scope in the
         #        notification process start from 0 and increment sequentially.
-        # Notes: (notify_num, rank, coord) = func_notify(notify_idx), rank=-1 for the local rank
+        # Notes: (notify_num, coord) = func_notify(notify_idx)
         # Notes: scope_id = -1 represents that each scope will separately notify
 
         max_notify_num_map = T.meta_var(
@@ -401,19 +397,19 @@ class DynamicTileScheduler(TileSchedulerBase):
         if scope_id == -1 or idx[0] == scope_id:
             if not pre_notify:
                 sync(scope, scope_id)
-            notify_num = T.meta_var(func_notify(idx[1])[0])
-            rank = T.meta_var(func_notify(idx[1])[1])
-            coord = T.meta_var(func_notify(idx[1])[2:])
+            notify_info = T.meta_var(func_notify(idx[1]))
+            notify_num = T.meta_var(notify_info[0])
+            coord = T.meta_var(notify_info[1:])
             if self.debug:
                 T.cuda.trap_when_assert_failed(notify_num <= max_notify_num_map[scope])
             if idx[1] < notify_num:
-                evt.semaphore_notify(*coord, pre_notify=pre_notify, rank=rank, release=release)
+                evt.semaphore_notify(*coord, pre_notify=pre_notify, release=release)
 
     def _enqueue(self, idx, func_trigger_list, push_level):
         if not isinstance(func_trigger_list, list):
             func_trigger_list = [func_trigger_list]
         for func_trigger in func_trigger_list:
-            self.queue.enqueue(-1, func_trigger(idx), push_level)
+            self.queue.enqueue(func_trigger(idx), push_level)
 
     @T.inline
     def pre_notify_and_push(
@@ -484,13 +480,13 @@ class DynamicTileScheduler(TileSchedulerBase):
         if self.debug:
             T.cuda.trap_when_assert_failed(scope_id == -1 or scope_id < max_scope_id_map[scope])
         if idx[0] == new_scope_id:
-            notify_num = T.meta_var(func_notify(idx[1])[0])
-            rank = T.meta_var(func_notify(idx[1])[1])
-            coord_notify = T.meta_var(func_notify(idx[1])[2:])
+            notify_info = T.meta_var(func_notify(idx[1]))
+            notify_num = T.meta_var(notify_info[0])
+            coord_notify = T.meta_var(notify_info[1:])
             if self.debug:
                 T.cuda.trap_when_assert_failed(notify_num <= max_notify_num_map[scope])
             if idx[1] < notify_num:
-                evt.semaphore_notify(*coord_notify, pre_notify=True, rank=rank)
+                evt.semaphore_notify(*coord_notify, pre_notify=True)
             if self.profiler_on:
                 self.profiler.start(self.push_event, lane_id == 0)
             if scope == "thread":

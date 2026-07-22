@@ -67,18 +67,14 @@ class Semaphore(SemaphoreBase):
             assert False
 
     @T.inline
-    def semaphore_notify(self, *coord, rank=-1, release=False):
+    def semaphore_notify(self, *coord, release=False):
         # wg is synced
-        self.state[0] = atomic_add_int32(
-            self.sem.ptr_to(coord), -(self.base + 1), rank, release=release
-        )
+        self.state[0] = atomic_add_int32(self.sem.ptr_to(coord), -(self.base + 1), release=release)
         if self.state[0] <= 0:
             while 1:
                 T.ptx.ld_global_acquire(self.state[0], self.sem.ptr_to(coord))
                 if gt(self.state[0], 0):
-                    atomic_add_int32(
-                        self.sem.ptr_to(coord), -(self.base + 1), rank, release=release
-                    )
+                    atomic_add_int32(self.sem.ptr_to(coord), -(self.base + 1), release=release)
                     break
                 T.cuda.nano_sleep(40)
 
@@ -154,7 +150,7 @@ class StaticTileScheduler(TileSchedulerBase):
         # Notes: Here each thread will notify only at most one time,
         #        and the tids of the threads involved among scope in the
         #        notification process start from 0 and increment sequentially.
-        # Notes: (num, rank, coord) = func_notify(notify_idx), rank=-1 for the local rank
+        # Notes: (num, coord) = func_notify(notify_idx)
         # Notes: scope_id = -1 represents that each scope will separately notify
 
         max_notify_num_map = T.meta_var(
@@ -207,12 +203,11 @@ class StaticTileScheduler(TileSchedulerBase):
             # Evaluate it once and then unpack to avoid duplicated rewrites.
             notify_info = T.meta_var(func_notify(idx[1]))
             notify_num = T.meta_var(notify_info[0])
-            rank = T.meta_var(notify_info[1])
-            coord = T.meta_var(notify_info[2:])
+            coord = T.meta_var(notify_info[1:])
             if self.debug:
                 T.cuda.trap_when_assert_failed(notify_num <= max_notify_num_map[scope])
             if idx[1] < notify_num:
-                evt.semaphore_notify(*coord, rank=rank, release=release)
+                evt.semaphore_notify(*coord, release=release)
 
     def valid(self):
         return tvm.tirx.all(self.tile_idx < self.MAX_TASKS, self.task_type != self.end_task_type)

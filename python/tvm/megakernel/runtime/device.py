@@ -16,15 +16,14 @@
 # under the License.
 """Device-code emission helpers shared by the runtime building blocks.
 
-These are verbatim migrations of the emission helpers in the production
+These are migrations of the emission helpers in the production
 ``tirx_kernels.megakernel.utils.utils`` that the migrated runtime classes
-use: warp collectives, relaxed/release atomics (local and nvshmem remote),
-and the queue load/store primitives.
+use: warp collectives, local relaxed/release atomics, and queue load/store
+primitives.
 """
 
 from __future__ import annotations
 
-import tvm
 from tvm.script import tirx as T
 
 
@@ -56,31 +55,6 @@ __forceinline__ __device__ bool gt(int32_t a, int32_t b) {
     )
 
 
-def atomic_add_int32_remote(addr, value, pe):
-    func = (
-        """
-__forceinline__ __device__ int32_t atomic_add_int32_remote("""
-        "int32_t* addr, int32_t value, int32_t pe) {"
-        """
-    if (pe >= 0) {
-        int32_t* ptr = (int32_t*)(nvshmem_ptr(addr, pe));
-        int32_t old_value;
-        asm volatile ("atom.release.gpu.global.add.u32 %0, [%1], %2;"
-                        : "=r"(old_value)
-                        : "l"(ptr), "r"(value)
-                        : "memory");
-        return old_value;
-    } else {
-        return atomicAdd(addr, value);
-    }
-}
-"""
-    )
-    return T.cuda.func_call(
-        "atomic_add_int32_remote", addr, value, pe, source_code=func, return_type="int32"
-    )
-
-
 def atomic_add_int32_local_release(addr, value):
     func = """
 __forceinline__ __device__ int32_t atomic_add_int32_release(int32_t* addr, int32_t value) {
@@ -106,40 +80,10 @@ __forceinline__ __device__ int32_t atomic_add_int32(int32_t* addr, int32_t value
     return T.cuda.func_call("atomic_add_int32", addr, value, source_code=func, return_type="int32")
 
 
-def is_const_minus_one(value):
-    return (isinstance(value, int) and value == -1) or (
-        isinstance(value, tvm.tirx.IntImm) and value.value == -1
-    )
-
-
-def atomic_add_int32(addr, value, pe, release=False):
-    if is_const_minus_one(pe):
-        if release:
-            return atomic_add_int32_local_release(addr, value)
-        else:
-            return atomic_add_int32_local(addr, value)
-    else:
-        return atomic_add_int32_remote(addr, value, pe)
-
-
-def stg_remote(v, dst_addr, pe):
-    func = """
-__forceinline__ __device__ void stg_remote(int32_t v, void* dst_addr, int32_t pe) {
-    if (pe >= 0) {
-        void* ptr = nvshmem_ptr(dst_addr, pe);
-        asm volatile("st.global.release.sys.b32 [%0], %1;"
-                     :
-                     : "l"(ptr), "r"(v)
-                     : "memory");
-    } else {
-        asm volatile("st.global.release.gpu.b32 [%0], %1;"
-                     :
-                     : "l"(dst_addr), "r"(v)
-                     : "memory");
-    }
-}
-"""
-    return T.cuda.func_call("stg_remote", v, dst_addr, pe, source_code=func)
+def atomic_add_int32(addr, value, release=False):
+    if release:
+        return atomic_add_int32_local_release(addr, value)
+    return atomic_add_int32_local(addr, value)
 
 
 def stg_local(v, dst_addr):
@@ -154,11 +98,8 @@ def stg_local(v, dst_addr):
     return T.cuda.func_call("stg_local", v, dst_addr, source_code=func)
 
 
-def stg(v, dst_addr, pe):
-    if is_const_minus_one(pe):
-        return stg_local(v, dst_addr)
-    else:
-        return stg_remote(v, dst_addr, pe)
+def stg(v, dst_addr):
+    return stg_local(v, dst_addr)
 
 
 _WHILE_LD_GLOBAL_ACQUIRE_LOAD = (
@@ -219,7 +160,6 @@ __all__ = [
     "atomic_add_int32",
     "f_init_const",
     "gt",
-    "is_const_minus_one",
     "stg",
     "sts",
     "while_ld_global_acquire",
