@@ -356,18 +356,6 @@ constexpr const char* kLaunchBoundsMaxBlocksPerCluster =
 constexpr const char* kNoAlias = "tirx.noalias";
 
 /*!
- * \brief Buffer parameters that may be passed as FFI ``None``.
- *
- * The named parameters must be present in the PrimFunc's buffer map.  A
- * nullable buffer cannot be the sole source of symbolic buffer metadata;
- * its shape, strides, element offset, and device metadata must already be
- * determined by scalar parameters or preceding non-null buffers.
- *
- * Type: ffi::Array<ffi::String>
- */
-constexpr const char* kNullableBufferParams = "tirx.nullable_buffer_params";
-
-/*!
  * \brief Mark the function as the entry function of
  *        the final generated runtime module.
  *

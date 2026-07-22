@@ -35,50 +35,6 @@ from tvm.testing import env
 codegen_target = tvm.testing.parameter("llvm", "c")
 
 
-# ── Nullable tensor parameters ───────────────────────────────
-
-
-def test_nullable_tensor_accepts_none(codegen_target):
-    """An explicitly nullable buffer accepts None without reading DLTensor fields."""
-
-    @T.prim_func(s_tir=True)
-    def func(required_h: T.handle, optional_h: T.handle):
-        T.func_attr({"tirx.nullable_buffer_params": ["optional_h"]})
-        n = T.int64()
-        required = T.match_buffer(required_h, (n,), "int32")
-        optional = T.match_buffer(optional_h, (n,), "int32")
-        for i in range(n):
-            required[i] = required[i] + 1
-        if not T.isnullptr(optional_h):
-            for i in range(n):
-                optional[i] = required[i]
-
-    lib = tvm.compile(func, target=codegen_target)
-    required = tvm.runtime.tensor(np.zeros(4, dtype="int32"))
-    lib(required, None)
-    np.testing.assert_array_equal(required.numpy(), np.ones(4, dtype="int32"))
-
-    optional = tvm.runtime.tensor(np.zeros(4, dtype="int32"))
-    lib(required, optional)
-    np.testing.assert_array_equal(required.numpy(), np.full(4, 2, dtype="int32"))
-    np.testing.assert_array_equal(optional.numpy(), np.full(4, 2, dtype="int32"))
-
-
-def test_nullable_tensor_cannot_define_symbolic_metadata():
-    """A missing optional tensor cannot be the source of a symbolic extent."""
-
-    @T.prim_func(s_tir=True)
-    def func(optional_h: T.handle):
-        T.func_attr({"tirx.nullable_buffer_params": ["optional_h"]})
-        n = T.int64()
-        optional = T.match_buffer(optional_h, (n,), "int32")
-        for i in range(n):
-            optional[i] = 0
-
-    with pytest.raises(ValueError, match="cannot define shape variable 'n'"):
-        tvm.compile(func, target="llvm")
-
-
 # ── Argument count errors ────────────────────────────────────
 
 
