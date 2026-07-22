@@ -21,7 +21,6 @@
  * \file split_host_device.cc
  * \brief Annotate and split device functions from host, then lower kernel launches.
  */
-#include <tvm/arith/analyzer.h>
 #include <tvm/ffi/cast.h>
 #include <tvm/ffi/function.h>
 #include <tvm/ffi/reflection/registry.h>
@@ -91,7 +90,6 @@ class LaunchBoundsAttrExtractor : public StmtMutator {
   Stmt Extract(Stmt stmt) {
     min_blocks_per_sm_.reset();
     max_blocks_per_cluster_.reset();
-    max_dynamic_shared_memory_.reset();
     Stmt result = operator()(std::move(stmt));
     TVM_FFI_ICHECK(!max_blocks_per_cluster_.has_value() || min_blocks_per_sm_.has_value())
         << tirx::attr::kLaunchBoundsMaxBlocksPerCluster << " requires "
@@ -101,7 +99,6 @@ class LaunchBoundsAttrExtractor : public StmtMutator {
 
   std::optional<int64_t> min_blocks_per_sm() const { return min_blocks_per_sm_; }
   std::optional<int64_t> max_blocks_per_cluster() const { return max_blocks_per_cluster_; }
-  std::optional<int64_t> max_dynamic_shared_memory() const { return max_dynamic_shared_memory_; }
 
  private:
   Stmt VisitStmt_(const AttrStmtNode* op) final {
@@ -129,27 +126,12 @@ class LaunchBoundsAttrExtractor : public StmtMutator {
       }
       max_blocks_per_cluster_ = max_blocks_per_cluster->value;
       return VisitStmt(op->body);
-    } else if (op->attr_key == tirx::attr::kMaxDynamicSharedMemory) {
-      arith::Analyzer analyzer;
-      PrimExpr simplified_value = analyzer->Simplify(op->value);
-      const auto* max_dynamic_shared_memory = simplified_value.as<IntImmNode>();
-      TVM_FFI_ICHECK(max_dynamic_shared_memory)
-          << tirx::attr::kMaxDynamicSharedMemory << " expects an integer value";
-      TVM_FFI_ICHECK_GT(max_dynamic_shared_memory->value, 0)
-          << tirx::attr::kMaxDynamicSharedMemory << " must be positive";
-      if (max_dynamic_shared_memory_.has_value()) {
-        TVM_FFI_ICHECK_EQ(max_dynamic_shared_memory_.value(), max_dynamic_shared_memory->value)
-            << "Conflicting " << tirx::attr::kMaxDynamicSharedMemory << " values";
-      }
-      max_dynamic_shared_memory_ = max_dynamic_shared_memory->value;
-      return VisitStmt(op->body);
     }
     return StmtMutator::VisitStmt_(op);
   }
 
   std::optional<int64_t> min_blocks_per_sm_;
   std::optional<int64_t> max_blocks_per_cluster_;
-  std::optional<int64_t> max_dynamic_shared_memory_;
 };
 
 class HostDeviceSplitter : public StmtMutator {
@@ -240,10 +222,6 @@ class HostDeviceSplitter : public StmtMutator {
       if (launch_bounds_attr.max_blocks_per_cluster().has_value()) {
         device_func = WithAttr(std::move(device_func), tirx::attr::kLaunchBoundsMaxBlocksPerCluster,
                                launch_bounds_attr.max_blocks_per_cluster().value());
-      }
-      if (launch_bounds_attr.max_dynamic_shared_memory().has_value()) {
-        device_func = WithAttr(std::move(device_func), tirx::attr::kMaxDynamicSharedMemory,
-                               launch_bounds_attr.max_dynamic_shared_memory().value());
       }
     }
     auto num_inputs = cur_func_->GetAttr<int64_t>(tvm::attr::kNumInputs);
@@ -343,14 +321,6 @@ class DeviceInfoCollector : public StmtVisitor {
     if (collector.use_cooperative_launch_) {
       collector.info_.launch_params.push_back(tvm::runtime::launch_param::kUseCooperativeLaunch);
     }
-    if (auto max_dynamic_shared_memory =
-            func->GetAttr<int64_t>(tirx::attr::kMaxDynamicSharedMemory)) {
-      TVM_FFI_ICHECK_GT(max_dynamic_shared_memory.value(), 0);
-      collector.max_dynamic_shared_memory_ = IntImm::Int64(max_dynamic_shared_memory.value());
-      collector.info_.launch_params.push_back(
-          tvm::runtime::launch_param::kMaxDynamicSharedMemoryTag);
-    }
-
     // The dynamic shared memory is required to be the last of the
     // kernel launch parameters.
     if (collector.dyn_shmem_size) {
@@ -379,12 +349,6 @@ class DeviceInfoCollector : public StmtVisitor {
           << "Compute kernel requires launch parameter \"" << launch_param
           << "\", but PrimFunc did not contain AllocBuffer node with shared dynamic scope.";
       return dyn_shmem_size.value();
-    } else if (launch_param == tvm::runtime::launch_param::kMaxDynamicSharedMemoryTag) {
-      TVM_FFI_ICHECK(max_dynamic_shared_memory_.has_value())
-          << "Compute kernel requires launch parameter \"" << launch_param
-          << "\", but PrimFunc did not contain attribute \"" << tirx::attr::kMaxDynamicSharedMemory
-          << "\".";
-      return max_dynamic_shared_memory_.value();
     }
 
     auto extent = thread_extent.Get(launch_param);
@@ -469,8 +433,6 @@ class DeviceInfoCollector : public StmtVisitor {
   ffi::Map<ffi::String, PrimExpr> thread_extent;
   // The amount of dynamic shared memory used.
   ffi::Optional<PrimExpr> dyn_shmem_size{std::nullopt};
-  // CUDA function-attribute ceiling, independent of launch dynamic bytes.
-  ffi::Optional<PrimExpr> max_dynamic_shared_memory_{std::nullopt};
   // Flag-only launch attributes requested by the original PrimFunc.
   bool use_programmatic_dependent_launch_{false};
   bool use_cooperative_launch_{false};

@@ -257,8 +257,6 @@ struct ThreadWorkLoad {
   size_t work_size[12];
   // Dynamic shared memory allocation size in bytes.
   size_t dyn_shmem_size{0};
-  // Function-attribute ceiling for dynamic shared memory in bytes.
-  size_t max_dyn_shmem_size{0};
   /*!
    * \param i The block dimension.
    * \return i-th block dim
@@ -293,10 +291,6 @@ class LaunchParamConfig {
         TVM_FFI_ICHECK_EQ(i, launch_param_tags.size() - 1)
             << "kUseDynamicSharedMemoryTag should be the last tag in launch_param_tags.";
         use_dyn_shared_memory_ = true;
-      } else if (tag == launch_param::kMaxDynamicSharedMemoryTag) {
-        TVM_FFI_ICHECK(!use_max_dynamic_shared_memory_)
-            << "kMaxDynamicSharedMemoryTag may appear at most once.";
-        use_max_dynamic_shared_memory_ = true;
       } else if (tag == launch_param::kUseProgramaticDependentLaunch) {
         use_programmatic_dependent_launch_ = true;
       } else if (tag == launch_param::kUseCooperativeLaunch) {
@@ -327,12 +321,8 @@ class LaunchParamConfig {
         w.work_size[arg_index_map_[i]] = size;
       }
     }
-    size_t extra_arg_index = base_ + arg_index_map_.size();
-    if (use_max_dynamic_shared_memory_) {
-      w.max_dyn_shmem_size = static_cast<size_t>(raw_args[extra_arg_index++].v_int64);
-    }
     if (use_dyn_shared_memory_) {
-      w.dyn_shmem_size = static_cast<size_t>(raw_args[extra_arg_index].v_int64);
+      w.dyn_shmem_size = static_cast<size_t>(raw_args[base_ + arg_index_map_.size()].v_int64);
     }
     return w;
   }
@@ -352,8 +342,6 @@ class LaunchParamConfig {
   std::vector<uint32_t> arg_index_map_;
   /*! \brief Whether or not use dynamic shared memory. */
   bool use_dyn_shared_memory_{false};
-  /*! \brief Whether or not a dynamic shared-memory function ceiling is supplied. */
-  bool use_max_dynamic_shared_memory_{false};
   /*! \brief Whether or not use programmatic dependent launch. */
   bool use_programmatic_dependent_launch_{false};
   /*! \brief Whether or not use cooperative launch. */

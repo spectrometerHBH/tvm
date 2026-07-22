@@ -221,19 +221,14 @@ class CUDAWrappedFunc {
 
     if (fcache_[device_id] == nullptr) {
       fcache_[device_id] = m_->GetFunc(device_id, func_name_);
-      size_t max_dyn_shmem_size = wl.max_dyn_shmem_size;
-      if (max_dyn_shmem_size == 0 && wl.dyn_shmem_size >= (48 << 10)) {
-        max_dyn_shmem_size = wl.dyn_shmem_size;
-      }
-      if (max_dyn_shmem_size > 0) {
-        // Assumption: the function ceiling doesn't change across different
-        // invocations of fcache_[device_id].
-        CUresult result =
-            cuFuncSetAttribute(fcache_[device_id], CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES,
-                               max_dyn_shmem_size);
+      if (wl.dyn_shmem_size >= (48 << 10)) {
+        // Assumption: dyn_shmem_size doesn't change across different invocations of
+        // fcache_[device_id]
+        CUresult result = cuFuncSetAttribute(
+            fcache_[device_id], CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES, wl.dyn_shmem_size);
         if (result != CUDA_SUCCESS) {
           TVM_FFI_THROW(InternalError)
-              << "Failed to set the allowed dynamic shared memory size to " << max_dyn_shmem_size;
+              << "Failed to set the allowed dynamic shared memory size to " << wl.dyn_shmem_size;
         }
       }
     }

@@ -291,12 +291,10 @@ namespace attr {
  *
  * Call(f,
  *      [arg1, arg2, ..., arg_n,
- *       work_size_1, work_size_2, ... work_size_m,
- *       max_dyn_shmem_size, dyn_shmem_size])
+ *       work_size_1, work_size_2, ... work_size_m, dyn_shmem_size])
  *
- * Flag-only launch tags do not add packed operands.  The two shared-memory
- * operands are present only when their corresponding value-bearing tag is
- * listed.
+ * Flag-only launch tags do not add packed operands.  The dynamic shared-memory
+ * operand is present only when its value-bearing tag is listed.
  *
  * The list of kernel launch params indicates which additional
  * parameters will be provided to the ffi::Function by the calling
@@ -326,14 +324,6 @@ namespace attr {
  *
  *   Defined as "tirx.use_dyn_shared_memory".
  *
- * - tvm::runtime::launch_param::kMaxDynamicSharedMemoryTag
- *
- *   A CUDA function-attribute ceiling exposed as
- *   CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES.  This value is
- *   independent of the launch-time dynamic byte count.
- *
- *   Defined as "tirx.max_dynamic_shared_memory".
- *
  * - tvm::runtime::launch_param::kUseProgramaticDependentLaunch
  * - tvm::runtime::launch_param::kUseCooperativeLaunch
  *
@@ -357,16 +347,6 @@ constexpr const char* kLaunchBoundsMinBlocksPerSM = "tirx.launch_bounds_min_bloc
  */
 constexpr const char* kLaunchBoundsMaxBlocksPerCluster =
     "tirx.launch_bounds_max_blocks_per_cluster";
-
-/*!
- * \brief CUDA function attribute ceiling for dynamic shared memory in bytes.
- *
- * This is independent of the dynamic shared-memory byte count supplied at
- * launch time.
- *
- * Type: IntImm
- */
-constexpr const char* kMaxDynamicSharedMemory = "tirx.max_dynamic_shared_memory";
 
 /*!
  * \brief Whether to set noalias rule on the function arguments.
