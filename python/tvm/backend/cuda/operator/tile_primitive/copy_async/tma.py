@@ -34,7 +34,6 @@ from itertools import pairwise
 
 import tvm
 from tvm.arith import Analyzer
-from tvm.ir import PointerType, PrimType
 from tvm.script import tirx as T
 from tvm.tirx import Buffer, IntImm, PrimFunc
 from tvm.tirx.layout import Layout, TileLayout
@@ -2099,19 +2098,14 @@ def _prefetch_main_descriptor(tensor_map, key: str, sctx: DispatchContext) -> No
 def _selected_descriptor(main_map, candidate_maps):
     if not candidate_maps:
         return main_map, None, False
-    pointer_type = PointerType(PrimType("void"))
-    selected_expr = T.reinterpret(pointer_type, T.address_of(main_map))
+    selected_expr = T.address_of(main_map)
     for condition, candidate_map in reversed(candidate_maps):
-        selected_expr = tvm.ir.Call(
-            "tirx.pointer_select",
-            [
-                condition,
-                T.reinterpret(pointer_type, T.address_of(candidate_map)),
-                selected_expr,
-            ],
-            ret_ty=pointer_type,
+        selected_expr = tvm.tirx.Select(
+            condition,
+            T.address_of(candidate_map),
+            selected_expr,
         )
-    selected = T.Var("selected_tensormap", ty=pointer_type)
+    selected = T.Var("selected_tensormap", "uint64")
     return selected, tvm.tirx.Bind(selected, selected_expr), True
 
 
@@ -2123,9 +2117,7 @@ def _emit_plan(
     sctx: DispatchContext,
 ) -> PrimFunc:
     spec = plan.spec
-    tensor_map_address = (
-        T.reinterpret("uint64", tensor_map) if tensor_map_is_address else T.address_of(tensor_map)
-    )
+    tensor_map_address = tensor_map if tensor_map_is_address else T.address_of(tensor_map)
 
     def tma_coordinates(coordinates):
         if spec.load_mode == "tile_gather4":

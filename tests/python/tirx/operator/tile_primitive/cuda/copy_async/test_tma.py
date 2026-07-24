@@ -103,15 +103,14 @@ class _EncodeCollector(StmtExprVisitor):
         super().visit_call_(op)
 
 
-class _PointerSelectCollector(StmtExprVisitor):
+class _SelectCollector(StmtExprVisitor):
     def __init__(self):
         super().__init__()
-        self.calls = []
+        self.nodes = []
 
-    def visit_call_(self, op):
-        if isinstance(op.op, tvm.ir.Op) and op.op.name == "tirx.pointer_select":
-            self.calls.append(op)
-        super().visit_call_(op)
+    def visit_select_(self, op):
+        self.nodes.append(op)
+        super().visit_select_(op)
 
 
 class _PrefetchCollector(StmtExprVisitor):
@@ -1504,7 +1503,7 @@ def selector_gather(
 """
 
 
-def test_explicit_gather_selector_encodes_each_map_selects_pointer_and_issues_once():
+def test_explicit_gather_selector_encodes_each_map_selects_address_and_issues_once():
     func = _from_source(_SELECTOR_SOURCE)
     lowered = _lower_module(func)
     encodes = _collect_encodes([lowered["main"].body])
@@ -1516,15 +1515,15 @@ def test_explicit_gather_selector_encodes_each_map_selects_pointer_and_issues_on
     assert _ints(by_dims[(64, 496)]["strides"]) == (160,)
     assert [_ints(item["boxes"]) for item in signatures] == [(64, 1), (64, 1)]
 
-    selects = _PointerSelectCollector()
+    selects = _SelectCollector()
     selects.visit_stmt(lowered["main"].body)
-    assert len(selects.calls) == 1
-    assert isinstance(selects.calls[0].ty, PointerType)
+    assert len(selects.nodes) == 1
+    assert selects.nodes[0].ty == PrimType("uint64")
     assert _count_tma(lowered["main"]).total == 1
 
     executable = _compile_module(func)
     cuda_source = executable.mod.imports[0].inspect_source()
-    assert "void* selected_tensormap" in cuda_source
+    assert "uint64_t selected_tensormap" in cuda_source
     assert "flag != 0) ?" in cuda_source
     assert "if (flag" not in cuda_source
     assert cuda_source.count("cp_async_bulk_tensor_g2s_cluster_tile_gather4_2d(") == 2
@@ -1785,9 +1784,9 @@ def test_sparse_decode_absent_extra_map_has_no_dummy_descriptor_or_select():
     )
     lowered = _lower_module(_from_source(source))
     assert len(_collect_encodes([lowered["main"].body])) == 1
-    selects = _PointerSelectCollector()
+    selects = _SelectCollector()
     selects.visit_stmt(lowered["main"].body)
-    assert selects.calls == []
+    assert selects.nodes == []
     prefetches = _PrefetchCollector()
     prefetches.visit_stmt(lowered["main"].body)
     assert prefetches.names == ["A_ptr_tensormap"]

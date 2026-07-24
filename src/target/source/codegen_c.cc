@@ -725,16 +725,6 @@ void CodeGenC::VisitExpr_(const CallNode* op, std::ostream& os) {  // NOLINT(*)
       PrintBinaryIntrinsic(op, " << ", os, this);
     } else if (op->op.same_as(builtin::shift_right())) {
       PrintBinaryIntrinsic(op, " >> ", os, this);
-    } else if (op->op.same_as(builtin::pointer_select())) {
-      TVM_FFI_ICHECK_EQ(op->args.size(), 3U);
-      TVM_FFI_ICHECK(op->ty.as<PointerTypeNode>());
-      os << "(";
-      PrintExpr(op->args[0], os);
-      os << " ? ";
-      PrintExpr(op->args[1], os);
-      os << " : ";
-      PrintExpr(op->args[2], os);
-      os << ")";
     } else if (op->op.same_as(builtin::if_then_else())) {
       // conditional that skips eval if cond evals to false
       std::string result = name_supply_->FreshName("condval");

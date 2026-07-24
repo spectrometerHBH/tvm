@@ -115,10 +115,6 @@ TIR_DEFINE_BUILTIN_FUNC(address_of)
     .set_attr<TCallEffectKind>("TCallEffectKind", static_cast<int64_t>(CallEffectKind::kPure))
     .set_num_inputs(1);
 
-TIR_DEFINE_BUILTIN_FUNC(pointer_select)
-    .set_num_inputs(3)
-    .set_attr<TCallEffectKind>("TCallEffectKind", static_cast<int64_t>(CallEffectKind::kPure));
-
 TIR_DEFINE_BUILTIN_FUNC(if_then_else)
     .set_num_inputs(3)
     .set_attr<TCallEffectKind>("TCallEffectKind", static_cast<int64_t>(CallEffectKind::kPure));
