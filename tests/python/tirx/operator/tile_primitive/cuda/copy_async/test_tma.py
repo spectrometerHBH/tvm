@@ -16,7 +16,7 @@
 
 """Tests for the independent ``tma_auto`` and ``tma_explicit`` planners."""
 
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from functools import reduce
 from operator import mul
 
@@ -38,6 +38,7 @@ from tvm.tirx.cuda.operator.tile_primitive.copy_async.tma import (
     TensorMapSpec,
     TMAPlan,
     _build_auto_plan,
+    _build_explicit_plan,
     _promote_auto_once,
     _selector_compatibility,
     _validation_failures,
@@ -45,7 +46,11 @@ from tvm.tirx.cuda.operator.tile_primitive.copy_async.tma import (
     copy_tma_explicit_impl,
     validate_tensor_map_spec,
 )
-from tvm.tirx.cuda.operator.tile_primitive.tma_utils import mma_shared_layout
+from tvm.tirx.cuda.operator.tile_primitive.tma_utils import (
+    mma_atom_layout,
+    mma_atom_shape,
+    mma_shared_layout,
+)
 from tvm.tirx.exec_scope import ExecScope
 from tvm.tirx.layout import S, TileLayout
 from tvm.tirx.operator.tile_primitive.ops import CopyAsync
@@ -205,6 +210,14 @@ def _auto_plan(**kwargs):
     return _build_auto_plan(op, sctx)
 
 
+def _direct_plan(variant, **kwargs):
+    op, sctx, _, _ = _make_op(**kwargs)
+    if variant == "tma_auto":
+        return _build_auto_plan(op, sctx)
+    plan, _ = _build_explicit_plan(op, sctx)
+    return plan
+
+
 def _count_tma(stmt):
     counter = _TMACounter()
     counter.visit_stmt(stmt.body if isinstance(stmt, tvm.tirx.PrimFunc) else stmt)
@@ -321,6 +334,620 @@ def _compile_module(func, arch="sm_100a"):
             target=target,
             tir_pipeline="tirx",
         )
+
+
+def _tma_case(case_id, **kwargs):
+    return pytest.param(case_id, kwargs, id=case_id)
+
+
+_BASELINE_AUTO_CASES = [
+    ("g2s-2d-8x256", "float16", 3),
+    ("g2s-2d-8x256-swizzle2", "float16", 2),
+    ("g2s-2d-8x256-swizzle1", "float16", 1),
+    ("g2s-2d-8x256-swizzle0", "float16", 0),
+    ("g2s-2d-8x256-int8", "int8", 3),
+    ("g2s-2d-8x256-bf16", "bfloat16", 3),
+    ("g2s-2d-8x256-fp32", "float32", 3),
+    ("g2s-2d-8x256-uint8", "uint8", 3),
+    ("g2s-2d-8x256-fp8e4m3", "float8_e4m3fn", 3),
+    ("g2s-2d-8x256-fp8e5m2", "float8_e5m2", 3),
+]
+
+
+TMA_CASES = [
+    *[
+        _tma_case(
+            case_id,
+            g_shape=(8, 256),
+            g_region=((0, 8), (0, 256)),
+            s_shape=(8, 256),
+            s_region=((0, 8), (0, 256)),
+            g_layout=_plain_layout((8, 256)),
+            s_layout=mma_shared_layout(dtype, swizzle, (8, 256)),
+            dtype=dtype,
+        )
+        for case_id, dtype, swizzle in _BASELINE_AUTO_CASES
+    ],
+    _tma_case(
+        "g2s-3d-shared-64x256",
+        g_shape=(64, 256),
+        g_region=((0, 64), (0, 256)),
+        s_shape=(3, 64, 256),
+        s_region=((1, 1), (0, 64), (0, 256)),
+        g_layout=_plain_layout((64, 256)),
+        s_layout=mma_shared_layout("float16", 3, (3, 64, 256)),
+    ),
+    _tma_case(
+        "g2s-2d-32x512-atom",
+        g_shape=(32, 512),
+        g_region=((0, 32), (0, 512)),
+        s_shape=(32, 512),
+        s_region=((0, 32), (0, 512)),
+        g_layout=_plain_layout((32, 512)),
+        s_layout=(
+            mma_atom_layout("float16", 3)
+            .tile_to((16, 256), mma_atom_shape("float16", 3))
+            .tile_to((32, 512), (16, 256))
+        ),
+    ),
+    _tma_case(
+        "g2s-2d-partial-8192",
+        g_shape=(8192, 8192),
+        g_region=((0, 128), (0, 64)),
+        s_shape=(128, 64),
+        s_region=((0, 128), (0, 64)),
+        g_layout=_plain_layout((8192, 8192)),
+        s_layout=mma_shared_layout("float16", 3, (128, 64)),
+    ),
+    _tma_case(
+        "g2s-edge-4d-shared-128x64",
+        g_shape=(128, 64),
+        g_region=((0, 128), (0, 64)),
+        s_shape=(2, 2, 128, 64),
+        s_region=((0, 1), (0, 1), (0, 128), (0, 64)),
+        g_layout=_plain_layout((128, 64)).canonicalize(),
+        s_layout=mma_shared_layout("float16", 3, (2, 2, 128, 64)).canonicalize(),
+    ),
+    _tma_case(
+        "g2s-edge-partial-offset",
+        g_shape=(128, 64),
+        g_region=((64, 24), (0, 64)),
+        s_shape=(2, 2, 24, 64),
+        s_region=((0, 1), (0, 1), (0, 24), (0, 64)),
+        g_layout=_plain_layout((128, 64)).canonicalize(),
+        s_layout=mma_shared_layout("float16", 3, (2, 2, 24, 64)).canonicalize(),
+    ),
+    _tma_case(
+        "g2s-edge-large-region",
+        g_shape=(256, 64),
+        g_region=((128, 128), (0, 64)),
+        s_shape=(256, 64),
+        s_region=((0, 128), (0, 64)),
+        g_layout=_plain_layout((256, 64)).canonicalize(),
+        s_layout=mma_shared_layout("float16", 3, (256, 64)).canonicalize(),
+    ),
+    _tma_case(
+        "g2s-partial-3d-shared-a",
+        g_shape=(128, 256),
+        g_region=((0, 32), (0, 64)),
+        s_shape=(6, 128, 64),
+        s_region=((0, 1), (0, 32), (0, 64)),
+        g_layout=_plain_layout((128, 256)).canonicalize(),
+        s_layout=mma_shared_layout("float16", 3, (6, 128, 64)).canonicalize(),
+    ),
+    _tma_case(
+        "g2s-partial-3d-shared-b",
+        g_shape=(256, 512),
+        g_region=((0, 64), (0, 64)),
+        s_shape=(4, 256, 64),
+        s_region=((1, 1), (0, 64), (0, 64)),
+        g_layout=_plain_layout((256, 512)).canonicalize(),
+        s_layout=mma_shared_layout("float16", 3, (4, 256, 64)).canonicalize(),
+    ),
+    _tma_case(
+        "g2s-3d-full-contiguous",
+        g_shape=(4, 32, 64),
+        g_region=((0, 4), (0, 32), (0, 64)),
+        s_shape=(4, 32, 64),
+        s_region=((0, 4), (0, 32), (0, 64)),
+        g_layout=_plain_layout((4, 32, 64)),
+        s_layout=_plain_layout((4, 32, 64)),
+    ),
+    _tma_case(
+        "g2s-3d-partial-contiguous",
+        g_shape=(8, 16, 128),
+        g_region=((0, 4), (0, 16), (0, 128)),
+        s_shape=(4, 16, 128),
+        s_region=((0, 4), (0, 16), (0, 128)),
+        g_layout=_plain_layout((8, 16, 128)),
+        s_layout=_plain_layout((4, 16, 128)),
+    ),
+    _tma_case(
+        "g2s-3d-stride-gap-outer",
+        g_shape=(8, 32, 64),
+        g_region=((0, 8), (0, 32), (0, 64)),
+        s_shape=(8, 32, 64),
+        s_region=((0, 8), (0, 32), (0, 64)),
+        g_layout=_plain_layout((8, 32, 64)),
+        s_layout=_plain_layout((8, 32, 64), (4096, 64, 1)),
+    ),
+    _tma_case(
+        "g2s-4d-reorder-a",
+        g_shape=(2, 128, 8, 64),
+        g_region=((0, 1), (0, 128), (0, 1), (0, 64)),
+        s_shape=(1, 1, 128, 64),
+        s_region=((0, 1), (0, 1), (0, 128), (0, 64)),
+        g_layout=_plain_layout((2, 128, 8, 64)).canonicalize(),
+        s_layout=mma_shared_layout("float16", 3, (1, 1, 128, 64)).canonicalize(),
+    ),
+    _tma_case(
+        "g2s-4d-reorder-b",
+        g_shape=(4, 64, 4, 128),
+        g_region=((0, 1), (0, 64), (0, 1), (0, 128)),
+        s_shape=(1, 1, 64, 128),
+        s_region=((0, 1), (0, 1), (0, 64), (0, 128)),
+        g_layout=_plain_layout((4, 64, 4, 128)).canonicalize(),
+        s_layout=mma_shared_layout("float16", 3, (1, 1, 64, 128)).canonicalize(),
+    ),
+    _tma_case(
+        "g2s-multidim-4d-a",
+        g_shape=(2, 2, 128, 64),
+        g_region=((0, 1), (0, 1), (0, 128), (0, 64)),
+        s_shape=(128, 64),
+        s_region=((0, 128), (0, 64)),
+        g_layout=_plain_layout((2, 2, 128, 64)).canonicalize(),
+        s_layout=mma_shared_layout("float16", 3, (128, 64)),
+    ),
+    _tma_case(
+        "g2s-multidim-4d-b",
+        g_shape=(4, 64, 4, 128),
+        g_region=((0, 1), (0, 64), (0, 1), (0, 128)),
+        s_shape=(64, 128),
+        s_region=((0, 64), (0, 128)),
+        g_layout=_plain_layout((4, 64, 4, 128)).canonicalize(),
+        s_layout=mma_shared_layout("float16", 3, (64, 128)),
+    ),
+    _tma_case(
+        "g2s-multiphase-3x8x256",
+        g_shape=(3, 8, 256),
+        g_region=((0, 1), (0, 8), (0, 256)),
+        s_shape=(8, 256),
+        s_region=((0, 8), (0, 256)),
+        g_layout=_plain_layout((3, 8, 256)),
+        s_layout=mma_shared_layout("float16", 3, (8, 256)),
+    ),
+    _tma_case(
+        "g2s-multiphase-5x64x256",
+        g_shape=(5, 64, 256),
+        g_region=((0, 1), (0, 64), (0, 256)),
+        s_shape=(64, 256),
+        s_region=((0, 64), (0, 256)),
+        g_layout=_plain_layout((5, 64, 256)),
+        s_layout=mma_shared_layout("float16", 3, (64, 256)),
+    ),
+    _tma_case(
+        "g2s-multiphase-7x32x512-atom",
+        g_shape=(7, 32, 512),
+        g_region=((0, 1), (0, 32), (0, 512)),
+        s_shape=(32, 512),
+        s_region=((0, 32), (0, 512)),
+        g_layout=_plain_layout((7, 32, 512)),
+        s_layout=(
+            mma_atom_layout("float16", 3)
+            .tile_to((16, 256), mma_atom_shape("float16", 3))
+            .tile_to((32, 512), (16, 256))
+        ),
+    ),
+    _tma_case(
+        "g2s-transpose-32x64",
+        g_shape=(32, 64),
+        g_region=((0, 32), (0, 64)),
+        s_shape=(32, 64),
+        s_region=((0, 32), (0, 64)),
+        g_layout=_plain_layout((32, 64)),
+        s_layout=_plain_layout((32, 64), (1, 32)),
+    ),
+    _tma_case(
+        "g2s-transpose-64x32",
+        g_shape=(64, 32),
+        g_region=((0, 64), (0, 32)),
+        s_shape=(64, 32),
+        s_region=((0, 64), (0, 32)),
+        g_layout=_plain_layout((64, 32)),
+        s_layout=_plain_layout((64, 32), (1, 64)),
+    ),
+    _tma_case(
+        "g2s-transpose-partial-region",
+        g_shape=(128, 64),
+        g_region=((0, 64), (0, 64)),
+        s_shape=(64, 64),
+        s_region=((0, 64), (0, 64)),
+        g_layout=_plain_layout((128, 64)),
+        s_layout=_plain_layout((64, 64), (1, 64)),
+    ),
+    _tma_case(
+        "g2s-transpose-partial-offset",
+        g_shape=(128, 64),
+        g_region=((64, 64), (0, 32)),
+        s_shape=(64, 32),
+        s_region=((0, 64), (0, 32)),
+        g_layout=_plain_layout((128, 64)),
+        s_layout=_plain_layout((64, 32), (1, 64)),
+    ),
+    _tma_case(
+        "g2s-non-prefix-compact-elides",
+        g_shape=(16, 16, 128, 128),
+        g_region=((3, 1), (4, 1), (0, 128), (0, 128)),
+        s_shape=(128, 128),
+        s_region=((0, 128), (0, 128)),
+        g_layout=_plain_layout((16, 16, 128, 128), (1024 * 128, 128, 1024, 1)),
+        s_layout=_plain_layout((128, 128)),
+    ),
+    _tma_case(
+        "g2s-oob-zero",
+        g_shape=(128, 64),
+        g_region=((120, 16), (0, 64)),
+        s_shape=(16, 64),
+        s_region=((0, 16), (0, 64)),
+        g_layout=_plain_layout((128, 64)),
+        s_layout=mma_shared_layout("float16", 3, (16, 64)),
+        config={"oob": "zero"},
+    ),
+    _tma_case(
+        "g2s-oob-nan",
+        g_shape=(128, 64),
+        g_region=((120, 16), (0, 64)),
+        s_shape=(16, 64),
+        s_region=((0, 16), (0, 64)),
+        g_layout=_plain_layout((128, 64)),
+        s_layout=mma_shared_layout("float16", 3, (16, 64)),
+        config={"oob": "nan"},
+    ),
+    _tma_case(
+        "g2s-fa4-q",
+        g_shape=(2048, 4096),
+        g_region=((0, 32), (0, 512)),
+        s_shape=(2, 128, 128),
+        s_region=((0, 1), (0, 128), (0, 128)),
+        g_layout=TileLayout(S[(1, 2048, 32, 128)]),
+        s_layout=mma_shared_layout("float16", 3, (2, 128, 128)),
+    ),
+    _tma_case(
+        "g2s-fa4-k",
+        g_shape=(2048, 1024),
+        g_region=((0, 128), (0, 128)),
+        s_shape=(3, 128, 128),
+        s_region=((0, 1), (0, 128), (0, 128)),
+        g_layout=TileLayout(S[(1, 2048, 8, 128)]),
+        s_layout=mma_shared_layout("float16", 3, (3, 128, 128)),
+    ),
+    _tma_case(
+        "g2s-fa4-v",
+        g_shape=(2048, 1024),
+        g_region=((0, 128), (0, 128)),
+        s_shape=(3, 128, 128),
+        s_region=((0, 1), (0, 128), (0, 128)),
+        g_layout=TileLayout(S[(1, 2048, 8, 128)]),
+        s_layout=mma_shared_layout("float16", 3, (3, 128, 128)),
+    ),
+    *[
+        _tma_case(
+            case_id,
+            g_shape=(3, 8, 256),
+            g_region=((0, 1), (0, 8), (0, 256)),
+            s_shape=(8, 256),
+            s_region=((0, 8), (0, 256)),
+            g_layout=_plain_layout((3, 8, 256)),
+            s_layout=mma_shared_layout(dtype, swizzle, (8, 256)),
+            dtype=dtype,
+            direction="s2g",
+        )
+        for case_id, dtype, swizzle in [
+            ("s2g-multiphase-3x8x256", "float16", 3),
+            ("s2g-multiphase-3x8x256-swizzle2", "float16", 2),
+            ("s2g-multiphase-3x8x256-swizzle0", "float16", 0),
+            ("s2g-multiphase-3x8x256-int8", "int8", 3),
+            ("s2g-multiphase-3x8x256-fp32", "float32", 3),
+        ]
+    ],
+    _tma_case(
+        "s2g-multiphase-5x64x256",
+        g_shape=(5, 64, 256),
+        g_region=((0, 1), (0, 64), (0, 256)),
+        s_shape=(64, 256),
+        s_region=((0, 64), (0, 256)),
+        g_layout=_plain_layout((5, 64, 256)),
+        s_layout=mma_shared_layout("float16", 3, (64, 256)),
+        direction="s2g",
+    ),
+    _tma_case(
+        "s2g-multiphase-7x32x512-atom",
+        g_shape=(7, 32, 512),
+        g_region=((0, 1), (0, 32), (0, 512)),
+        s_shape=(32, 512),
+        s_region=((0, 32), (0, 512)),
+        g_layout=_plain_layout((7, 32, 512)),
+        s_layout=(
+            mma_atom_layout("float16", 3)
+            .tile_to((16, 256), mma_atom_shape("float16", 3))
+            .tile_to((32, 512), (16, 256))
+        ),
+        direction="s2g",
+    ),
+    _tma_case(
+        "s2g-keeps-multidim-coords",
+        g_shape=(1024, 4, 1024),
+        g_region=((128, 128), (1, 1), (32, 32)),
+        s_shape=(128, 32),
+        s_region=((0, 128), (0, 32)),
+        g_layout=_plain_layout((1024, 4, 1024), (4 * 1024, 1024, 1)),
+        s_layout=_plain_layout((128, 32), (32, 1)),
+        dtype="bfloat16",
+        direction="s2g",
+    ),
+    *[
+        _tma_case(
+            case_id,
+            g_shape=(2, 128, 64),
+            g_region=((0, 1), (0, 128), (0, 64)),
+            s_shape=(128, 64),
+            s_region=((0, 128), (0, 64)),
+            g_layout=_plain_layout((2, 128, 64)),
+            s_layout=mma_shared_layout("float16", 3, (128, 64)),
+            direction="s2g",
+            config=config,
+        )
+        for case_id, config in [
+            ("s2g-oob-none", None),
+            ("s2g-oob-zero", {"oob": "zero"}),
+            ("s2g-oob-nan", {"oob": "nan"}),
+        ]
+    ],
+    _tma_case(
+        "reject-unknown-oob",
+        g_shape=(3, 8, 256),
+        g_region=((0, 1), (0, 8), (0, 256)),
+        s_shape=(8, 256),
+        s_region=((0, 8), (0, 256)),
+        g_layout=_plain_layout((3, 8, 256)),
+        s_layout=mma_shared_layout("float16", 3, (8, 256)),
+        config={"oob": "bogus"},
+    ),
+    _tma_case(
+        "reject-g2s-nan-on-non-float",
+        g_shape=(128, 64),
+        g_region=((120, 16), (0, 64)),
+        s_shape=(16, 64),
+        s_region=((0, 16), (0, 64)),
+        g_layout=_plain_layout((128, 64)),
+        s_layout=_plain_layout((16, 64)),
+        dtype="int8",
+        config={"oob": "nan"},
+    ),
+    _tma_case(
+        "reject-s2g-nan-on-non-float",
+        g_shape=(2, 128, 64),
+        g_region=((0, 1), (0, 128), (0, 64)),
+        s_shape=(128, 64),
+        s_region=((0, 128), (0, 64)),
+        g_layout=_plain_layout((2, 128, 64)),
+        s_layout=_plain_layout((128, 64)),
+        dtype="int8",
+        direction="s2g",
+        config={"oob": "nan"},
+    ),
+]
+
+
+@dataclass(frozen=True)
+class _TMAGolden:
+    dtype: str
+    dims: tuple
+    strides: tuple
+    boxes: tuple
+    coordinates: tuple
+    enums: tuple
+
+
+def _tma_golden(
+    dtype,
+    dims,
+    strides,
+    boxes,
+    coordinates=None,
+    enums=(0, 3, 2, 0),
+):
+    return _TMAGolden(
+        dtype=dtype,
+        dims=dims,
+        strides=strides,
+        boxes=boxes,
+        coordinates=(0,) * len(dims) if coordinates is None else coordinates,
+        enums=enums,
+    )
+
+
+_TMA_CASE_GOLDENS = {
+    "g2s-2d-8x256": _tma_golden("float16", (64, 8, 4), (512, 128), (64, 8, 4)),
+    "g2s-2d-8x256-swizzle2": _tma_golden(
+        "float16", (32, 8, 8), (512, 64), (32, 8, 8), enums=(0, 2, 2, 0)
+    ),
+    "g2s-2d-8x256-swizzle1": _tma_golden(
+        "float16", (16, 8, 16), (512, 32), (16, 8, 16), enums=(0, 1, 2, 0)
+    ),
+    "g2s-2d-8x256-swizzle0": _tma_golden(
+        "float16", (8, 8, 32), (512, 16), (8, 8, 32), enums=(0, 0, 2, 0)
+    ),
+    "g2s-2d-8x256-int8": _tma_golden("int8", (128, 8, 2), (256, 128), (128, 8, 2)),
+    "g2s-2d-8x256-bf16": _tma_golden("bfloat16", (64, 8, 4), (512, 128), (64, 8, 4)),
+    "g2s-2d-8x256-fp32": _tma_golden("float32", (32, 8, 8), (1024, 128), (32, 8, 8)),
+    "g2s-2d-8x256-uint8": _tma_golden("uint8", (128, 8, 2), (256, 128), (128, 8, 2)),
+    "g2s-2d-8x256-fp8e4m3": _tma_golden("float8_e4m3fn", (128, 8, 2), (256, 128), (128, 8, 2)),
+    "g2s-2d-8x256-fp8e5m2": _tma_golden("float8_e5m2", (128, 8, 2), (256, 128), (128, 8, 2)),
+    "g2s-3d-shared-64x256": _tma_golden("float16", (64, 64, 4), (512, 128), (64, 64, 4)),
+    "g2s-2d-partial-8192": _tma_golden("float16", (8192, 8192), (16384,), (64, 128)),
+    "g2s-edge-4d-shared-128x64": _tma_golden("float16", (64, 128), (128,), (64, 128)),
+    "g2s-edge-partial-offset": _tma_golden("float16", (64, 128), (128,), (64, 24), (0, 64)),
+    "g2s-edge-large-region": _tma_golden("float16", (64, 256), (128,), (64, 128), (0, 128)),
+    "g2s-partial-3d-shared-a": _tma_golden("float16", (256, 128), (512,), (64, 32)),
+    "g2s-partial-3d-shared-b": _tma_golden("float16", (512, 256), (1024,), (64, 64)),
+    "g2s-3d-full-contiguous": _tma_golden(
+        "float16", (64, 32, 4), (128, 4096), (64, 32, 4), enums=(0, 0, 2, 0)
+    ),
+    "g2s-3d-partial-contiguous": _tma_golden(
+        "float16", (128, 16, 8), (256, 4096), (128, 16, 4), enums=(0, 0, 2, 0)
+    ),
+    "g2s-4d-reorder-a": _tma_golden(
+        "float16", (64, 128, 2, 8), (1024, 131072, 128), (64, 128, 1, 1)
+    ),
+    "g2s-4d-reorder-b": _tma_golden(
+        "float16",
+        (64, 64, 2, 4, 4),
+        (1024, 128, 65536, 256),
+        (64, 64, 2, 1, 1),
+    ),
+    "g2s-multidim-4d-a": _tma_golden(
+        "float16", (64, 128, 2, 2), (128, 32768, 16384), (64, 128, 1, 1)
+    ),
+    "g2s-multidim-4d-b": _tma_golden(
+        "float16",
+        (64, 64, 2, 4, 4),
+        (1024, 128, 65536, 256),
+        (64, 64, 2, 1, 1),
+    ),
+    "g2s-multiphase-3x8x256": _tma_golden(
+        "float16", (64, 8, 4, 3), (512, 128, 4096), (64, 8, 4, 1)
+    ),
+    "g2s-multiphase-5x64x256": _tma_golden(
+        "float16", (64, 64, 4, 5), (512, 128, 32768), (64, 64, 4, 1)
+    ),
+    "g2s-non-prefix-compact-elides": _tma_golden(
+        "float16",
+        (128, 128, 16, 16),
+        (2048, 262144, 256),
+        (128, 128, 1, 1),
+        (0, 0, 3, 4),
+        (0, 0, 2, 0),
+    ),
+    "g2s-oob-zero": _tma_golden("float16", (64, 128), (128,), (64, 16), (0, 120)),
+    "g2s-oob-nan": _tma_golden("float16", (64, 128), (128,), (64, 16), (0, 120), (0, 3, 2, 1)),
+    "g2s-fa4-q": _tma_golden("float16", (64, 32, 2048, 2), (256, 8192, 128), (64, 4, 32, 2)),
+    "g2s-fa4-k": _tma_golden("float16", (64, 2048, 16), (2048, 128), (64, 128, 2)),
+    "g2s-fa4-v": _tma_golden("float16", (64, 2048, 16), (2048, 128), (64, 128, 2)),
+    "s2g-multiphase-3x8x256": _tma_golden(
+        "float16", (64, 8, 4, 3), (512, 128, 4096), (64, 8, 4, 1)
+    ),
+    "s2g-multiphase-3x8x256-swizzle2": _tma_golden(
+        "float16",
+        (32, 8, 8, 3),
+        (512, 64, 4096),
+        (32, 8, 8, 1),
+        enums=(0, 2, 2, 0),
+    ),
+    "s2g-multiphase-3x8x256-swizzle0": _tma_golden(
+        "float16",
+        (8, 8, 32, 3),
+        (512, 16, 4096),
+        (8, 8, 32, 1),
+        enums=(0, 0, 2, 0),
+    ),
+    "s2g-multiphase-3x8x256-int8": _tma_golden(
+        "int8", (128, 8, 2, 3), (256, 128, 2048), (128, 8, 2, 1)
+    ),
+    "s2g-multiphase-3x8x256-fp32": _tma_golden(
+        "float32", (32, 8, 8, 3), (1024, 128, 8192), (32, 8, 8, 1)
+    ),
+    "s2g-multiphase-5x64x256": _tma_golden(
+        "float16", (64, 64, 4, 5), (512, 128, 32768), (64, 64, 4, 1)
+    ),
+    "s2g-keeps-multidim-coords": _tma_golden(
+        "bfloat16",
+        (1024, 1024, 4),
+        (8192, 2048),
+        (32, 128, 1),
+        (32, 128, 1),
+        (0, 0, 2, 0),
+    ),
+    "s2g-oob-none": _tma_golden("float16", (64, 128, 2), (128, 16384), (64, 128, 1)),
+}
+
+
+_TMA_EXPLICIT_CASES = {
+    "g2s-oob-zero",
+    "g2s-oob-nan",
+    "s2g-oob-zero",
+    "s2g-oob-nan",
+    "reject-unknown-oob",
+    "reject-g2s-nan-on-non-float",
+    "reject-s2g-nan-on-non-float",
+}
+
+
+_TMA_CASE_ERRORS = {
+    "g2s-2d-32x512-atom": r"stage=prefix-search: rank: .*got 6",
+    "g2s-3d-stride-gap-outer": r"stage=shared-chain:",
+    "g2s-multiphase-7x32x512-atom": r"stage=prefix-search: rank: .*got 7",
+    "g2s-transpose-32x64": r"stage=prefix-search: global_stride_alignment:",
+    "g2s-transpose-64x32": r"stage=prefix-search: global_stride_alignment:",
+    "g2s-transpose-partial-region": r"stage=prefix-search: global_stride_alignment:",
+    "g2s-transpose-partial-offset": r"stage=prefix-search: global_stride_alignment:",
+    "s2g-multiphase-7x32x512-atom": r"stage=prefix-search: rank: .*got 7",
+    "s2g-oob-zero": r"oob is only valid for explicit global-to-shared",
+    "s2g-oob-nan": r"oob is only valid for explicit global-to-shared",
+    "reject-unknown-oob": r"unsupported TensorMap oob='bogus'",
+    "reject-g2s-nan-on-non-float": r"nan_oob_dtype:",
+    "reject-s2g-nan-on-non-float": r"oob is only valid for explicit global-to-shared",
+}
+
+
+def test_tma_case_matrix_is_complete():
+    case_ids = [case.values[0] for case in TMA_CASES]
+    expected_ids = set(_TMA_CASE_GOLDENS) | set(_TMA_CASE_ERRORS)
+    assert len(case_ids) == 52
+    assert len(set(case_ids)) == len(case_ids)
+    assert set(case_ids) == expected_ids
+    assert not set(_TMA_CASE_GOLDENS) & set(_TMA_CASE_ERRORS)
+    assert _TMA_EXPLICIT_CASES <= expected_ids
+
+
+@pytest.mark.parametrize(("case_id", "kwargs"), TMA_CASES)
+def test_tma_codegen(case_id, kwargs):
+    variant = "tma_explicit" if case_id in _TMA_EXPLICIT_CASES else "tma_auto"
+    if case_id in _TMA_CASE_ERRORS:
+        with pytest.raises(Exception, match=_TMA_CASE_ERRORS[case_id]):
+            _lower_direct(variant, **kwargs)
+        return
+
+    expected = _TMA_CASE_GOLDENS[case_id]
+    plan = _direct_plan(variant, **kwargs)
+    spec = plan.spec
+    assert spec.descriptor_dtype == expected.dtype
+    assert _ints(spec.global_dims) == expected.dims
+    assert _ints(spec.global_strides) == expected.strides
+    assert _ints(spec.box_dims) == expected.boxes
+    assert _ints(spec.coordinates) == expected.coordinates
+    assert _ints(spec.element_strides) == (1,) * len(expected.dims)
+    assert (spec.interleave, spec.swizzle, spec.l2_promotion, spec.oob_fill) == expected.enums
+    assert plan.issue_axes == ()
+
+    impl, host, _ = _lower_direct(variant, **kwargs)
+    counter = _count_tma(impl)
+    assert counter.total == 1
+    assert len(counter.calls) == 1
+    call = counter.calls[0]
+    assert int(call.args[0]) == len(expected.dims)
+    coord_start = 11 if kwargs.get("direction", "g2s") == "g2s" else 5
+    assert _ints(call.args[coord_start:]) == expected.coordinates
+
+    encodes = _collect_encodes(host)
+    assert len(encodes) == 1
+    signature = _encode_signature(encodes[0])
+    assert signature["dtype"] == expected.dtype
+    assert _ints(signature["dims"]) == expected.dims
+    assert _ints(signature["strides"]) == expected.strides
+    assert _ints(signature["boxes"]) == expected.boxes
+    assert _ints(signature["element_strides"]) == (1,) * len(expected.dims)
+    assert _ints(signature["enums"]) == expected.enums
 
 
 def test_auto_raw_legal_plan_is_not_repaired():
