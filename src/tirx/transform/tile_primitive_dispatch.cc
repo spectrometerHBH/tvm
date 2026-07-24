@@ -469,6 +469,20 @@ class TilePrimitiveDispatcher : public StmtExprMutator {
     return SeqStmt::Flatten(rebuilt);
   }
 
+  Stmt VisitStmt_(const BindNode* op) final {
+    Stmt stmt = StmtExprMutator::VisitStmt_(op);
+    const auto* bind = stmt.as<BindNode>();
+    TVM_FFI_ICHECK(bind);
+    if (auto value = bind->value.as<PrimExpr>()) {
+      // Bind is flat: the definition is visible to subsequent statements in
+      // its enclosing scope.  Under SSA, an inner-scope Var cannot be
+      // referenced after leaving that scope or rebound elsewhere, so stale
+      // entries are never consulted and no scope-based cleanup is needed.
+      var_range_map_.Set(bind->var, Range::FromMinExtent(value.value(), 1));
+    }
+    return stmt;
+  }
+
   Stmt VisitStmt_(const ForNode* op) final {
     // Collect the loop variables
     auto loop_var = op->loop_var.as_or_throw<Var>();

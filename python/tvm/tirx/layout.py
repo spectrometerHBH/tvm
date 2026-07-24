@@ -1327,6 +1327,28 @@ class TileLayout(Layout):
         """
         return _ffi_api.TileLayoutGroup(self, shape)  # pylint: disable=no-member
 
+    def group_many(self, shapes: Sequence[Sequence[Expr]]) -> tuple["TileLayout", list[list[int]]]:
+        """Group the layout by the minimal common refinement of several shapes.
+
+        Repeated cumulative product boundaries are retained, so an extent-one
+        dimension in any input shape becomes a real unit iterator in the
+        refined layout.  This operation only splits existing shard iterators;
+        it does not canonicalize or reorder the layout.
+
+        Parameters
+        ----------
+        shapes : Sequence[Sequence[Expr]]
+            Logical shapes with provably equal total products.
+
+        Returns
+        -------
+        Tuple[TileLayout, List[List[int]]]
+            The commonly refined layout and one separator list per input shape.
+        """
+        return _ffi_api.TileLayoutGroupMany(  # pylint: disable=no-member
+            self, [list(shape) for shape in shapes]
+        )
+
     def get_scope(self) -> tuple[ExecScope, ExecScope] | None:
         """Get the scope pair of the layout."""
         return _ffi_api.TileLayoutGetScope(self)  # pylint: disable=no-member

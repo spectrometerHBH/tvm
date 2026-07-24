@@ -1363,6 +1363,63 @@ def test_group_by_logical_shape():
     case1()
 
 
+def test_group_many_uses_minimal_common_refinement():
+    layout = TileLayout(S[30:1])
+    grouped, separators = layout.group_many(([6, 5], [2, 15]))
+
+    expected = TileLayout(S[(2, 3, 5) : (15, 5, 1)])
+    assert_structural_equal(grouped, expected)
+    assert [list(seps) for seps in separators] == [[0, 2, 3], [0, 1, 3]]
+
+
+def test_group_many_preserves_repeated_boundaries_as_unit_iters():
+    layout = TileLayout(S[30:1])
+    grouped, separators = layout.group_many(
+        (
+            [1, 6, 1, 5, 1],
+            [2, 1, 3, 5],
+        )
+    )
+
+    expected = TileLayout(S[(1, 2, 1, 3, 1, 5, 1) : (30, 15, 15, 5, 5, 1, 1)])
+    assert_structural_equal(grouped, expected)
+    assert [list(seps) for seps in separators] == [
+        [0, 1, 4, 5, 6, 7],
+        [0, 2, 3, 4, 7],
+    ]
+
+
+def test_group_many_preserves_existing_unit_iter_stride():
+    layout = TileLayout(S[(6, 1, 5) : (5, 97, 1)])
+    grouped, separators = layout.group_many(([6, 1, 5], [30]))
+
+    assert_structural_equal(grouped, layout)
+    assert [list(seps) for seps in separators] == [[0, 1, 2, 3], [0, 3]]
+
+
+def test_group_many_rejects_incompatible_boundaries():
+    layout = TileLayout(S[12:1])
+    with pytest.raises(tvm.error.InternalError, match="incompatible cumulative boundaries"):
+        layout.group_many(([3, 4], [2, 6]))
+
+
+def test_group_many_accepts_only_provably_ordered_symbolic_boundaries():
+    n = Var("n", "int32")
+    extent = tvm.tirx.floormod(n, 16) + 2
+    layout = TileLayout(S[2 * extent : 1])
+
+    grouped, separators = layout.group_many(([2, extent], [1, 2, extent]))
+    expected = TileLayout(S[(1, 2, extent) : (Analyzer().simplify(2 * extent), extent, 1)])
+    assert_structural_equal(grouped, expected)
+    assert [list(seps) for seps in separators] == [[0, 2, 3], [0, 1, 2, 3]]
+
+    with pytest.raises(
+        tvm.error.InternalError,
+        match="cannot prove cumulative boundary divisibility|order or equality",
+    ):
+        layout.group_many(([2, extent], [extent, 2]))
+
+
 def test_permute_by_groups():
     def case_swap_two_groups():
         # Two groups, each with 2 shard iters: swap them.

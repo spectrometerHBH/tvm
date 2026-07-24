@@ -251,7 +251,7 @@ def test_gemm_tcgen05_cta_group_1(task):
         tmem = T.decl_buffer((128, C_shape[1]), C_dtype, scope="tmem", allocated_addr=tmem_addr[0], layout=TileLayout(S[(128, C_shape[1]) : (1 @ TLane, 1 @ TCol)]))  # noqa: E501
 
         if tid_in_wg == 0:
-            tma_args = T.meta_var({"dispatch": "tma", "mbar": tma_mbar.ptr_to([0])})
+            tma_args = T.meta_var({"dispatch": "tma_auto", "mbar": tma_mbar.ptr_to([0])})
             Tx.copy_async(A_smem[tuple(r_gmem_A)], A[tuple(r_gmem_A)], **tma_args)
             Tx.copy_async(B_smem[tuple(r_gmem_B)], B[tuple(r_gmem_B)], **tma_args)
             T.ptx.mbarrier.arrive.expect_tx(tma_mbar.ptr_to([0]), total_bytes)
@@ -362,7 +362,7 @@ def test_gemm_tcgen05_cta_group_1_layout_f_m64():
         tmem = T.decl_buffer((64, N), C_dtype, scope="tmem", allocated_addr=tmem_addr[0], layout=c_layout)  # noqa: E501
 
         if tid_in_wg == 0:
-            tma_args = T.meta_var({"dispatch": "tma", "mbar": tma_mbar.ptr_to([0])})
+            tma_args = T.meta_var({"dispatch": "tma_auto", "mbar": tma_mbar.ptr_to([0])})
             Tx.copy_async(A_smem[:, :], A[:, :], **tma_args)
             Tx.copy_async(B_smem[:, :], B[:, :], **tma_args)
             T.ptx.mbarrier.arrive.expect_tx(tma_mbar.ptr_to([0]), (M * K + N * K) * 2)
@@ -508,7 +508,7 @@ def test_gemm_tcgen05_cta_group_2(task):
         T.cuda.cta_sync()
         T.cuda.cluster_sync()
 
-        tma_args = T.meta_var({"dispatch": "tma", "mbar": tma_mbar_cta_0.ptr_to([0]), "cta_group": 2})  # noqa: E501
+        tma_args = T.meta_var({"dispatch": "tma_auto", "mbar": tma_mbar_cta_0.ptr_to([0]), "cta_group": 2})  # noqa: E501
         if tid_in_wg == 0:
             Tx.copy_async(A_smem[tuple(r_smem_A_in)], A[tuple(get_global_region(A_shape_per_cta, transA, cbx))], **tma_args)  # noqa: E501
             Tx.copy_async(B_smem[tuple(r_smem_B_in)], B[tuple(get_global_region(B_shape_per_cta, transB, cbx))], **tma_args)  # noqa: E501
@@ -645,7 +645,7 @@ def test_gemm_tcgen05_cta_group_2_layout_b():
         T.cuda.cta_sync()
         T.cuda.cluster_sync()
 
-        tma_args = T.meta_var({"dispatch": "tma", "mbar": tma_mbar_cta_0.ptr_to([0]), "cta_group": 2})  # noqa: E501
+        tma_args = T.meta_var({"dispatch": "tma_auto", "mbar": tma_mbar_cta_0.ptr_to([0]), "cta_group": 2})  # noqa: E501
         if tid_in_wg == 0:
                     # CTA cbx loads its portion of A and B
             Tx.copy_async(A_smem[0:M_per_cta, 0:K], A[cbx * M_per_cta:(cbx + 1) * M_per_cta, 0:K], **tma_args)  # noqa: E501
@@ -821,7 +821,7 @@ def test_gemm_block_scaled_fp8_cta_group_1(task):
 
                 # TMA load A and B from global to shared
         if tid_in_wg == 0:
-            tma_args = T.meta_var({"dispatch": "tma", "mbar": tma_mbar.ptr_to([0])})
+            tma_args = T.meta_var({"dispatch": "tma_auto", "mbar": tma_mbar.ptr_to([0])})
             Tx.copy_async(A_smem[tuple(r_gmem_A)], A[tuple(r_gmem_A)], **tma_args)
             Tx.copy_async(B_smem[tuple(r_gmem_B)], B[tuple(r_gmem_B)], **tma_args)
             T.ptx.mbarrier.arrive.expect_tx(tma_mbar.ptr_to([0]), total_bytes)
@@ -1028,7 +1028,7 @@ def test_gemm_block_scaled_fp8_cta_group_2(task):
         T.cuda.cluster_sync()
 
                 # TMA load A and B (both CTAs issue with multicast)
-        tma_args = T.meta_var({"dispatch": "tma", "mbar": tma_mbar_cta_0.ptr_to([0]), "cta_group": 2})  # noqa: E501
+        tma_args = T.meta_var({"dispatch": "tma_auto", "mbar": tma_mbar_cta_0.ptr_to([0]), "cta_group": 2})  # noqa: E501
         if tid_in_wg == 0:
             Tx.copy_async(A_smem[tuple(r_smem_A_in)], A[tuple(get_global_region(A_shape_per_cta, transA, cbx))], **tma_args)  # noqa: E501
             Tx.copy_async(B_smem[tuple(r_smem_B_in)], B[tuple(get_global_region(B_shape_per_cta, transB, cbx))], **tma_args)  # noqa: E501
@@ -1222,7 +1222,7 @@ def test_gemm_block_scaled_nvfp4_cta_group_1():
 
                 # TMA load A and B as uint8
         if tid_in_wg == 0:
-            tma_args = T.meta_var({"dispatch": "tma", "mbar": tma_mbar.ptr_to([0])})
+            tma_args = T.meta_var({"dispatch": "tma_auto", "mbar": tma_mbar.ptr_to([0])})
             Tx.copy_async(A_smem_packed[:, :], A_packed[:, :], **tma_args)
             Tx.copy_async(B_smem_packed[:, :], B_packed[:, :], **tma_args)
             T.ptx.mbarrier.arrive.expect_tx(tma_mbar.ptr_to([0]), total_bytes)
@@ -1413,7 +1413,7 @@ def test_gemm_block_scaled_nvfp4_cta_group_2():
         T.cuda.cluster_sync()
 
                 # TMA load A and B with multicast (each CTA loads its portion)
-        tma_args = T.meta_var({"dispatch": "tma", "mbar": tma_mbar_cta_0.ptr_to([0]), "cta_group": 2})  # noqa: E501
+        tma_args = T.meta_var({"dispatch": "tma_auto", "mbar": tma_mbar_cta_0.ptr_to([0]), "cta_group": 2})  # noqa: E501
         if tid_in_wg == 0:
             Tx.copy_async(A_smem_packed[:, :], A_packed[cbx * M_per_cta:(cbx + 1) * M_per_cta, :], **tma_args)  # noqa: E501
             Tx.copy_async(B_smem_packed[:, :], B_packed[cbx * N_per_cta:(cbx + 1) * N_per_cta, :], **tma_args)  # noqa: E501
@@ -1612,7 +1612,7 @@ def test_gemm_block_scaled_fp8_sf_id():
 
                 # TMA load A and B from global to shared
         if tid_in_wg == 0:
-            tma_args = T.meta_var({"dispatch": "tma", "mbar": tma_mbar.ptr_to([0])})
+            tma_args = T.meta_var({"dispatch": "tma_auto", "mbar": tma_mbar.ptr_to([0])})
             Tx.copy_async(A_smem[0:M, 0:K], A[0:M, 0:K], **tma_args)
             Tx.copy_async(B_smem[0:N, 0:K], B[0:N, 0:K], **tma_args)
             T.ptx.mbarrier.arrive.expect_tx(tma_mbar.ptr_to([0]), total_bytes)
@@ -1953,7 +1953,7 @@ def test_gemm_tcgen05_arbitrary_tiles(task):
         tmem = T.decl_buffer((M, C_shape[1]), C_dtype, scope="tmem", allocated_addr=tmem_addr[0], layout=TileLayout(S[(M, C_shape[1]) : (1 @ TLane, 1 @ TCol)]))  # noqa: E501
 
         if tid_in_wg == 0:
-            tma_args = T.meta_var({"dispatch": "tma", "mbar": tma_mbar.ptr_to([0])})
+            tma_args = T.meta_var({"dispatch": "tma_auto", "mbar": tma_mbar.ptr_to([0])})
             Tx.copy_async(A_smem[tuple(r_gmem_A)], A[tuple(r_gmem_A)], **tma_args)
             Tx.copy_async(B_smem[tuple(r_gmem_B)], B[tuple(r_gmem_B)], **tma_args)
             T.ptx.mbarrier.arrive.expect_tx(tma_mbar.ptr_to([0]), total_bytes)
@@ -2354,7 +2354,7 @@ def test_gemm_tcgen05_contiguous_kslice_partial_k(k_lo, k_hi):
         T.cuda.cta_sync()
         tmem = T.decl_buffer((128, N), "float32", scope="tmem", allocated_addr=tmem_addr[0], layout=TileLayout(S[(128, N) : (1 @ TLane, 1 @ TCol)]))  # noqa: E501
         if tid_in_wg == 0:
-            tma_args = T.meta_var({"dispatch": "tma", "mbar": tma_mbar.ptr_to([0])})
+            tma_args = T.meta_var({"dispatch": "tma_auto", "mbar": tma_mbar.ptr_to([0])})
             Tx.copy_async(A_smem[0:M, 0:K_alloc], A[0:M, 0:K_alloc], **tma_args)
             Tx.copy_async(B_smem[0:N, 0:K_alloc], B[0:N, 0:K_alloc], **tma_args)
             T.ptx.mbarrier.arrive.expect_tx(tma_mbar.ptr_to([0]), total_bytes)
@@ -2415,7 +2415,7 @@ def _run_dense_gemm(
     gemm_kw = {"dispatch": "tcgen05"}
     if is_AB_tf32:
         gemm_kw["is_AB_tf32"] = True
-    b_tma_kw = {"dispatch": "tma"}
+    b_tma_kw = {"dispatch": "tma_auto"}
     if tma_dtype_B is not None:
         b_tma_kw["tma_dtype"] = tma_dtype_B
 
@@ -2450,7 +2450,7 @@ def _run_dense_gemm(
             layout=TileLayout(S[(128, N) : (1 @ TLane, 1 @ TCol)]),
         )
         if tid_in_wg == 0:
-            Tx.copy_async(A_smem[:, :], A[:, :], dispatch="tma", mbar=tma_mbar.ptr_to([0]))
+            Tx.copy_async(A_smem[:, :], A[:, :], dispatch="tma_auto", mbar=tma_mbar.ptr_to([0]))
             Tx.copy_async(B_smem[:, :], B[:, :], mbar=tma_mbar.ptr_to([0]), **b_tma_kw)
             T.ptx.mbarrier.arrive.expect_tx(tma_mbar.ptr_to([0]), total_bytes)
         T.ptx.mbarrier.try_wait(tma_mbar.ptr_to([0]), 0)
@@ -2561,7 +2561,7 @@ def _build_smem_desc_kernel(smem_desc):
         T.cuda.cta_sync()
         tmem = T.decl_buffer((128, C_shape[1]), C_dtype, scope="tmem", allocated_addr=tmem_addr[0], layout=TileLayout(S[(128, C_shape[1]) : (1 @ TLane, 1 @ TCol)]))  # noqa: E501
         if tid_in_wg == 0:
-            tma_args = T.meta_var({"dispatch": "tma", "mbar": tma_mbar.ptr_to([0])})
+            tma_args = T.meta_var({"dispatch": "tma_auto", "mbar": tma_mbar.ptr_to([0])})
             Tx.copy_async(A_smem[tuple(r_gmem_A)], A[tuple(r_gmem_A)], **tma_args)
             Tx.copy_async(B_smem[tuple(r_gmem_B)], B[tuple(r_gmem_B)], **tma_args)
             T.ptx.mbarrier.arrive.expect_tx(tma_mbar.ptr_to([0]), total_bytes)
@@ -2640,7 +2640,7 @@ def _run_dense_gemm(
     gemm_kw = {"dispatch": "tcgen05"}
     if is_AB_tf32:
         gemm_kw["is_AB_tf32"] = True
-    b_tma_kw = {"dispatch": "tma"}
+    b_tma_kw = {"dispatch": "tma_auto"}
     if tma_dtype_B is not None:
         b_tma_kw["tma_dtype"] = tma_dtype_B
 
@@ -2675,7 +2675,7 @@ def _run_dense_gemm(
             layout=TileLayout(S[(128, N) : (1 @ TLane, 1 @ TCol)]),
         )
         if tid_in_wg == 0:
-            Tx.copy_async(A_smem[:, :], A[:, :], dispatch="tma", mbar=tma_mbar.ptr_to([0]))
+            Tx.copy_async(A_smem[:, :], A[:, :], dispatch="tma_auto", mbar=tma_mbar.ptr_to([0]))
             Tx.copy_async(B_smem[:, :], B[:, :], mbar=tma_mbar.ptr_to([0]), **b_tma_kw)
             T.ptx.mbarrier.arrive.expect_tx(tma_mbar.ptr_to([0]), total_bytes)
         T.ptx.mbarrier.try_wait(tma_mbar.ptr_to([0]), 0)
@@ -2760,7 +2760,7 @@ def _build_smem_desc_kernel(smem_desc, weight_stationary=False, pass_descI=False
         T.cuda.cta_sync()
         tmem = T.decl_buffer((128, C_shape[1]), C_dtype, scope="tmem", allocated_addr=tmem_addr[0], layout=TileLayout(S[(128, C_shape[1]) : (1 @ TLane, 1 @ TCol)]))  # noqa: E501
         if tid_in_wg == 0:
-            tma_args = T.meta_var({"dispatch": "tma", "mbar": tma_mbar.ptr_to([0])})
+            tma_args = T.meta_var({"dispatch": "tma_auto", "mbar": tma_mbar.ptr_to([0])})
             Tx.copy_async(A_smem[tuple(r_gmem_A)], A[tuple(r_gmem_A)], **tma_args)
             Tx.copy_async(B_smem[tuple(r_gmem_B)], B[tuple(r_gmem_B)], **tma_args)
             T.ptx.mbarrier.arrive.expect_tx(tma_mbar.ptr_to([0]), total_bytes)

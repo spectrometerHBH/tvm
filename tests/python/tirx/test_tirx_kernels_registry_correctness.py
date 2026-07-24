@@ -14,7 +14,7 @@
 # KIND, either express or implied.  See the License for the
 # specific language governing permissions and limitations
 # under the License.
-"""Correctness coverage for kernels registered in tirx-kernels."""
+"""Correctness coverage for workloads maintained by tirx-kernels."""
 
 from __future__ import annotations
 
@@ -31,21 +31,51 @@ if _WORKSPACE_TIRX_KERNELS.exists():
 
 kernel_registry = pytest.importorskip("tirx_kernels.registry")
 kernel_runner = pytest.importorskip("tirx_kernels.runner")
+bench_suite_run = pytest.importorskip("tirx_kernels.bench_suite.run")
 
-_KERNELS = kernel_registry.discover_kernels(min_compute_capability=10, strict=True)
+_WORKLOADS = bench_suite_run.load_workloads(bench_suite_run.DEFAULT_WORKLOADS)
+_KERNELS = {
+    kernel_name: kernel_registry.load_kernel(kernel_name, strict=True)
+    for kernel_name in sorted({workload["kernel"] for workload in _WORKLOADS})
+}
+_DISTRIBUTED_KERNELS = frozenset(
+    {"allgather_gemm", "deepgemm_fp8_fp4_mega_moe", "gemm_reduce_scatter"}
+)
+_XDIST_CUDA_DEVICE = None
 
 
-def _registered_kernel_config_cases():
+def _manifest_kernel_config_cases():
     cases = []
-    for kernel_name, mod in sorted(_KERNELS.items()):
-        configs = getattr(mod, "CONFIGS", [])
-        for index, config in enumerate(configs):
-            label = config.get("label", f"config{index}")
-            cases.append(pytest.param(kernel_name, config, id=f"{kernel_name}::{label}"))
+    for workload in _WORKLOADS:
+        kernel_name = workload["kernel"]
+        label = workload["config"]
+        mod = _KERNELS[kernel_name]
+        configs = getattr(mod, "BENCH_CONFIGS", getattr(mod, "CONFIGS", []))
+        matches = [config for config in configs if config.get("label") == label]
+        if len(matches) != 1:
+            raise ValueError(
+                f"{kernel_name}::{label} must resolve to exactly one benchmark config, "
+                f"found {len(matches)}"
+            )
+        config = matches[0]
+        required_devices = int(config.get("num_processes", config.get("world_size", 1)))
+        if workload["num_gpus"] != required_devices:
+            raise ValueError(
+                f"{kernel_name}::{label} declares num_gpus={workload['num_gpus']}, "
+                f"but its config requires {required_devices}"
+            )
+        marks = (
+            pytest.mark.xdist_group(name="distributed_device_zero")
+            if kernel_name in _DISTRIBUTED_KERNELS
+            else ()
+        )
+        cases.append(pytest.param(kernel_name, config, id=f"{kernel_name}::{label}", marks=marks))
     return cases
 
 
 def _set_cuda_device_for_xdist_worker():
+    global _XDIST_CUDA_DEVICE
+
     try:
         import torch
     except ImportError:
@@ -54,19 +84,11 @@ def _set_cuda_device_for_xdist_worker():
     if not torch.cuda.is_available():
         return False
 
-    min_free_gb = float(os.environ.get("TIRX_KERNEL_TEST_MIN_FREE_GB", "32"))
-    min_free_bytes = int(min_free_gb * 1024**3)
-    eligible_devices = []
-    for device_id in range(torch.cuda.device_count()):
-        free_bytes, _ = torch.cuda.mem_get_info(device_id)
-        if free_bytes >= min_free_bytes:
-            eligible_devices.append(device_id)
-    if not eligible_devices:
-        pytest.skip(f"requires at least one CUDA device with {min_free_gb:g} GiB free memory")
-
-    worker = os.environ.get("PYTEST_XDIST_WORKER", "gw0")
-    worker_index = int(worker[2:]) if worker.startswith("gw") and worker[2:].isdigit() else 0
-    torch.cuda.set_device(eligible_devices[worker_index % len(eligible_devices)])
+    if _XDIST_CUDA_DEVICE is None:
+        worker = os.environ.get("PYTEST_XDIST_WORKER", "gw0")
+        worker_index = int(worker[2:]) if worker.startswith("gw") and worker[2:].isdigit() else 0
+        _XDIST_CUDA_DEVICE = worker_index % torch.cuda.device_count()
+    torch.cuda.set_device(_XDIST_CUDA_DEVICE)
     return True
 
 
@@ -82,11 +104,11 @@ def _visible_cuda_device_count():
 
 
 def _required_cuda_device_count(config):
-    return int(config.get("num_processes", 1))
+    return int(config.get("num_processes", config.get("world_size", 1)))
 
 
 @contextmanager
-def _registry_gpu_lock(config):
+def _registry_gpu_lock(kernel_name, config):
     try:
         import fcntl
 
@@ -99,25 +121,38 @@ def _registry_gpu_lock(config):
         yield
         return
 
-    if int(config.get("num_processes", 1)) > 1:
-        lock_name = "global"
+    if kernel_name in _DISTRIBUTED_KERNELS:
+        device_ids = range(_required_cuda_device_count(config))
     else:
-        lock_name = f"device{torch.cuda.current_device()}"
-    lock_path = Path("/tmp") / f"tirx-kernels-registry-correctness-{lock_name}.lock"
-    with lock_path.open("w") as lock_file:
-        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
-        try:
-            torch.cuda.empty_cache()
-            yield
-        finally:
-            torch.cuda.empty_cache()
+        device_ids = (torch.cuda.current_device(),)
+
+    lock_files = []
+    try:
+        for device_id in device_ids:
+            lock_path = Path("/tmp") / f"tirx-kernels-registry-correctness-device{device_id}.lock"
+            lock_file = lock_path.open("w")
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+            lock_files.append(lock_file)
+
+        torch.cuda.empty_cache()
+        min_free_gb = float(os.environ.get("TIRX_KERNEL_TEST_MIN_FREE_GB", "32"))
+        min_free_bytes = int(min_free_gb * 1024**3)
+        for device_id in device_ids:
+            free_bytes, _ = torch.cuda.mem_get_info(device_id)
+            if free_bytes < min_free_bytes:
+                pytest.skip(
+                    f"CUDA device {device_id} has less than {min_free_gb:g} GiB free memory"
+                )
+        yield
+    finally:
+        torch.cuda.empty_cache()
+        for lock_file in reversed(lock_files):
             fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+            lock_file.close()
 
 
-@pytest.mark.parametrize(("kernel_name", "config"), _registered_kernel_config_cases())
-def test_registered_tirx_kernel_correctness(kernel_name, config):
-    if kernel_name == "deepgemm_fp8_fp4_mega_moe":
-        pytest.skip("mega_moe multi-GPU correctness requires a dedicated scheduler")
+@pytest.mark.parametrize(("kernel_name", "config"), _manifest_kernel_config_cases())
+def test_manifest_tirx_kernel_correctness(kernel_name, config):
     _set_cuda_device_for_xdist_worker()
     required_devices = _required_cuda_device_count(config)
     visible_devices = _visible_cuda_device_count()
@@ -125,5 +160,12 @@ def test_registered_tirx_kernel_correctness(kernel_name, config):
         pytest.skip(
             f"requires {required_devices} CUDA devices, but only {visible_devices} are visible"
         )
-    with _registry_gpu_lock(config):
-        kernel_runner.run_kernel_test(kernel_name, config, registry=_KERNELS)
+    with _registry_gpu_lock(kernel_name, config):
+        schedulers = getattr(_KERNELS[kernel_name], "_SUPPORTED_SCHEDULERS", ())
+        if kernel_name == "megakernel_moe" and "scheduler" not in config:
+            for scheduler in schedulers:
+                kernel_runner.run_kernel_test(
+                    kernel_name, {**config, "scheduler": scheduler}, registry=_KERNELS
+                )
+        else:
+            kernel_runner.run_kernel_test(kernel_name, config, registry=_KERNELS)

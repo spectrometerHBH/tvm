@@ -1023,7 +1023,7 @@ def test_kwargs_op_call():
     @T.prim_func(private=True)
     def test(A: T.Buffer((10, 10), "float32"), B: T.Buffer((10, 10), "float32")):
         T.device_entry()
-        kwargs = T.meta_var({"dispatch": "tma", "cta_group": 2})
+        kwargs = T.meta_var({"dispatch": "tma_auto", "cta_group": 2})
         Tx.copy_async(A[:, :], B[:, :], **kwargs)
         # fmt: on
     code = test.script()
