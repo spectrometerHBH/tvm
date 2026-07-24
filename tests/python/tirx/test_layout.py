@@ -1814,17 +1814,6 @@ def test_slice_single_shard_skips_defensive_floormod():
     # we just assert offset is non-empty and structurally sane (not None).
 
 
-def test_slice_standalone_unit_shard_preserves_coordinate_stride():
-    layout = TileLayout.from_iters([Iter(1, 2048, "m")])
-    sliced = layout.slice([1], [(3, 3 + 128)])
-
-    assert sliced is not None
-    assert len(sliced.shard) == 1
-    assert int(sliced.shard[0].extent) == 128
-    assert int(sliced.shard[0].stride) == 2048
-    assert [int(value) for value in sliced.offset.values()] == [3 * 2048]
-
-
 def test_slice_tcgen05_frag_layout_scope_consistent():
     """Slicing a wid_in_wg+laneid frag layout (tcgen05 16x256b) must stay
     scope-consistent: the sliced result canonicalizes to a single tid_in_wg

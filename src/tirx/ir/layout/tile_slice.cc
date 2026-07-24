@@ -27,29 +27,6 @@ namespace tirx {
 
 // Slice a contiguous region [begin, begin+extent) over the grouped block (shard).
 ffi::Optional<TileLayout> SlicePerGroup(TileLayout layout, PrimExpr begin, PrimExpr extent) {
-  // Canonicalization normally replaces an all-unit shard with a canonical
-  // ``(1):(1)`` iterator.  For a logical tensor dimension whose full extent
-  // is one, however, the original stride is still the coordinate stride that
-  // a downstream TensorMap must encode.  Preserve that stride while slicing
-  // the one-iterator group.
-  if (layout->shard.size() == 1 && is_one(layout->shard[0]->extent)) {
-    arith::Analyzer analyzer;
-    const Iter& iterator = layout->shard[0];
-    ffi::Map<Axis, PrimExpr> offset;
-    for (const auto& [axis, value] : layout->offset) {
-      offset.Set(axis, value);
-    }
-    PrimExpr slice_offset = analyzer->Simplify(begin * iterator->stride);
-    auto it = offset.find(iterator->axis);
-    if (it == offset.end()) {
-      offset.Set(iterator->axis, slice_offset);
-    } else {
-      offset.Set(iterator->axis, analyzer->Simplify((*it).second + slice_offset));
-    }
-    std::vector<Iter> shard{Iter(extent, iterator->stride, iterator->axis)};
-    return TileLayout(shard, layout->replica, offset);
-  }
-
   layout = layout->Canonicalize().as<TileLayout>().value();
   const auto& shard = layout->shard;
   if (shard.empty()) {
@@ -167,15 +144,6 @@ ffi::Optional<TileLayout> SlicePerGroup(TileLayout layout, PrimExpr begin, PrimE
 ffi::Optional<Layout> TileLayoutNode::Slice(const Array<PrimExpr>& shape,
                                             const Region& region) const {
   arith::Analyzer analyzer;
-  // Preserve the physical coordinate stride of a standalone unit iterator.
-  // Canonicalizing it first would replace ``(1):(S)`` with ``(1):(1)`` and
-  // make the SlicePerGroup unit-extent path below too late to recover S.
-  if (shape.size() == 1 && region.size() == 1 && shard.size() == 1 && is_one(shard[0]->extent)) {
-    auto sliced = SlicePerGroup(ffi::GetRef<TileLayout>(this), region[0]->min,
-                                analyzer->Simplify(region[0]->extent));
-    if (!sliced.has_value()) return std::nullopt;
-    return sliced.value();
-  }
   // Canonicalize the whole layout first so scope fusion (e.g. wid_in_wg+laneid
   // -> tid_in_wg) runs globally; otherwise grouping can split sibling thread
   // axes and SlicePerGroup's per-group fusion leaves an ill-formed mix.
