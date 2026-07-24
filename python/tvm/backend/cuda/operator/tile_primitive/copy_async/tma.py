@@ -1067,30 +1067,18 @@ def _auto_spec_for_prefix(
     box_dims = tuple(gt.extent if gt.smem_idx in selected_smem else 1 for gt in ordered)
 
     descriptor_dtype, descriptor_bits, effective_bytes, packed_kind, force_cu_dtype = descriptor
-    # A backing dimension of extent one carries no in-bounds address
-    # information.  Encode its explicit CUDA stride as zero, matching the
-    # legacy planner and avoiding an artificial alignment failure when the
-    # logical layout's coordinate stride is smaller than 16 bytes.
     full_byte_strides = [
-        (
-            0
-            if _proof_equal(gt.global_dim, 1, analyzer) == ProofStatus.PROVEN
-            else _elements_to_bytes(
-                gt.stride,
-                descriptor_bits,
-                analyzer,
-                auto=True,
-                stage="descriptor-stride",
-                label=f"global stride for copy group {gt.copy_dim}",
-            )
+        _elements_to_bytes(
+            gt.stride,
+            descriptor_bits,
+            analyzer,
+            auto=True,
+            stage="descriptor-stride",
+            label=f"global stride for copy group {gt.copy_dim}",
         )
         for gt in ordered
     ]
-    inner_stride = (
-        1
-        if _proof_equal(ordered[0].global_dim, 1, analyzer) == ProofStatus.PROVEN
-        else ordered[0].stride
-    )
+    inner_stride = ordered[0].stride
     global_strides = tuple(full_byte_strides[1:])
 
     issue_axes = []

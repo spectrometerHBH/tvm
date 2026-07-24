@@ -1156,21 +1156,6 @@ def test_auto_recovers_leading_unit_dimension_stride():
     assert plan.issue_axes == ()
 
 
-def test_auto_zeroes_explicit_stride_for_singleton_backing_dimension():
-    plan = _auto_plan(
-        g_shape=(1, 2048),
-        s_shape=(128, 64),
-        g_region=((0, 128), (0, 64)),
-        g_layout=_plain_layout((1, 2048), (2048, 1)),
-    )
-    assert plan.spec.rank == 2
-    assert _ints(plan.spec.global_dims) == (2048, 1)
-    assert _ints(plan.spec.global_strides) == (0,)
-    assert _ints(plan.spec.box_dims) == (64, 128)
-    assert _ints(plan.spec.coordinates) == (0, 0)
-    assert plan.issue_axes == ()
-
-
 def test_auto_maximum_prefix_and_mixed_radix_issue_pointer():
     plan = _auto_plan(g_shape=(512, 64))
     assert _ints(plan.spec.box_dims) == (64, 1)
