@@ -206,6 +206,9 @@ _REPAIRABLE_RULES = {
     "box_dim",
     "inner_box_bytes",
 }
+# These bounds depend only on runtime tensor arguments and are checked by
+# runtime.cuTensorMapEncodeTiled before the CUDA driver encodes the descriptor.
+_RUNTIME_VALIDATED_RULES = {"global_dim"}
 
 
 def _proof(predicate, analyzer: Analyzer) -> ProofStatus:
@@ -288,6 +291,46 @@ def _slice_layout(buffer: Buffer, starts, extents, label: str) -> tuple[TileLayo
         raise ValueError(f"{label} sliced layout is not a TileLayout")
     _assert_plain_memory_layout(sliced, f"sliced {label}")
     return tile, sliced
+
+
+def _slice_global_layout(buffer: Buffer, starts, extents) -> tuple[TileLayout, TileLayout]:
+    """Slice each logical global dimension without fusing across its boundary.
+
+    ``TileLayout.slice`` canonicalizes the complete layout before grouping it
+    by ``buffer.shape``.  For an unsigned dynamic shape, that can turn
+    ``(n * C, K)`` into a single wrapping ``uint32`` product, after which the
+    analyzer correctly refuses to prove the original dimension boundary.
+    Global TensorMap planning needs those semantic buffer boundaries, so group
+    the original memory layout first and slice each proven group separately.
+    """
+
+    analyzer = Analyzer()
+    tile = _to_tile_layout(buffer.layout, buffer.shape)
+    _assert_plain_memory_layout(tile, "global")
+    try:
+        grouped, separators = tile.group(list(buffer.shape))
+    except (TypeError, ValueError, tvm.error.InternalError) as error:
+        _auto_fail("global-slice", f"cannot group global layout by buffer shape: {error}")
+
+    sliced_shard = []
+    sliced_offset = dict(grouped.offset.items())
+    for dim, (start, extent) in enumerate(zip(starts, extents)):
+        group = TileLayout.from_iters(
+            grouped.shard[separators[dim] : separators[dim + 1]],
+        )
+        sliced = group.slice([buffer.shape[dim]], [(start, start + extent)])
+        if sliced is None or not isinstance(sliced, TileLayout):
+            _auto_fail(
+                "global-slice",
+                f"global dimension {dim} cannot be sliced at start={start}, extent={extent}",
+            )
+        sliced_shard.extend(sliced.shard)
+        for axis, value in sliced.offset.items():
+            sliced_offset[axis] = analyzer.simplify(sliced_offset.get(axis, 0) + value)
+
+    result = TileLayout.from_iters(sliced_shard, grouped.replica, sliced_offset)
+    _assert_plain_memory_layout(result, "sliced global")
+    return tile, result
 
 
 def _target_sm(arch: str) -> int:
@@ -786,7 +829,11 @@ def _validation_failures(spec: TensorMapSpec, *, auto: bool):
         finding
         for finding in findings
         if finding.status == ProofStatus.DISPROVEN
-        or (auto and finding.status == ProofStatus.UNKNOWN)
+        or (
+            auto
+            and finding.status == ProofStatus.UNKNOWN
+            and finding.rule not in _RUNTIME_VALIDATED_RULES
+        )
     ]
 
 
@@ -866,9 +913,12 @@ def _build_auto_gt(
     g_starts,
     g_extents,
     sliced_smem: TileLayout,
+    sctx: DispatchContext,
 ):
     analyzer = Analyzer()
-    _, sliced_gmem = _slice_layout(g_buf, g_starts, g_extents, "global")
+    for var, value in sctx.var_range_map.items():
+        analyzer.bind(var, value)
+    _, sliced_gmem = _slice_global_layout(g_buf, g_starts, g_extents)
 
     smem_shape = tuple(iterator.extent for iterator in sliced_smem.shard)
     if not smem_shape:
@@ -1017,18 +1067,30 @@ def _auto_spec_for_prefix(
     box_dims = tuple(gt.extent if gt.smem_idx in selected_smem else 1 for gt in ordered)
 
     descriptor_dtype, descriptor_bits, effective_bytes, packed_kind, force_cu_dtype = descriptor
+    # A backing dimension of extent one carries no in-bounds address
+    # information.  Encode its explicit CUDA stride as zero, matching the
+    # legacy planner and avoiding an artificial alignment failure when the
+    # logical layout's coordinate stride is smaller than 16 bytes.
     full_byte_strides = [
-        _elements_to_bytes(
-            gt.stride,
-            descriptor_bits,
-            analyzer,
-            auto=True,
-            stage="descriptor-stride",
-            label=f"global stride for copy group {gt.copy_dim}",
+        (
+            0
+            if _proof_equal(gt.global_dim, 1, analyzer) == ProofStatus.PROVEN
+            else _elements_to_bytes(
+                gt.stride,
+                descriptor_bits,
+                analyzer,
+                auto=True,
+                stage="descriptor-stride",
+                label=f"global stride for copy group {gt.copy_dim}",
+            )
         )
         for gt in ordered
     ]
-    inner_stride = ordered[0].stride
+    inner_stride = (
+        1
+        if _proof_equal(ordered[0].global_dim, 1, analyzer) == ProofStatus.PROVEN
+        else ordered[0].stride
+    )
     global_strides = tuple(full_byte_strides[1:])
 
     issue_axes = []
@@ -1209,8 +1271,27 @@ def _remap_issue_axes_after_remove(issue_axes, removed_idx):
     return tuple(remapped)
 
 
-def _compress_auto_plan(plan: TMAPlan) -> TMAPlan:
-    """Apply the auto-only, address-sequence-preserving dimension compression."""
+def _auto_inner_dimension_is_legal(spec, global_dim, box_dim, analyzer: Analyzer) -> bool:
+    """Check rules that can change when an auto dimension becomes innermost."""
+
+    if spec.interleave != 0:
+        return True
+    if spec.is_packed:
+        checks = (
+            _proof_equal(tvm.tirx.floormod(global_dim, 128), 0, analyzer),
+            _proof_equal(box_dim, 128, analyzer),
+        )
+    else:
+        inner_bytes = analyzer.simplify(box_dim * spec.effective_bytes)
+        checks = [_proof_equal(tvm.tirx.floormod(inner_bytes, 16), 0, analyzer)]
+        atom_bytes = {1: 32, 2: 64, 3: 128}.get(spec.swizzle)
+        if atom_bytes is not None:
+            checks.append(_proof(inner_bytes <= atom_bytes, analyzer))
+    return all(status == ProofStatus.PROVEN for status in checks)
+
+
+def _canonicalize_auto_plan(plan: TMAPlan) -> TMAPlan:
+    """Canonicalize auto-only TensorMap dimensions without changing byte addresses."""
 
     analyzer = Analyzer()
     current = plan
@@ -1218,16 +1299,75 @@ def _compress_auto_plan(plan: TMAPlan) -> TMAPlan:
         spec = current.spec
         full_strides = [spec.effective_bytes * spec.inner_stride, *spec.global_strides]
         issue_dims = {coord.dim_idx for axis in current.issue_axes for coord in axis.coords}
+
+        # A unit global dimension carries no address information for an
+        # in-bounds tma_auto copy.  Non-innermost units can always disappear;
+        # an innermost unit can disappear only when the next dimension already
+        # has the implicit innermost byte stride.
+        removed = False
+        if spec.rank > 1:
+            for dim_idx in range(spec.rank):
+                if dim_idx in issue_dims:
+                    continue
+                checks = (
+                    _proof_equal(spec.global_dims[dim_idx], 1, analyzer),
+                    _proof_equal(spec.box_dims[dim_idx], 1, analyzer),
+                    _proof_equal(spec.element_strides[dim_idx], 1, analyzer),
+                )
+                if any(status != ProofStatus.PROVEN for status in checks):
+                    continue
+                if dim_idx == 0:
+                    if _proof_equal(
+                        full_strides[1], full_strides[0], analyzer
+                    ) != ProofStatus.PROVEN or not _auto_inner_dimension_is_legal(
+                        spec,
+                        spec.global_dims[1],
+                        spec.box_dims[1],
+                        analyzer,
+                    ):
+                        continue
+
+                global_dims = list(spec.global_dims)
+                box_dims = list(spec.box_dims)
+                coordinates = list(spec.coordinates)
+                element_strides = list(spec.element_strides)
+                for values in (global_dims, box_dims, coordinates, element_strides):
+                    values.pop(dim_idx)
+                full_strides.pop(dim_idx)
+                current = replace(
+                    current,
+                    spec=replace(
+                        spec,
+                        global_dims=tuple(global_dims),
+                        global_strides=tuple(full_strides[1:]),
+                        box_dims=tuple(box_dims),
+                        coordinates=tuple(coordinates),
+                        element_strides=tuple(element_strides),
+                    ),
+                    issue_axes=_remap_issue_axes_after_remove(current.issue_axes, dim_idx),
+                )
+                removed = True
+                break
+        if removed:
+            continue
+
+        # Flatten an adjacent pair when the inner dimension is copied in full
+        # from coordinate zero and the outer byte stride follows it
+        # contiguously.  The outer dimension may have a partial box and a
+        # non-zero coordinate; both are scaled into the flattened dimension.
         merged = False
+        promoted_for_merge = False
         for inner_idx in range(spec.rank - 1):
             outer_idx = inner_idx + 1
             if inner_idx in issue_dims or outer_idx in issue_dims:
                 continue
+            merged_global_dim = analyzer.simplify(
+                spec.global_dims[inner_idx] * spec.global_dims[outer_idx]
+            )
+            merged_box_dim = analyzer.simplify(spec.box_dims[inner_idx] * spec.box_dims[outer_idx])
             checks = (
                 _proof_equal(spec.box_dims[inner_idx], spec.global_dims[inner_idx], analyzer),
-                _proof_equal(spec.box_dims[outer_idx], spec.global_dims[outer_idx], analyzer),
                 _proof_equal(spec.coordinates[inner_idx], 0, analyzer),
-                _proof_equal(spec.coordinates[outer_idx], 0, analyzer),
                 _proof_equal(
                     full_strides[outer_idx],
                     spec.global_dims[inner_idx] * full_strides[inner_idx],
@@ -1235,37 +1375,84 @@ def _compress_auto_plan(plan: TMAPlan) -> TMAPlan:
                 ),
                 _proof_equal(spec.element_strides[inner_idx], 1, analyzer),
                 _proof_equal(spec.element_strides[outer_idx], 1, analyzer),
+                _proof_all(analyzer, merged_global_dim > 0, merged_global_dim <= (1 << 32)),
             )
+            if inner_idx == 0 and not _auto_inner_dimension_is_legal(
+                spec, merged_global_dim, merged_box_dim, analyzer
+            ):
+                continue
             if any(status != ProofStatus.PROVEN for status in checks):
+                continue
+            box_status = _proof_all(analyzer, merged_box_dim >= 1, merged_box_dim <= 256)
+            if box_status != ProofStatus.PROVEN:
+                # Preserve the innermost contiguous-chain boundary.  Skipping a
+                # box-size-blocked inner merge and merging an outer pair instead
+                # changes the TensorMap tiling even though one byte-preserving
+                # descriptor-unit promotion may make this merge legal.
+                if (
+                    inner_idx == 0
+                    and spec.rank > 2
+                    and _proof(merged_box_dim > 256, analyzer) == ProofStatus.PROVEN
+                    and _proof_equal(
+                        spec.box_dims[outer_idx], spec.global_dims[outer_idx], analyzer
+                    )
+                    == ProofStatus.PROVEN
+                    and _proof_equal(spec.coordinates[outer_idx], 0, analyzer) == ProofStatus.PROVEN
+                ):
+                    promoted = _promote_auto_once(current)
+                    if promoted is not None:
+                        promoted_spec = promoted.spec
+                        promoted_global_dim = analyzer.simplify(
+                            promoted_spec.global_dims[0] * promoted_spec.global_dims[1]
+                        )
+                        promoted_box_dim = analyzer.simplify(
+                            promoted_spec.box_dims[0] * promoted_spec.box_dims[1]
+                        )
+                        if _proof_all(
+                            analyzer,
+                            promoted_box_dim >= 1,
+                            promoted_box_dim <= 256,
+                            promoted_global_dim > 0,
+                            promoted_global_dim <= (1 << 32),
+                        ) == ProofStatus.PROVEN and _auto_inner_dimension_is_legal(
+                            promoted_spec,
+                            promoted_global_dim,
+                            promoted_box_dim,
+                            analyzer,
+                        ):
+                            current = promoted
+                            promoted_for_merge = True
+                            break
                 continue
 
             global_dims = list(spec.global_dims)
             box_dims = list(spec.box_dims)
             coordinates = list(spec.coordinates)
             element_strides = list(spec.element_strides)
-            global_dims[inner_idx] = analyzer.simplify(
-                global_dims[inner_idx] * global_dims[outer_idx]
+            global_dims[inner_idx] = merged_global_dim
+            box_dims[inner_idx] = merged_box_dim
+            coordinates[inner_idx] = analyzer.simplify(
+                spec.coordinates[outer_idx] * spec.global_dims[inner_idx]
             )
-            box_dims[inner_idx] = analyzer.simplify(box_dims[inner_idx] * box_dims[outer_idx])
-            coordinates[inner_idx] = 0
             for values in (global_dims, box_dims, coordinates, element_strides):
                 values.pop(outer_idx)
             full_strides.pop(outer_idx)
-            new_spec = replace(
-                spec,
-                global_dims=tuple(global_dims),
-                global_strides=tuple(full_strides[1:]),
-                box_dims=tuple(box_dims),
-                coordinates=tuple(coordinates),
-                element_strides=tuple(element_strides),
-            )
             current = replace(
                 current,
-                spec=new_spec,
+                spec=replace(
+                    spec,
+                    global_dims=tuple(global_dims),
+                    global_strides=tuple(full_strides[1:]),
+                    box_dims=tuple(box_dims),
+                    coordinates=tuple(coordinates),
+                    element_strides=tuple(element_strides),
+                ),
                 issue_axes=_remap_issue_axes_after_remove(current.issue_axes, outer_idx),
             )
             merged = True
             break
+        if promoted_for_merge:
+            continue
         if not merged:
             return current
 
@@ -1345,29 +1532,18 @@ def _promote_auto_once(plan: TMAPlan) -> TMAPlan | None:
 
 def _repair_auto_candidate(plan: TMAPlan):
     candidate = plan
-    failures = _validation_failures(candidate.spec, auto=True)
-    if not failures:
-        return candidate, ()
-    if any(finding.rule not in _REPAIRABLE_RULES for finding in failures):
-        return None, failures
-
-    candidate = _compress_auto_plan(candidate)
-    failures = _validation_failures(candidate.spec, auto=True)
-    if not failures:
-        return candidate, ()
-    if any(finding.rule not in _REPAIRABLE_RULES for finding in failures):
-        return None, failures
-
     while True:
-        promoted = _promote_auto_once(candidate)
-        if promoted is None:
-            return None, failures
-        candidate = _compress_auto_plan(promoted)
+        candidate = _canonicalize_auto_plan(candidate)
         failures = _validation_failures(candidate.spec, auto=True)
         if not failures:
             return candidate, ()
         if any(finding.rule not in _REPAIRABLE_RULES for finding in failures):
             return None, failures
+
+        promoted = _promote_auto_once(candidate)
+        if promoted is None:
+            return None, failures
+        candidate = promoted
 
 
 def _runtime_config(op_call, sctx, direction: str, *, explicit: bool):
@@ -1514,7 +1690,7 @@ def _build_auto_plan(op_call: TilePrimitiveCall, sctx: DispatchContext) -> TMAPl
             f"with copy shape={tuple(g_extents)}: {error}",
         )
     smem_order = _smem_iter_order(sliced_smem)
-    gt_records = _build_auto_gt(g_buf, g_starts, g_extents, sliced_smem)
+    gt_records = _build_auto_gt(g_buf, g_starts, g_extents, sliced_smem, sctx)
     descriptor = _dtype_contract(g_buf.dtype, runtime["tma_dtype"])
 
     best = None

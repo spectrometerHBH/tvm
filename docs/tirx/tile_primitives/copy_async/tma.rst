@@ -53,16 +53,28 @@ contiguous stride chain.  The planner groups the global layout against that
 chain, selects the maximum hardware-legal shared prefix for the TensorMap box,
 and emits mixed-radix issue loops for the remaining dimensions.
 
-A raw legal plan is kept unchanged.  Dimension compression and descriptor dtype
-promotion are repair steps used only when a raw candidate fails a repairable
-hardware rule.  Promotion preserves byte strides, payload size, transaction
-size, global base, and shared pointer, and is not used for reductions, TF32,
-packed dtypes, interleave, OOB fill, gather4, or issue-driven innermost axes.
+Every raw candidate runs the same address-preserving dimension
+canonicalization: address-free unit dimensions are removed where legal, and
+adjacent contiguous dimensions are merged when the inner dimension is copied
+in full from coordinate zero.  When an innermost contiguous, fully boxed,
+coordinate-zero pair is blocked only because its merged box would exceed 256,
+canonicalization may first apply one byte-preserving descriptor-unit promotion
+and retry that same boundary, but only if that single promotion makes the merge
+legal and a farther outer dimension exists.  This avoids skipping outward and
+changing the TensorMap tiling of the contiguous inner chain.  Promotion is
+otherwise a repair step used only when the canonical candidate fails a
+repairable hardware rule.  It preserves byte strides, payload size,
+transaction size, global base, and shared pointer, and is not used for
+reductions, TF32, packed dtypes, interleave, OOB fill, gather4, or issue-driven
+innermost axes.
 
 ``tma_auto`` does not accept ``gather4`` or ``src_selector`` and only accepts the
-default zero OOB mode.  Symbolic facts that affect layout mapping or hardware
-legality must be proven; use ``tma_explicit`` when they are only known at
-runtime.
+default no-OOB contract (``oob=None``).  Symbolic facts that affect layout
+mapping, prefix selection, or repair must be proven.  A dynamic ``globalDim``
+whose range is otherwise unknown is the exception: the runtime TensorMap
+encoder checks it is in ``(0, 2^32]`` immediately before the CUDA Driver call.
+Use ``tma_explicit`` for explicit OOB behavior or when other descriptor facts
+are only known at runtime.
 
 ``tma_explicit``
 ----------------
@@ -198,6 +210,12 @@ The shared validator checks, among other rules:
 
 Packed sub-byte descriptors are validated in their actual TensorMap encoding
 units rather than by truncating ``bits // 8``.
+
+For ``tma_auto``, a statically disproven rule always rejects the candidate.
+Unknown planner-sensitive rules also reject it; only the dynamic
+``globalDim`` range is deferred to the runtime encoder.  ``tma_explicit``
+retains unknown descriptor values for runtime validation because it does not
+choose among alternative boxes or issue loops.
 
 Completion
 ----------

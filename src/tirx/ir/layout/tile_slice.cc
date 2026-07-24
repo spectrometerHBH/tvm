@@ -167,6 +167,15 @@ ffi::Optional<TileLayout> SlicePerGroup(TileLayout layout, PrimExpr begin, PrimE
 ffi::Optional<Layout> TileLayoutNode::Slice(const Array<PrimExpr>& shape,
                                             const Region& region) const {
   arith::Analyzer analyzer;
+  // Preserve the physical coordinate stride of a standalone unit iterator.
+  // Canonicalizing it first would replace ``(1):(S)`` with ``(1):(1)`` and
+  // make the SlicePerGroup unit-extent path below too late to recover S.
+  if (shape.size() == 1 && region.size() == 1 && shard.size() == 1 && is_one(shard[0]->extent)) {
+    auto sliced = SlicePerGroup(ffi::GetRef<TileLayout>(this), region[0]->min,
+                                analyzer->Simplify(region[0]->extent));
+    if (!sliced.has_value()) return std::nullopt;
+    return sliced.value();
+  }
   // Canonicalize the whole layout first so scope fusion (e.g. wid_in_wg+laneid
   // -> tid_in_wg) runs globally; otherwise grouping can split sibling thread
   // axes and SlicePerGroup's per-group fusion leaves an ill-formed mix.

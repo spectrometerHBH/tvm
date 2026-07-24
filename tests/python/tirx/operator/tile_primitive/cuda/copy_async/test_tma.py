@@ -605,8 +605,8 @@ TMA_CASES = [
     ),
     _tma_case(
         "g2s-fa4-q",
-        g_shape=(2048, 4096),
-        g_region=((0, 32), (0, 512)),
+        g_shape=(1, 2048, 32, 128),
+        g_region=((0, 1), (0, 32), (0, 4), (0, 128)),
         s_shape=(2, 128, 128),
         s_region=((0, 1), (0, 128), (0, 128)),
         g_layout=TileLayout(S[(1, 2048, 32, 128)]),
@@ -614,8 +614,8 @@ TMA_CASES = [
     ),
     _tma_case(
         "g2s-fa4-k",
-        g_shape=(2048, 1024),
-        g_region=((0, 128), (0, 128)),
+        g_shape=(1, 2048, 8, 128),
+        g_region=((0, 1), (0, 128), (0, 1), (0, 128)),
         s_shape=(3, 128, 128),
         s_region=((0, 1), (0, 128), (0, 128)),
         g_layout=TileLayout(S[(1, 2048, 8, 128)]),
@@ -623,8 +623,8 @@ TMA_CASES = [
     ),
     _tma_case(
         "g2s-fa4-v",
-        g_shape=(2048, 1024),
-        g_region=((0, 128), (0, 128)),
+        g_shape=(1, 2048, 8, 128),
+        g_region=((0, 1), (0, 128), (0, 1), (0, 128)),
         s_shape=(3, 128, 128),
         s_region=((0, 1), (0, 128), (0, 128)),
         g_layout=TileLayout(S[(1, 2048, 8, 128)]),
@@ -792,14 +792,12 @@ _TMA_CASE_GOLDENS = {
     "g2s-partial-3d-shared-a": _tma_golden("float16", (256, 128), (512,), (64, 32)),
     "g2s-partial-3d-shared-b": _tma_golden("float16", (512, 256), (1024,), (64, 64)),
     "g2s-3d-full-contiguous": _tma_golden(
-        "float16", (64, 32, 4), (128, 4096), (64, 32, 4), enums=(0, 0, 2, 0)
+        "float16", (64, 128), (128,), (64, 128), enums=(0, 0, 2, 0)
     ),
     "g2s-3d-partial-contiguous": _tma_golden(
-        "float16", (128, 16, 8), (256, 4096), (128, 16, 4), enums=(0, 0, 2, 0)
+        "float16", (128, 128), (256,), (128, 64), enums=(0, 0, 2, 0)
     ),
-    "g2s-4d-reorder-a": _tma_golden(
-        "float16", (64, 128, 2, 8), (1024, 131072, 128), (64, 128, 1, 1)
-    ),
+    "g2s-4d-reorder-a": _tma_golden("float16", (64, 256, 8), (1024, 128), (64, 128, 1)),
     "g2s-4d-reorder-b": _tma_golden(
         "float16",
         (64, 64, 2, 4, 4),
@@ -823,10 +821,10 @@ _TMA_CASE_GOLDENS = {
     ),
     "g2s-non-prefix-compact-elides": _tma_golden(
         "float16",
-        (128, 128, 16, 16),
-        (2048, 262144, 256),
-        (128, 128, 1, 1),
-        (0, 0, 3, 4),
+        (128, 2048, 16),
+        (2048, 256),
+        (128, 128, 1),
+        (0, 384, 4),
         (0, 0, 2, 0),
     ),
     "g2s-oob-zero": _tma_golden("float16", (64, 128), (128,), (64, 16), (0, 120)),
@@ -868,7 +866,7 @@ _TMA_CASE_GOLDENS = {
         (32, 128, 1),
         (0, 0, 2, 0),
     ),
-    "s2g-oob-none": _tma_golden("float16", (64, 128, 2), (128, 16384), (64, 128, 1)),
+    "s2g-oob-none": _tma_golden("float16", (64, 256), (128,), (64, 128)),
 }
 
 
@@ -886,12 +884,12 @@ _TMA_EXPLICIT_CASES = {
 _TMA_CASE_ERRORS = {
     "g2s-2d-32x512-atom": r"stage=prefix-search: rank: .*got 6",
     "g2s-3d-stride-gap-outer": r"stage=shared-chain:",
-    "g2s-multiphase-7x32x512-atom": r"stage=prefix-search: rank: .*got 7",
+    "g2s-multiphase-7x32x512-atom": r"stage=prefix-search: rank: .*got 6",
     "g2s-transpose-32x64": r"stage=prefix-search: global_stride_alignment:",
     "g2s-transpose-64x32": r"stage=prefix-search: global_stride_alignment:",
     "g2s-transpose-partial-region": r"stage=prefix-search: global_stride_alignment:",
     "g2s-transpose-partial-offset": r"stage=prefix-search: global_stride_alignment:",
-    "s2g-multiphase-7x32x512-atom": r"stage=prefix-search: rank: .*got 7",
+    "s2g-multiphase-7x32x512-atom": r"stage=prefix-search: rank: .*got 6",
     "s2g-oob-zero": r"oob is only valid for explicit global-to-shared",
     "s2g-oob-nan": r"oob is only valid for explicit global-to-shared",
     "reject-unknown-oob": r"unsupported TensorMap oob='bogus'",
@@ -950,7 +948,7 @@ def test_tma_codegen(case_id, kwargs):
     assert _ints(signature["enums"]) == expected.enums
 
 
-def test_auto_raw_legal_plan_is_not_repaired():
+def test_auto_canonicalization_does_not_create_an_oversized_box():
     plan = _auto_plan(g_shape=(8, 64))
     assert plan.spec.descriptor_dtype == "float16"
     assert plan.spec.rank == 2
@@ -1025,9 +1023,9 @@ def test_auto_canonicalizes_dynamic_stage_slice_before_global_grouping():
         },
     )
     plan = _auto_plan(
-        g_shape=(4096, 2048),
+        g_shape=(1, 4096, 16, 128),
         s_shape=(3, 128, 128),
-        g_region=((kv_row, 128), (head * 128, 128)),
+        g_region=((0, 1), (kv_row, 128), (head, 1), (0, 128)),
         s_region=((stage, 1), (0, 128), (0, 128)),
         g_layout=TileLayout(S[(1, 4096, 16, 128)]),
         s_layout=TileLayout(S[(3, 128, 2, 64) : (16384, 64, 8192, 1)]),
@@ -1044,6 +1042,69 @@ def test_auto_canonicalizes_dynamic_stage_slice_before_global_grouping():
     assert analyzer.can_prove_equal(plan.spec.smem_base_offset, stage * 16384)
     assert int(plan.spec.transaction_bits) // 8 == 32 * 1024
     assert plan.issue_axes == ()
+
+
+def test_auto_defers_dynamic_global_dimension_bounds_to_runtime():
+    seq_len = Var("seq_len", "uint32")
+    row = Var("row", "uint32")
+    plan = _auto_plan(
+        g_shape=(seq_len * T.uint32(64), 64),
+        s_shape=(128, 64),
+        g_region=((row, 128), (0, 64)),
+        g_layout=TileLayout(S[(seq_len * T.uint32(64), 64)]),
+        s_layout=TileLayout(S[(128, 64)]),
+        dtype="uint8",
+    )
+    assert plan.spec.rank == 2
+    assert Analyzer().can_prove_equal(plan.spec.global_dims[0], 64)
+    assert Analyzer().can_prove_equal(plan.spec.global_dims[1], seq_len * T.uint32(64))
+    assert _ints(plan.spec.box_dims) == (64, 128)
+    assert Analyzer().can_prove_equal(plan.spec.coordinates[0], 0)
+    assert Analyzer().can_prove_equal(plan.spec.coordinates[1], row)
+    assert plan.issue_axes == ()
+
+
+def test_dispatch_propagates_flat_bind_to_auto_coordinate_proof():
+    func = _from_source(
+        """
+@T.prim_func
+def bind_coordinate(D_ptr: T.handle):
+    D = T.match_buffer(D_ptr, (33360, 6144), "bfloat16")
+    T.device_entry()
+    block = T.cta_id([192])
+    tid = T.thread_id([1])
+    tile_index = T.alloc_local((1,), "int32")
+    D_smem = T.alloc_buffer(
+        (2, 16, 128),
+        "bfloat16",
+        scope="shared.dyn",
+        layout=T.TileLayout(T.S[(2, 16, 2, 64) : (2048, 64, 1024, 1)]),
+    )
+    tile_index[0] = block
+    d_n: T.let = tile_index[0] * 128
+    if tid == 0:
+        Tx.copy_async(
+            D[0:16, d_n : d_n + 128],
+            D_smem[0, :, :],
+            dispatch="tma_auto",
+        )
+"""
+    )
+    lowered = _lower_module(func)
+    encodes = _collect_encodes([lowered["main"].body])
+    assert len(encodes) == 1
+    signature = _encode_signature(encodes[0])
+    assert _ints(signature["dims"]) == (64, 33360, 96)
+    assert _ints(signature["strides"]) == (12288, 128)
+    assert _ints(signature["boxes"]) == (64, 16, 2)
+
+    counter = _count_tma(lowered["main"])
+    assert counter.total == 1
+    call = counter.calls[0]
+    assert int(call.args[0]) == 3
+    assert int(call.args[5]) == 0
+    assert int(call.args[6]) == 0
+    assert str(call.args[7]) == "tile_index[0] * 2"
 
 
 def test_auto_recovers_stride_from_split_coordinate_only_dimension():
@@ -1087,11 +1148,26 @@ def test_auto_recovers_leading_unit_dimension_stride():
         g_region=((0, 1), (512, 256)),
         g_layout=_plain_layout((1, 8192), (8192, 1)),
     )
+    assert plan.spec.rank == 1
+    assert _ints(plan.spec.global_dims) == (8192,)
+    assert _ints(plan.spec.global_strides) == ()
+    assert _ints(plan.spec.box_dims) == (256,)
+    assert _ints(plan.spec.coordinates) == (512,)
+    assert plan.issue_axes == ()
+
+
+def test_auto_zeroes_explicit_stride_for_singleton_backing_dimension():
+    plan = _auto_plan(
+        g_shape=(1, 2048),
+        s_shape=(128, 64),
+        g_region=((0, 128), (0, 64)),
+        g_layout=_plain_layout((1, 2048), (2048, 1)),
+    )
     assert plan.spec.rank == 2
-    assert _ints(plan.spec.global_dims) == (8192, 1)
-    assert _ints(plan.spec.global_strides) == (16384,)
-    assert _ints(plan.spec.box_dims) == (256, 1)
-    assert _ints(plan.spec.coordinates) == (512, 0)
+    assert _ints(plan.spec.global_dims) == (2048, 1)
+    assert _ints(plan.spec.global_strides) == (0,)
+    assert _ints(plan.spec.box_dims) == (64, 128)
+    assert _ints(plan.spec.coordinates) == (0, 0)
     assert plan.issue_axes == ()
 
 
@@ -1145,7 +1221,7 @@ def test_auto_requires_complete_chain_and_exact_division(kwargs, error):
         _auto_plan(**kwargs)
 
 
-def test_auto_compression_repairs_rank_and_unaligned_stride_only_when_needed():
+def test_auto_canonicalization_repairs_rank_and_unaligned_stride():
     rank_plan = _auto_plan(g_shape=(2, 2, 2, 2, 2, 8))
     assert rank_plan.spec.descriptor_dtype == "float16"
     assert rank_plan.spec.rank == 1
@@ -1166,6 +1242,23 @@ def test_auto_promotion_preserves_payload_and_shared_pointer():
     assert int(plan.spec.payload_bits) == 4096
     assert plan.spec.smem_start == (0, 0)
     assert str(plan.spec.smem_buffer.dtype) == "uint8"
+
+
+def test_auto_promotes_before_crossing_box_blocked_inner_chain_boundary():
+    region = ((0, 1), (0, 4), (0, 32), (0, 4), (0, 4))
+    plan = _auto_plan(
+        g_shape=(8, 16, 32, 4, 4),
+        g_region=region,
+        s_region=region,
+        dtype="uint8",
+    )
+    assert plan.spec.descriptor_dtype == "uint16"
+    assert _ints(plan.spec.global_dims) == (256, 16, 8)
+    assert _ints(plan.spec.global_strides) == (512, 8192)
+    assert _ints(plan.spec.box_dims) == (256, 4, 1)
+    assert _ints(plan.spec.coordinates) == (0, 0, 0)
+    assert plan.issue_axes == ()
+    assert int(plan.spec.payload_bits) == 16384
 
 
 def test_auto_promotion_rejects_unsafe_modes():
@@ -1772,6 +1865,18 @@ def test_shared_validator_unknown_policy_differs_for_auto_and_explicit():
         "global_stride_range",
         "global_stride_alignment",
     }
+
+
+def test_auto_defers_only_unknown_global_dimension_bounds_to_runtime():
+    dynamic_dim = Var("runtime_global_dim", "int64")
+    dynamic = _make_spec(global_dims=(dynamic_dim, 64))
+    assert _finding(dynamic, "global_dim")[0].status == ProofStatus.UNKNOWN
+    assert not any(
+        finding.rule == "global_dim" for finding in _validation_failures(dynamic, auto=True)
+    )
+
+    invalid = replace(dynamic, global_dims=(0, 64))
+    assert any(finding.rule == "global_dim" for finding in _validation_failures(invalid, auto=True))
 
 
 def test_shared_validator_packed_and_interleave_rules():
