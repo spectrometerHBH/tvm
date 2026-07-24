@@ -19,6 +19,7 @@
 import functools
 from collections.abc import Callable
 
+import tvm
 import tvm.tirx.operator as tirx_op
 from tvm.ir import Op
 from tvm.tirx import Buffer, BufferRegion, Expr, LambdaExpr
@@ -488,7 +489,7 @@ def cast(
     )
 
 
-def _check_copy_regions_match(dst, src, config, name):
+def _check_copy_regions_match(dst, src, config, name, dispatch=None):
     """Enforce that plain copy operands cover identical regions.
 
     A plain copy is elementwise between two regions over one shared logical
@@ -505,10 +506,45 @@ def _check_copy_regions_match(dst, src, config, name):
     the layout) is what produces a spurious region mismatch. The fix is
     always to declare the natural logical shape, never to exempt the copy.
 
-    Gather (``indexer`` / ``gather_axis``) is the one true exception: the
-    source region is the index table, a different logical operand.
+    TMA is byte-oriented rather than elementwise.  Its planners validate the
+    layout mapping, so the builder only proves equal payload bytes.  A
+    ``tma_explicit`` gather4 source describes one row while the instruction
+    transfers the four rows named by ``gather4``.
     """
-    if "indexer" in config or "gather_axis" in config:
+    if dispatch in ("tma_auto", "tma_explicit"):
+        analyzer = None
+
+        def _payload_bits(region):
+            nonlocal analyzer
+            value = tvm.DataType(region.buffer.dtype).bits
+            for axis in region.region:
+                value = value * axis.extent
+            if analyzer is None:
+                from tvm.arith import Analyzer  # pylint: disable=import-outside-toplevel
+
+                analyzer = Analyzer()
+            return analyzer.simplify(value)
+
+        dst_bits = _payload_bits(dst)
+        src_bits = _payload_bits(src)
+        gather4 = config.get("gather4")
+        if gather4 is not None:
+            if dispatch != "tma_explicit":
+                raise ValueError("copy_async: gather4 is only supported by dispatch='tma_explicit'")
+            if not isinstance(gather4, list | tuple | tvm.ir.Array) or len(gather4) != 4:
+                raise ValueError("copy_async: gather4 must contain exactly four row coordinates")
+            if len(src.region) != 2:
+                raise ValueError("copy_async: gather4 requires a rank-2 global source")
+            row_extent = src.region[0].extent
+            if not analyzer.can_prove_equal(row_extent, 1):
+                raise ValueError("copy_async: gather4 global axis 0 must describe exactly one row")
+            src_bits = analyzer.simplify(src_bits * 4)
+
+        if not analyzer.can_prove_equal(dst_bits, src_bits):
+            raise ValueError(
+                f"{name}: dst payload {dst_bits} bits != src payload {src_bits} bits; "
+                "TMA operands must transfer the same total number of bytes"
+            )
         return
 
     def _squeeze(region):
@@ -572,7 +608,7 @@ def copy(
     config = kwargs or {}
     dst = _to_region(dst)
     src = _to_region(src)
-    _check_copy_regions_match(dst, src, config, "copy")
+    _check_copy_regions_match(dst, src, config, "copy", dispatch)
     return f_insert(
         tirx_op.Copy(dst, src, workspace=workspace, config=config, dispatch=dispatch, scope=scope)
     )
@@ -592,7 +628,7 @@ def copy_async(
     config = kwargs or {}
     dst = _to_region(dst)
     src = _to_region(src)
-    _check_copy_regions_match(dst, src, config, "copy_async")
+    _check_copy_regions_match(dst, src, config, "copy_async", dispatch)
     return f_insert(
         tirx_op.CopyAsync(
             dst, src, workspace=workspace, config=config, dispatch=dispatch, scope=scope

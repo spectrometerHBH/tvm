@@ -1181,5 +1181,41 @@ def test_op_call_config_mutated():
     )
 
 
+def test_op_call_nested_config_visited_and_substituted():
+    """Nested selector arrays participate in the core visitor and mutator."""
+    from tvm.tirx.stmt_functor import post_order_visit, substitute
+
+    @T.prim_func
+    def selector(
+        A: T.Buffer((8,), "float16"),
+        B: T.Buffer((8,), "float16"),
+        C: T.Buffer((8,), "float16"),
+        flag: T.int32,
+    ):
+        Tx.copy_async(
+            C[:],
+            A[:],
+            dispatch="tma_explicit",
+            mbar=C.data,
+            src_selector=[(flag != 0, B)],
+        )
+
+    op_call = selector.body
+    assert isinstance(op_call, tir.TilePrimitiveCall)
+    original_b = selector.buffer_map[selector.params[1]]
+    seen = []
+    post_order_visit(selector.body, seen.append)
+    assert any(isinstance(node, Var) and node.same_as(selector.params[-1]) for node in seen)
+    undefined = tvm.tirx.analysis.undefined_vars(op_call)
+    assert any(var.same_as(original_b.data) for var in undefined)
+
+    replacement = Var("replacement", "int32")
+    updated = substitute(op_call, {selector.params[-1]: replacement})
+    condition, candidate = updated.config["src_selector"][0]
+    assert isinstance(condition, tir.NE)
+    assert condition.a.same_as(replacement)
+    assert candidate.same_as(original_b)
+
+
 if __name__ == "__main__":
     tvm.testing.main()

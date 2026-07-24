@@ -24,6 +24,7 @@ import pytest
 import tvm
 from tvm.ir import assert_structural_equal
 from tvm.script import tirx as T
+from tvm.script.tirx import tile as Tx
 
 
 def test_int_constexpr_specializes_loop_bound():
@@ -219,6 +220,32 @@ def test_specialize_returns_primfunc():
     assert isinstance(spec, tvm.tirx.PrimFunc)
     # Specialized PrimFunc has only the runtime params (constexpr stripped).
     assert len(spec.params) == 1
+
+
+def test_constexpr_specializes_nested_selector_condition():
+    @T.jit(private=True)
+    def k(
+        A: T.Buffer((8,), "float16"),
+        B: T.Buffer((8,), "float16"),
+        C: T.Buffer((8,), "float16"),
+        flag: T.int32,
+        *,
+        LIMIT: T.constexpr,
+    ):
+        Tx.copy_async(
+            C[:],
+            A[:],
+            dispatch="tma_explicit",
+            mbar=C.data,
+            src_selector=[(flag < LIMIT, B)],
+        )
+
+    specialized = k.specialize(LIMIT=4)
+    op_call = specialized.body
+    condition, candidate = op_call.config["src_selector"][0]
+    assert isinstance(condition, tvm.tirx.LT)
+    assert int(condition.b) == 4
+    assert candidate.same_as(specialized.buffer_map[specialized.params[1]])
 
 
 if __name__ == "__main__":

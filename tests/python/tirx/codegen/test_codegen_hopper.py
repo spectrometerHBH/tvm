@@ -525,14 +525,26 @@ def test_cp_async_bulk_tensor_global_to_shared_unicast(dtype, inputs):
         (
             (16, 16),
             "float16",
+            [16, 16, 32, 16, 16, 2, 1, 0, 0, 0, 0],
+            r"elementStrides\[0\] must be one",
+        ),
+        (
+            (16, 16),
+            "float16",
             [16, 16, 32, 16, 16, 1, 1, 2, 0, 0, 0],
             r"tensorRank must be greater than or equal to 3 when interleave is not NONE",
         ),
         (
             (8, 8, 8),
             "float16",
-            [8, 8, 8, 16, 128, 8, 8, 8, 1, 1, 1, 2, 0, 0, 0],
+            [8, 8, 8, 16, 128, 8, 8, 8, 1, 1, 1, 2, 1, 0, 0],
             r"globalStrides\[0\] must be a multiple of 32",
+        ),
+        (
+            (8, 8, 8),
+            "float16",
+            [8, 8, 8, 32, 256, 8, 8, 8, 1, 1, 1, 2, 2, 0, 0],
+            r"CU_TENSOR_MAP_INTERLEAVE_32B requires CU_TENSOR_MAP_SWIZZLE_32B",
         ),
         (
             (16, 16),
@@ -542,6 +554,18 @@ def test_cp_async_bulk_tensor_global_to_shared_unicast(dtype, inputs):
                 r"CU_TENSOR_MAP_FLOAT_OOB_FILL_NAN_REQUEST_ZERO_FMA requires a "
                 r"floating-point tensorDataType"
             ),
+        ),
+        (
+            (16, 16),
+            "float32",
+            [16, 16, 64, 4, 16, 1, 1, 0, 0, 0, 0, 7],
+            r"force_cu_dtype only supports CU_TENSOR_MAP_DATA_TYPE_TFLOAT32",
+        ),
+        (
+            (16, 16),
+            "float16",
+            [16, 16, 32, 8, 16, 1, 1, 0, 0, 0, 0, 11],
+            r"CU_TENSOR_MAP_DATA_TYPE_TFLOAT32 requires a scalar float32",
         ),
     ],
 )

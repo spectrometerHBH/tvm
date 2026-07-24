@@ -147,6 +147,15 @@ TVM_DLL const Op& q_multiply_shift_per_axis();
 TVM_DLL const Op& address_of();
 
 /*!
+ * \brief Select between two pointer values without introducing control flow.
+ *
+ *  PointerType pointer_select(bool cond, PointerType a, PointerType b) {
+ *    return cond ? a : b;
+ *  }
+ */
+TVM_DLL const Op& pointer_select();
+
+/*!
  * \brief Same as select, used for unsafe memory access.
  *
  *  Type tvm_if_then_else(cond, a, b) {
