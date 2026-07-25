@@ -34,8 +34,8 @@ from tvm.tirx.script import builder as T
 from tvm.tirx.script.builder.ir import name_meta_class_value
 from tvm.tirx.stmt import BufferRegion
 
+from .entry import _OptionalAnnotation, inline
 from .entry import constexpr as _constexpr_sentinel
-from .entry import inline
 
 
 def slice_buffer_from_region(br: BufferRegion) -> Buffer:
@@ -247,6 +247,18 @@ def find_decorator_annotation(node: doc.FunctionDef, annotation: str, default: b
             if keyword.arg == annotation:
                 return keyword.value.value
     return default
+
+
+def _is_jit_function(node: doc.FunctionDef) -> bool:
+    """Return whether the parsed source function is decorated with ``T.jit``."""
+
+    for decorator in node.decorator_list:
+        target = decorator.func if isinstance(decorator, doc.Call) else decorator
+        if isinstance(target, doc.Attribute) and target.attr == "jit":
+            return True
+        if isinstance(target, doc.Name) and target.id == "jit":
+            return True
+    return False
 
 
 @dispatch.register(token="tirx", type_name="For")
@@ -633,16 +645,32 @@ def visit_function_def(self: Parser, node: doc.FunctionDef) -> None:
                         self.report_error(arg, "Type annotation required for function parameters.")
                     try:
                         ann = self.eval_expr(arg.annotation)
-                        if (
-                            callable(ann)
-                            and not isinstance(ann, Expr)
-                            and ann is not _constexpr_sentinel
-                        ):
-                            ann = ann()
                     except Exception:  # pylint: disable=broad-except
                         ann = func_annotation.get(arg.arg, None)
                         if ann is None:
                             raise
+                    if isinstance(ann, _OptionalAnnotation):
+                        if not _is_jit_function(node):
+                            self.report_error(
+                                arg.annotation,
+                                "T.Optional parameter annotations are only supported by @T.jit",
+                            )
+                        if arg.arg in self.absent_params:
+                            self.var_table.add(arg.arg, None)
+                            continue
+                        ann = ann.annotation
+                    elif arg.arg in self.absent_params:
+                        self.report_error(
+                            arg.annotation,
+                            "Only T.Optional parameters may be absent, "
+                            f"but {arg.arg!r} is not optional",
+                        )
+                    if (
+                        callable(ann)
+                        and not isinstance(ann, Expr)
+                        and ann is not _constexpr_sentinel
+                    ):
+                        ann = ann()
                     if ann is _constexpr_sentinel:
                         # T.constexpr param: value was bound in extra_vars by
                         # TIRJit.specialize() and lives in an outer var_table
@@ -782,29 +810,28 @@ def visit_if(self: Parser, node: doc.If) -> None:
     node : doc.If
         The doc AST if node.
     """
-    with self.var_table.with_frame():
-        predicate = self.eval_expr(node.test)
-        if tvm.ir.is_prim_expr(predicate) or isinstance(predicate, tvm.tirx.expr.ExprOp):
-            with T.If(self.eval_expr(node.test)):
-                with T.Then():
-                    with self.var_table.with_frame():
-                        self.visit_body(node.body)
-                if node.orelse:
-                    with T.Else():
-                        with self.var_table.with_frame():
-                            self.visit_body(node.orelse)
-        elif isinstance(predicate, bool):
-            if predicate:
+    predicate = self.eval_expr(node.test)
+    if tvm.ir.is_prim_expr(predicate) or isinstance(predicate, tvm.tirx.expr.ExprOp):
+        with T.If(predicate):
+            with T.Then():
                 with self.var_table.with_frame():
                     self.visit_body(node.body)
-            elif node.orelse:
-                with self.var_table.with_frame():
-                    self.visit_body(node.orelse)
-        else:
-            self.report_error(
-                node.test,
-                f"If condition must be a boolean expression, but got {predicate}",
-            )
+            if node.orelse:
+                with T.Else():
+                    with self.var_table.with_frame():
+                        self.visit_body(node.orelse)
+    elif isinstance(predicate, bool):
+        # Python ``if`` does not introduce a lexical scope.  Bindings from the
+        # selected compile-time branch must therefore remain visible after it.
+        if predicate:
+            self.visit_body(node.body)
+        elif node.orelse:
+            self.visit_body(node.orelse)
+    else:
+        self.report_error(
+            node.test,
+            f"If condition must be a boolean expression, but got {predicate}",
+        )
 
 
 @dispatch.register(token="tirx", type_name="Assert")

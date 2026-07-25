@@ -16,7 +16,6 @@
 # under the License.
 """Abstraction for array data structures."""
 
-import functools
 from numbers import Integral
 
 import tvm_ffi
@@ -25,7 +24,7 @@ import tvm
 from tvm.ir import PointerType, PrimType, Range
 from tvm.runtime import Object, Scriptable, convert
 
-from . import _ffi_api
+from . import _buffer_view, _ffi_api
 
 
 @tvm_ffi.register_object("tirx.Buffer")
@@ -286,51 +285,6 @@ class Buffer(Object, Scriptable):
         )
         return tvm.tirx.address_of(self[tuple(indices)])
 
-    def _redecl(self, shape, layout, *, dtype=None, elem_offset=None, addr_offset=None):
-        """Re-declare a derived view over this buffer's storage.
-
-        Routes the buffer identity by storage kind: a ``tmem`` buffer aliases
-        by column address — ``addr_offset`` (a column count) adds onto its
-        ``allocated_addr``, and ``decl_buffer`` requires ``allocated_addr``
-        (and rejects ``data``) only for tmem scope — while every other scope
-        (including an sbuf buffer that the allocator later stamps with an
-        ``allocated_addr``) carries ``data``/``strides``/``elem_offset``
-        through, since ``decl_buffer`` does not accept ``allocated_addr`` there.
-        """
-        if (
-            self.scope() == "tmem"
-            and self.allocated_addr is not None
-            and len(self.allocated_addr) > 0
-        ):
-            addr = self.allocated_addr[0]
-            if addr_offset is not None:
-                addr = addr + addr_offset
-            return tvm.tirx.script.builder.decl_buffer(
-                shape,
-                self.dtype if dtype is None else dtype,
-                None,
-                None,
-                None,
-                None,
-                self.scope(),
-                self.data_alignment,
-                0,
-                layout,
-                allocated_addr=addr,
-            )
-        return tvm.tirx.script.builder.decl_buffer(
-            shape,
-            self.dtype if dtype is None else dtype,
-            self.data,
-            self.strides,
-            self.elem_offset if elem_offset is None else elem_offset,
-            None,
-            self.scope(),
-            self.data_alignment,
-            self.offset_factor,
-            layout,
-        )
-
     def view(self, *args, **kwargs) -> "Buffer":
         """Creates a new view of the buffer. (used by parser)
 
@@ -344,68 +298,7 @@ class Buffer(Object, Scriptable):
             The corresponding view buffer.
         """
 
-        def _infer_shape(shape):
-            shape = list(shape)
-            if -1 in shape and shape.count(-1) == 1:
-                size = functools.reduce(lambda x, y: x * y, self.shape)
-                n_size = functools.reduce(lambda x, y: x * y, [s for s in shape if s != -1], 1)
-                shape[shape.index(-1)] = size // n_size
-            else:
-                # Only validate the shape product when both old and new shapes
-                # are fully concrete: a Expr `==` returns an `EQ` node, not
-                # a Python bool, and `assert <Expr>` raises (no __bool__).
-                if all(isinstance(s, int) for s in shape) and all(
-                    isinstance(s, int) for s in self.shape
-                ):
-                    assert functools.reduce(lambda x, y: x * y, shape) == functools.reduce(
-                        lambda x, y: x * y, self.shape
-                    ), (
-                        "The shape of the buffer "
-                        + str(self.shape)
-                        + " and the new shape "
-                        + str(shape)
-                        + " are not compatible"
-                    )
-            return shape
-
-        if len(args) == 1 and isinstance(args[0], str | tvm.DataType) and not kwargs:
-            cast_dtype = tvm.DataType(args[0])
-            cur_dtype = tvm.DataType(self.dtype)
-            if cast_dtype.bits > cur_dtype.bits:
-                # cast up
-                assert cast_dtype.bits % cur_dtype.bits == 0
-                ratio = cast_dtype.bits // cur_dtype.bits
-                layout = self.layout.pack(ratio)
-                shape = [s for s in self.shape[:-1]] + [self.shape[-1] // ratio]
-                new_elem_offset = self.elem_offset // ratio
-            else:
-                # cast down
-                assert cur_dtype.bits % cast_dtype.bits == 0
-                ratio = cur_dtype.bits // cast_dtype.bits
-                layout = self.layout.unpack(ratio)
-                shape = [s for s in self.shape[:-1]] + [self.shape[-1] * ratio]
-                new_elem_offset = self.elem_offset * ratio
-            return self._redecl(shape, layout, dtype=cast_dtype, elem_offset=new_elem_offset)
-        else:
-            # --- Signature 1: view(*shape, **opts) ---
-            # Check if all positional args are integers/Exprs with dtype int32 or int64 (the shape)  # noqa: E501
-            shape = args
-            assert all(
-                isinstance(arg, int)
-                or (tvm.ir.is_prim_expr(arg) and arg.ty.dtype in ["int32", "int64"])
-                for arg in shape
-            ), "shape must be a list of integers or Exprs with dtype int32 or int64"
-            # Safely get optional keyword arguments
-            layout = kwargs.get("layout", None)
-            # Assert there are no other kwargs
-            assert set(kwargs.keys()).issubset({"layout"}), (
-                f"Unsupported kwargs for view: {set(kwargs.keys()) - {'layout'}}"
-            )
-
-            if layout is None:
-                shape = _infer_shape(shape)
-
-            return self._redecl(shape, self.layout if layout is None else layout)
+        return _buffer_view.view(self, *args, **kwargs)
 
     def local(self, *shape, layout=None) -> "Buffer":
         """Create a thread-local view of this buffer.
@@ -428,13 +321,7 @@ class Buffer(Object, Scriptable):
         local : DeclBufferFrame
             The corresponding local buffer.
         """
-        if not shape:
-            local_layout = self.layout.storage()
-            total = functools.reduce(
-                lambda x, y: x * y, [it.extent for it in local_layout.shard], 1
-            )
-            shape = (total,)
-        return self._redecl(shape, self.layout.storage() if layout is None else layout)
+        return _buffer_view.local(self, *shape, layout=layout)
 
     def permute(self, *dims) -> "Buffer":
         """Permute the dimensions of the buffer.
@@ -449,164 +336,7 @@ class Buffer(Object, Scriptable):
         permuted : DeclBufferFrame
             The buffer with permuted dimensions.
         """
-        new_shape = [self.shape[d] for d in dims]
-        # Permute *logical* dims, not the layout's fine-grained shard iters: a
-        # tcgen05/atom layout maps several shard iters to each logical axis, so
-        # group by the current shape first and permute whole groups. ``group``
-        # returns a regrouped layout (degenerate extent-1 iters folded away)
-        # plus seps over *that* layout — permute the regrouped one, not
-        # ``self.layout``. For a simple layout (one shard iter per axis) this
-        # reduces to ``permute_dims(dims)``.
-        # The swizzle permutes the flat offset, so it commutes with a
-        # permutation of the logical dims: permute the inner tile layout
-        # and re-compose.
-        layout, swizzle = self._surgery_parts()
-        grouped, seps = layout.group(list(self.shape))
-        new_layout = grouped.permute_by_groups(seps, list(dims))
-        if swizzle is not None:
-            new_layout = self._rewrap_swizzle(new_layout, swizzle)
-        return self._redecl(new_shape, new_layout)
-
-    # Dimension-surgery views (view/permute/sub/tile/chunk): derived views
-    # sharing this buffer's data; placement is carried and data is never moved.
-
-    def _normalized_dim(self, dim, name):
-        ndim = len(self.shape)
-        if dim < 0:
-            dim += ndim
-        if not 0 <= dim < ndim:
-            raise ValueError(f"{name}: dim {dim} out of range for buffer of rank {ndim}")
-        return dim
-
-    @staticmethod
-    def _concrete_int(value):
-        """Return ``value`` as a python int when it is statically known."""
-        if isinstance(value, bool):
-            return None
-        if isinstance(value, Integral):
-            return int(value)
-        if isinstance(value, tvm.tirx.IntImm):
-            return int(value)
-        return None
-
-    def _surgery_parts(self):
-        """Split ``self.layout`` into (inner tile layout, optional swizzle params).
-
-        The swizzle is returned as a ``(per_element, swizzle_len, atom_len,
-        swizzle_inner)`` tuple consumed by ``_rewrap_swizzle`` /
-        ``_swizzle_offset_commutes``.
-        """
-        layout = self.layout
-        swizzle = None
-        if isinstance(layout, tvm.tirx.layout.ComposeLayout):
-            swizzle = (
-                layout.per_element,
-                layout.swizzle_len,
-                layout.atom_len,
-                layout.swizzle_inner,
-            )
-            layout = layout.tile_layout
-        return layout, swizzle
-
-    @staticmethod
-    def _rewrap_swizzle(layout, swizzle):
-        if swizzle is not None:
-            per_element, swizzle_len, atom_len, swizzle_inner = swizzle
-            return tvm.tirx.layout.ComposeLayout(
-                per_element, swizzle_len, atom_len, layout, swizzle_inner
-            )
-        return layout
-
-    @staticmethod
-    def _dim_group_offset(group, index):
-        """Offset of ``index`` along a dim made of the given layout iters.
-
-        The dim's iters are outer→inner in row-major coordinate order:
-        decompose ``index`` mixed-radix over their extents and weight each
-        coordinate by its iter's stride. A single-iter dim reduces to
-        ``index * stride``. ``index`` may be a Expr; multi-iter dims
-        need concrete inner extents.
-        """
-        if len(group) == 1:
-            return index * group[0].stride
-        extents = []
-        for it in group[1:]:
-            extent = it.extent
-            if not isinstance(extent, tvm.tirx.IntImm):
-                raise ValueError(
-                    "select/narrow: dim with multiple layout iters requires concrete iter extents"
-                )
-            extents.append(int(extent))
-        offset = None
-        remaining = index
-        for pos, it in enumerate(group):
-            inner = functools.reduce(lambda a, b: a * b, extents[pos:], 1)
-            if inner == 1:
-                coord = remaining
-            elif isinstance(remaining, Integral):
-                coord = remaining // inner
-                remaining = remaining % inner
-            else:
-                coord = tvm.tirx.floordiv(remaining, inner)
-                remaining = tvm.tirx.floormod(remaining, inner)
-            term = coord * it.stride
-            offset = term if offset is None else offset + term
-        return offset
-
-    def _swizzle_offset_commutes(self, swizzle, extra_offset):
-        """Whether ``extra_offset`` commutes with the swizzle permutation.
-
-        Folding an offset into ``elem_offset`` moves it *outside* the layout,
-        so the address becomes ``offset + swizzle(rest)``. The swizzle XORs
-        bits within a period of ``2^(per_element + atom_len + swizzle_len)``
-        elements, so this equals the true ``swizzle(offset + rest)`` only
-        when the offset is a multiple of that period.
-        """
-        if swizzle is None or extra_offset is None:
-            return True
-        per_element, sw_len, atom_len, _ = swizzle
-        if sw_len == 0:
-            return True  # identity permutation, everything commutes
-        period = 1 << (int(per_element) + int(atom_len) + sw_len)
-        offset_c = self._concrete_int(extra_offset)
-        if offset_c is not None:
-            return offset_c % period == 0
-        from ..arith import Analyzer  # pylint: disable=import-outside-toplevel
-
-        return Analyzer().can_prove_equal(tvm.tirx.floormod(extra_offset, period), 0)
-
-    def _rebuild_view(self, new_shape, new_shard, grouped, swizzle, extra_offset):
-        """Rebuild a derived view; ``extra_offset`` goes into ``elem_offset``
-        when it commutes with the swizzle (provable period multiple),
-        otherwise it stays inside the tile layout's offset so the swizzle
-        keeps applying to it and the view addresses the same bytes."""
-        offset_map = dict(grouped.offset.items())
-        is_tmem = (
-            self.scope() == "tmem"
-            and self.allocated_addr is not None
-            and len(self.allocated_addr) > 0
-        )
-        if (
-            not is_tmem
-            and extra_offset is not None
-            and not self._swizzle_offset_commutes(swizzle, extra_offset)
-        ):
-            m_axis = tvm.tirx.layout.Axis.get("m")
-            prev = offset_map.get(m_axis)
-            offset_map[m_axis] = extra_offset if prev is None else prev + extra_offset
-            extra_offset = None
-        new_layout = tvm.tirx.layout.TileLayout.from_iters(
-            new_shard, list(grouped.replica), offset_map
-        )
-        new_layout = self._rewrap_swizzle(new_layout, swizzle)
-        if is_tmem:
-            # tmem addresses by physical column: narrowing shifts allocated_addr
-            # (col base), not elem_offset; extra_offset is a TCol column count.
-            return self._redecl(new_shape, new_layout, addr_offset=extra_offset)
-        elem_offset = self.elem_offset
-        if extra_offset is not None:
-            elem_offset = elem_offset + extra_offset
-        return self._redecl(new_shape, new_layout, elem_offset=elem_offset)
+        return _buffer_view.permute(self, *dims)
 
     def rearrange(self, pattern: str, **sizes) -> "Buffer":
         """einops-style relayout in one line: ``buf.rearrange("b (2 r) -> 2 b r")``.
@@ -628,64 +358,10 @@ class Buffer(Object, Scriptable):
         replica (``R[...]``), a stride-fiction/padded view, or a reshape crossing
         a swizzle-atom boundary — keep those as explicit ``view(layout=...)``.
         """
-        import re as _re
-
-        def _groups(side):
-            out = []
-            for grp, bare in _re.findall(r"\(([^)]*)\)|(\S+)", side.strip()):
-                out.append(grp.split() if grp else [bare])
-            return out
-
-        if "->" not in pattern:
-            raise ValueError(f"rearrange: pattern must contain '->', got {pattern!r}")
-        lhs_s, rhs_s = pattern.split("->")
-        lgroups, rgroups = _groups(lhs_s), _groups(rhs_s)
-        if len(lgroups) != len(self.shape):
-            raise ValueError(
-                f"rearrange: lhs has {len(lgroups)} groups but buffer has "
-                f"{len(self.shape)} dims (pattern {pattern!r}, shape {list(self.shape)})"
-            )
-        axis_size: dict = {}
-        for grp, dim in zip(lgroups, self.shape):
-            dim_c = int(dim)
-            known = {a: int(sizes[a]) for a in grp if a in sizes}
-            unknown = [a for a in grp if a not in sizes]
-            prod = 1
-            for v in known.values():
-                prod *= v
-            if len(unknown) == 0:
-                if prod != dim_c:
-                    raise ValueError(f"rearrange: group {grp} product {prod} != dim {dim_c}")
-            elif len(unknown) == 1:
-                if dim_c % prod != 0:
-                    raise ValueError(
-                        f"rearrange: dim {dim_c} not divisible by known product {prod} "
-                        f"in group {grp}"
-                    )
-                known[unknown[0]] = dim_c // prod
-            else:
-                raise ValueError(
-                    f"rearrange: group {grp} has >1 unknown axis; give sizes= for all but one"
-                )
-            axis_size.update(known)
-        flat_l = [a for grp in lgroups for a in grp]
-        flat_r = [a for grp in rgroups for a in grp]
-        if sorted(flat_l) != sorted(flat_r):
-            raise ValueError(
-                f"rearrange: lhs axes {flat_l} != rhs axes {flat_r} (pattern {pattern!r})"
-            )
-        out = self.view(*[axis_size[a] for a in flat_l])  # split
-        out = out.permute(*[flat_l.index(a) for a in flat_r])  # reorder
-        merge = []
-        for grp in rgroups:
-            s = 1
-            for a in grp:
-                s *= axis_size[a]
-            merge.append(s)
-        return out.view(*merge)  # merge
+        return _buffer_view.rearrange(self, pattern, **sizes)
 
     @property
-    def sub(self) -> "_SubIndexer":
+    def sub(self) -> "_buffer_view.SubIndexer":
         """Numpy-style view indexer: ``buf.sub[2, 4:8, ::4]``.
 
         Unlike plain ``buf[...]`` (BufferLoad for scalar indices, extent-1
@@ -695,9 +371,9 @@ class Buffer(Object, Scriptable):
         every s-th element (requires the extent divisible by ``s`` and
         ``a < s``). Trailing dims are kept whole.
         """
-        return _SubIndexer(self)
+        return _buffer_view.sub(self)
 
-    def tile(self, *specs) -> "_TileIndexer":
+    def tile(self, *specs) -> "_buffer_view.TileIndexer":
         """Chunk a dim: split it into factors, pick a chunk, keep the rest.
 
         Rank-preserving — the picked dim's remaining factors merge back into
@@ -724,26 +400,9 @@ class Buffer(Object, Scriptable):
         A picked index may be a dynamic Expr (e.g. a warp id); picking
         several factors of one dim is allowed.
         """
-        if specs and isinstance(specs[0], int | Integral):
-            if len(specs) != 2:
-                raise ValueError("tile(dim, factors) takes a dim and a factors tuple")
-            specs = (specs,)  # single-dim positional form
-        norm = []
-        seen = set()
-        for spec in specs:
-            if not isinstance(spec, tuple | list) or len(spec) != 2:
-                raise ValueError(f"tile: each spec must be (dim, factors), got {spec!r}")
-            dim = self._normalized_dim(spec[0], "tile")
-            if dim in seen:
-                raise ValueError(f"tile: dim {dim} tiled more than once")
-            seen.add(dim)
-            factors = spec[1]
-            if not isinstance(factors, tuple | list) or len(factors) < 1:
-                raise ValueError(f"tile: factors for dim {dim} must be a non-empty tuple")
-            norm.append((dim, tuple(factors)))
-        return _TileIndexer(self, norm)
+        return _buffer_view.tile(self, *specs)
 
-    def chunk(self, spec) -> "_ChunkIndexer":
+    def chunk(self, spec) -> "_buffer_view.ChunkIndexer":
         """Split dims into equal contiguous chunks and pick a chunk per dim —
         **rank-preserving**. Index the result with ``[picks]``.
 
@@ -760,14 +419,7 @@ class Buffer(Object, Scriptable):
             X[.., c * k : (c + 1) * k, ..]        # before (k = E // n)
             X.chunk((None, .., n, ..))[.., c, ..]  # after (k inferred)
         """
-        if not isinstance(spec, tuple | list):
-            raise ValueError(f"chunk: spec must be a per-dim tuple, got {spec!r}")
-        if len(spec) != len(self.shape):
-            raise ValueError(f"chunk: spec length {len(spec)} != buffer rank {len(self.shape)}")
-        for d, n in enumerate(spec):
-            if n is not None and (not isinstance(n, Integral) or int(n) < 1):
-                raise ValueError(f"chunk: spec[{d}] must be None or a positive int, got {n!r}")
-        return _ChunkIndexer(self, tuple(spec))
+        return _buffer_view.chunk(self, spec)
 
     def __getitem__(self, indices):
         from ..arith import Analyzer  # pylint: disable=import-outside-toplevel
@@ -818,261 +470,6 @@ class Buffer(Object, Scriptable):
                 else:
                     expr_indices.append(index)
             return BufferLoad(self, expr_indices)
-
-
-def _tmem_offset_axis_check(buf, group_iters, start_c, what):
-    """tmem views fold sub offsets into ``allocated_addr`` as a *column*
-    count, so a nonzero (or non-provably-zero) pick/narrow is only valid on
-    TCol-stride layout iters — a lane-axis offset would be silently
-    misaddressed. No-op for non-tmem buffers."""
-    if buf.allocated_addr is None or len(buf.allocated_addr) == 0:
-        return
-    if start_c == 0:
-        return
-    for it in group_iters:
-        axis_name = getattr(it.axis, "name", None) if it.axis is not None else None
-        if axis_name != "TCol":
-            raise ValueError(
-                f"sub: tmem {what} with nonzero offset requires TCol-stride "
-                f"layout iters; dim iter has axis {axis_name!r} (a lane-axis "
-                f"offset cannot fold into the column allocated_addr)"
-            )
-
-
-def _view_drop(buf, dim, index):
-    """Internal machinery for ``sub`` (int index) / ``tile`` (factor pick): a
-    view with ``dim`` removed, fixed at ``index`` — the offset folds into
-    elem_offset through the dim's layout iters. Not a public method."""
-    dim = buf._normalized_dim(dim, "index")
-    index_c = buf._concrete_int(index)
-    extent_c = buf._concrete_int(buf.shape[dim])
-    if index_c is not None and (index_c < 0 or (extent_c is not None and index_c >= extent_c)):
-        raise ValueError(
-            f"index {index_c} out of range for dim {dim} "
-            f"of extent {extent_c if extent_c is not None else buf.shape[dim]}"
-        )
-    layout, swizzle = buf._surgery_parts()
-    grouped, seps = layout.group(list(buf.shape))
-    iters = list(grouped.shard)
-    lo, hi = seps[dim], seps[dim + 1]
-    _tmem_offset_axis_check(buf, iters[lo:hi], index_c, "index")
-    offset = buf._dim_group_offset(iters[lo:hi], index)
-    new_shape = list(buf.shape[:dim]) + list(buf.shape[dim + 1 :])
-    new_shard = iters[:lo] + iters[hi:]
-    return buf._rebuild_view(new_shape, new_shard, grouped, swizzle, offset)
-
-
-def _view_narrow(buf, dim, start, length):
-    """Internal machinery for ``sub`` (slice index): a view of ``dim`` narrowed
-    to ``[start, start + length)`` — the offset folds into elem_offset. Multi-iter
-    dims need start/length on the inner iter block. Not a public method."""
-    dim = buf._normalized_dim(dim, "index")
-    start_c = buf._concrete_int(start)
-    length_c = buf._concrete_int(length)
-    extent_c = buf._concrete_int(buf.shape[dim])
-    if start_c is not None and start_c < 0:
-        raise ValueError(f"sub: start {start_c} must be non-negative")
-    if length_c is not None and length_c < 1:
-        raise ValueError(f"sub: length {length_c} must be positive")
-    if (
-        start_c is not None
-        and length_c is not None
-        and extent_c is not None
-        and start_c + length_c > extent_c
-    ):
-        raise ValueError(
-            f"sub: range [{start_c}, {start_c + length_c}) exceeds dim {dim} extent {extent_c}"
-        )
-    layout, swizzle = buf._surgery_parts()
-    grouped, seps = layout.group(list(buf.shape))
-    iters = list(grouped.shard)
-    lo, hi = seps[dim], seps[dim + 1]
-    group = iters[lo:hi]
-    Iter = tvm.tirx.layout.Iter
-    if len(group) == 1:
-        it = group[0]
-        _tmem_offset_axis_check(buf, [it], start_c, "narrow")
-        offset = start * it.stride
-        new_group = [Iter(length, it.stride, it.axis)]
-    else:
-        inner = 1
-        for it in group[1:]:
-            extent = it.extent
-            if not isinstance(extent, tvm.tirx.IntImm):
-                raise ValueError(
-                    "sub: dim with multiple layout iters requires concrete iter extents"
-                )
-            inner *= int(extent)
-        if not (isinstance(start, Integral) and isinstance(length, Integral)):
-            raise ValueError(
-                f"sub: dim {dim} is made of {len(group)} layout iters; "
-                f"start/length must be concrete multiples of {inner}"
-            )
-        if start % inner != 0 or length % inner != 0:
-            raise ValueError(
-                f"sub: dim {dim} start/length must be multiples of the "
-                f"inner iter block {inner}; got start={start} length={length}"
-            )
-        outer = group[0]
-        _tmem_offset_axis_check(buf, [outer], start // inner, "narrow")
-        offset = (start // inner) * outer.stride
-        new_group = [Iter(length // inner, outer.stride, outer.axis), *group[1:]]
-    new_shape = list(buf.shape)
-    new_shape[dim] = length
-    new_shard = iters[:lo] + new_group + iters[hi:]
-    return buf._rebuild_view(new_shape, new_shard, grouped, swizzle, offset)
-
-
-class _SubIndexer:
-    """Indexer object returned by :attr:`Buffer.sub`.
-
-    Translates numpy basic indexing into ``_view_drop`` / ``_view_narrow`` /
-    ``view`` view operations (int drops the dim, ``a:b`` narrows, ``a::s`` strides).
-    """
-
-    def __init__(self, buffer: Buffer):
-        self._buffer = buffer
-
-    def __getitem__(self, indices) -> Buffer:
-        if not isinstance(indices, tuple):
-            indices = (indices,)
-        buf = self._buffer
-        if len(indices) > len(buf.shape):
-            raise ValueError(f"sub: {len(indices)} indices for buffer of rank {len(buf.shape)}")
-        dim = 0
-        for item in indices:
-            if isinstance(item, slice):
-                step = item.step
-                if step is None or (isinstance(step, Integral) and step == 1):
-                    if item.start is None and item.stop is None:
-                        dim += 1
-                        continue
-                    start = 0 if item.start is None else item.start
-                    stop = buf.shape[dim] if item.stop is None else item.stop
-                    buf = _view_narrow(buf, dim, start, stop - start)
-                    dim += 1
-                else:
-                    if not isinstance(step, Integral) or step <= 0:
-                        raise ValueError(f"sub: step must be a positive int, got {step!r}")
-                    if item.stop is not None:
-                        raise ValueError("sub: a stop bound with a step is not supported")
-                    extent = buf.shape[dim]
-                    if not isinstance(extent, tvm.tirx.IntImm):
-                        raise ValueError("sub: a stepped slice requires a concrete dim extent")
-                    extent = int(extent)
-                    if extent % step != 0:
-                        raise ValueError(
-                            f"sub: dim extent {extent} is not divisible by step {step}"
-                        )
-                    start = 0 if item.start is None else item.start
-                    # a::s over N = split into (N//s, s) and fix the remainder
-                    # coordinate at a (requires 0 <= a < s).
-                    start_c = Buffer._concrete_int(start)
-                    if start_c is not None and not 0 <= start_c < step:
-                        raise ValueError(
-                            f"sub: stepped-slice start {start_c} must be in [0, {step})"
-                        )
-                    split = buf.view(*buf.shape[:dim], extent // step, step, *buf.shape[dim + 1 :])
-                    buf = _view_drop(split, dim + 1, start)
-                    dim += 1
-            else:
-                buf = _view_drop(buf, dim, item)
-        return buf
-
-
-class _ChunkIndexer:
-    """Indexer returned by :meth:`Buffer.chunk`.
-
-    ``[picks]`` picks a chunk per chunked dim — narrowing that dim to the
-    chunk's ``[c*k : (c+1)*k)`` range (``k = E // n``, rank-preserving) — and
-    passes unchunked-dim picks through as ordinary indices, yielding the same
-    ``BufferRegion`` as the hand-written ``c*k:(c+1)*k`` slice.
-    """
-
-    def __init__(self, buffer: Buffer, spec):
-        self._buffer = buffer
-        self._spec = spec
-
-    def __getitem__(self, picks):
-        if not isinstance(picks, tuple):
-            picks = (picks,)
-        buf = self._buffer
-        if len(picks) > len(self._spec):
-            raise ValueError(f"chunk: {len(picks)} indices for a rank-{len(self._spec)} spec")
-        translated = []
-        for d, pick in enumerate(picks):
-            n = self._spec[d]
-            if n is None:
-                translated.append(pick)
-            elif isinstance(pick, slice):
-                raise ValueError(
-                    f"chunk: chunked dim {d} takes a chunk index, not a slice; got {pick!r}"
-                )
-            else:
-                k = buf.shape[d] // int(n)
-                translated.append(slice(pick * k, (pick + 1) * k))
-        return buf[tuple(translated)]
-
-
-class _TileIndexer:
-    """Indexer object returned by :meth:`Buffer.tile`.
-
-    Holds ``(dim, factors)`` specs; ``[...]`` takes one entry per factor
-    (``int`` / ``Expr`` picks and drops it, ``:`` keeps it). Each dim is
-    processed as ``view`` (split) -> per-factor ``_view_drop`` -> a single
-    ``view`` (merge) of the kept factors. Dims are processed high-to-low so a
-    fully-picked (rank-reducing) dim never shifts a lower dim's index.
-    """
-
-    def __init__(self, buffer: Buffer, specs):
-        self._buffer = buffer
-        self._specs = specs
-
-    def __getitem__(self, picks) -> Buffer:
-        if not isinstance(picks, tuple):
-            picks = (picks,)
-        n_factors = sum(len(factors) for _, factors in self._specs)
-        if len(picks) != n_factors:
-            raise ValueError(
-                f"tile: split into {n_factors} factor(s) but {len(picks)} "
-                f"index(es) given (int/Expr picks, ':' keeps)"
-            )
-        # Distribute the flat index list across specs, left to right.
-        groups, pos = [], 0
-        for dim, factors in self._specs:
-            groups.append((dim, factors, picks[pos : pos + len(factors)]))
-            pos += len(factors)
-        buf = self._buffer
-        for dim, factors, dim_picks in sorted(groups, key=lambda g: g[0], reverse=True):
-            buf = self._apply(buf, dim, factors, dim_picks)
-        return buf
-
-    @staticmethod
-    def _is_keep(p):
-        return isinstance(p, slice) and p.start is None and p.stop is None and p.step is None
-
-    @classmethod
-    def _apply(cls, buf, dim, factors, dim_picks):
-        for p in dim_picks:
-            if isinstance(p, slice) and not cls._is_keep(p):
-                raise ValueError("tile: a factor slice must be ':' (keep whole); got a sub-slice")
-        n_keep = sum(1 for p in dim_picks if cls._is_keep(p))
-        if n_keep == len(dim_picks):
-            raise ValueError(
-                f"tile: dim {dim} picks no factor (all ':'); a chunk must pick "
-                f"at least one factor. Use .view / .chunk for a pure reshape."
-            )
-        # Split `dim` into `factors` (view infers the -1).
-        buf = buf.view(*buf.shape[:dim], *factors, *buf.shape[dim + 1 :])
-        # Drop picked factors from the last to the first so earlier dim indices
-        # stay valid; kept factors then sit contiguously starting at ``dim``.
-        for i in reversed(range(len(dim_picks))):
-            if not cls._is_keep(dim_picks[i]):
-                buf = _view_drop(buf, dim + i, dim_picks[i])
-        # Merge the kept factors back into the one dim (rank-preserving).
-        if n_keep >= 2:
-            buf = buf.view(*buf.shape[:dim], -1, *buf.shape[dim + n_keep :])
-        return buf
 
 
 def decl_buffer(

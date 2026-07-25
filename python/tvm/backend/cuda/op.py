@@ -918,6 +918,29 @@ def ptx_bar_sync(name_bar_id, thread_count):
     return call_intrin("", "tirx.ptx.bar_sync", name_bar_id, thread_count)
 
 
+def ptx_barrier_sync(name_bar_id, thread_count):
+    """TVM intrinsic to call unaligned ``barrier.sync a, b``.
+
+    Unlike the aligned ``bar.sync`` alias, this spelling is valid when
+    participating lanes reach the named barrier through divergent control
+    flow or distinct static instruction sites.
+
+    Parameters
+    ----------
+    name_bar_id : int
+        The ID of the named barrier.
+
+    thread_count : int
+        The number of threads expected to arrive at the barrier.
+
+    Returns
+    -------
+    call : Expr
+        The call expression.
+    """
+    return call_intrin("", "tirx.ptx.barrier_sync", name_bar_id, thread_count)
+
+
 def ptx_cp_async(
     dst_ptr,
     src_ptr,

@@ -1086,6 +1086,10 @@ def gemm_async_tcgen05_impl(op_call: TilePrimitiveCall, sctx: DispatchContext) -
         )
 
     def _make_desc(smem_buf, ldo, sdo, swizzle_val, name):
+        # Warp-scoped calls encode in all active lanes before electing the MMA
+        # issuer, so make the descriptor low word uniform there.  A
+        # single-thread caller is already elected: a full-mask shuffle in that
+        # scope is invalid, and the same thread consumes the descriptor anyway.
         desc_buf = tvm.tirx.decl_buffer((1,), "uint64", name=name, scope="local")
         encode_call = tvm.tirx.call_intrin(
             "",
@@ -1096,14 +1100,11 @@ def gemm_async_tcgen05_impl(op_call: TilePrimitiveCall, sctx: DispatchContext) -
             sdo,
             swizzle_val,
         )
-        wrap = SeqStmt(
-            [
-                AllocBuffer(desc_buf),
-                Evaluate(encode_call),
-                Evaluate(_make_lo_uniform(desc_buf[0])),
-                _krp,
-            ]
-        )
+        wrap_stmts = [AllocBuffer(desc_buf), Evaluate(encode_call)]
+        if warp_scope:
+            wrap_stmts.append(Evaluate(_make_lo_uniform(desc_buf[0])))
+        wrap_stmts.append(_krp)
+        wrap = SeqStmt(wrap_stmts)
         sctx.add_post_buffer_def_stmt(smem_buf, wrap)
         return desc_buf
 

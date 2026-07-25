@@ -880,7 +880,8 @@ def _ptx_cp_async_bulk_wait_group_parts(n, read):
     read_b = bool(int(read)) if hasattr(read, "value") else bool(read)
     return (
         f"ptx_cp_async_bulk_wait_group{'_read' if read_b else ''}_{n}",
-        f'    asm volatile("cp.async.bulk.wait_group{".read" if read_b else ""} {n};");',
+        f'    asm volatile("cp.async.bulk.wait_group{".read" if read_b else ""} {n};" '
+        '::: "memory");',
     )
 
 

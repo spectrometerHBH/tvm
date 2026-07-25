@@ -333,6 +333,7 @@ class BarrierNamespace:
     """The Barrier instruction submodule."""
 
     def __init__(self):
+        self.sync = _op_wrapper(_cuda_op.ptx_barrier_sync)
         self.cluster = BarrierClusterNamespace()
 
 

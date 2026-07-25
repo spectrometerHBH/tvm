@@ -157,6 +157,45 @@ def test_tirx_launch_bounds_min_blocks_attr_sets_one_block_per_sm():
     assert "tirx.launch_bounds_min_blocks_per_sm" not in src
 
 
+def test_tirx_launch_bounds_max_blocks_per_cluster_emits_third_operand():
+    @T.prim_func
+    def main(A: T.Buffer((4,), "int32")):
+        T.device_entry()
+        T.attr(
+            {
+                "tirx.launch_bounds_min_blocks_per_sm": 1,
+                "tirx.launch_bounds_max_blocks_per_cluster": 1,
+            }
+        )
+        bx = T.cta_id([4])
+        tx = T.thread_id([384])
+        if tx == 0:
+            A[bx] = A[bx] + 1
+
+    src, _ = _get_source(main)
+    assert 'extern "C" __global__ void __launch_bounds__(384, 1, 1) main_kernel' in src
+    assert "tirx.launch_bounds_max_blocks_per_cluster" not in src
+
+
+def test_tirx_cuda_kernel_return_zero_codegen_is_void_early_return():
+    @T.prim_func
+    def main(A: T.Buffer((4,), "int32")):
+        T.device_entry()
+        bx = T.cta_id([4])
+        tx = T.thread_id([32])
+        if bx >= 3:
+            return 0
+        if tx == 0:
+            A[bx] = A[bx] + 1
+
+    src, _ = _get_source(main)
+    # The bounded blockIdx.x domain simplifies ``blockIdx.x >= 3`` to the
+    # equivalent final-point predicate, including CUDA's explicit index cast.
+    assert re.search(r"if \(\(\(int\)blockIdx\.x\) == 3\)", src)
+    assert "return;" in src
+    assert "return 0;" not in src
+
+
 def test_serial_pragma_unroll_codegen():
     @T.prim_func
     def main(A: T.Buffer((4,), "int32")):
@@ -172,6 +211,21 @@ def test_serial_pragma_unroll_codegen():
     assert "#pragma unroll\n" in src
     assert "for (" in src
     assert "break;" in src
+
+
+def test_serial_disable_unroll_pragma_immediately_precedes_dynamic_for():
+    @T.prim_func
+    def main(A: T.Buffer((4,), "int32")):
+        T.device_entry()
+        tx = T.thread_id([32])
+        if tx == 0:
+            begin: T.let = T.if_then_else(A[0] > 0, A[1], A[2])
+            end: T.let = T.if_then_else(A[0] > 1, A[2], A[3])
+            for i in T.serial(begin, end, unroll=False):
+                A[0] = A[0] + i
+
+    src, _ = _get_source(main)
+    assert re.search(r"#pragma unroll 1\s*for \(", src)
 
 
 def test_cluster_cta_id_codegen_uses_coordinate_sregs():
@@ -442,12 +496,17 @@ def test_ptx_cp_async_bulk_non_tma_form_codegen():
                 smem.ptr_to([0]), A.data, T.uint32(64), smem.ptr_to([0]), cache_policy=C[0]
             )
             T.ptx.cp_async_bulk_s2g(B.data, smem.ptr_to([0]), T.uint32(64), cache_policy=C[0])
+            T.ptx.cp_async.bulk.commit_group()
+            T.ptx.cp_async.bulk.wait_group(0, read=True)
+            T.ptx.cp_async.bulk.wait_group(1, read=False)
 
     src, _ = _get_source(main)
     assert "cp.async.bulk.shared::cta.global.mbarrier::complete_tx::bytes.L2::cache_hint" in src
     assert "cp.async.bulk.shared::cluster.global.mbarrier::complete_tx::bytes.L2::cache_hint" in src
     assert "cp.async.bulk.global.shared::cta.bulk_group.L2::cache_hint" in src
     assert "unsigned long long cache_policy" in src
+    assert 'asm volatile("cp.async.bulk.wait_group.read 0;" ::: "memory");' in src
+    assert 'asm volatile("cp.async.bulk.wait_group 1;" ::: "memory");' in src
 
 
 def test_ptx_sync_and_clc_codegen():

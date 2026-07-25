@@ -318,6 +318,23 @@ def test_bar_sync():
 
 @pytest.mark.gpu
 @pytest.mark.skipif(not env.has_cuda_compute(9), reason="need cuda compute >= 9.0")
+def test_barrier_sync_unaligned():
+    # fmt: off
+    @T.prim_func
+    def func(A: T.Buffer(1)):
+        T.device_entry()
+        cta_id = T.cta_id([1])
+        tid = T.thread_id([128])
+        T.ptx.barrier.sync(0, 128)
+        # fmt: on
+
+    src, mod = _get_source(func)
+    assert "tvm_builtin_ptx_barrier_sync(0, 128)" in src
+    assert 'barrier.sync %0, %1;" : : "r"(name_bar_id), "r"(thread_count) : "memory"' in src
+
+
+@pytest.mark.gpu
+@pytest.mark.skipif(not env.has_cuda_compute(9), reason="need cuda compute >= 9.0")
 def test_fence_mbarrier_init_release_clsuter():
     # fmt: off
     @T.prim_func

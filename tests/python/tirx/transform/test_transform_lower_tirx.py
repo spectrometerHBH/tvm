@@ -977,6 +977,27 @@ def test_lower_exec_context_selector_filter_for_elect_sync():
     assert any("T.selector(lane_id, T.ptx.elect_sync() != T.uint32(0))" in item for item in seen)
 
 
+def test_lower_cleanup_accepts_bool_elect_sync_else_path():
+    @T.prim_func(private=True)
+    def before(A_ptr: T.handle):
+        A = T.match_buffer(A_ptr, (32,), "int32", scope="global")
+        T.device_entry()
+        T.cta_id([1])
+        T.warp_id([1])
+        lane_id = T.lane_id([32])
+        if T.ptx.elect_sync() != T.uint32(0):
+            A[lane_id] = 1
+        else:
+            A[lane_id] = 0
+
+    with tvm.target.Target("cuda"):
+        lowered = LowerTIRx()(tvm.IRModule({"main": before}))
+
+    script = lowered.script(extra_config={"tirx.prefix": "T"})
+    assert "T.ptx.elect_sync() != T.uint32(0)" in script
+    assert "else:" in script
+
+
 def test_lower_exec_context_scope_guard_mixes_structural_and_selector():
     import tvm.tirx.operator.tile_primitive as _  # noqa: F401
     from tvm.tirx.operator.tile_primitive.dispatcher import register_dispatch
