@@ -307,13 +307,17 @@ def _ptx_shared_addr(space, ptr_name="address"):
     return "", f'"l"({ptr_name})'
 
 
-def _ptx_addr_operand(space, ptr_name="address", raw_address=False):
+def _ptx_addr_operand(space, ptr_name, raw_address):
     if raw_address:
         return "", f'"r"({ptr_name})'
     return _ptx_shared_addr(space, ptr_name)
 
 
-def _ptx_ld_signature(dst_count, vec_len, raw_address=False):
+def _is_raw_u32_address(address):
+    return str(address.ty) == "uint32"
+
+
+def _ptx_ld_signature(dst_count, vec_len, raw_address):
     address_type = "unsigned int" if raw_address else "void*"
     if dst_count == 1:
         return f"(void* dst_ptr, {address_type} src_ptr, unsigned long long cache_policy)"
@@ -337,7 +341,7 @@ def _ptx_ld_vec_store(num_bytes, vec_len, ptx_type, c_type, dst_count):
     return f"    *reinterpret_cast<{store_type}*>(dst_ptr) = r0;"
 
 
-def _ptx_ld_form_parts(form, attr_args, raw_address=False):
+def _ptx_ld_form_parts(form, attr_args, raw_address):
     if form == "weak":
         (
             return_dtype,
@@ -562,12 +566,12 @@ def _ptx_ld_form_parts(form, attr_args, raw_address=False):
     return name, sig, c_type, return_dtype, body
 
 
-def _register_ptx_ld(op_name, form, n_attrs, *, with_raw_address=False):
+def _register_ptx_ld(op_name, form, n_attrs):
     def _parts(*args):
         attrs = args[-n_attrs:]
-        raw_address = _bool_attr(attrs[-1]) if with_raw_address else False
-        if with_raw_address:
-            attrs = attrs[:-1]
+        forward = args[:-n_attrs]
+        # The weak ld form always forwards (..., address, cache_policy).
+        raw_address = form == "weak" and _is_raw_u32_address(forward[-2])
         return _ptx_ld_form_parts(form, attrs, raw_address)
 
     device_intrinsic(
@@ -583,7 +587,7 @@ def _register_ptx_ld(op_name, form, n_attrs, *, with_raw_address=False):
     )
 
 
-_register_ptx_ld("ptx_ld", "weak", 12, with_raw_address=True)
+_register_ptx_ld("ptx_ld", "weak", 11)
 _register_ptx_ld("ptx_ld_global_nc", "global_nc", 9)
 _register_ptx_ld("ptx_ld_relaxed", "relaxed", 10)
 _register_ptx_ld("ptx_ld_acquire", "acquire", 10)
@@ -933,7 +937,7 @@ def _ptx_st_load_src(_num_bytes, vec_len, ptx_type, c_type):
     return _assign("r0", f"*reinterpret_cast<{src_c_type}*>(src_ptr)")
 
 
-def _ptx_st_form_parts(form, attr_args, from_src, raw_address=False):
+def _ptx_st_form_parts(form, attr_args, from_src, raw_address):
     if form == "weak":
         weak, space, cop, vec, ptx_type, has_cache_hint, l1_evict, l2_evict = attr_args
         sem, scope = "", ""
@@ -1101,13 +1105,13 @@ def _ptx_st_form_parts(form, attr_args, from_src, raw_address=False):
     return name, sig, body
 
 
-def _register_ptx_st(op_name, form, n_attrs, *, with_raw_address=False):
+def _register_ptx_st(op_name, form, n_attrs):
     def codegen(*args):
         from_src = _bool_attr(args[-1])
-        raw_address = _bool_attr(args[-2]) if with_raw_address else False
-        st_attrs = args[-n_attrs:-2] if with_raw_address else args[-n_attrs:-1]
-        parts = _ptx_st_form_parts(form, st_attrs, from_src, raw_address)
+        st_attrs = args[-n_attrs:-1]
         forward = args[:-(n_attrs)]
+        raw_address = form == "weak" and _is_raw_u32_address(forward[0])
+        parts = _ptx_st_form_parts(form, st_attrs, from_src, raw_address)
         name, sig, body_str = parts
         source_code = f"\n__forceinline__ __device__ void {name}{sig} {{\n{body_str}\n}}\n"
         return cuda_func_call(name, *forward, source_code=source_code)
@@ -1128,7 +1132,7 @@ def _register_ptx_st_mmio(op_name, form, n_attrs):
     register_codegen(op_name)(codegen)
 
 
-_register_ptx_st("ptx_st", "weak", 10, with_raw_address=True)
+_register_ptx_st("ptx_st", "weak", 9)
 _register_ptx_st("ptx_st_relaxed", "relaxed", 8)
 _register_ptx_st("ptx_st_release", "release", 8)
 _register_ptx_st("ptx_st_volatile", "volatile", 4)

@@ -3911,22 +3911,21 @@ def _normalize_ptx_ld_dst(dst, vec, op_name):
     return [dst], 1
 
 
-def _ptx_raw_shared_address(addr, space, op_name):
-    """Return whether ``addr`` is a raw shared-memory u32 address."""
+def _validate_ptx_address(addr, space, op_name):
+    """Validate pointer and raw shared-memory address forms."""
     addr_ty = getattr(addr, "ty", None)
     if isinstance(addr_ty, PointerType):
-        return False
+        return
     if isinstance(addr_ty, PrimType):
         if addr_ty.dtype == "uint32":
             if not str(space).startswith("shared"):
                 raise ValueError(f"{op_name} uint32 address requires shared state space")
-            return True
+            return
         if addr_ty.dtype.startswith(("int", "uint")):
             raise ValueError(
                 f"{op_name} integer address must be uint32 in shared state space, "
                 f"got {addr_ty.dtype}"
             )
-    return False
 
 
 def ptx_ld_acquire(
@@ -4041,7 +4040,7 @@ def ptx_ld(
     _choice("cop", cop, _PTX_LD_COP)
     _choice("ptx_type", ptx_type, _PTX_LD_TYPE)
     _choice("vec", vec, _PTX_LD_VEC)
-    raw_address = _ptx_raw_shared_address(addr, space, "ptx_ld")
+    _validate_ptx_address(addr, space, "ptx_ld")
     cache_policy, has_cache_policy = _resolve_cache_policy(cache_hint, cache_policy)
     dst_args, to_dst = _normalize_ptx_ld_dst(dst, vec, "ld")
     if to_dst:
@@ -4062,7 +4061,6 @@ def ptx_ld(
             l1_evict,
             l2_evict,
             prefetch_size,
-            int(raw_address),
         )
     return call_intrin(
         return_type,
@@ -4080,7 +4078,6 @@ def ptx_ld(
         l1_evict,
         l2_evict,
         prefetch_size,
-        int(raw_address),
     )
 
 
@@ -4380,7 +4377,7 @@ def ptx_st(
     _choice("cop", cop, _PTX_ST_COP)
     _choice("vec", vec, _PTX_ST_VEC)
     _choice("ptx_type", ptx_type, _PTX_SCALAR_TYPE | {"b128"})
-    raw_address = _ptx_raw_shared_address(address, space, "ptx_st")
+    _validate_ptx_address(address, space, "ptx_st")
     if ptx_type == "b128" and not (
         src is not None
         and not values
@@ -4408,7 +4405,6 @@ def ptx_st(
         int(has_cache_policy),
         l1_evict,
         l2_evict,
-        int(raw_address),
         int(src is not None),
     )
     if src is not None:
