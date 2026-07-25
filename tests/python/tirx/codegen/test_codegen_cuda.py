@@ -339,6 +339,31 @@ def test_ptx_f32x2_value_codegen():
     assert "fma.rn.f32x2 %0, %1, %2, %3;" in src
 
 
+def test_sparse_decode_conversion_intrinsics_codegen():
+    @T.prim_func
+    def main(
+        U16: T.Buffer((1,), "uint16"),
+        U32: T.Buffer((1,), "uint32"),
+        U64: T.Buffer((2,), "uint64"),
+        F32: T.Buffer((2,), "float32"),
+    ):
+        T.device_entry()
+        tx = T.thread_id([32])
+        if tx == 0:
+            pair: T.let = T.cuda.make_float2(F32[0], F32[1])
+            U16[0] = T.cuda.cvt_float2_to_e8m0x2(pair)
+            U32[0] = T.cuda.cvt_e8m0x2_to_bf162raw(U16[0])
+            U64[0] = T.cuda.fp8x2_e4m3_to_float2(U16[0])
+            U64[1] = T.ptx.add_f32x2(pair, pair, rounding="", dps=False)
+
+    src, _ = _get_source(main)
+    assert "__nv_cvt_float2_to_e8m0x2(value, __NV_NOSAT, cudaRoundZero)" in src
+    assert "__nv_cvt_e8m0x2_to_bf162raw(packed)" in src
+    assert "float2 result = static_cast<float2>(value)" in src
+    assert "add.f32x2 %0, %1, %2;" in src
+    assert "add.rn.f32x2 %0, %1, %2;" not in src
+
+
 @pytest.mark.gpu
 def test_megamoe_extracted_intrinsics_codegen():
     @T.prim_func

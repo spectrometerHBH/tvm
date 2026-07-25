@@ -21,6 +21,7 @@ from __future__ import annotations
 
 from tvm import tirx
 from tvm.ir import Call, Op, is_prim_expr
+from tvm.ir.type import PointerType, PrimType
 from tvm.runtime import const
 from tvm.tirx.op import bitwise_and, call_intrin, reinterpret, tvm_access_ptr
 from tvm.tirx.operator.intrinsics._common import CLUSTER_BARRIER_SEM as _CLUSTER_BARRIER_SEM
@@ -3620,7 +3621,7 @@ def _ptx_binary_f32x2(op_name, *args, rounding="rn", ftz=False, dps=True, return
     ``dps=True`` emits the destination-passing form and returns void.
     ``dps=False`` returns either packed ``uint64`` bits or ``float32x2``.
     """
-    rounding_options = ("", *_F32X2_ROUND) if op_name == "mul" else _F32X2_ROUND
+    rounding_options = ("", *_F32X2_ROUND) if op_name in ("add", "mul") else _F32X2_ROUND
     _choice("rounding", rounding, rounding_options)
     if dps:
         if len(args) != 3:
@@ -3910,6 +3911,24 @@ def _normalize_ptx_ld_dst(dst, vec, op_name):
     return [dst], 1
 
 
+def _ptx_raw_shared_address(addr, space, op_name):
+    """Return whether ``addr`` is a raw shared-memory u32 address."""
+    addr_ty = getattr(addr, "ty", None)
+    if isinstance(addr_ty, PointerType):
+        return False
+    if isinstance(addr_ty, PrimType):
+        if addr_ty.dtype == "uint32":
+            if not str(space).startswith("shared"):
+                raise ValueError(f"{op_name} uint32 address requires shared state space")
+            return True
+        if addr_ty.dtype.startswith(("int", "uint")):
+            raise ValueError(
+                f"{op_name} integer address must be uint32 in shared state space, "
+                f"got {addr_ty.dtype}"
+            )
+    return False
+
+
 def ptx_ld_acquire(
     addr,
     return_type,
@@ -4022,6 +4041,7 @@ def ptx_ld(
     _choice("cop", cop, _PTX_LD_COP)
     _choice("ptx_type", ptx_type, _PTX_LD_TYPE)
     _choice("vec", vec, _PTX_LD_VEC)
+    raw_address = _ptx_raw_shared_address(addr, space, "ptx_ld")
     cache_policy, has_cache_policy = _resolve_cache_policy(cache_hint, cache_policy)
     dst_args, to_dst = _normalize_ptx_ld_dst(dst, vec, "ld")
     if to_dst:
@@ -4042,6 +4062,7 @@ def ptx_ld(
             l1_evict,
             l2_evict,
             prefetch_size,
+            int(raw_address),
         )
     return call_intrin(
         return_type,
@@ -4059,6 +4080,7 @@ def ptx_ld(
         l1_evict,
         l2_evict,
         prefetch_size,
+        int(raw_address),
     )
 
 
@@ -4357,7 +4379,24 @@ def ptx_st(
     _choice("space", space, _PTX_MEM_SPACE | {"local", "param::func"})
     _choice("cop", cop, _PTX_ST_COP)
     _choice("vec", vec, _PTX_ST_VEC)
-    _choice("ptx_type", ptx_type, _PTX_SCALAR_TYPE)
+    _choice("ptx_type", ptx_type, _PTX_SCALAR_TYPE | {"b128"})
+    raw_address = _ptx_raw_shared_address(address, space, "ptx_st")
+    if ptx_type == "b128" and not (
+        src is not None
+        and not values
+        and weak
+        and space == "shared::cta"
+        and not cop
+        and not vec
+        and not cache_hint
+        and cache_policy is None
+        and not l1_evict
+        and not l2_evict
+    ):
+        raise ValueError(
+            "ptx_st b128 requires src=, weak=True, space='shared::cta', "
+            "and no cache/vector modifiers"
+        )
     cache_policy, has_cache_policy = _resolve_cache_policy(cache_hint, cache_policy)
     attrs = (
         cache_policy,
@@ -4369,6 +4408,7 @@ def ptx_st(
         int(has_cache_policy),
         l1_evict,
         l2_evict,
+        int(raw_address),
         int(src is not None),
     )
     if src is not None:
@@ -4637,6 +4677,21 @@ def cuda_float22bfloat162_rn_from_float2(packed):
 
 def cuda_bfloat1622float2(packed):
     return call_intrin("uint64", "tirx.cuda.bfloat1622float2", packed)
+
+
+def cuda_cvt_float2_to_e8m0x2(packed):
+    """Convert packed ``float2`` bits to e8m0x2 with rz/nosat semantics."""
+    return call_intrin("uint16", "tirx.cuda.cvt_float2_to_e8m0x2", packed)
+
+
+def cuda_cvt_e8m0x2_to_bf162raw(packed):
+    """Convert packed e8m0x2 bits to raw ``bfloat162`` bits."""
+    return call_intrin("uint32", "tirx.cuda.cvt_e8m0x2_to_bf162raw", packed)
+
+
+def cuda_fp8x2_e4m3_to_float2(packed):
+    """Convert packed e4m3 fp8x2 bits to packed ``float2`` bits."""
+    return call_intrin("uint64", "tirx.cuda.fp8x2_e4m3_to_float2", packed)
 
 
 def cuda_hmin2(a, b):

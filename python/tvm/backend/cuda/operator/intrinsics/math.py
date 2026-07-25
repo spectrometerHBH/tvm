@@ -73,7 +73,7 @@ def _ptx_arith_modifier_string(dtype, rounding, ftz, sat, op=None):
         raise ValueError("PTX <op>.f64 does not accept .ftz or .sat")
     if dtype == "f32x2" and sat_b:
         raise ValueError("PTX <op>.f32x2 does not accept .sat")
-    if dtype == "f32x2" and op == "mul" and rnd in ("", "none"):
+    if dtype == "f32x2" and op in ("add", "mul") and rnd in ("", "none"):
         mod = ""
         name_suffix = ""
         if ftz_b:
@@ -612,6 +612,44 @@ device_intrinsic(
         "    return *reinterpret_cast<unsigned long long*>(&result);"
     ),
     extra_deps=("bf16",),
+)
+
+device_intrinsic(
+    "cuda_cvt_float2_to_e8m0x2",
+    helper_name="tvm_builtin_cvt_float2_to_e8m0x2",
+    c_signature="(unsigned long long packed)",
+    return_type="unsigned short",
+    body=(
+        "    float2 value = *reinterpret_cast<float2*>(&packed);\n"
+        "    return __nv_cvt_float2_to_e8m0x2(value, __NV_NOSAT, cudaRoundZero);"
+    ),
+    extra_deps=("fp8",),
+)
+
+device_intrinsic(
+    "cuda_cvt_e8m0x2_to_bf162raw",
+    helper_name="tvm_builtin_cvt_e8m0x2_to_bf162raw",
+    c_signature="(unsigned short packed)",
+    return_type="unsigned int",
+    body=(
+        "    __nv_bfloat162_raw result = __nv_cvt_e8m0x2_to_bf162raw(packed);\n"
+        "    return *reinterpret_cast<unsigned int*>(&result);"
+    ),
+    extra_deps=("bf16", "fp8"),
+)
+
+device_intrinsic(
+    "cuda_fp8x2_e4m3_to_float2",
+    helper_name="tvm_builtin_fp8x2_e4m3_to_float2",
+    c_signature="(unsigned short packed)",
+    return_type="unsigned long long",
+    body=(
+        "    __nv_fp8x2_e4m3 value;\n"
+        "    value.__x = packed;\n"
+        "    float2 result = static_cast<float2>(value);\n"
+        "    return *reinterpret_cast<unsigned long long*>(&result);"
+    ),
+    extra_deps=("fp8",),
 )
 
 device_intrinsic(
