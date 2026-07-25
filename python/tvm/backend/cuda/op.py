@@ -3803,6 +3803,125 @@ def ptx_max_f32(a, b, *, ftz=False, nan=False):
     return call_intrin("float32", "tirx.ptx.max_f32", a, b, int(ftz), int(nan))
 
 
+_PTX_CVT_TYPES = {
+    "u8",
+    "u16",
+    "u32",
+    "u64",
+    "s8",
+    "s16",
+    "s32",
+    "s64",
+    "bf16",
+    "f16",
+    "f32",
+    "f64",
+    "f16x2",
+    "bf16x2",
+    "tf32",
+    "e4m3x2",
+    "e5m2x2",
+    "e2m1x2",
+    "e2m3x2",
+    "e3m2x2",
+    "e4m3x4",
+    "e5m2x4",
+    "e2m1x4",
+    "e2m3x4",
+    "e3m2x4",
+    "ue8m0x2",
+    "s2f6x2",
+}
+_PTX_CVT_ROUNDING = {"", "rni", "rzi", "rmi", "rpi", "rn", "rz", "rm", "rp", "rna", "rs"}
+_PTX_CVT_SCALED = {"", "n2::ue8m0"}
+_PTX_CVT_RETURN_TYPE = {
+    "u8": "uint8",
+    "s8": "int8",
+    "u16": "uint16",
+    "s16": "int16",
+    "u32": "uint32",
+    "s32": "int32",
+    "u64": "uint64",
+    "s64": "int64",
+    "f32": "float32",
+    "f64": "float64",
+    "f16": "uint16",
+    "bf16": "uint16",
+    "e4m3x2": "uint16",
+    "e5m2x2": "uint16",
+    "e2m1x2": "uint8",
+    "e2m3x2": "uint16",
+    "e3m2x2": "uint16",
+    "ue8m0x2": "uint16",
+    "s2f6x2": "uint16",
+    "tf32": "uint32",
+    "f16x2": "uint32",
+    "bf16x2": "uint32",
+    "e2m1x4": "uint16",
+    "e4m3x4": "uint32",
+    "e5m2x4": "uint32",
+    "e2m3x4": "uint32",
+    "e3m2x4": "uint32",
+}
+
+
+def ptx_cvt(
+    dtype,
+    *values,
+    atype,
+    rounding="",
+    ftz=False,
+    sat=False,
+    relu=False,
+    satfinite=False,
+    scaled="",
+    rbits=None,
+    scale_factor=None,
+):
+    """Build one PTX ``cvt`` instruction.
+
+    The concrete ``dtype``/``atype`` pair and modifiers select one grammar
+    form from the PTX ISA ``cvt`` table.  ``values``, ``rbits`` and
+    ``scale_factor`` are register operands; all other arguments are instruction
+    attrs.  Invalid combinations are rejected when the form is classified.
+
+    Alternate and packed floating-point values use raw PTX register carriers:
+    a ``.b8`` result is returned as ``uint8``, a ``.b16`` result as ``uint16``,
+    and a ``.b32`` result as ``uint32``.
+    """
+    _choice("dtype", dtype, _PTX_CVT_TYPES)
+    _choice("atype", atype, _PTX_CVT_TYPES)
+    _choice("rounding", rounding, _PTX_CVT_ROUNDING)
+    _choice("scaled", scaled, _PTX_CVT_SCALED)
+    has_rbits = rbits is not None
+    has_scale = scale_factor is not None
+    if has_rbits != (rounding == "rs"):
+        raise ValueError("ptx.cvt requires rbits exactly when rounding='rs'")
+    if has_scale != bool(scaled):
+        raise ValueError("ptx.cvt scale_factor must be present exactly when scaled is set")
+    operands = [*values]
+    if has_rbits:
+        operands.append(rbits)
+    if has_scale:
+        operands.append(scale_factor)
+    return call_intrin(
+        _PTX_CVT_RETURN_TYPE[dtype],
+        "tirx.ptx.cvt",
+        *operands,
+        len(values),
+        int(has_rbits),
+        int(has_scale),
+        dtype,
+        atype,
+        rounding,
+        int(bool(ftz)),
+        int(bool(sat)),
+        int(bool(relu)),
+        int(bool(satfinite)),
+        scaled,
+    )
+
+
 def ptx_griddepcontrol_wait():
     """TVM intrinsic for PTX ``griddepcontrol.wait`` (sm_90+).
 
@@ -4673,21 +4792,6 @@ def cuda_float22bfloat162_rn_from_float2(packed):
 
 def cuda_bfloat1622float2(packed):
     return call_intrin("uint64", "tirx.cuda.bfloat1622float2", packed)
-
-
-def cuda_cvt_float2_to_e8m0x2(packed):
-    """Convert packed ``float2`` bits to e8m0x2 with rz/nosat semantics."""
-    return call_intrin("uint16", "tirx.cuda.cvt_float2_to_e8m0x2", packed)
-
-
-def cuda_cvt_e8m0x2_to_bf162raw(packed):
-    """Convert packed e8m0x2 bits to raw ``bfloat162`` bits."""
-    return call_intrin("uint32", "tirx.cuda.cvt_e8m0x2_to_bf162raw", packed)
-
-
-def cuda_fp8x2_e4m3_to_float2(packed):
-    """Convert packed e4m3 fp8x2 bits to packed ``float2`` bits."""
-    return call_intrin("uint64", "tirx.cuda.fp8x2_e4m3_to_float2", packed)
 
 
 def cuda_hmin2(a, b):

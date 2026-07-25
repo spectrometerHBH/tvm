@@ -87,6 +87,7 @@ class PTXNamespace:
         self.rcp = _op_wrapper(_cuda_op.ptx_rcp)
         self.reduce3_min_f32 = _op_wrapper(_cuda_op.ptx_reduce3_min_f32)
         self.reduce3_max_f32 = _op_wrapper(_cuda_op.ptx_reduce3_max_f32)
+        self.cvt = _dtype_forward(_cuda_op.ptx_cvt)
         # add/sub/mul/fma DPS form: (d_addr, a, b[, c], *, rounding, ftz[, sat])
         self.add_f32 = _op_wrapper(_cuda_op.ptx_add_f32)
         self.add_f32x2 = _op_wrapper(_cuda_op.ptx_add_f32x2)
@@ -436,9 +437,6 @@ class CUDANamespace:
             _cuda_op.cuda_float22bfloat162_rn_from_float2
         )
         self.bfloat1622float2 = _op_wrapper(_cuda_op.cuda_bfloat1622float2)
-        self.cvt_float2_to_e8m0x2 = _op_wrapper(_cuda_op.cuda_cvt_float2_to_e8m0x2)
-        self.cvt_e8m0x2_to_bf162raw = _op_wrapper(_cuda_op.cuda_cvt_e8m0x2_to_bf162raw)
-        self.fp8x2_e4m3_to_float2 = _op_wrapper(_cuda_op.cuda_fp8x2_e4m3_to_float2)
         self.hmin2 = _op_wrapper(_cuda_op.cuda_hmin2)
         self.hmax2 = _op_wrapper(_cuda_op.cuda_hmax2)
         self.fp8x4_e4m3_from_float4 = _op_wrapper(_cuda_op.cuda_fp8x4_e4m3_from_float4)
