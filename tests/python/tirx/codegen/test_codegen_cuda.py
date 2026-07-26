@@ -339,6 +339,38 @@ def test_ptx_f32x2_value_codegen():
     assert "fma.rn.f32x2 %0, %1, %2, %3;" in src
 
 
+@pytest.mark.skipif(
+    not (env.has_cuda_compute(10, 0) and env.has_nvcc_version(13, 2)),
+    reason="PTX 9.2 packed bf16 conversion requires sm_100 and CUDA 13.2",
+)
+def test_sparse_decode_conversion_intrinsics_codegen(monkeypatch):
+    monkeypatch.setenv("TVM_CUDA_COMPILE_MODE", "nvcc")
+
+    @T.prim_func
+    def main(
+        U16: T.Buffer((1,), "uint16"),
+        U32: T.Buffer((2,), "uint32"),
+        U64: T.Buffer((1,), "uint64"),
+        F32: T.Buffer((2,), "float32"),
+    ):
+        T.device_entry()
+        tx = T.thread_id([32])
+        if tx == 0:
+            pair: T.let = T.cuda.make_float2(F32[0], F32[1])
+            U16[0] = T.ptx.cvt(F32[1], F32[0], dtype="ue8m0x2", atype="f32", rounding="rz")
+            U32[0] = T.ptx.cvt(U16[0], dtype="bf16x2", atype="ue8m0x2", rounding="rn")
+            U32[1] = T.ptx.cvt(U16[0], dtype="bf16x2", atype="e4m3x2", rounding="rn")
+            U64[0] = T.ptx.add_f32x2(pair, pair, rounding="", dps=False)
+
+    src, _ = _get_source(main)
+    assert "cvt.rz.ue8m0x2.f32 %0, %1, %2;" in src
+    assert "cvt.rn.bf16x2.ue8m0x2 %0, %1;" in src
+    assert "cvt.rn.bf16x2.e4m3x2 %0, %1;" in src
+    assert "__nv_cvt_" not in src
+    assert "add.f32x2 %0, %1, %2;" in src
+    assert "add.rn.f32x2 %0, %1, %2;" not in src
+
+
 @pytest.mark.gpu
 def test_megamoe_extracted_intrinsics_codegen():
     @T.prim_func

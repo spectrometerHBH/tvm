@@ -264,6 +264,7 @@ const DeviceIntrinsicRegistration kDeviceIntrinsics[] = {
     TIRX_DEVICE_INTRIN_ALIAS(ptx_cp_async_commit_group, ptx, kOpaque),
     TIRX_DEVICE_INTRIN_ALIAS(ptx_cp_async_mbarrier_arrive, ptx, kOpaque),
     TIRX_DEVICE_INTRIN_ALIAS(ptx_cp_async_wait_group, ptx, kOpaque),
+    TIRX_DEVICE_INTRIN_ALIAS(ptx_cvt, ptx, kPure),
     TIRX_DEVICE_INTRIN_ALIAS(ptx_elect_sync, ptx, kOpaque),
     TIRX_DEVICE_INTRIN_ALIAS(ptx_exp2, ptx, kPure),
     TIRX_DEVICE_INTRIN_ALIAS(ptx_fence, ptx, kOpaque),

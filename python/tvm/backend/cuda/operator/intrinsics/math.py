@@ -73,7 +73,7 @@ def _ptx_arith_modifier_string(dtype, rounding, ftz, sat, op=None):
         raise ValueError("PTX <op>.f64 does not accept .ftz or .sat")
     if dtype == "f32x2" and sat_b:
         raise ValueError("PTX <op>.f32x2 does not accept .sat")
-    if dtype == "f32x2" and op == "mul" and rnd in ("", "none"):
+    if dtype == "f32x2" and op in ("add", "mul") and rnd in ("", "none"):
         mod = ""
         name_suffix = ""
         if ftz_b:

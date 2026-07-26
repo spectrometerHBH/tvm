@@ -307,12 +307,23 @@ def _ptx_shared_addr(space, ptr_name="address"):
     return "", f'"l"({ptr_name})'
 
 
-def _ptx_ld_signature(dst_count, vec_len):
+def _ptx_addr_operand(space, ptr_name, raw_address):
+    if raw_address:
+        return "", f'"r"({ptr_name})'
+    return _ptx_shared_addr(space, ptr_name)
+
+
+def _is_raw_u32_address(address):
+    return str(address.ty) == "uint32"
+
+
+def _ptx_ld_signature(dst_count, vec_len, raw_address):
+    address_type = "unsigned int" if raw_address else "void*"
     if dst_count == 1:
-        return "(void* dst_ptr, void* src_ptr, unsigned long long cache_policy)"
+        return f"(void* dst_ptr, {address_type} src_ptr, unsigned long long cache_policy)"
     if dst_count == vec_len:
         dst_params = ", ".join(f"void* dst{i}" for i in range(vec_len))
-        return f"({dst_params}, void* src_ptr, unsigned long long cache_policy)"
+        return f"({dst_params}, {address_type} src_ptr, unsigned long long cache_policy)"
     raise ValueError(f"PTX ld dst count must be 1 or vec_len={vec_len}, got {dst_count}")
 
 
@@ -330,7 +341,7 @@ def _ptx_ld_vec_store(num_bytes, vec_len, ptx_type, c_type, dst_count):
     return f"    *reinterpret_cast<{store_type}*>(dst_ptr) = r0;"
 
 
-def _ptx_ld_form_parts(form, attr_args):
+def _ptx_ld_form_parts(form, attr_args, raw_address):
     if form == "weak":
         (
             return_dtype,
@@ -501,9 +512,13 @@ def _ptx_ld_form_parts(form, attr_args):
         name_parts.append(_safe_attr(l2_evict))
     if prefetch_size:
         name_parts.append(_safe_attr(prefetch_size))
+    if raw_address:
+        name_parts.append("raw_u32")
     name = "_".join(p for p in name_parts if p)
     cache_operand = ', "l"(cache_policy)' if has_cache else ""
-    addr_decl, addr_operand = _ptx_shared_addr(space, "src_ptr" if to_dst else "address")
+    addr_decl, addr_operand = _ptx_addr_operand(
+        space, "src_ptr" if to_dst else "address", raw_address
+    )
     if to_dst:
         if to_dst not in (1, vec_len):
             raise ValueError(f"PTX ld dst count must be 1 or vec_len={vec_len}, got {to_dst}")
@@ -527,7 +542,7 @@ def _ptx_ld_form_parts(form, attr_args):
         )
         return (
             name,
-            _ptx_ld_signature(to_dst, vec_len),
+            _ptx_ld_signature(to_dst, vec_len, raw_address),
             "void",
             "",
             body,
@@ -542,17 +557,22 @@ def _ptx_ld_form_parts(form, attr_args):
         f"                 : {addr_operand}{cache_operand});\n"
         "    return ret;"
     )
+    address_type = "unsigned int" if raw_address else "void*"
     sig = (
-        "(void* address, unsigned long long cache_policy)"
+        f"({address_type} address, unsigned long long cache_policy)"
         if form in ("weak", "global_nc")
-        else "(void* address)"
+        else f"({address_type} address)"
     )
     return name, sig, c_type, return_dtype, body
 
 
 def _register_ptx_ld(op_name, form, n_attrs):
     def _parts(*args):
-        return _ptx_ld_form_parts(form, args[-n_attrs:])
+        attrs = args[-n_attrs:]
+        forward = args[:-n_attrs]
+        # The weak ld form always forwards (..., address, cache_policy).
+        raw_address = form == "weak" and _is_raw_u32_address(forward[-2])
+        return _ptx_ld_form_parts(form, attrs, raw_address)
 
     device_intrinsic(
         op_name,
@@ -917,7 +937,7 @@ def _ptx_st_load_src(_num_bytes, vec_len, ptx_type, c_type):
     return _assign("r0", f"*reinterpret_cast<{src_c_type}*>(src_ptr)")
 
 
-def _ptx_st_form_parts(form, attr_args, from_src):
+def _ptx_st_form_parts(form, attr_args, from_src, raw_address):
     if form == "weak":
         weak, space, cop, vec, ptx_type, has_cache_hint, l1_evict, l2_evict = attr_args
         sem, scope = "", ""
@@ -947,6 +967,45 @@ def _ptx_st_form_parts(form, attr_args, from_src):
     l2_evict = parse_str(l2_evict)
     weak = _bool_attr(weak)
     has_cache = _bool_attr(has_cache_hint)
+    ptx_type = parse_str(ptx_type)
+    if ptx_type == "b128":
+        # The b128 form mirrors the FlashMLA dequantization store exactly.
+        # Its source pointer materializes one scalar 128-bit register for the
+        # PTX ``q`` constraint.  Unlike generic scalar/vector stores, this is
+        # weak shared::cta only, accepts no cache policy, and deliberately
+        # omits a memory clobber to preserve the source dependency shape.
+        if not (
+            form == "weak"
+            and weak
+            and space == "shared::cta"
+            and not cop
+            and not vec
+            and from_src
+            and not has_cache
+            and not l1_evict
+            and not l2_evict
+        ):
+            raise ValueError(
+                "PTX st.b128 requires src=, weak=True, space='shared::cta', "
+                "and no cache/vector modifiers"
+            )
+        name = "tvm_builtin_ptx_st_weak_shared_cta_b128_from_src"
+        if raw_address:
+            name += "_raw_u32"
+        address_type = "unsigned int" if raw_address else "void*"
+        addr_decl, addr_operand = _ptx_addr_operand(space, "address", raw_address)
+        body = (
+            f"{addr_decl}"
+            "    unsigned __int128 value = *reinterpret_cast<unsigned __int128*>(src_ptr);\n"
+            '    asm volatile("st.weak.shared::cta.b128 [%0], %1;"\n'
+            "                 :\n"
+            f'                 : {addr_operand}, "q"(value));'
+        )
+        return (
+            name,
+            (f"({address_type} address, void* src_ptr, unsigned long long cache_policy)"),
+            body,
+        )
     ptx_type, c_type, constraint, _tvm_dtype = _type_info(ptx_type)
     if cop and cop not in _PTX_ST_COPS:
         raise ValueError(f"Unsupported PTX st cache operation {cop!r}")
@@ -1000,12 +1059,15 @@ def _ptx_st_form_parts(form, attr_args, from_src):
     )
     if has_cache:
         name_parts.append("cache_hint")
+    if raw_address:
+        name_parts.append("raw_u32")
     name = "_".join(p for p in name_parts if p)
     values = f"{{{', '.join(f'%{i + 1}' for i in range(vec_len))}}}" if vec_len > 1 else "%1"
     value_constraints = "".join(f', "{constraint}"(value{i})' for i in range(vec_len))
     cache_slot = f", %{vec_len + 1}" if has_cache else ""
     cache_operand = ', "l"(cache_policy)' if has_cache else ""
-    addr_decl, addr_operand = _ptx_shared_addr(space, "address")
+    addr_decl, addr_operand = _ptx_addr_operand(space, "address", raw_address)
+    address_type = "unsigned int" if raw_address else "void*"
     if from_src:
         load_regs = _ptx_st_load_src(num_bytes, vec_len, ptx_type, c_type)
         if vec_len > 1:
@@ -1021,9 +1083,9 @@ def _ptx_st_form_parts(form, attr_args, from_src):
             '                 : "memory");'
         )
         if use_cache_policy:
-            sig = "(void* address, void* src_ptr, unsigned long long cache_policy)"
+            sig = f"({address_type} address, void* src_ptr, unsigned long long cache_policy)"
         else:
-            sig = "(void* address, void* src_ptr)"
+            sig = f"({address_type} address, void* src_ptr)"
     else:
         body = (
             f"{addr_decl}"
@@ -1033,22 +1095,23 @@ def _ptx_st_form_parts(form, attr_args, from_src):
             '                 : "memory");'
         )
         if form == "mmio":
-            sig = f"(void* address, {c_type} value0)"
+            sig = f"({address_type} address, {c_type} value0)"
         elif use_cache_policy:
             value_params = ", ".join(f"{c_type} value{i}" for i in range(vec_len))
-            sig = f"(void* address, {value_params}, unsigned long long cache_policy)"
+            sig = f"({address_type} address, {value_params}, unsigned long long cache_policy)"
         else:
             value_params = ", ".join(f"{c_type} value{i}" for i in range(vec_len))
-            sig = f"(void* address, {value_params})"
+            sig = f"({address_type} address, {value_params})"
     return name, sig, body
 
 
-def _register_ptx_st(op_name, form, n_attrs, *, with_cache_policy=True):
+def _register_ptx_st(op_name, form, n_attrs):
     def codegen(*args):
         from_src = _bool_attr(args[-1])
         st_attrs = args[-n_attrs:-1]
-        parts = _ptx_st_form_parts(form, st_attrs, from_src)
         forward = args[:-(n_attrs)]
+        raw_address = form == "weak" and _is_raw_u32_address(forward[0])
+        parts = _ptx_st_form_parts(form, st_attrs, from_src, raw_address)
         name, sig, body_str = parts
         source_code = f"\n__forceinline__ __device__ void {name}{sig} {{\n{body_str}\n}}\n"
         return cuda_func_call(name, *forward, source_code=source_code)

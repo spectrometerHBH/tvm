@@ -21,6 +21,7 @@ from __future__ import annotations
 
 from tvm import tirx
 from tvm.ir import Call, Op, is_prim_expr
+from tvm.ir.type import PointerType, PrimType
 from tvm.runtime import const
 from tvm.tirx.op import bitwise_and, call_intrin, reinterpret, tvm_access_ptr
 from tvm.tirx.operator.intrinsics._common import CLUSTER_BARRIER_SEM as _CLUSTER_BARRIER_SEM
@@ -3620,7 +3621,7 @@ def _ptx_binary_f32x2(op_name, *args, rounding="rn", ftz=False, dps=True, return
     ``dps=True`` emits the destination-passing form and returns void.
     ``dps=False`` returns either packed ``uint64`` bits or ``float32x2``.
     """
-    rounding_options = ("", *_F32X2_ROUND) if op_name == "mul" else _F32X2_ROUND
+    rounding_options = ("", *_F32X2_ROUND) if op_name in ("add", "mul") else _F32X2_ROUND
     _choice("rounding", rounding, rounding_options)
     if dps:
         if len(args) != 3:
@@ -3802,6 +3803,125 @@ def ptx_max_f32(a, b, *, ftz=False, nan=False):
     return call_intrin("float32", "tirx.ptx.max_f32", a, b, int(ftz), int(nan))
 
 
+_PTX_CVT_TYPES = {
+    "u8",
+    "u16",
+    "u32",
+    "u64",
+    "s8",
+    "s16",
+    "s32",
+    "s64",
+    "bf16",
+    "f16",
+    "f32",
+    "f64",
+    "f16x2",
+    "bf16x2",
+    "tf32",
+    "e4m3x2",
+    "e5m2x2",
+    "e2m1x2",
+    "e2m3x2",
+    "e3m2x2",
+    "e4m3x4",
+    "e5m2x4",
+    "e2m1x4",
+    "e2m3x4",
+    "e3m2x4",
+    "ue8m0x2",
+    "s2f6x2",
+}
+_PTX_CVT_ROUNDING = {"", "rni", "rzi", "rmi", "rpi", "rn", "rz", "rm", "rp", "rna", "rs"}
+_PTX_CVT_SCALED = {"", "n2::ue8m0"}
+_PTX_CVT_RETURN_TYPE = {
+    "u8": "uint8",
+    "s8": "int8",
+    "u16": "uint16",
+    "s16": "int16",
+    "u32": "uint32",
+    "s32": "int32",
+    "u64": "uint64",
+    "s64": "int64",
+    "f32": "float32",
+    "f64": "float64",
+    "f16": "uint16",
+    "bf16": "uint16",
+    "e4m3x2": "uint16",
+    "e5m2x2": "uint16",
+    "e2m1x2": "uint8",
+    "e2m3x2": "uint16",
+    "e3m2x2": "uint16",
+    "ue8m0x2": "uint16",
+    "s2f6x2": "uint16",
+    "tf32": "uint32",
+    "f16x2": "uint32",
+    "bf16x2": "uint32",
+    "e2m1x4": "uint16",
+    "e4m3x4": "uint32",
+    "e5m2x4": "uint32",
+    "e2m3x4": "uint32",
+    "e3m2x4": "uint32",
+}
+
+
+def ptx_cvt(
+    dtype,
+    *values,
+    atype,
+    rounding="",
+    ftz=False,
+    sat=False,
+    relu=False,
+    satfinite=False,
+    scaled="",
+    rbits=None,
+    scale_factor=None,
+):
+    """Build one PTX ``cvt`` instruction.
+
+    The concrete ``dtype``/``atype`` pair and modifiers select one grammar
+    form from the PTX ISA ``cvt`` table.  ``values``, ``rbits`` and
+    ``scale_factor`` are register operands; all other arguments are instruction
+    attrs.  Invalid combinations are rejected when the form is classified.
+
+    Alternate and packed floating-point values use raw PTX register carriers:
+    a ``.b8`` result is returned as ``uint8``, a ``.b16`` result as ``uint16``,
+    and a ``.b32`` result as ``uint32``.
+    """
+    _choice("dtype", dtype, _PTX_CVT_TYPES)
+    _choice("atype", atype, _PTX_CVT_TYPES)
+    _choice("rounding", rounding, _PTX_CVT_ROUNDING)
+    _choice("scaled", scaled, _PTX_CVT_SCALED)
+    has_rbits = rbits is not None
+    has_scale = scale_factor is not None
+    if has_rbits != (rounding == "rs"):
+        raise ValueError("ptx.cvt requires rbits exactly when rounding='rs'")
+    if has_scale != bool(scaled):
+        raise ValueError("ptx.cvt scale_factor must be present exactly when scaled is set")
+    operands = [*values]
+    if has_rbits:
+        operands.append(rbits)
+    if has_scale:
+        operands.append(scale_factor)
+    return call_intrin(
+        _PTX_CVT_RETURN_TYPE[dtype],
+        "tirx.ptx.cvt",
+        *operands,
+        len(values),
+        int(has_rbits),
+        int(has_scale),
+        dtype,
+        atype,
+        rounding,
+        int(bool(ftz)),
+        int(bool(sat)),
+        int(bool(relu)),
+        int(bool(satfinite)),
+        scaled,
+    )
+
+
 def ptx_griddepcontrol_wait():
     """TVM intrinsic for PTX ``griddepcontrol.wait`` (sm_90+).
 
@@ -3908,6 +4028,23 @@ def _normalize_ptx_ld_dst(dst, vec, op_name):
             raise ValueError(f"{op_name} scatter dst length must match {vec}: got {len(dst)}")
         return list(dst), vec_len
     return [dst], 1
+
+
+def _validate_ptx_address(addr, space, op_name):
+    """Validate pointer and raw shared-memory address forms."""
+    addr_ty = getattr(addr, "ty", None)
+    if isinstance(addr_ty, PointerType):
+        return
+    if isinstance(addr_ty, PrimType):
+        if addr_ty.dtype == "uint32":
+            if not str(space).startswith("shared"):
+                raise ValueError(f"{op_name} uint32 address requires shared state space")
+            return
+        if addr_ty.dtype.startswith(("int", "uint")):
+            raise ValueError(
+                f"{op_name} integer address must be uint32 in shared state space, "
+                f"got {addr_ty.dtype}"
+            )
 
 
 def ptx_ld_acquire(
@@ -4022,6 +4159,7 @@ def ptx_ld(
     _choice("cop", cop, _PTX_LD_COP)
     _choice("ptx_type", ptx_type, _PTX_LD_TYPE)
     _choice("vec", vec, _PTX_LD_VEC)
+    _validate_ptx_address(addr, space, "ptx_ld")
     cache_policy, has_cache_policy = _resolve_cache_policy(cache_hint, cache_policy)
     dst_args, to_dst = _normalize_ptx_ld_dst(dst, vec, "ld")
     if to_dst:
@@ -4357,7 +4495,24 @@ def ptx_st(
     _choice("space", space, _PTX_MEM_SPACE | {"local", "param::func"})
     _choice("cop", cop, _PTX_ST_COP)
     _choice("vec", vec, _PTX_ST_VEC)
-    _choice("ptx_type", ptx_type, _PTX_SCALAR_TYPE)
+    _choice("ptx_type", ptx_type, _PTX_SCALAR_TYPE | {"b128"})
+    _validate_ptx_address(address, space, "ptx_st")
+    if ptx_type == "b128" and not (
+        src is not None
+        and not values
+        and weak
+        and space == "shared::cta"
+        and not cop
+        and not vec
+        and not cache_hint
+        and cache_policy is None
+        and not l1_evict
+        and not l2_evict
+    ):
+        raise ValueError(
+            "ptx_st b128 requires src=, weak=True, space='shared::cta', "
+            "and no cache/vector modifiers"
+        )
     cache_policy, has_cache_policy = _resolve_cache_policy(cache_hint, cache_policy)
     attrs = (
         cache_policy,

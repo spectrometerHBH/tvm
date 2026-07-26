@@ -87,6 +87,7 @@ class PTXNamespace:
         self.rcp = _op_wrapper(_cuda_op.ptx_rcp)
         self.reduce3_min_f32 = _op_wrapper(_cuda_op.ptx_reduce3_min_f32)
         self.reduce3_max_f32 = _op_wrapper(_cuda_op.ptx_reduce3_max_f32)
+        self.cvt = _dtype_forward(_cuda_op.ptx_cvt)
         # add/sub/mul/fma DPS form: (d_addr, a, b[, c], *, rounding, ftz[, sat])
         self.add_f32 = _op_wrapper(_cuda_op.ptx_add_f32)
         self.add_f32x2 = _op_wrapper(_cuda_op.ptx_add_f32x2)

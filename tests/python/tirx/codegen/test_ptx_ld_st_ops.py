@@ -208,6 +208,67 @@ def test_ptx_ld_st_codegen_emits_shared_asm():
     assert "tvm_builtin_ptx_st" in src
 
 
+def test_ptx_ld_st_raw_shared_address_codegen():
+    @T.prim_func
+    def main(out: T.Buffer((2,), "uint64")):
+        T.device_entry()
+        tx = T.thread_id([32])
+        smem = T.alloc_buffer((2,), "uint64", scope="shared")
+        values = T.alloc_local((4,), "uint32")
+        if tx == 0:
+            raw_addr: T.uint32 = T.cuda.cvta_generic_to_shared(smem.data)
+            out[0] = T.ptx.ld(raw_addr, "uint64", "u64", space="shared")
+            out[1] = T.ptx.ld(smem.data, "uint64", "u64", space="shared")
+            T.ptx.st(
+                raw_addr,
+                src=values.ptr_to([0]),
+                weak=True,
+                space="shared::cta",
+                ptx_type="b128",
+            )
+
+    with TARGET:
+        mod = tvm.compile(tvm.IRModule({"main": main}), target=TARGET, tir_pipeline="tirx")
+    src = mod.mod.imports[0].inspect_source("cuda")
+    assert "unsigned int address" in src
+    assert "ld.shared.u64 %0, [%1];" in src
+    assert src.count("__cvta_generic_to_shared") == 2
+    assert 'asm volatile("st.weak.shared::cta.b128 [%0], %1;"' in src
+    assert '"q"(value));' in src
+    b128_helper = src[src.index("tvm_builtin_ptx_st_weak_shared_cta_b128_from_src") :]
+    b128_helper = b128_helper[: b128_helper.index("\n}")]
+    assert '"memory"' not in b128_helper
+
+
+def test_ptx_ld_st_reject_invalid_integer_addresses_and_b128_forms():
+    with pytest.raises((ValueError, tvm.error.DiagnosticError), match="uint32 address"):
+
+        @T.prim_func
+        def bad_global_raw(out: T.Buffer((1,), "uint32")):
+            T.device_entry()
+            out[0] = T.ptx.ld(T.uint32(0), "uint32", "u32", space="global")
+
+    with pytest.raises((ValueError, tvm.error.DiagnosticError), match="integer address"):
+
+        @T.prim_func
+        def bad_shared_u64(out: T.Buffer((1,), "uint64")):
+            T.device_entry()
+            out[0] = T.ptx.ld(T.uint64(0), "uint64", "u64", space="shared")
+
+    with pytest.raises((ValueError, tvm.error.DiagnosticError), match="b128 requires"):
+
+        @T.prim_func
+        def bad_b128(out: T.Buffer((1,), "uint32")):
+            T.device_entry()
+            T.ptx.st(
+                T.uint32(0),
+                out[0],
+                weak=True,
+                space="shared::cta",
+                ptx_type="b128",
+            )
+
+
 def test_ptx_ld_global_nc_v8_codegen():
     """FlashMLA index loads need ``ld.global.nc`` with a 256B prefetch."""
 
