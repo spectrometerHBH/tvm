@@ -78,17 +78,16 @@ class VecImpl:
 
     vec_len: int  # elements per packed call
     applies: Callable[[TilePrimitiveCall, Any, Plan], tuple[bool, str | None]]
-    # emit(dst_ptr, src_ptrs, extras) -> Stmt
+    # emit(dst_ptr, src_ptrs, extras) -> tuple[Expr, ...]
     #   dst_ptr: typed ptr to ``vec_len`` consecutive dst elements
     #   src_ptrs[i]: typed ptr to ``vec_len`` consecutive src[i] elements,
     #                OR a scalar Expr if src[i].is_scalar.
+    # The returned expressions are emitted in order.  Most packed forms return
+    # one expression; forms with scalar destinations may return one per lane.
     # Runs in Python at @T.prim_func build time -- branching on src kind is a
     # normal Python ``if``, not a TVMScript shape limitation. This is what
     # collapses the old 4x2 shape-explosion in schema.py's factories.
     emit: Callable
-    # Optional second instruction for packed forms whose PTX grammar has only
-    # scalar destinations (for example, f16x2 -> two f32 conversions).
-    emit_second: Callable | None = None
 
 
 @dataclass

@@ -46,7 +46,7 @@ def _cast_vec2_applies(op_call, sctx, plan):
     return True, None
 
 
-def _emit_cast_vec2(dst_buf, dst_lane_indices, src_args, extras) -> Expr:
+def _emit_cast_vec2(dst_buf, dst_lane_indices, src_args, extras) -> tuple[Expr, ...]:
     src_arg = src_args[0]
     # cast_vec2 requires buffer src (guarded by applies()).
     assert isinstance(src_arg, tuple), "cast vec2 src must be a buffer"
@@ -56,33 +56,26 @@ def _emit_cast_vec2(dst_buf, dst_lane_indices, src_args, extras) -> Expr:
     if src_dtype == "float32":
         # PTX packed conversion operands are high lane first, so reverse the
         # logical (x, y) pair to preserve CUDA float2/half2 lane order.
-        return T.ptx.cvt(
-            src_buf[tuple(src_lane_indices[1])],
-            src_buf[tuple(src_lane_indices[0])],
-            dtype="f16x2" if dst_dtype == "float16" else "bf16x2",
-            atype="f32",
-            dst=T.address_of(dst_buf[tuple(dst_lane_indices[0])]),
-            rounding="rn",
+        return (
+            T.ptx.cvt(
+                src_buf[tuple(src_lane_indices[1])],
+                src_buf[tuple(src_lane_indices[0])],
+                dtype="f16x2" if dst_dtype == "float16" else "bf16x2",
+                atype="f32",
+                dst=T.address_of(dst_buf[tuple(dst_lane_indices[0])]),
+                rounding="rn",
+            ),
         )
 
-    return T.ptx.cvt(
-        T.reinterpret("uint16", src_buf[tuple(src_lane_indices[0])]),
-        dtype="f32",
-        atype="f16" if src_dtype == "float16" else "bf16",
-        dst=T.address_of(dst_buf[tuple(dst_lane_indices[0])]),
-    )
-
-
-def _emit_cast_vec2_second(dst_buf, dst_lane_indices, src_args, extras) -> Expr:
-    src_buf, src_lane_indices = src_args[0]
-    src_dtype = dtype_name(src_buf.dtype)
-    if src_dtype == "float32":
-        return T.int32(0)
-    return T.ptx.cvt(
-        T.reinterpret("uint16", src_buf[tuple(src_lane_indices[1])]),
-        dtype="f32",
-        atype="f16" if src_dtype == "float16" else "bf16",
-        dst=T.address_of(dst_buf[tuple(dst_lane_indices[1])]),
+    atype = "f16" if src_dtype == "float16" else "bf16"
+    return tuple(
+        T.ptx.cvt(
+            T.reinterpret("uint16", src_buf[tuple(src_lane_indices[lane])]),
+            dtype="f32",
+            atype=atype,
+            dst=T.address_of(dst_buf[tuple(dst_lane_indices[lane])]),
+        )
+        for lane in range(2)
     )
 
 
@@ -90,5 +83,4 @@ CAST_VEC2_IMPL = VecImpl(
     vec_len=2,
     applies=_cast_vec2_applies,
     emit=_emit_cast_vec2,
-    emit_second=_emit_cast_vec2_second,
 )

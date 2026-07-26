@@ -43,6 +43,12 @@ from ..copy._common import _TID_AXIS_FOR_SCOPE, _extract_tile, _thread_cnt
 from ..copy.vec_auto_reg import _all_threads_active, _axis_decl, _compute_perm_r
 
 
+def emit_all(expressions):
+    """Emit a parser-time sequence of expressions in order."""
+    for expression in expressions:
+        T.evaluate(expression)
+
+
 # -----------------------------------------------------------------------------
 # Plan helpers
 # -----------------------------------------------------------------------------

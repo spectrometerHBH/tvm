@@ -45,6 +45,7 @@ from ._common import (
     buffer_regions,
     compute_dtype_of,
     dtype_bits,
+    emit_all,
     emit_scope_sync,
     fetch_src_value,
     n_elements,
@@ -226,10 +227,8 @@ def _emit_packed(plan, vec_impl, vec_chunk, total, thread_cnt, sctx) -> PrimFunc
                         for i in range(len(srcs))
                     ]
                 )
-                T.evaluate(vec_impl.emit(dst_buf, dst_lane_indices, src_args, extras))
-                has_second = T.meta_var(vec_impl.emit_second is not None)
-                if has_second:
-                    T.evaluate(vec_impl.emit_second(dst_buf, dst_lane_indices, src_args, extras))
+                emissions = T.meta_var(vec_impl.emit(dst_buf, dst_lane_indices, src_args, extras))
+                emit_all(emissions)
         sync()
 
     return impl

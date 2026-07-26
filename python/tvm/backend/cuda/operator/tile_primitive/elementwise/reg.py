@@ -52,6 +52,7 @@ from ._common import (
     align_operands_to_anchor,
     buffer_regions,
     compute_dtype_of,
+    emit_all,
     pick_anchor,
     shape_broadcast_compat,
 )
@@ -396,10 +397,8 @@ def _emit_induced_packed(
                     for src in srcs
                 ]
             )
-            T.evaluate(vec_impl.emit(views[dst_br], dst_lane_indices, src_args, extras))
-            has_second = T.meta_var(vec_impl.emit_second is not None)
-            if has_second:
-                T.evaluate(vec_impl.emit_second(views[dst_br], dst_lane_indices, src_args, extras))
+            emissions = T.meta_var(vec_impl.emit(views[dst_br], dst_lane_indices, src_args, extras))
+            emit_all(emissions)
 
     return impl
 
