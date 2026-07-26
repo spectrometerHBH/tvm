@@ -227,6 +227,9 @@ def _emit_packed(plan, vec_impl, vec_chunk, total, thread_cnt, sctx) -> PrimFunc
                     ]
                 )
                 T.evaluate(vec_impl.emit(dst_buf, dst_lane_indices, src_args, extras))
+                has_second = T.meta_var(vec_impl.emit_second is not None)
+                if has_second:
+                    T.evaluate(vec_impl.emit_second(dst_buf, dst_lane_indices, src_args, extras))
         sync()
 
     return impl

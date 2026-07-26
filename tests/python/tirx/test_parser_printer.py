@@ -301,6 +301,27 @@ def test_roundtrip_buffer_view_get3():
     assert_structural_equal(test, from_source(code))
 
 
+def test_buffer_rearrange_allows_buf_axis_size():
+    """Axis-size kwargs may use the public method's positional parameter names."""
+
+    @T.prim_func
+    def test() -> None:
+        T.device_entry()
+        A = T.alloc_buffer(
+            (4, 8),
+            "float32",
+            scope="local",
+            layout=T.TileLayout(T.S[(4, 8) : (8, 1)]),
+        )
+        B = A.rearrange("(kh row) (buf kl) -> buf row (kh kl)", kh=2, buf=2, kl=4)
+        B[0, 0, 0] = T.float32(0)
+
+    bufs = _collect_buffers(test)
+    assert [int(s) for s in bufs["B"].shape] == [2, 2, 8]
+    code = test.script()
+    assert_structural_equal(test, from_source(code))
+
+
 def test_roundtrip_op1():
     # fmt: off
     @T.prim_func
@@ -2321,6 +2342,26 @@ def test_roundtrip_cp_async_bulk_tensor_prefetch():
     # fmt: on
 
     code = func.script()
+    assert from_source(code).script() == code
+    assert_structural_equal(func, from_source(code))
+
+
+def test_roundtrip_ptx_cvt_dps():
+    """The opaque destination-passing cvt op must remain script-roundtrippable."""
+
+    @T.prim_func(check_well_formed=False)
+    def func(A: T.Buffer((2,), "float32"), B: T.Buffer((2,), "bfloat16")):
+        T.ptx.cvt(
+            A[1],
+            A[0],
+            dtype="bf16x2",
+            atype="f32",
+            dst=T.address_of(B[0]),
+            rounding="rn",
+        )
+
+    code = func.script()
+    assert "T.ptx.cvt_dps" in code
     assert from_source(code).script() == code
     assert_structural_equal(func, from_source(code))
 

@@ -270,57 +270,6 @@ def cuda_thread_rank():
     return call_intrin("int32", "tirx.cuda.thread_rank")
 
 
-def cuda_half2float(src):
-    """TVM intrinsic to convert half to float
-
-    Parameters
-    ----------
-    src : Expr
-        Source pointer.
-
-    Returns
-    -------
-    call : Expr
-        The call expression.
-    """
-    return call_intrin("float32", "tirx.cuda.half2float", src)
-
-
-def cuda_bfloat162float(src):
-    """TVM intrinsic to convert bfloat16 to float
-
-    Parameters
-    ----------
-    src : Expr
-        Source pointer.
-
-    Returns
-    -------
-    call : Expr
-        The call expression.
-    """
-    return call_intrin("float32", "tirx.cuda.bfloat162float", src)
-
-
-def cuda_float22half2(dst, src):
-    """TVM intrinsic to convert float2 to half2 with rounding
-
-    Parameters
-    ----------
-    dst : Expr
-        Destination pointer.
-
-    src : Expr
-        Source pointer.
-
-    Returns
-    -------
-    call : Expr
-        The call expression.
-    """
-    return call_intrin("", "tirx.cuda.float22half2", dst, src)
-
-
 def cuda_trap_when_assert_failed(cond):
     """TVM intrinsic to trap when assertion failed (cond == false)
 
@@ -354,44 +303,6 @@ def cuda_runtime_instr_desc(desc, sf_id):
         The call expression.
     """
     return call_intrin("", "tirx.cuda.runtime_instr_desc", desc, sf_id)
-
-
-def cuda_half8tofloat8(src_addr, dst_addr):
-    """TVM intrinsic to convert 8 half2s to 8 float2s
-
-    Parameters
-    ----------
-    src_addr : Expr
-        Source pointer.
-
-    dst_addr : Expr
-        Destination pointer.
-
-    Returns
-    -------
-    call : Expr
-        The call expression.
-    """
-    return call_intrin("", "tirx.cuda.half8tofloat8", src_addr, dst_addr)
-
-
-def cuda_float8tohalf8(src_addr, dst_addr):
-    """TVM intrinsic to convert 8 float2s to 8 half2s
-
-    Parameters
-    ----------
-    src_addr : Expr
-        Source pointer.
-
-    dst_addr : Expr
-        Destination pointer.
-
-    Returns
-    -------
-    call : Expr
-        The call expression.
-    """
-    return call_intrin("", "tirx.cuda.float8tohalf8", src_addr, dst_addr)
 
 
 def ptx_mma_sp(
@@ -3869,6 +3780,7 @@ def ptx_cvt(
     dtype,
     *values,
     atype,
+    dst=None,
     rounding="",
     ftz=False,
     sat=False,
@@ -3885,9 +3797,10 @@ def ptx_cvt(
     ``scale_factor`` are register operands; all other arguments are instruction
     attrs.  Invalid combinations are rejected when the form is classified.
 
-    Alternate and packed floating-point values use raw PTX register carriers:
-    a ``.b8`` result is returned as ``uint8``, a ``.b16`` result as ``uint16``,
-    and a ``.b32`` result as ``uint32``.
+    When ``dst`` is omitted, alternate and packed floating-point values use raw
+    PTX register carriers: a ``.b8`` result is returned as ``uint8``, a ``.b16``
+    result as ``uint16``, and a ``.b32`` result as ``uint32``.  Pass ``dst=`` to
+    bind the instruction output directly to a destination pointer instead.
     """
     _choice("dtype", dtype, _PTX_CVT_TYPES)
     _choice("atype", atype, _PTX_CVT_TYPES)
@@ -3904,9 +3817,11 @@ def ptx_cvt(
         operands.append(rbits)
     if has_scale:
         operands.append(scale_factor)
+    to_dst = dst is not None
+    operands = [dst, *operands] if to_dst else operands
     return call_intrin(
-        _PTX_CVT_RETURN_TYPE[dtype],
-        "tirx.ptx.cvt",
+        "" if to_dst else _PTX_CVT_RETURN_TYPE[dtype],
+        "tirx.ptx.cvt_dps" if to_dst else "tirx.ptx.cvt",
         *operands,
         len(values),
         int(has_rbits),
@@ -3919,7 +3834,13 @@ def ptx_cvt(
         int(bool(relu)),
         int(bool(satfinite)),
         scaled,
+        int(to_dst),
     )
+
+
+def ptx_cvt_dps(*args):
+    """Rebuild the internal destination-passing ``cvt`` op from printed IR."""
+    return call_intrin("", "tirx.ptx.cvt_dps", *args)
 
 
 def ptx_griddepcontrol_wait():
@@ -4782,28 +4703,12 @@ def cuda_fadd2_rn(a, b):
     return call_intrin("uint64", "tirx.cuda.fadd2_rn", a, b)
 
 
-def cuda_float22bfloat162_rn(v0, v1):
-    return call_intrin("uint32", "tirx.cuda.float22bfloat162_rn", v0, v1)
-
-
-def cuda_float22bfloat162_rn_from_float2(packed):
-    return call_intrin("uint32", "tirx.cuda.float22bfloat162_rn_from_float2", packed)
-
-
-def cuda_bfloat1622float2(packed):
-    return call_intrin("uint64", "tirx.cuda.bfloat1622float2", packed)
-
-
 def cuda_hmin2(a, b):
     return call_intrin("uint32", "tirx.cuda.hmin2", a, b)
 
 
 def cuda_hmax2(a, b):
     return call_intrin("uint32", "tirx.cuda.hmax2", a, b)
-
-
-def cuda_fp8x4_e4m3_from_float4(x, y, z, w):
-    return call_intrin("uint32", "tirx.cuda.fp8x4_e4m3_from_float4", x, y, z, w)
 
 
 def ptx_map_shared_rank(ptr, rank):

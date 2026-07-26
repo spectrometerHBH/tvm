@@ -451,7 +451,7 @@ def test_megamoe_extracted_intrinsics_codegen():
             U32[0] = T.cuda.reduce_add_sync_u32(T.uint32(0xFFFFFFFF), U32[0])
             U32[0] = T.cuda.reduce_min_sync_u32(T.uint32(0xFFFFFFFF), U32[0])
             U64[0] = T.cuda.clock64()
-            U32[0] = T.cuda.float22bfloat162_rn(F32[0], F32[1])
+            U32[0] = T.ptx.cvt(F32[1], F32[0], dtype="bf16x2", atype="f32", rounding="rn")
 
     src, _ = _get_source(main)
     for snippet in [
@@ -477,7 +477,7 @@ def test_megamoe_extracted_intrinsics_codegen():
         "__reduce_add_sync",
         "__reduce_min_sync",
         "clock64()",
-        "__float22bfloat162_rn",
+        "cvt.rn.bf16x2.f32",
     ]:
         assert snippet in src
 

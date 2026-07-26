@@ -18,7 +18,7 @@
 """Per-op data model + ALL_OPS registry.
 
 ``OpSpec`` describes one elementwise op. ``VecImpl`` describes one packed-PTX
-or CUDA-intrinsic emit available for that op (e.g. ``add_f32x2``); a list of
+emit available for that op (e.g. ``add_f32x2``); a list of
 these (widest-first) lets ``reg.py``/``smem.py`` pick the widest matching
 both the layout and the op's available intrinsics, like copy picks
 ``copy_{128,64,32,16,8}b`` based on bit-width and tail contiguity.
@@ -86,6 +86,9 @@ class VecImpl:
     # normal Python ``if``, not a TVMScript shape limitation. This is what
     # collapses the old 4x2 shape-explosion in schema.py's factories.
     emit: Callable
+    # Optional second instruction for packed forms whose PTX grammar has only
+    # scalar destinations (for example, f16x2 -> two f32 conversions).
+    emit_second: Callable | None = None
 
 
 @dataclass

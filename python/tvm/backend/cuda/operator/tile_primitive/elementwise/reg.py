@@ -397,6 +397,9 @@ def _emit_induced_packed(
                 ]
             )
             T.evaluate(vec_impl.emit(views[dst_br], dst_lane_indices, src_args, extras))
+            has_second = T.meta_var(vec_impl.emit_second is not None)
+            if has_second:
+                T.evaluate(vec_impl.emit_second(views[dst_br], dst_lane_indices, src_args, extras))
 
     return impl
 
