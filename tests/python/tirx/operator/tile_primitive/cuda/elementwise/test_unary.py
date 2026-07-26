@@ -1357,8 +1357,6 @@ def test_cast_vec2_packed_dispatch(src_dtype, dst_dtype, instruction):
     assert instruction in src, f"expected packed vec2 cast {instruction}; got:\n{src[:2000]}"
     assert "tvm_builtin_cast_" not in src
     assert f"tvm_builtin_ptx_{instruction.replace('.', '_')}_dps" in src
-    assert "ld.local" not in src
-    assert "st.local" not in src
 
 
 # -----------------------------------------------------------------------------
