@@ -1913,6 +1913,28 @@ def test_roundtrip_serial_unroll_true():
     assert_structural_equal(test, from_source(code))
 
 
+def test_roundtrip_serial_unroll_factor():
+    """T.serial(N, unroll=4) should preserve the explicit unroll factor."""
+
+    # fmt: off
+    @T.prim_func
+    def test(A_ptr: T.handle) -> None:
+        A = T.match_buffer(A_ptr, (128,), "float32", scope="global")
+        T.device_entry()
+        cta_id = T.cta_id([1])
+        warp_id = T.warp_id([1])
+        lane_id = T.lane_id([32])
+        for _ in T.serial(10, unroll=4):
+            Tx.cta.fill(A[0:32], T.float32(0))
+        # fmt: on
+
+    code = test.script()
+    assert "unroll=4" in code, f"printer should emit unroll=4, got:\n{code}"
+    assert "annotations" not in code, "printer should NOT emit annotations dict"
+    assert from_source(code).script() == code
+    assert_structural_equal(test, from_source(code))
+
+
 def test_roundtrip_serial_unroll_false_with_other_annotations():
     """When other annotations exist alongside disable_unroll, fall back to full dict."""
 

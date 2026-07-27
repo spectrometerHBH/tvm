@@ -213,6 +213,20 @@ def test_serial_pragma_unroll_codegen():
     assert "break;" in src
 
 
+def test_serial_pragma_unroll_factor_codegen():
+    @T.prim_func
+    def main(A: T.Buffer((8,), "int32")):
+        T.device_entry()
+        tx = T.thread_id([32])
+        if tx == 0:
+            for i in T.serial(8, unroll=4):
+                A[i] = A[i] + 1
+
+    src, _ = _get_source(main)
+    assert "#pragma unroll 4\n" in src
+    assert "for (" in src
+
+
 def test_serial_disable_unroll_pragma_immediately_precedes_dynamic_for():
     @T.prim_func
     def main(A: T.Buffer((4,), "int32")):

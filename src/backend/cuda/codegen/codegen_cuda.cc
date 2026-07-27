@@ -32,6 +32,7 @@
 
 #include <cmath>
 #include <iomanip>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
@@ -307,7 +308,21 @@ void CodeGenCUDA::VisitStmt_(const tirx::ForNode* op) {
     stream << "#pragma unroll 1\n";
   } else if (op->kind == tirx::ForKind::kUnrolled || op->annotations.count("pragma_unroll")) {
     PrintIndent();
-    stream << "#pragma unroll\n";
+    stream << "#pragma unroll";
+    if (op->annotations.count("pragma_unroll")) {
+      const auto& unroll = op->annotations.at("pragma_unroll");
+      std::optional<int64_t> factor;
+      if (unroll.type_index() == ffi::TypeIndex::kTVMFFIInt) {
+        factor = unroll.cast<int64_t>();
+      } else if (auto imm = unroll.try_cast<IntImm>()) {
+        factor = (*imm)->value;
+      }
+      if (factor.has_value()) {
+        TVM_FFI_ICHECK_GT(*factor, 0) << "pragma_unroll factor must be positive";
+        stream << " " << *factor;
+      }
+    }
+    stream << "\n";
   }
   PrintIndent();
   std::string vid = AllocVarID(op->loop_var.get());
@@ -1667,7 +1682,13 @@ void CodeGenCUDA::VisitStmt_(const AttrStmtNode* op) {
     return;
   } else if (op->attr_key == "pragma_unroll") {
     PrintIndent();
-    stream << "#pragma unroll\n";
+    stream << "#pragma unroll";
+    if (!op->value.ty().MatchesCode(DLDataTypeCode::kDLBool)) {
+      const auto* factor = op->value.as<IntImmNode>();
+      TVM_FFI_ICHECK(factor && factor->value > 0) << "pragma_unroll factor must be positive";
+      stream << " " << factor->value;
+    }
+    stream << "\n";
     this->VisitStmt(op->body);
     return;
   } else if (op->attr_key == tirx::attr::thread_extent) {
