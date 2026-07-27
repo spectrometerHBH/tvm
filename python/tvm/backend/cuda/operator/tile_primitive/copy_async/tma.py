@@ -1650,12 +1650,10 @@ def _build_auto_plan(op_call: TilePrimitiveCall, sctx: DispatchContext) -> TMAPl
     if swizzle is None:
         _auto_fail("shared-layout", f"cannot recognize shared swizzle in {s_buf.layout}")
     try:
-        full_smem, sliced_smem_with_offset = _slice_layout(s_buf, s_starts, s_extents, "shared")
+        _, sliced_smem_with_offset = _slice_layout(s_buf, s_starts, s_extents, "shared")
     except ValueError as error:
         _auto_fail("shared-slice", str(error))
-    smem_layout_offset = Analyzer().simplify(
-        _layout_offset(full_smem) + _layout_offset(sliced_smem_with_offset)
-    )
+    smem_layout_offset = _layout_offset(sliced_smem_with_offset)
     sliced_smem = TileLayout.from_iters(
         sliced_smem_with_offset.shard,
         sliced_smem_with_offset.replica,
@@ -1716,12 +1714,11 @@ def _build_auto_plan(op_call: TilePrimitiveCall, sctx: DispatchContext) -> TMAPl
 
 
 def _explicit_smem_layout(s_buf: Buffer, starts, extents, swizzle: SwizzleMode):
-    full, sliced = _slice_layout(s_buf, starts, extents, "shared")
-    # LayoutSlice intentionally returns the selected region relative to the
-    # layout's logical origin.  A view may already carry a memory-axis offset
-    # (for example, one warp's interleaved rows), so the physical shared
-    # pointer must include both that view offset and the region-start offset.
-    offset = Analyzer().simplify(_layout_offset(full) + _layout_offset(sliced))
+    _, sliced = _slice_layout(s_buf, starts, extents, "shared")
+    # LayoutSlice preserves the layout's physical base and adds the selected
+    # region offset, so the sliced offset is already the complete layout-side
+    # contribution to the shared pointer.
+    offset = _layout_offset(sliced)
     normalized = TileLayout.from_iters(sliced.shard, sliced.replica, {})
     canonical = normalized.canonicalize()
     if not canonical.is_trivial():

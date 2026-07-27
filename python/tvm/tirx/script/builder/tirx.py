@@ -1274,6 +1274,46 @@ def exp2(
     )
 
 
+@ScopedOp
+def log2(
+    dst: BufferRegion | Buffer,
+    src: BufferRegion | Buffer | None = None,
+    bias: BufferRegion | Buffer | FloatImm | None = None,
+    scale: FloatImm | None = None,
+    workspace: dict[str, Buffer] | None = None,
+    dispatch: str | None = None,
+    scope: ExecScope | None = None,
+    **kwargs,
+):
+    """Compute base-2 logarithm of all elements in src and store to dst."""
+    # Expression-form overload: ``log2(value)`` returns the underlying expression.
+    from tvm import tirx as _tirx
+
+    if not _is_buffer_or_region(dst):
+        return _tirx.log2(dst)
+    if src is None:
+        src = dst
+    if workspace is None:
+        workspace = {}
+    config = kwargs or {}
+    dst = _to_region(dst)
+    src = _to_region(src)
+    if bias is not None and isinstance(bias, Buffer):
+        bias = _to_region(bias)
+    return f_insert(
+        tirx_op.Log2(
+            dst,
+            src,
+            bias,
+            scale,
+            workspace=workspace,
+            config=config,
+            dispatch=dispatch,
+            scope=scope,
+        )
+    )
+
+
 def compose_op(
     workspace: dict[str, Buffer] | None = None, dispatch: str | None = None, **kwargs
 ) -> frame.ComposeOpFrame:
@@ -1740,6 +1780,7 @@ __all__ = [
     "fma",
     "gemm",
     "gemm_async",
+    "log2",
     "max",
     "maximum",
     "memset",

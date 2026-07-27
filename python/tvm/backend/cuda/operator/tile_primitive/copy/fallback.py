@@ -75,6 +75,10 @@ def _emit_fallback(op_call: TilePrimitiveCall, sctx: DispatchContext) -> PrimFun
                 coord[src_indices[k]] += lv
             return coord
 
+        if not copy_extents:
+            T.buffer_store(dst_buf, src_buf[tuple(src_st)], dst_st)
+            return
+
         with T.grid(*copy_extents) as lvs:
             T.buffer_store(dst_buf, src_buf[tuple(_src_coord(lvs))], _dst_coord(lvs))
 

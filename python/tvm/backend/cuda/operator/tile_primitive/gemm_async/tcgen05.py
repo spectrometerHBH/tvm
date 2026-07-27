@@ -351,6 +351,79 @@ def _choose_mma_tile(M, N, cta_group, MMA_N_MIN):
     return M_mma, N_mma
 
 
+def _get_explicit_mma_tile(config):
+    """Parse an optional physical tcgen05 instruction tile from op config.
+
+    ``mma_m`` is the descriptor M (cluster-wide for ``cta_group=2``), while
+    ``mma_n`` is the descriptor N.  The pair is all-or-nothing so a caller
+    cannot accidentally combine one explicit dimension with the heuristic
+    choice for the other.
+    """
+    has_m = "mma_m" in config
+    has_n = "mma_n" in config
+    if has_m != has_n:
+        missing = "mma_n" if has_m else "mma_m"
+        raise ValueError(
+            "gemm_async[tcgen05]: config fields mma_m and mma_n must be provided "
+            f"together; missing {missing}"
+        )
+    if not has_m:
+        return None
+
+    values = []
+    for name in ("mma_m", "mma_n"):
+        value = config[name]
+        if isinstance(value, bool):
+            raise ValueError(
+                f"gemm_async[tcgen05]: {name} must be a positive integer, got {value!r}"
+            )
+        try:
+            value = operator.index(value)
+        except TypeError as err:
+            raise ValueError(
+                f"gemm_async[tcgen05]: {name} must be a positive integer, got {value!r}"
+            ) from err
+        if value <= 0:
+            raise ValueError(f"gemm_async[tcgen05]: {name} must be a positive integer, got {value}")
+        values.append(value)
+    return tuple(values)
+
+
+def _validate_explicit_mma_tile(
+    explicit_mma_tile,
+    *,
+    M,
+    N,
+    cta_group,
+    MMA_K,
+    mma_kind,
+):
+    """Validate and convert a physical instruction tile to per-CTA loop extents."""
+    M_desc, N_mma = explicit_mma_tile
+    M_total = M * cta_group
+    if M_desc != M_total:
+        raise ValueError(
+            "gemm_async[tcgen05]: explicit mma_m must match the physical "
+            f"instruction M derived from the operand/layout tile: got mma_m={M_desc}, "
+            f"but M={M} and cta_group={cta_group} require {M_total}. A smaller "
+            "mma_m would select a different TMEM datapath layout."
+        )
+    if N % N_mma != 0:
+        raise ValueError(
+            "gemm_async[tcgen05]: explicit mma_n must divide the derived output "
+            f"N exactly, got mma_n={N_mma}, N={N}"
+        )
+    _check_tcgen05_mma_matrix_shape(
+        mma_kind,
+        cta_group,
+        M_desc,
+        N_mma,
+        MMA_K,
+        False,
+    )
+    return M_desc // cta_group, N_mma
+
+
 def _layout_matches_datapath_f(tmem_buf) -> bool:
     """Return True if ``tmem_buf.layout`` structurally equals Layout F (M=64
     scattered) over the buffer's full (64, X) shape — i.e. the buffer was
@@ -363,7 +436,10 @@ def _layout_matches_datapath_f(tmem_buf) -> bool:
     if tmem_buf.layout is None or int(tmem_buf.shape[0]) != 64:
         return False
     try:
-        expected = tmem_datapath_layout("F", 64, tmem_buf.shape[1]).canonicalize()
+        base = tmem_datapath_layout("F", 64, tmem_buf.shape[1])
+        expected = TileLayout.from_iters(
+            base.shard, base.replica, tmem_buf.layout.offset
+        ).canonicalize()
         tvm.ir.assert_structural_equal(tmem_buf.layout.canonicalize(), expected)
         return True
     except (AssertionError, ValueError):
@@ -390,6 +466,9 @@ def gemm_async_tcgen05_impl(op_call: TilePrimitiveCall, sctx: DispatchContext) -
             - args[5:8]: transA, transB, accum flags
             Config:
             - config["cta_group"]: CTA group in tcgen05 instructions (default 1)
+            - config["mma_m"], config["mma_n"]: Optional explicit physical
+              instruction tile. Both fields are required together. ``mma_m``
+              is cluster-wide for cta_group=2.
             - config["descI"]: Optional pre-encoded instruction descriptor
               (block-scaled only; the dense path always self-encodes and
               raises if descI is passed)
@@ -890,7 +969,22 @@ def gemm_async_tcgen05_impl(op_call: TilePrimitiveCall, sctx: DispatchContext) -
         MMA_K = 16
     MMA_N_MIN = 8 if cta_group == 1 else 16  # Minimum N dimension
 
-    M_mma, N_mma = _choose_mma_tile(M, N, cta_group, MMA_N_MIN)
+    explicit_mma_tile = _get_explicit_mma_tile(op_call.config)
+    if explicit_mma_tile is None:
+        M_mma, N_mma = _choose_mma_tile(M, N, cta_group, MMA_N_MIN)
+    else:
+        if is_block_scaled:
+            mma_kind = _get_tcgen05_mma_kind(C_type, A_type, B_type, SFA_type, SFB_type)
+        else:
+            mma_kind = _get_tcgen05_mma_kind("float32", A_sem, B_sem)
+        M_mma, N_mma = _validate_explicit_mma_tile(
+            explicit_mma_tile,
+            M=M,
+            N=N,
+            cta_group=cta_group,
+            MMA_K=MMA_K,
+            mma_kind=mma_kind,
+        )
     M_tiles = M // M_mma
     N_tiles = N // N_mma
     K_iters = K // MMA_K
@@ -1018,6 +1112,7 @@ def gemm_async_tcgen05_impl(op_call: TilePrimitiveCall, sctx: DispatchContext) -
     tvm.ir.assert_structural_equal(C_slice_layout.canonicalize(), expected_c_layout)
     assert C_buffer.allocated_addr is not None
     tmem_addr = C_buffer.allocated_addr[0]
+    tmem_lane_offset = C_slice_layout.offset.get(TLane, 0)
     tmem_offset_32b = C_slice_layout.offset.get(TCol, 0)
 
     # Validate TMEM A via the same resolver as tmem_pool.alloc_tcgen05_mma_A.
@@ -1049,6 +1144,7 @@ def gemm_async_tcgen05_impl(op_call: TilePrimitiveCall, sctx: DispatchContext) -
         assert A_buffer.allocated_addr is not None, "TMEM A buffer must have allocated_addr"
         A_tmem_addr = A_buffer.allocated_addr[0]
         A_elem_per_32b = 32 // DataType(A_type).bits
+        A_tmem_lane_offset = A_slice_layout.offset.get(TLane, 0)
         # TCol offset is in element units (not 32-bit columns) for sub-32-bit dtypes.
         # Convert to 32-bit column units for get_tmem_addr.
         A_tmem_offset_32b = A_slice_layout.offset.get(TCol, 0) // A_elem_per_32b
@@ -1198,7 +1294,7 @@ def gemm_async_tcgen05_impl(op_call: TilePrimitiveCall, sctx: DispatchContext) -
     def _a_operand(mi, ki, descA_in=None):
         if a_is_tmem:
             # A is [M, K] non-transposed: M→TLane (rows), K→TCol (cols)
-            a_row = 0 if M_tiles == 1 else mi * M_mma
+            a_row = A_tmem_lane_offset + (0 if M_tiles == 1 else mi * M_mma)
             a_col = A_tmem_offset_32b + ki * (MMA_K // A_elem_per_32b)
             return _get_tmem_addr_fast(A_tmem_addr, a_row, a_col)
         A_offset = _a_offset(mi, ki)
@@ -1215,15 +1311,21 @@ def gemm_async_tcgen05_impl(op_call: TilePrimitiveCall, sctx: DispatchContext) -
         sfa_base = SFA_buffer.allocated_addr[0]
         sfb_base = SFB_buffer.allocated_addr[0]
 
-        # Compute initial SFA/SFB addresses (for ki=0)
-        # apply(0)["TCol"] at row 0 gives physical TCol offset
-        sfa_tcol_0 = SFA_slice_layout.apply(0).get("TCol", 0)
-        sfb_tcol_0 = SFB_slice_layout.apply(0).get("TCol", 0)
-        SFA_init_addr = analyzer.simplify(
-            sfa_base + tvm.tirx.floordiv(sfa_tcol_0, SFA_elem_per_col)
+        # Compute initial SFA/SFB addresses (for ki=0). Both physical axes are
+        # part of a TMEM address: TLane occupies the high half-word and TCol
+        # the low half-word. Dropping TLane silently redirects an explicitly
+        # banded scale view to row zero.
+        sfa_coord_0 = SFA_slice_layout.apply(0)
+        sfb_coord_0 = SFB_slice_layout.apply(0)
+        sfa_tlane_0 = sfa_coord_0.get("TLane", 0)
+        sfb_tlane_0 = sfb_coord_0.get("TLane", 0)
+        sfa_tcol_0 = sfa_coord_0.get("TCol", 0)
+        sfb_tcol_0 = sfb_coord_0.get("TCol", 0)
+        SFA_init_addr = _get_tmem_addr_fast(
+            sfa_base, sfa_tlane_0, tvm.tirx.floordiv(sfa_tcol_0, SFA_elem_per_col)
         )
-        SFB_init_addr = analyzer.simplify(
-            sfb_base + tvm.tirx.floordiv(sfb_tcol_0, SFB_elem_per_col)
+        SFB_init_addr = _get_tmem_addr_fast(
+            sfb_base, sfb_tlane_0, tvm.tirx.floordiv(sfb_tcol_0, SFB_elem_per_col)
         )
 
         # Rotate sf_id per ki when multiple ki share one SF column.
@@ -1251,14 +1353,26 @@ def gemm_async_tcgen05_impl(op_call: TilePrimitiveCall, sctx: DispatchContext) -
                     should_accum = T.meta_var(tvm.tirx.any(ki != 0, accum_expr))
                     sfa_linear = mi * M_mma * SFA_K_total + ki * sfa_elems_per_ki
                     sfb_linear = ni * N_mma_per_cta * SFB_K_total + ki * sfb_elems_per_ki
-                    # Fold tcol to constants shared by SF addr and sf_id.
-                    sfa_tcol = T.meta_var(analyzer.simplify(SFA_slice_layout.apply(sfa_linear).get("TCol", 0)))  # noqa: E501
-                    sfb_tcol = T.meta_var(analyzer.simplify(SFB_slice_layout.apply(sfb_linear).get("TCol", 0)))  # noqa: E501
+                    # Fold the physical coordinates shared by SF addr and sf_id.
+                    sfa_coord = T.meta_var(SFA_slice_layout.apply(sfa_linear))
+                    sfb_coord = T.meta_var(SFB_slice_layout.apply(sfb_linear))
+                    sfa_tlane = T.meta_var(analyzer.simplify(sfa_coord.get("TLane", 0)))
+                    sfb_tlane = T.meta_var(analyzer.simplify(sfb_coord.get("TLane", 0)))
+                    sfa_tcol = T.meta_var(analyzer.simplify(sfa_coord.get("TCol", 0)))
+                    sfb_tcol = T.meta_var(analyzer.simplify(sfb_coord.get("TCol", 0)))
                     sfa_addr = T.meta_var(
-                        analyzer.simplify(sfa_base + tvm.tirx.floordiv(sfa_tcol, SFA_elem_per_col))
+                        _get_tmem_addr_fast(
+                            sfa_base,
+                            sfa_tlane,
+                            tvm.tirx.floordiv(sfa_tcol, SFA_elem_per_col),
+                        )
                     )
                     sfb_addr = T.meta_var(
-                        analyzer.simplify(sfb_base + tvm.tirx.floordiv(sfb_tcol, SFB_elem_per_col))
+                        _get_tmem_addr_fast(
+                            sfb_base,
+                            sfb_tlane,
+                            tvm.tirx.floordiv(sfb_tcol, SFB_elem_per_col),
+                        )
                     )
                     if needs_sf_id:
                         sf_id = T.meta_var(analyzer.simplify(tvm.tirx.floormod(sfa_tcol, SFA_elem_per_col)))  # noqa: E501
@@ -1266,7 +1380,9 @@ def gemm_async_tcgen05_impl(op_call: TilePrimitiveCall, sctx: DispatchContext) -
                     tmem_col = T.meta_var(
                         tmem_offset_32b + ni * (N_mma_phys_cols // C_elem_per_32b)
                     )
-                    tmem_row = T.meta_var(0 if M_tiles == 1 else mi * M_mma)
+                    tmem_row = T.meta_var(
+                        tmem_lane_offset + (0 if M_tiles == 1 else mi * M_mma)
+                    )
                     if elect_pred:
                         T.ptx.tcgen05.mma.block_scale(
                             _get_tmem_addr_fast(tmem_addr, tmem_row, tmem_col),
@@ -1297,7 +1413,9 @@ def gemm_async_tcgen05_impl(op_call: TilePrimitiveCall, sctx: DispatchContext) -
                         tmem_col = T.meta_var(
                             tmem_offset_32b + ni * (N_mma_phys_cols // C_elem_per_32b)
                         )
-                        tmem_row = T.meta_var(0 if M_tiles == 1 else mi * M_mma)
+                        tmem_row = T.meta_var(
+                            tmem_lane_offset + (0 if M_tiles == 1 else mi * M_mma)
+                        )
                         if elect_pred:
                             descB_mma = T.meta_var(
                                 _encoded_desc_val(
@@ -1344,7 +1462,9 @@ def gemm_async_tcgen05_impl(op_call: TilePrimitiveCall, sctx: DispatchContext) -
                         tmem_col = T.meta_var(
                             tmem_offset_32b + ni * (N_mma_phys_cols // C_elem_per_32b)
                         )
-                        tmem_row = T.meta_var(0 if M_tiles == 1 else mi * M_mma)
+                        tmem_row = T.meta_var(
+                            tmem_lane_offset + (0 if M_tiles == 1 else mi * M_mma)
+                        )
                         if elect_pred:
                             T.ptx.tcgen05.mma(
                                 _get_tmem_addr_fast(tmem_addr, tmem_row, tmem_col),

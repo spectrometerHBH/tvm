@@ -1702,6 +1702,17 @@ def test_slice():
 
     case4()
 
+    def case_adds_region_offset_to_base():
+        warp_offset = Var("warp_offset", "int32")
+        layout = TileLayout(S[(4, 64)] + warp_offset * 64)
+        shape = [4, 64]
+        region = [(2, 4), (0, 64)]
+        sliced = layout.slice(shape, region).canonicalize()
+        assert sliced is not None
+        assert Analyzer().can_prove_equal(sliced.offset[m], warp_offset * 64 + 128)
+
+    case_adds_region_offset_to_base()
+
     def case_swizzle_slice():
         # bare-swizzle ComposeLayout slice - delegates to ComposeLayout
         swizzle = ComposeLayout(3, 3, 3, TileLayout(S[(512,)]))

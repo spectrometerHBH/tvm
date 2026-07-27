@@ -18,6 +18,7 @@
 import copy
 import functools
 import operator
+import re
 
 import numpy as np
 import pytest
@@ -40,7 +41,15 @@ from tvm.tirx.cuda.operator.tile_primitive.tma_utils import (
     mma_atom_shape,
     mma_shared_layout,
 )
-from tvm.tirx.layout import R, S, TCol, TileLayout, TLane, tcgen05_atom_layout
+from tvm.tirx.layout import (
+    R,
+    S,
+    TCol,
+    TileLayout,
+    TLane,
+    tcgen05_atom_layout,
+    tmem_datapath_layout,
+)
 from tvm.tirx.layout import tid_in_wg as axis_tid_in_wg
 
 # ---------------------------------------------------------------------------
@@ -259,7 +268,7 @@ def test_gemm_tcgen05_cta_group_1(task):
         T.cuda.cta_sync()
 
         if tid_in_wg == 0:
-            Tx.gemm_async(tmem[tuple(r_tmem_C)], A_smem[tuple(r_smem_A)], B_smem[tuple(r_smem_B)], dispatch="tcgen05")  # noqa: E501
+            Tx.gemm_async(tmem[tuple(r_tmem_C)], A_smem[tuple(r_smem_A)], B_smem[tuple(r_smem_B)], dispatch="tcgen05", mma_m=128, mma_n=64)  # noqa: E501
             T.ptx.tcgen05.commit(mma_mbar.ptr_to([0]), cta_group=1)
         T.ptx.mbarrier.try_wait(mma_mbar.ptr_to([0]), 0)
         T.cuda.cta_sync()
@@ -520,7 +529,7 @@ def test_gemm_tcgen05_cta_group_2(task):
             T.ptx.tcgen05.fence.after_thread_sync()
             T.cuda.cta_sync()
             if tid_in_wg == 0:
-                Tx.gemm_async(tmem[tuple(r_tmem_C)], A_smem[tuple(r_smem_A)], B_smem[tuple(r_smem_B)], dispatch="tcgen05", cta_group=2)  # noqa: E501
+                Tx.gemm_async(tmem[tuple(r_tmem_C)], A_smem[tuple(r_smem_A)], B_smem[tuple(r_smem_B)], dispatch="tcgen05", cta_group=2, mma_m=256, mma_n=128)  # noqa: E501
                 T.ptx.tcgen05.commit(mma_mbar.ptr_to([0]), cta_group=2, cta_mask=3) # signal cta 1's mbarrier  # noqa: E501
         T.ptx.mbarrier.try_wait(mma_mbar.ptr_to([0]), 0) # both cta 0 and cta 1 have done mma
         T.ptx.tcgen05.fence.after_thread_sync()
@@ -658,7 +667,7 @@ def test_gemm_tcgen05_cta_group_2_layout_b():
             T.ptx.tcgen05.fence.after_thread_sync()
             T.cuda.cta_sync()
             if tid_in_wg == 0:
-                Tx.gemm_async(tmem[0:M_per_cta, 0:N_logical], A_smem[0:M_per_cta, 0:K], B_smem[0:N_half, 0:K], dispatch="tcgen05", cta_group=2)  # noqa: E501
+                Tx.gemm_async(tmem[0:M_per_cta, 0:N_logical], A_smem[0:M_per_cta, 0:K], B_smem[0:N_half, 0:K], dispatch="tcgen05", cta_group=2, mma_m=128, mma_n=128)  # noqa: E501
                 T.ptx.tcgen05.commit(mma_mbar.ptr_to([0]), cta_group=2, cta_mask=3)
         T.ptx.mbarrier.try_wait(mma_mbar.ptr_to([0]), 0)
         T.ptx.tcgen05.fence.after_thread_sync()
@@ -2611,8 +2620,9 @@ def _run_dense_gemm(
     np.testing.assert_allclose(C_t.numpy().astype("float32"), C_ref, atol=atol, rtol=rtol)
 
 
-def _build_smem_desc_kernel(smem_desc, weight_stationary=False, pass_descI=False):
+def _build_smem_desc_kernel(smem_desc, weight_stationary=False, pass_descI=False, mma_config=None):
     """Minimal cta_group=1 fp16 gemm_async kernel parametrized on ``smem_desc``."""
+    mma_cfg = {} if mma_config is None else mma_config
     C_shape, C_dtype, C_region = (128, 512), "float32", [(0, 128), (256, 384)]
     A_shape, A_dtype, A_sw = (3, 128, 64), "float16", 3
     B_shape, B_dtype, B_sw = (3, 128, 64), "float16", 3
@@ -2676,9 +2686,9 @@ def _build_smem_desc_kernel(smem_desc, weight_stationary=False, pass_descI=False
                     trans_b=False,
                     n_cta_groups=1,
                 )
-                Tx.gemm_async(tmem[tuple(r_tmem_C)], A_smem[tuple(r_smem_A)], B_smem[tuple(r_smem_B)], dispatch="tcgen05", smem_desc=smem_desc, weight_stationary=weight_stationary, descI=desc_i)  # noqa: E501, F821
+                Tx.gemm_async(tmem[tuple(r_tmem_C)], A_smem[tuple(r_smem_A)], B_smem[tuple(r_smem_B)], dispatch="tcgen05", smem_desc=smem_desc, weight_stationary=weight_stationary, descI=desc_i, **mma_cfg)  # noqa: E501, F821
             else:
-                Tx.gemm_async(tmem[tuple(r_tmem_C)], A_smem[tuple(r_smem_A)], B_smem[tuple(r_smem_B)], dispatch="tcgen05", smem_desc=smem_desc, weight_stationary=weight_stationary)  # noqa: E501
+                Tx.gemm_async(tmem[tuple(r_tmem_C)], A_smem[tuple(r_smem_A)], B_smem[tuple(r_smem_B)], dispatch="tcgen05", smem_desc=smem_desc, weight_stationary=weight_stationary, **mma_cfg)  # noqa: E501
             T.ptx.tcgen05.commit(mma_mbar.ptr_to([0]), cta_group=1)
         T.ptx.mbarrier.try_wait(mma_mbar.ptr_to([0]), 0)
         T.cuda.cta_sync()
@@ -2696,6 +2706,156 @@ def _build_smem_desc_kernel(smem_desc, weight_stationary=False, pass_descI=False
         # fmt: on
 
     return gemm_async
+
+
+def _build_explicit_cta2_dense_kernel(M_per_cta, mma_m):
+    """Minimal cta_group=2 fp16 kernel with an explicit descriptor M."""
+    N, K = 64, 16
+    A_shape = (M_per_cta, K)
+    B_shape = (N // 2, K)
+    A_layout = mma_shared_layout("float16", SwizzleMode.SWIZZLE_NONE, A_shape)
+    B_layout = mma_shared_layout("float16", SwizzleMode.SWIZZLE_NONE, B_shape)
+    if M_per_cta == 64:
+        C_layout = TileLayout(S[(M_per_cta, 2, N // 2) : (1 @ TLane, 64 @ TLane, 1 @ TCol)])
+    else:
+        C_layout = TileLayout(S[(M_per_cta, N) : (1 @ TLane, 1 @ TCol)])
+
+    # fmt: off
+    @T.prim_func
+    def kernel() -> None:
+        T.device_entry()
+        cta_id = T.cta_id([2])
+        cbx, cby = T.cta_id_in_cluster([2, 1])
+        thread_id = T.thread_id([128])
+        tid = T.thread_id_in_wg([128])
+        A_smem = T.alloc_buffer(A_shape, "float16", scope="shared", layout=A_layout)
+        B_smem = T.alloc_buffer(B_shape, "float16", scope="shared", layout=B_layout)
+        C_tmem = T.decl_buffer((M_per_cta, N), "float32", scope="tmem", allocated_addr=0, layout=C_layout)  # noqa: E501
+        if tid == 0:
+            Tx.gemm_async(C_tmem[:, :], A_smem[:, :], B_smem[:, :], dispatch="tcgen05", cta_group=2, mma_m=mma_m, mma_n=N)  # noqa: E501
+        # fmt: on
+
+    return kernel
+
+
+def _build_explicit_block_scaled_split_n_kernel():
+    """Minimal cta_group=2 block-scaled fp8 kernel split into two N instructions."""
+    M, N, K = 128, 128, 32
+    A_shape = (M, K)
+    B_shape = (N // 2, K)
+    A_layout = mma_shared_layout("float8_e4m3fn", SwizzleMode.SWIZZLE_32B_ATOM, A_shape)
+    B_layout = mma_shared_layout("float8_e4m3fn", SwizzleMode.SWIZZLE_32B_ATOM, B_shape)
+    C_layout = TileLayout(S[(M, N) : (1 @ TLane, 1 @ TCol)])
+    sf_layout = sf_tmem_layout(M, SF_K=1, sf_per_mma=1)
+
+    # fmt: off
+    @T.prim_func
+    def kernel() -> None:
+        T.device_entry()
+        cta_id = T.cta_id([2])
+        cbx, cby = T.cta_id_in_cluster([2, 1])
+        thread_id = T.thread_id([128])
+        tid = T.thread_id_in_wg([128])
+        A_smem = T.alloc_buffer(A_shape, "float8_e4m3fn", scope="shared", layout=A_layout)
+        B_smem = T.alloc_buffer(B_shape, "float8_e4m3fn", scope="shared", layout=B_layout)
+        C_tmem = T.decl_buffer((M, N), "float32", scope="tmem", allocated_addr=0, layout=C_layout)
+        SFA_tmem = T.decl_buffer((M, 1), "float8_e8m0fnu", scope="tmem", allocated_addr=N, layout=sf_layout)  # noqa: E501
+        SFB_tmem = T.decl_buffer((N, 1), "float8_e8m0fnu", scope="tmem", allocated_addr=N + 4, layout=sf_layout)  # noqa: E501
+        if tid == 0:
+            Tx.gemm_async(C_tmem[:, :], A_smem[:, :], B_smem[:, :], SFA=SFA_tmem[:, :], SFB=SFB_tmem[:, :], dispatch="tcgen05", cta_group=2, mma_m=256, mma_n=64)  # noqa: E501
+        # fmt: on
+
+    return kernel
+
+
+def _compile_cuda_source(func):
+    target = tvm.target.Target("cuda")
+    with target:
+        mod = tvm.compile(
+            tvm.IRModule({"main": func}),
+            target=target,
+            tir_pipeline="tirx",
+        )
+    return mod.mod.imports[0].inspect_source()
+
+
+def _dense_mma_call_lines(src):
+    helper = "ptx_tcgen05_mma_cta_1_kind_f16_SS("
+    return [line for line in src.splitlines() if line.lstrip().startswith(helper)]
+
+
+def _mma_descriptor_values(lines):
+    return [int(re.search(r", \(uint\)(\d+), \(bool\)", line).group(1)) for line in lines]
+
+
+def test_gemm_tcgen05_explicit_mma_tile_changes_physical_instructions():
+    default_src = _compile_cuda_source(_build_smem_desc_kernel("hoist"))
+    explicit_src = _compile_cuda_source(
+        _build_smem_desc_kernel("hoist", mma_config={"mma_m": 128, "mma_n": 64})
+    )
+
+    default_calls = _dense_mma_call_lines(default_src)
+    explicit_calls = _dense_mma_call_lines(explicit_src)
+    assert len(default_calls) == 4
+    assert len(explicit_calls) == 8
+
+    assert {(desc >> 17) & 0x3F for desc in _mma_descriptor_values(default_calls)} == {128 // 8}
+    assert {(desc >> 17) & 0x3F for desc in _mma_descriptor_values(explicit_calls)} == {64 // 8}
+
+
+@pytest.mark.parametrize(
+    ("M_per_cta", "mma_m"),
+    [
+        (64, 128),
+        (128, 256),
+    ],
+)
+def test_gemm_tcgen05_explicit_mma_m_is_cluster_total_for_cta_group_2(M_per_cta, mma_m):
+    src = _compile_cuda_source(_build_explicit_cta2_dense_kernel(M_per_cta, mma_m))
+    assert "tcgen05.mma.cta_group::2.kind::f16" in src
+    helper = "ptx_tcgen05_mma_cta_2_kind_f16_SS("
+    calls = [line for line in src.splitlines() if line.lstrip().startswith(helper)]
+    assert len(calls) == 1
+    assert {(desc >> 24) & 0x1F for desc in _mma_descriptor_values(calls)} == {mma_m // 16}
+
+
+def test_gemm_tcgen05_block_scaled_explicit_mma_tile_splits_n():
+    src = _compile_cuda_source(_build_explicit_block_scaled_split_n_kernel())
+    helper = "ptx_tcgen05_mma_block_scaled_cta_2_kind_mxf8f6f4"
+    calls = [line for line in src.splitlines() if line.lstrip().startswith(helper)]
+    assert len(calls) == 2
+
+
+@pytest.mark.parametrize(
+    ("mma_config", "message"),
+    [
+        ({"mma_m": 128}, "must be provided together"),
+        ({"mma_n": 64}, "must be provided together"),
+        ({"mma_m": 0, "mma_n": 64}, "mma_m must be a positive integer"),
+        ({"mma_m": 128, "mma_n": -1}, "mma_n must be a positive integer"),
+        ({"mma_m": True, "mma_n": 64}, "mma_m must be a positive integer"),
+        ({"mma_m": 128.0, "mma_n": 64}, "mma_m must be a positive integer"),
+        ({"mma_m": 64, "mma_n": 64}, "explicit mma_m must match"),
+        ({"mma_m": 128, "mma_n": 96}, "explicit mma_n must divide"),
+        ({"mma_m": 128, "mma_n": 8}, "Invalid matrix shape"),
+    ],
+)
+def test_gemm_tcgen05_explicit_mma_tile_rejects_invalid_config(mma_config, message):
+    target = tvm.target.Target("cuda")
+    with target:
+        with pytest.raises(Exception, match=message):
+            tvm.compile(
+                tvm.IRModule(
+                    {
+                        "main": _build_smem_desc_kernel(
+                            "hoist",
+                            mma_config=mma_config,
+                        )
+                    }
+                ),
+                target=target,
+                tir_pipeline="tirx",
+            )
 
 
 @pytest.mark.parametrize("smem_desc", ["hoist", "local_hoist", "encode", "recompute"])
@@ -2787,13 +2947,14 @@ def test_gemm_tcgen05_dense_descI_rejected():
             )
 
 
-def _build_cta1_m64_packed_c_kernel(weight_stationary=None):
+def _build_cta1_m64_packed_c_kernel(weight_stationary=None, mma_config=None):
     """cta_group::1 M=64 GEMM whose C uses the packed (M, 2, N//2) TMEM layout.
 
     ``weight_stationary=None`` omits the flag entirely (the dispatch infers
     .ws from the Layout-E C); True/False pass it explicitly.
     """
     ws_cfg = {} if weight_stationary is None else {"weight_stationary": weight_stationary}
+    mma_cfg = {} if mma_config is None else mma_config
 
     M, N, K = 64, 128, 16
     A_dtype = B_dtype = "bfloat16"
@@ -2838,6 +2999,7 @@ def _build_cta1_m64_packed_c_kernel(weight_stationary=None):
                 dispatch="tcgen05",
                 cta_group=1,
                 **ws_cfg,
+                **mma_cfg,
             )
 
     return gemm_packed_c
@@ -2863,6 +3025,18 @@ def test_gemm_tcgen05_cta1_m64_accepts_packed_c_layout_ws():
     assert "ptx_tcgen05_mma_cta_1_kind_f16_TS_ws(400," in src
     assert "get_tmem_addr(400, 0, 0)" not in src
     assert "get_tmem_addr(400, 0, 64)" not in src
+
+
+def test_gemm_tcgen05_explicit_mma_tile_preserves_inferred_ws_datapath():
+    src = _compile_cuda_source(
+        _build_cta1_m64_packed_c_kernel(
+            mma_config={"mma_m": 64, "mma_n": 64},
+        )
+    )
+    assert "tcgen05.mma.ws.cta_group::1.kind::f16" in src
+    helper = "ptx_tcgen05_mma_cta_1_kind_f16_TS_ws("
+    calls = [line for line in src.splitlines() if line.lstrip().startswith(helper)]
+    assert len(calls) == 2
 
 
 def _build_cta1_m64_batched_c_kernel():
@@ -3174,6 +3348,10 @@ def _make_gemm_tcgen05_call(
     config=None,
     scope_kind="thread",
     return_context=False,
+    C_layout=None,
+    C_allocated_addr=0,
+    A_scope="shared.dyn",
+    A_allocated_addr=0,
 ):
     """Construct a GemmAsync TilePrimitiveCall and run the tcgen05 dispatch.
 
@@ -3196,11 +3374,14 @@ def _make_gemm_tcgen05_call(
 
     A_shape = (M, K) if not transA else (K, M)
     B_shape = (K, N) if transB else (N, K)
-    A_buf = tvm.tirx.decl_buffer(A_shape, dtype, "A_smem", scope="shared.dyn", layout=A_layout)
+    A_buf = tvm.tirx.decl_buffer(A_shape, dtype, "A", scope=A_scope, layout=A_layout)
+    if A_scope == "tmem":
+        A_buf = A_buf.with_allocated_addr([tvm.tirx.IntImm("uint32", A_allocated_addr)])
     B_buf = tvm.tirx.decl_buffer(B_shape, dtype, "B_smem", scope="shared.dyn", layout=B_layout)
-    C_layout = TileLayout(S[(M, N) : (1 @ TLane, 1 @ TCol)])
+    if C_layout is None:
+        C_layout = TileLayout(S[(M, N) : (1 @ TLane, 1 @ TCol)])
     C_buf = tvm.tirx.decl_buffer((M, N), "float32", "C_tmem", scope="tmem", layout=C_layout)
-    C_buf = C_buf.with_allocated_addr([tvm.tirx.IntImm("uint32", 0)])
+    C_buf = C_buf.with_allocated_addr([tvm.tirx.IntImm("uint32", C_allocated_addr)])
     call = GemmAsync(
         full_region(C_buf),
         full_region(A_buf),
@@ -3214,6 +3395,116 @@ def _make_gemm_tcgen05_call(
     sctx = DispatchContext(target, ExecScope(scope_kind), {}, {}, scope_kind=scope_kind)
     impl = gemm_async_tcgen05_impl(call, sctx)
     return (impl, sctx) if return_context else impl
+
+
+def test_gemm_tcgen05_preserves_explicit_tmem_lane_bases():
+    """D and TMEM-A row offsets are part of their physical taddr operands."""
+    M, N, K = 64, 64, 16
+    dtype = "bfloat16"
+    B_layout = mma_shared_layout(dtype, SwizzleMode.SWIZZLE_32B_ATOM, (K, N))
+
+    d_base = tmem_datapath_layout("F", M, N)
+    d_offset = TileLayout.from_iters(d_base.shard, d_base.replica, {TLane: 1})
+    A_smem_layout = mma_shared_layout(dtype, SwizzleMode.SWIZZLE_32B_ATOM, (M, K))
+    d_impl = _make_gemm_tcgen05_call(
+        M,
+        N,
+        K,
+        dtype,
+        A_smem_layout,
+        B_layout,
+        C_layout=d_offset,
+        C_allocated_addr=400,
+        config={"mma_m": M, "mma_n": N},
+    )
+    assert "T.cuda.get_tmem_addr(T.uint32(400), 1, ni * 64)" in d_impl.script()
+
+    a_base = TileLayout(S[(M, K) : (1 @ TLane, 1 @ TCol)])
+    a_offset = TileLayout.from_iters(a_base.shard, a_base.replica, {TLane: 1})
+    a_impl = _make_gemm_tcgen05_call(
+        M,
+        N,
+        K,
+        dtype,
+        a_offset,
+        B_layout,
+        C_layout=d_base,
+        C_allocated_addr=400,
+        A_scope="tmem",
+        A_allocated_addr=256,
+        config={"mma_m": M, "mma_n": N},
+    )
+    assert "T.cuda.get_tmem_addr(T.uint32(256), 1, ki * 8)" in a_impl.script()
+
+
+def test_gemm_tcgen05_preserves_block_scale_tmem_lane_bases():
+    """SFA/SFB row offsets must reach the encoded TMEM address operands."""
+    from tvm.ir import Range
+    from tvm.tirx.cuda.operator.tile_primitive.gemm_async.tcgen05 import (
+        gemm_async_tcgen05_impl,
+    )
+    from tvm.tirx.exec_scope import ExecScope
+    from tvm.tirx.operator.tile_primitive.ops import GemmAsync
+    from tvm.tirx.stmt import BufferRegion
+    from tvm.tirx.tile_primitive import DispatchContext
+
+    def full_region(buf):
+        return BufferRegion(buf, [Range.from_min_extent(0, s) for s in buf.shape])
+
+    M, N, K = 128, 64, 64
+    data_dtype = "float4_e2m1fn"
+    sf_dtype = "float8_e4m3fn"
+    A = tvm.tirx.decl_buffer(
+        (M, K),
+        data_dtype,
+        "A_smem",
+        scope="shared.dyn",
+        layout=mma_shared_layout(data_dtype, SwizzleMode.SWIZZLE_32B_ATOM, (M, K)),
+    )
+    B = tvm.tirx.decl_buffer(
+        (N, K),
+        data_dtype,
+        "B_smem",
+        scope="shared.dyn",
+        layout=mma_shared_layout(data_dtype, SwizzleMode.SWIZZLE_32B_ATOM, (N, K)),
+    )
+    C = tvm.tirx.decl_buffer(
+        (M, N),
+        "float32",
+        "C_tmem",
+        scope="tmem",
+        layout=tmem_datapath_layout("D", M, N),
+    ).with_allocated_addr([tvm.tirx.IntImm("uint32", 0)])
+
+    sf_per_mma = 4
+    sfa_base = sf_tmem_layout(M, SF_K=sf_per_mma, sf_per_mma=sf_per_mma)
+    sfb_base = sf_tmem_layout(N, SF_K=sf_per_mma, sf_per_mma=sf_per_mma)
+    sfa_layout = TileLayout.from_iters(sfa_base.shard, sfa_base.replica, {TLane: 1})
+    sfb_layout = TileLayout.from_iters(sfb_base.shard, sfb_base.replica, {TLane: 2})
+    SFA = tvm.tirx.decl_buffer(
+        (M, sf_per_mma), sf_dtype, "SFA_tmem", scope="tmem", layout=sfa_layout
+    ).with_allocated_addr([tvm.tirx.IntImm("uint32", 256)])
+    SFB = tvm.tirx.decl_buffer(
+        (N, sf_per_mma), sf_dtype, "SFB_tmem", scope="tmem", layout=sfb_layout
+    ).with_allocated_addr([tvm.tirx.IntImm("uint32", 320)])
+
+    call = GemmAsync(
+        full_region(C),
+        full_region(A),
+        full_region(B),
+        full_region(SFA),
+        full_region(SFB),
+        False,
+        False,
+        False,
+        config={"cta_group": 1, "mma_m": M, "mma_n": N},
+    )
+    target = tvm.target.Target({"kind": "cuda", "arch": "sm_100a"})
+    sctx = DispatchContext(target, ExecScope("thread"), {}, {}, scope_kind="thread")
+    script = gemm_async_tcgen05_impl(call, sctx).script()
+
+    assert "T.cuda.get_tmem_addr(T.uint32(256), 1, 0)" in script
+    assert "T.cuda.get_tmem_addr(T.uint32(320), 2, 0)" in script
 
 
 @pytest.mark.parametrize(

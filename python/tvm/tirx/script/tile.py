@@ -46,7 +46,7 @@ def _validate_tile_call(op_name, args, kwargs):
     if op_name in {"cast", "max", "min", "permute_layout", "silu"}:
         src = _get_arg(args, kwargs, 1, "src")
         _require_buffer_arg(op_name, "src", src)
-    elif op_name in {"sqrt", "exp", "exp2", "reciprocal"}:
+    elif op_name in {"sqrt", "exp", "exp2", "log2", "reciprocal"}:
         src = _get_arg(args, kwargs, 1, "src")
         if src is not None:
             _require_buffer_arg(op_name, "src", src)
@@ -72,6 +72,7 @@ _SCOPED_TILE_OP_NAMES = [
     "copy_async",
     "exp",
     "exp2",
+    "log2",
     "fdiv",
     "fill",
     "fma",
