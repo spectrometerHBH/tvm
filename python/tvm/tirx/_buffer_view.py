@@ -143,7 +143,7 @@ def permute(buf: Buffer, *dims) -> Buffer:
     return _redecl(buf, new_shape, new_layout)
 
 
-def rearrange(buf: Buffer, pattern: str, **sizes) -> Buffer:
+def rearrange(buf: Buffer, pattern: str, /, **sizes) -> Buffer:
     """Implement :meth:`Buffer.rearrange`."""
 
     def _groups(side):
