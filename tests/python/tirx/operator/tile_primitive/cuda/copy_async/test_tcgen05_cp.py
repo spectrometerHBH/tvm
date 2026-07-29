@@ -739,8 +739,8 @@ def test_cp_rejects_missing_multicast_for_64x128b():
     _assert_compile_raises(kernel, "requires an explicit multicast")
 
 
-def test_cp_rejects_misaligned_tcol_offset():
-    """bf16 TMEM column offset of 1 element (half a 32-bit cell)."""
+def test_cp_rejects_non_128b_tcol_offset():
+    """A whole 32-bit TMEM cell is still below tcgen05.cp's 128-bit alignment."""
     bits = 16
     epa = 128 // bits
     C = 2 * epa
@@ -753,14 +753,14 @@ def test_cp_rejects_misaligned_tcol_offset():
         [(0, 32), (0, C)],
         t_full,
         t_full_shape,
-        [(0, 32), (1, C + 1)],  # TCol offset 1 elem = 16 bits
+        [(0, 32), (2, C + 2)],  # TCol offset 2 bf16 elems = one 32-bit cell
         "bfloat16",
         "32x128b",
         "warpx4",
         t_C * bits // 32,
         32,
     )
-    _assert_compile_raises(kernel, "not provably 32b-aligned")
+    _assert_compile_raises(kernel, "not provably 128b-aligned")
 
 
 def test_cp_rejects_unknown_shape():

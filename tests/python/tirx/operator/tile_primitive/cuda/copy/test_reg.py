@@ -514,6 +514,28 @@ def test_ptx_st_from_src_f32_vector_preserves_values():
     np.testing.assert_equal(out.numpy(), np.array([1, 2, 3, 4], dtype="float32"))
 
 
+def test_copy_fallback_handles_scalar_regions():
+    @T.prim_func
+    def kernel(B_ptr: T.handle) -> None:
+        B = T.match_buffer(B_ptr, (1,), "float32")
+        T.device_entry()
+        T.cta_id([1])
+        T.thread_id([1])
+        src = T.alloc_local((1,), "float32")
+        dst = T.alloc_local((4,), "float32")
+        src[0] = T.cast(7, "float32")
+        Tx.copy(dst[2:3], src[:])
+        B[0] = dst[2]
+
+    target = tvm.target.Target("cuda")
+    with target:
+        mod = tvm.IRModule({"main": kernel})
+        ex = tvm.compile(mod, target=target, tir_pipeline="tirx")
+        src = ex.mod.imports[0].inspect_source()
+
+    assert "dst_ptr[2] = src_ptr[0];" in src
+
+
 @pytest.mark.gpu
 @pytest.mark.skipif(not env.has_cuda_compute(9), reason="need cuda compute >= 9.0")
 @pytest.mark.parametrize(

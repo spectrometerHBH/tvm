@@ -1404,6 +1404,74 @@ def test_buffer_permute_ir():
     assert from_source(code).script() == code
 
 
+def test_buffer_rearrange_allows_arbitrary_axis_names():
+    @T.prim_func
+    def ordinary_axis() -> None:
+        T.device_entry()
+        A = T.alloc_buffer(
+            (8, 4),
+            "float16",
+            scope="local",
+            layout=T.TileLayout(T.S[(8, 4) : (4, 1)]),
+        )
+        B = A.rearrange("(outer inner) tail -> outer tail inner", outer=2)
+        B[0, 0, 0] = T.float16(0)
+
+    @T.prim_func
+    def buf_axis() -> None:
+        T.device_entry()
+        A = T.alloc_buffer(
+            (8, 4),
+            "float16",
+            scope="local",
+            layout=T.TileLayout(T.S[(8, 4) : (4, 1)]),
+        )
+        B = A.rearrange("(buf inner) tail -> buf tail inner", buf=2)
+        B[0, 0, 0] = T.float16(0)
+
+    @T.prim_func
+    def self_axis() -> None:
+        T.device_entry()
+        A = T.alloc_buffer(
+            (8, 4),
+            "float16",
+            scope="local",
+            layout=T.TileLayout(T.S[(8, 4) : (4, 1)]),
+        )
+        B = A.rearrange("(self inner) tail -> self tail inner", self=2)
+        B[0, 0, 0] = T.float16(0)
+
+    @T.prim_func
+    def pattern_axis() -> None:
+        T.device_entry()
+        A = T.alloc_buffer(
+            (8, 4),
+            "float16",
+            scope="local",
+            layout=T.TileLayout(T.S[(8, 4) : (4, 1)]),
+        )
+        B = A.rearrange("(pattern inner) tail -> pattern tail inner", pattern=2)
+        B[0, 0, 0] = T.float16(0)
+
+    @T.prim_func
+    def keyword_pattern() -> None:
+        T.device_entry()
+        A = T.alloc_buffer(
+            (8, 4),
+            "float16",
+            scope="local",
+            layout=T.TileLayout(T.S[(8, 4) : (4, 1)]),
+        )
+        B = A.rearrange(pattern="(outer inner) tail -> outer tail inner", outer=2)
+        B[0, 0, 0] = T.float16(0)
+
+    expected = _collect_buffers(ordinary_axis)["B"]
+    for func in (buf_axis, self_axis, pattern_axis, keyword_pattern):
+        actual = _collect_buffers(func)["B"]
+        assert_structural_equal(actual.shape, expected.shape)
+        assert_structural_equal(actual.layout, expected.layout)
+
+
 def test_buffer_permute_compose_layout_ir():
     """Verify .permute on a swizzle-composed layout: the swizzle is preserved
     and the inner tile layout's dim groups are permuted (the reshape-permute-

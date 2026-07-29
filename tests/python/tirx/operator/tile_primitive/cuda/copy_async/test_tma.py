@@ -155,6 +155,7 @@ def _make_op(
     config=None,
     g_data=None,
     g_elem_offset=0,
+    s_elem_offset=0,
     target_arch="sm_90a",
     sctx=None,
 ):
@@ -178,6 +179,7 @@ def _make_op(
         s_dtype,
         "A_smem",
         scope="shared.dyn",
+        elem_offset=s_elem_offset,
         layout=s_layout,
     )
     config = dict(config or {})
@@ -1043,6 +1045,21 @@ def test_auto_canonicalizes_dynamic_stage_slice_before_global_grouping():
     assert plan.issue_axes == ()
 
 
+def test_auto_shared_pointer_counts_each_offset_once():
+    warp_offset = Var("warp_offset", "int32")
+    plan = _auto_plan(
+        g_shape=(2, 64),
+        s_shape=(4, 64),
+        s_region=((2, 2), (0, 64)),
+        s_layout=TileLayout(S[(4, 64)] + warp_offset * 64),
+        s_elem_offset=32,
+    )
+    assert Analyzer().can_prove_equal(
+        plan.spec.smem_base_offset,
+        32 + warp_offset * 64 + 128,
+    )
+
+
 def test_auto_defers_dynamic_global_dimension_bounds_to_runtime():
     seq_len = Var("seq_len", "uint32")
     row = Var("row", "uint32")
@@ -1436,18 +1453,21 @@ def test_explicit_gather_uses_extracted_swizzled_slice_pointer():
     assert int(shared_ptr.args[0].indices[0]) == 256
 
 
-def test_explicit_shared_pointer_retains_dynamic_view_layout_offset():
+def test_explicit_shared_pointer_counts_each_offset_once():
     warp_offset = Var("warp_offset", "int32")
     layout = TileLayout(S[(4, 64)] + warp_offset * 64)
     impl, _, _ = _lower_direct(
         "tma_explicit",
-        g_shape=(4, 64),
+        g_shape=(2, 64),
+        s_shape=(4, 64),
+        s_region=((2, 2), (0, 64)),
         s_layout=layout,
+        s_elem_offset=32,
     )
     shared_ptr = _count_tma(impl).calls[0].args[1]
     assert shared_ptr.op.name == "tirx.address_of"
     pointer_index = shared_ptr.args[0].indices[0]
-    assert Analyzer().can_prove_equal(pointer_index, warp_offset * 64)
+    assert Analyzer().can_prove_equal(pointer_index, 32 + warp_offset * 64 + 128)
 
 
 def test_explicit_allows_different_operand_ranks_with_equal_payload_bytes():

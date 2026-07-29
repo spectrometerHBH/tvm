@@ -26,6 +26,8 @@ from tvm.runtime import Object, Scriptable, convert
 
 from . import _buffer_view, _ffi_api
 
+_REARRANGE_PATTERN_UNSET = object()
+
 
 @tvm_ffi.register_object("tirx.Buffer")
 class Buffer(Object, Scriptable):
@@ -338,7 +340,7 @@ class Buffer(Object, Scriptable):
         """
         return _buffer_view.permute(self, *dims)
 
-    def rearrange(self, pattern: str, **sizes) -> "Buffer":
+    def rearrange(self, pattern: str = _REARRANGE_PATTERN_UNSET, /, **sizes) -> "Buffer":
         """einops-style relayout in one line: ``buf.rearrange("b (2 r) -> 2 b r")``.
 
         A pure reshape+permute+reshape over the SAME physical bytes, spelled as
@@ -358,6 +360,10 @@ class Buffer(Object, Scriptable):
         replica (``R[...]``), a stride-fiction/padded view, or a reshape crossing
         a swizzle-atom boundary — keep those as explicit ``view(layout=...)``.
         """
+        if pattern is _REARRANGE_PATTERN_UNSET:
+            if "pattern" not in sizes:
+                raise TypeError("Buffer.rearrange() missing required argument: 'pattern'")
+            pattern = sizes.pop("pattern")
         return _buffer_view.rearrange(self, pattern, **sizes)
 
     @property

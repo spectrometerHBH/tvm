@@ -93,7 +93,7 @@ F. Split each side's iters into three segments by grouping the flattened
    - atom_K_byte ∈ {16, 32, 64, 128} → swizzle_mode 0..3, which must match
      s_buf.layout's swizzle (if any)
 G. Alignment checks:
-   - t_iso TCol offset ≡ 0 (mod 32-bit)
+   - t_iso TCol offset ≡ 0 (mod 128-bit)
    - t_iso TLane offset folds into the taddr lane half-word
    - s_iso m offset ≡ 0 (mod 16B for sw=0; mod atom_size for sw>0)
    - middle iter strides 16B-aligned
@@ -559,14 +559,16 @@ def _plan_for_shape(op_call: TilePrimitiveCall, shape: str, multicast: str):
     analyzer = Analyzer()
 
     # G: alignments.
-    # G.1: t_iso TCol offset ≡ 0 (mod 32-bit element count).
+    # G.1: tcgen05.cp taddr is 128-bit aligned. The layout offset is in
+    # element units, so require four complete 32-bit TMEM cells.
     t_col_offset_expr = 0
     for ax, val in t_iso.offset.items():
         if ax == TCol:
             t_col_offset_expr = val
             break
-    if not analyzer.can_prove_equal(t_col_offset_expr % elem_per_32b, 0):
-        raise ValueError(f"t TCol offset {t_col_offset_expr} not provably 32b-aligned")
+    elem_per_128b_tmem = 4 * elem_per_32b
+    if not analyzer.can_prove_equal(t_col_offset_expr % elem_per_128b_tmem, 0):
+        raise ValueError(f"t TCol offset {t_col_offset_expr} not provably 128b-aligned")
 
     # G.1b: a region row offset folds into the taddr lane half-word ([31:16]).
     # The full lane footprint must still fit the 128-lane space.
