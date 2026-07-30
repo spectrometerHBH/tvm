@@ -4730,6 +4730,32 @@ def ptx_fns_b32(mask, base, offset):
     return call_intrin("uint32", "tirx.ptx.fns_b32", mask, base, offset)
 
 
+_PTX_SHL_RETURN_TYPE = {
+    "b16": "uint16",
+    "b32": "uint32",
+    "b64": "uint64",
+}
+
+
+def ptx_shl(a, b, ptx_type):
+    """Return the PTX ``shl.{type} a, b`` result as a raw-bit carrier.
+
+    PTX defines the shift operand as an unsigned 32-bit value.  Shift counts
+    greater than or equal to the width selected by ``ptx_type`` produce zero.
+
+    Parameters
+    ----------
+    a : Expr
+        Value to shift.
+    b : Expr
+        Unsigned 32-bit shift count.
+    ptx_type : str
+        One of ``"b16"``, ``"b32"``, or ``"b64"``.
+    """
+    _choice("ptx_type", ptx_type, _PTX_SHL_RETURN_TYPE)
+    return call_intrin(_PTX_SHL_RETURN_TYPE[ptx_type], "tirx.ptx.shl", a, b, ptx_type)
+
+
 def ptx_add_rn_f32_bf16(acc, x):
     return call_intrin("float32", "tirx.ptx.add_rn_f32_bf16", acc, x)
 
