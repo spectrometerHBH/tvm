@@ -576,45 +576,6 @@ device_intrinsic(
 )
 
 device_intrinsic(
-    "cuda_float22bfloat162_rn",
-    helper_name="tvm_builtin_float22bfloat162_rn",
-    c_signature="(float x, float y)",
-    return_type="unsigned int",
-    body=(
-        "    __nv_bfloat162 value = __float22bfloat162_rn(make_float2(x, y));\n"
-        "    return *reinterpret_cast<unsigned int*>(&value);"
-    ),
-    extra_deps=("bf16",),
-)
-
-device_intrinsic(
-    "cuda_float22bfloat162_rn_from_float2",
-    helper_name="tvm_builtin_float22bfloat162_rn_from_float2",
-    c_signature="(unsigned long long packed)",
-    return_type="unsigned int",
-    body=(
-        "    float2 value = *reinterpret_cast<float2*>(&packed);\n"
-        "    __nv_bfloat162 result = __float22bfloat162_rn(value);\n"
-        "    return *reinterpret_cast<unsigned int*>(&result);"
-    ),
-    extra_deps=("bf16",),
-)
-
-device_intrinsic(
-    "cuda_bfloat1622float2",
-    helper_name="tvm_builtin_bfloat1622float2",
-    c_signature="(unsigned int packed)",
-    return_type="unsigned long long",
-    body=(
-        "    __nv_bfloat162 value;\n"
-        "    *reinterpret_cast<unsigned int*>(&value) = packed;\n"
-        "    float2 result = __bfloat1622float2(value);\n"
-        "    return *reinterpret_cast<unsigned long long*>(&result);"
-    ),
-    extra_deps=("bf16",),
-)
-
-device_intrinsic(
     "cuda_hmin2",
     helper_name="tvm_builtin_hmin2",
     c_signature="(unsigned int a, unsigned int b)",
@@ -644,16 +605,4 @@ device_intrinsic(
         "    return *reinterpret_cast<unsigned int*>(&result);"
     ),
     extra_deps=("bf16",),
-)
-
-device_intrinsic(
-    "cuda_fp8x4_e4m3_from_float4",
-    helper_name="tvm_builtin_fp8x4_e4m3_from_float4",
-    c_signature="(float x, float y, float z, float w)",
-    return_type="unsigned int",
-    body=(
-        "    __nv_fp8x4_e4m3 result = __nv_fp8x4_e4m3(make_float4(x, y, z, w));\n"
-        "    return *reinterpret_cast<unsigned int*>(&result);"
-    ),
-    extra_deps=("fp8",),
 )

@@ -667,56 +667,6 @@ device_intrinsic(
 
 
 # =============================================================================
-# half / bfloat16 ↔ float type-punned conversions.
-# =============================================================================
-device_intrinsic(
-    "cuda_half2float",
-    c_signature="(half src)",
-    body="    return __half2float(src);",
-    return_type="float",
-    tvm_return_type="float32",
-)
-device_intrinsic(
-    "cuda_bfloat162float",
-    c_signature="(nv_bfloat16 src)",
-    body="    return __bfloat162float(src);",
-    return_type="float",
-    tvm_return_type="float32",
-)
-device_intrinsic(
-    "cuda_float22half2",
-    c_signature="(void* dst, void* src)",
-    body=(
-        "    half2* dst_p = (half2*) dst;\n"
-        "    float2* src_p = (float2*) src;\n"
-        "    *dst_p = __float22half2_rn(*src_p);"
-    ),
-)
-device_intrinsic(
-    "cuda_half8tofloat8",
-    c_signature="(void* src_addr, void* dst_addr)",
-    body=(
-        "    half2* source = (half2*) src_addr;\n"
-        "    float2* dest = (float2*) dst_addr;\n"
-        "    for (int i = 0; i < 4; i++) {\n"
-        "        dest[i] = __half22float2(source[i]);\n"
-        "    }"
-    ),
-)
-device_intrinsic(
-    "cuda_float8tohalf8",
-    c_signature="(void* src_addr, void* dst_addr)",
-    body=(
-        "    float2* source = (float2*) src_addr;\n"
-        "    half2* dest = (half2*) dst_addr;\n"
-        "    for (int i = 0; i < 4; i++) {\n"
-        "        dest[i] = __float22half2_rn(source[i]);\n"
-        "    }"
-    ),
-)
-
-
-# =============================================================================
 # Address-conversion helpers used by op-wrapper-side dispatch in tvm.tirx.op.
 # Each precomputes a value that the schema's specialized op then takes as a
 # typed scalar input (instead of doing the conversion inside the asm helper).

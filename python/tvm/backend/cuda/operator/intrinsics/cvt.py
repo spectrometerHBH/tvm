@@ -434,8 +434,10 @@ def _input_info(atype: str):
     raise ValueError(f"Unsupported PTX cvt source type {atype!r}")
 
 
-def _cvt_form_parts(form_name: str, *args):
+def _cvt_form_parts(form_name: str, *args, dps: bool = False):
     form = _CVT_FORMS[form_name]
+    if dps:
+        _dst, *args = args
     operands, attrs = _parse_form_attrs(form, args)
     dtype = _resolve(form.dtype, attrs)
     atype = _resolve(form.atype, attrs)
@@ -459,16 +461,13 @@ def _cvt_form_parts(form_name: str, *args):
         source_names.append("scale_factor")
 
     return_type, result_type, out_constraint, tvm_return_type = _result_info(dtype)
-    signature = (
-        "("
-        + ", ".join(
-            f"{c_type} {name}" for name, (c_type, _constraint) in zip(source_names, source_info)
-        )
-        + ")"
-    )
+    params = [f"{c_type} {name}" for name, (c_type, _constraint) in zip(source_names, source_info)]
+    if dps:
+        params.insert(0, "void* dst")
+    signature = "(" + ", ".join(params) + ")"
 
     instruction = f"cvt{_modifier_string(form, attrs)}.{dtype}.{atype}"
-    name = f"tvm_builtin_ptx_{_safe(instruction)}"
+    name = f"tvm_builtin_ptx_{_safe(instruction)}{'_dps' if dps else ''}"
     placeholders = [f"%{index}" for index in range(1, len(source_names) + 1)]
     if form.grouped_primary:
         primary = "{" + ", ".join(placeholders[: form.primary_count]) + "}"
@@ -484,14 +483,41 @@ def _cvt_form_parts(form_name: str, *args):
     if dtype == "e2m1x2":
         asm_prefix.append(".reg .b8 raw_result;")
         result_operand = "raw_result"
-        asm_suffix.append("cvt.u16.u8 %0, raw_result;")
+        asm_suffix.append("cvt.u16.u8 result, raw_result;" if dps else "cvt.u16.u8 %0, raw_result;")
     operand_text = ", ".join([result_operand, *asm_operands])
     inputs = ", ".join(
         f'"{constraint}"({source_name})'
         for source_name, (_c_type, constraint) in zip(source_names, source_info)
     )
     asm_instructions = [*asm_prefix, f"{instruction} {operand_text};", *asm_suffix]
-    if asm_prefix or asm_suffix:
+    if dps:
+        output = (
+            f'"={out_constraint}"(*reinterpret_cast<{result_type}*>(dst))'
+            if dtype != "e2m1x2"
+            else f'"={out_constraint}"(result)'
+        )
+        result_decl = f"    {result_type} result;\n" if dtype == "e2m1x2" else ""
+        result_store = (
+            f"\n    *reinterpret_cast<{return_type}*>(dst) = static_cast<{return_type}>(result);"
+            if dtype == "e2m1x2"
+            else ""
+        )
+        if asm_prefix or asm_suffix:
+            asm_text = "\\n\\t".join(asm_instructions)
+            body = (
+                f"{result_decl}"
+                f'    asm volatile("{{\\n\\t{asm_text}\\n\\t}}"\n'
+                f"                 : {output}\n"
+                f"                 : {inputs});"
+                f"{result_store}"
+            )
+        else:
+            body = (
+                f'    asm volatile("{instruction} {operand_text};"\n'
+                f"                 : {output}\n"
+                f"                 : {inputs});"
+            )
+    elif asm_prefix or asm_suffix:
         asm_text = "\\n\\t".join(asm_instructions)
         body = (
             f"    {result_type} result;\n"
@@ -521,6 +547,13 @@ def _register_cvt_form(form_name: str) -> None:
         return_type=lambda *a, _form=form_name: _cvt_form_parts(_form, *a)[2],
         tvm_return_type=lambda *a, _form=form_name: _cvt_form_parts(_form, *a)[3],
         body=lambda *a, _form=form_name: _cvt_form_parts(_form, *a)[4],
+    )
+    device_intrinsic(
+        f"_ptx_cvt_{form_name}_dps",
+        n_attrs=len(form.attrs),
+        helper_name=lambda *a, _form=form_name: _cvt_form_parts(_form, *a, dps=True)[0],
+        c_signature=lambda *a, _form=form_name: _cvt_form_parts(_form, *a, dps=True)[1],
+        body=lambda *a, _form=form_name: _cvt_form_parts(_form, *a, dps=True)[4],
     )
 
 
@@ -700,10 +733,9 @@ def _classify_cvt_form(
     )
 
 
-@register_codegen("ptx_cvt")
-def codegen_ptx_cvt(*args):
+def _codegen_ptx_cvt(*args):
     """Classify one public ``ptx.cvt`` invocation into an ISA grammar form."""
-    if len(args) < 11:
+    if len(args) < 12:
         raise ValueError("ptx.cvt is missing its trailing instruction attrs")
     (
         n_values,
@@ -717,8 +749,9 @@ def codegen_ptx_cvt(*args):
         relu,
         satfinite,
         scaled,
-    ) = args[-11:]
-    operands = list(args[:-11])
+        to_dst,
+    ) = args[-12:]
+    operands = list(args[:-12])
     n_values = int(n_values)
     has_rbits = _as_bool(has_rbits)
     has_scale = _as_bool(has_scale)
@@ -730,8 +763,10 @@ def codegen_ptx_cvt(*args):
     relu = _as_bool(relu)
     satfinite = _as_bool(satfinite)
     scaled = parse_str(scaled)
+    to_dst = _as_bool(to_dst)
 
-    if len(operands) != n_values + int(has_rbits) + int(has_scale):
+    expected_operands = n_values + int(has_rbits) + int(has_scale) + int(to_dst)
+    if len(operands) != expected_operands:
         raise ValueError("ptx.cvt operand metadata does not match the provided operands")
     if has_rbits != (rounding == "rs"):
         raise ValueError("ptx.cvt rbits operand must be present exactly when rounding='rs'")
@@ -750,5 +785,18 @@ def codegen_ptx_cvt(*args):
         n_values,
         has_rbits,
     )
-    result = CODEGEN_REGISTRY[f"tirx._ptx_cvt_{form_name}"](operands + form_attrs)
+    suffix = "_dps" if to_dst else ""
+    result = CODEGEN_REGISTRY[f"tirx._ptx_cvt_{form_name}{suffix}"](operands + form_attrs)
     return result[0] if isinstance(result, tuple) else result
+
+
+@register_codegen("ptx_cvt")
+def codegen_ptx_cvt(*args):
+    """Codegen the pure value form of ``ptx.cvt``."""
+    return _codegen_ptx_cvt(*args)
+
+
+@register_codegen("ptx_cvt_dps")
+def codegen_ptx_cvt_dps(*args):
+    """Codegen the destination-passing form of ``ptx.cvt``."""
+    return _codegen_ptx_cvt(*args)

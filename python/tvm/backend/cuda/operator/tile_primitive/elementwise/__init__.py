@@ -23,7 +23,7 @@ Split by storage scope to mirror ``cuda/copy/``:
   smem.py — operands all in ``shared*``             → synthesized partition
 
 Each op in ``ops.ALL_OPS`` is registered under both variants. Per-op packed
-PTX/CUDA intrinsics live in ``vec_emit/`` (``binary_f32x2`` / ``cast_vec2``
+PTX intrinsics live in ``vec_emit/`` (``binary_f32x2`` / ``cast_vec2``
 / ``fma_f32x2``) and are attached to the relevant ``OpSpec.vec_impls``.
 """
 

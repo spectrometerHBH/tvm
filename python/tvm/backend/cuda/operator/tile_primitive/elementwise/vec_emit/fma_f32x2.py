@@ -59,16 +59,18 @@ def _fma_f32x2_applies(op_call, sctx, plan):
     return True, None
 
 
-def _emit_fma_f32x2(dst_buf, dst_lane_indices, src_args, extras) -> Expr:
+def _emit_fma_f32x2(dst_buf, dst_lane_indices, src_args, extras) -> tuple[Expr, ...]:
     a_arg, b_arg, c_arg = src_args
     rm = extras.get("rounding_mode", "rz")
-    return T.ptx.fma_f32x2(
-        T.address_of(dst_buf[tuple(dst_lane_indices[0])]),
-        T.cuda.make_float2(_lane(a_arg, 0), _lane(a_arg, 1)),
-        T.cuda.make_float2(_lane(b_arg, 0), _lane(b_arg, 1)),
-        T.cuda.make_float2(_lane(c_arg, 0), _lane(c_arg, 1)),
-        rounding=rm,
-        ftz=True,
+    return (
+        T.ptx.fma_f32x2(
+            T.address_of(dst_buf[tuple(dst_lane_indices[0])]),
+            T.cuda.make_float2(_lane(a_arg, 0), _lane(a_arg, 1)),
+            T.cuda.make_float2(_lane(b_arg, 0), _lane(b_arg, 1)),
+            T.cuda.make_float2(_lane(c_arg, 0), _lane(c_arg, 1)),
+            rounding=rm,
+            ftz=True,
+        ),
     )
 
 

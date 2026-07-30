@@ -943,7 +943,7 @@ def test_cast_warpgroup_local_view(A_dtype, B_dtype):
 @pytest.mark.skipif(not env.has_cuda(), reason="need cuda")
 @pytest.mark.parametrize("A_dtype,B_dtype", [("float32", "float16"), ("float32", "bfloat16")])
 def test_cast_warpgroup_src_layout_to_flat_uses_vec2_intrinsic(A_dtype, B_dtype):
-    """Regression: GEMM-epilogue cast pattern must emit the packed vec2 cuda intrinsic.
+    """Regression: GEMM-epilogue cast pattern must emit the packed vec2 PTX instruction.
 
     Pattern: both sides have ``wg_local_layout`` (per-thread 1xK row). dst is
     allocated per-chunk to keep both operands wg-distributed — the dispatch
@@ -990,10 +990,12 @@ def test_cast_warpgroup_src_layout_to_flat_uses_vec2_intrinsic(A_dtype, B_dtype)
         mod = tvm.IRModule({"main": test_cast})
         mod = tvm.compile(mod, target=target, tir_pipeline="tirx")
         src = mod.mod.imports[0].inspect_source()
-        # The packed vec2 cast intrinsic must be present — guards against
+        # The packed vec2 cast instruction must be present — guards against
         # falling back to scalar T.cast inside T.vectorized.
-        helper = f"tvm_builtin_cast_{A_dtype}x2_{B_dtype}x2"
-        assert helper in src, f"expected {helper!r} in generated CUDA, fell back to scalar cast"
+        instruction = f"cvt.rn.{'f16x2' if B_dtype == 'float16' else 'bf16x2'}.f32"
+        assert instruction in src, (
+            f"expected {instruction!r} in generated CUDA, fell back to scalar cast"
+        )
 
         def run_and_check():
             dev = tvm.cuda(0)
@@ -1325,14 +1327,16 @@ def test_unary_exp_f16_shared_scalar_fallback_dispatch():
 
 
 @pytest.mark.parametrize(
-    "src_dtype,dst_dtype,intrinsic",
+    "src_dtype,dst_dtype,instruction",
     [
-        ("float32", "float16", "__float22half2_rn"),
-        ("float16", "float32", "__half22float2"),
+        ("float32", "float16", "cvt.rn.f16x2.f32"),
+        ("float16", "float32", "cvt.f32.f16"),
+        ("float32", "bfloat16", "cvt.rn.bf16x2.f32"),
+        ("bfloat16", "float32", "cvt.f32.bf16"),
     ],
 )
-def test_cast_vec2_packed_dispatch(src_dtype, dst_dtype, intrinsic):
-    """cast (f32↔f16) + all-local → reg.py + packed pair intrinsic."""
+def test_cast_vec2_packed_dispatch(src_dtype, dst_dtype, instruction):
+    """cast (f32↔f16/bf16) + all-local → reg.py + PTX cvt."""
     shape = (64, 32)
     lay = TileLayout(S[shape])
 
@@ -1354,9 +1358,9 @@ def test_cast_vec2_packed_dispatch(src_dtype, dst_dtype, intrinsic):
         mod = tvm.IRModule({"main": k})
         mod = tvm.compile(mod, target=target, tir_pipeline="tirx")
         src = mod.mod.imports[0].inspect_source()
-    assert re.search(
-        rf"{re.escape(intrinsic)}|tvm_builtin_cast_{src_dtype}x2_{dst_dtype}x2", src
-    ), f"expected packed vec2 cast {intrinsic}; got:\n{src[:2000]}"
+    assert instruction in src, f"expected packed vec2 cast {instruction}; got:\n{src[:2000]}"
+    assert "tvm_builtin_cast_" not in src
+    assert f"tvm_builtin_ptx_{instruction.replace('.', '_')}_dps" in src
 
 
 # -----------------------------------------------------------------------------

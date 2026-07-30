@@ -18,7 +18,7 @@
 """Per-op data model + ALL_OPS registry.
 
 ``OpSpec`` describes one elementwise op. ``VecImpl`` describes one packed-PTX
-or CUDA-intrinsic emit available for that op (e.g. ``add_f32x2``); a list of
+emit available for that op (e.g. ``add_f32x2``); a list of
 these (widest-first) lets ``reg.py``/``smem.py`` pick the widest matching
 both the layout and the op's available intrinsics, like copy picks
 ``copy_{128,64,32,16,8}b`` based on bit-width and tail contiguity.
@@ -78,10 +78,12 @@ class VecImpl:
 
     vec_len: int  # elements per packed call
     applies: Callable[[TilePrimitiveCall, Any, Plan], tuple[bool, str | None]]
-    # emit(dst_ptr, src_ptrs, extras) -> Stmt
+    # emit(dst_ptr, src_ptrs, extras) -> tuple[Expr, ...]
     #   dst_ptr: typed ptr to ``vec_len`` consecutive dst elements
     #   src_ptrs[i]: typed ptr to ``vec_len`` consecutive src[i] elements,
     #                OR a scalar Expr if src[i].is_scalar.
+    # The returned expressions are emitted in order.  Most packed forms return
+    # one expression; forms with scalar destinations may return one per lane.
     # Runs in Python at @T.prim_func build time -- branching on src kind is a
     # normal Python ``if``, not a TVMScript shape limitation. This is what
     # collapses the old 4x2 shape-explosion in schema.py's factories.

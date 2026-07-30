@@ -15,13 +15,7 @@
 # specific language governing permissions and limitations
 # under the License.
 
-"""Packed vec_len=2 cast via CUDA pair intrinsics.
-
-Each supported (src_dtype, dst_dtype) pair has a CUDA builtin that converts a
-packed-2 source to a packed-2 destination in one instruction
-(e.g. ``__float22half2_rn``). The intrinsic takes pointers to the first
-element of each packed pair on either side.
-"""
+"""Packed vec_len=2 cast via PTX ``cvt``."""
 
 from __future__ import annotations
 
@@ -31,28 +25,12 @@ from tvm.script import tirx as T
 from .._common import dtype_name
 from ..ops import VecImpl
 
-_VEC2_CAST_INTRINSICS = {
-    ("float32", "float16"): "__float22half2_rn",
-    ("float16", "float32"): "__half22float2",
-    ("bfloat16", "float32"): "__bfloat1622float2",
-    ("float32", "bfloat16"): "__float22bfloat162_rn",
+_VEC2_CAST_PAIRS = {
+    ("float32", "float16"),
+    ("float16", "float32"),
+    ("bfloat16", "float32"),
+    ("float32", "bfloat16"),
 }
-_DTYPE_X2_NAME = {"float32": "float2", "float16": "half2", "bfloat16": "nv_bfloat162"}
-
-
-def _intrinsic_name(src_dtype, dst_dtype):
-    return f"tvm_builtin_cast_{src_dtype}x2_{dst_dtype}x2"
-
-
-def _intrinsic_source(src_dtype, dst_dtype):
-    intrinsic = _VEC2_CAST_INTRINSICS[(src_dtype, dst_dtype)]
-    return (
-        f"\n__forceinline__ __device__ void {_intrinsic_name(src_dtype, dst_dtype)}"
-        f"(void* dst, void* src) {{\n"
-        f"    (({_DTYPE_X2_NAME[dst_dtype]}*)dst)[0] = "
-        f"{intrinsic}((({_DTYPE_X2_NAME[src_dtype]}*)src)[0]);\n"
-        "}\n"
-    )
 
 
 def _cast_vec2_applies(op_call, sctx, plan):
@@ -63,25 +41,41 @@ def _cast_vec2_applies(op_call, sctx, plan):
         return False, "broadcasting src not supported by cast vec2"
     src_dtype = dtype_name(src.buf_region.buffer.dtype)
     dst_dtype = dtype_name(plan.dst.buffer.dtype)
-    if (src_dtype, dst_dtype) not in _VEC2_CAST_INTRINSICS:
-        return False, f"no vec2 intrinsic for {src_dtype}->{dst_dtype}"
+    if (src_dtype, dst_dtype) not in _VEC2_CAST_PAIRS:
+        return False, f"no vec2 PTX cvt form for {src_dtype}->{dst_dtype}"
     return True, None
 
 
-def _emit_cast_vec2(dst_buf, dst_lane_indices, src_args, extras) -> Expr:
+def _emit_cast_vec2(dst_buf, dst_lane_indices, src_args, extras) -> tuple[Expr, ...]:
     src_arg = src_args[0]
     # cast_vec2 requires buffer src (guarded by applies()).
     assert isinstance(src_arg, tuple), "cast vec2 src must be a buffer"
     src_buf, src_lane_indices = src_arg
     src_dtype = dtype_name(src_buf.dtype)
     dst_dtype = dtype_name(dst_buf.dtype)
-    func_name = _intrinsic_name(src_dtype, dst_dtype)
-    source_code = _intrinsic_source(src_dtype, dst_dtype)
-    return T.cuda.func_call(
-        func_name,
-        T.address_of(dst_buf[tuple(dst_lane_indices[0])]),
-        T.address_of(src_buf[tuple(src_lane_indices[0])]),
-        source_code=source_code,
+    if src_dtype == "float32":
+        # PTX packed conversion operands are high lane first, so reverse the
+        # logical (x, y) pair to preserve CUDA float2/half2 lane order.
+        return (
+            T.ptx.cvt(
+                src_buf[tuple(src_lane_indices[1])],
+                src_buf[tuple(src_lane_indices[0])],
+                dtype="f16x2" if dst_dtype == "float16" else "bf16x2",
+                atype="f32",
+                dst=T.address_of(dst_buf[tuple(dst_lane_indices[0])]),
+                rounding="rn",
+            ),
+        )
+
+    atype = "f16" if src_dtype == "float16" else "bf16"
+    return tuple(
+        T.ptx.cvt(
+            T.reinterpret("uint16", src_buf[tuple(src_lane_indices[lane])]),
+            dtype="f32",
+            atype=atype,
+            dst=T.address_of(dst_buf[tuple(dst_lane_indices[lane])]),
+        )
+        for lane in range(2)
     )
 
 

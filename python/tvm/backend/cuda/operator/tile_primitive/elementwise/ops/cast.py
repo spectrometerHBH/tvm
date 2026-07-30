@@ -15,9 +15,11 @@
 # specific language governing permissions and limitations
 # under the License.
 
-"""Cast op: ``Tx.cast(dst, src)``. Outer ``Tx.cast(..., dst.dtype)`` in the
-schedule handles the scalar conversion; the vec-impl packs pairs via
-CUDA intrinsics like ``__float22half2_rn``."""
+"""Cast op: ``Tx.cast(dst, src)``.
+
+Outer ``Tx.cast(..., dst.dtype)`` in the schedule handles scalar conversion;
+the vec implementation uses packed PTX ``cvt`` forms.
+"""
 
 from __future__ import annotations
 

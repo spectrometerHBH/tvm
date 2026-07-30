@@ -130,6 +130,7 @@ def test_ptx_cvt_form_registration(form_name, args, instruction):
     assert instruction in body
     assert helper_name.startswith("tvm_builtin_ptx_cvt_")
     assert f"tirx._ptx_cvt_{form_name}" in CODEGEN_REGISTRY
+    assert f"tirx._ptx_cvt_{form_name}_dps" in CODEGEN_REGISTRY
 
 
 def test_ptx_cvt_test_matrix_covers_every_registered_form():
@@ -149,3 +150,17 @@ def test_ptx_cvt_e2m1x2_uses_b8_staging():
     assert signature == "(uint16_t a)"
     assert ".reg .b8 raw_a;" in body
     assert "cvt.u8.u16 raw_a, %1;" in body
+
+
+def test_ptx_cvt_dps_binds_output_to_destination():
+    helper_name, signature, _c_type, _tvm_type, body = _cvt_form_parts(
+        "frnd2_bf16x2_f32", 0, 0, 0, "rn", 0, 0, dps=True
+    )
+
+    assert helper_name == "tvm_builtin_ptx_cvt_rn_bf16x2_f32_dps"
+    assert signature == "(void* dst, float a, float b)"
+    assert '"=r"(*reinterpret_cast<uint32_t*>(dst))' in body
+    assert "cvt.rn.bf16x2.f32 %0, %1, %2;" in body
+    assert "return" not in body
+    assert "tirx.ptx.cvt" in CODEGEN_REGISTRY
+    assert "tirx.ptx.cvt_dps" in CODEGEN_REGISTRY
