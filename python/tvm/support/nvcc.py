@@ -557,6 +557,18 @@ namespace std {
     if nvrtc_extra:
         compile_opts.extend(t.encode() for t in shlex.split(nvrtc_extra))
 
+    # Mirror the nvcc path's TVM_KERNEL_DUMP behavior: keep the generated CUDA
+    # source (and, below, the compiled binary) under the dump directory and
+    # embed line info so profilers (e.g. the ncu source page) can attribute
+    # SASS to source lines.
+    tvm_kernel_dump = os.environ.get("TVM_KERNEL_DUMP", None)
+    if tvm_kernel_dump is not None:
+        if not os.path.isdir(tvm_kernel_dump):
+            os.makedirs(tvm_kernel_dump)
+        compile_opts.append(b"-lineinfo")
+        with open(os.path.join(tvm_kernel_dump, "tvm_kernels.cu"), "w") as out_file:
+            out_file.write(code_filtered)
+
     # Add user-provided options, filtering out nvcc-specific flags that nvrtc doesn't support
     if options:
         nvcc_only_prefixes = (
@@ -638,6 +650,10 @@ namespace std {
     # Link stage for NVSHMEM
     if use_nvshmem:
         binary_buf = _link_nvshmem_nvrtc(binary_buf, nvshmem_lib_path)
+
+    if tvm_kernel_dump is not None:
+        with open(os.path.join(tvm_kernel_dump, f"tvm_kernels.{target_format}"), "wb") as out_file:
+            out_file.write(binary_buf)
 
     if path_target:
         with open(path_target, "wb") as f:
