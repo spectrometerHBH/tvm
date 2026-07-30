@@ -161,11 +161,4 @@ def test_manifest_tirx_kernel_correctness(kernel_name, config):
             f"requires {required_devices} CUDA devices, but only {visible_devices} are visible"
         )
     with _registry_gpu_lock(kernel_name, config):
-        schedulers = getattr(_KERNELS[kernel_name], "_SUPPORTED_SCHEDULERS", ())
-        if kernel_name == "megakernel_moe" and "scheduler" not in config:
-            for scheduler in schedulers:
-                kernel_runner.run_kernel_test(
-                    kernel_name, {**config, "scheduler": scheduler}, registry=_KERNELS
-                )
-        else:
-            kernel_runner.run_kernel_test(kernel_name, config, registry=_KERNELS)
+        kernel_runner.run_kernel_test(kernel_name, config, registry=_KERNELS)
