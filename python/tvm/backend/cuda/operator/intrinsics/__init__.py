@@ -20,6 +20,7 @@
 - ``mma`` / ``wgmma`` / ``tcgen05`` — matrix-multiply hardware (Volta+/Hopper/Blackwell).
 - ``cp_async`` — cp.async + cp.async.bulk + cp.async.bulk.tensor (TMA), incl. TMA address helpers.
 - ``sync`` — barriers, fences, mbarrier, cluster.barrier, warp vote, elect, sync helpers.
+- ``logic`` — PTX logic and shift instructions.
 - ``math`` — packed-f32x2 arithmetic, exp2/rcp/reduce3, warp/CTA reductions.
 - ``cvt`` — PTX data movement and conversion instruction forms.
 - ``memory`` — typed copies, ldg, ld.global.acquire, atomics, type conversions, address casts.
@@ -35,7 +36,7 @@ Plus the support modules:
 """
 
 # Import op modules to register their codegen functions.
-from . import cp_async, cvt, math, memory, misc, mma, nvshmem, sync, tcgen05, wgmma
+from . import cp_async, cvt, logic, math, memory, misc, mma, nvshmem, sync, tcgen05, wgmma
 from .header import TAGS, header_generator
 from .registry import CODEGEN_REGISTRY, get_codegen, register_codegen
 from .types import PTXDataType
