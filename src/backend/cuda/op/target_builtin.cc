@@ -278,7 +278,6 @@ const DeviceIntrinsicRegistration kDeviceIntrinsics[] = {
     TIRX_DEVICE_INTRIN_ALIAS(ptx_griddepcontrol_launch_dependents, ptx, kOpaque),
     TIRX_DEVICE_INTRIN_ALIAS(ptx_griddepcontrol_wait, ptx, kOpaque),
     TIRX_DEVICE_INTRIN_ALIAS(ptx_ld, ptx, kOpaque),
-    TIRX_DEVICE_INTRIN_ALIAS(ptx_ld_acquire, ptx, kOpaque),
     TIRX_DEVICE_INTRIN_ALIAS(ptx_ld_global_acquire, ptx, kOpaque),
     TIRX_DEVICE_INTRIN_ALIAS(ptx_ld_global_nc, ptx, kOpaque),
     TIRX_DEVICE_INTRIN_ALIAS(ptx_ld_mmio, ptx, kOpaque),

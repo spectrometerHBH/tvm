@@ -60,7 +60,9 @@ def _chain_class(entry: InstructionEntry) -> str:
         signature = f"def __call__({', '.join(params)}) -> None"
     else:
         signature = f"def __call__({', '.join(params)}) -> Any"
-    doc_lines = textwrap.wrap(f"`{entry.name}` — {doc or '(no modifiers)'}", width=92)
+    # 4 indent + 3 opening quotes + text + 3 closing quotes must stay <= 100,
+    # because ruff format collapses a one-line docstring onto a single line.
+    doc_lines = textwrap.wrap(f"`{entry.name}` — {doc or '(no modifiers)'}", width=88)
     lines.append('    """' + doc_lines[0])
     lines.extend(f"    {line}" for line in doc_lines[1:])
     lines.append('    """')
@@ -74,8 +76,29 @@ def _chain_class(entry: InstructionEntry) -> str:
     return "\n".join(lines)
 
 
+_ASF_HEADER = """\
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
+#
+#   http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License.\
+"""
+
+
 def generate() -> str:
     out = [
+        _ASF_HEADER,
         '"""Generated stub for T.ptxd — do not edit.',
         "",
         "Regenerate:",
@@ -97,7 +120,28 @@ def generate() -> str:
     out.append("")
     out.append("# Every other tvm.script.tirx member stays dynamically typed, as before.")
     out.append("def __getattr__(name: str) -> Any: ...")
-    return "\n".join(out) + "\n"
+    return _ruff_format("\n".join(out) + "\n")
+
+
+def _ruff_format(text: str) -> str:
+    """Normalize through ``ruff format`` so the generated file is stable under pre-commit.
+
+    Without this the repo's ruff-format hook rewrites the checked-in stub and the
+    freshness test can never pass. Falls back to the raw text if ruff is absent.
+    """
+    import shutil  # pylint: disable=import-outside-toplevel
+    import subprocess  # pylint: disable=import-outside-toplevel
+
+    if shutil.which("ruff") is None:
+        return text
+    done = subprocess.run(
+        ["ruff", "format", "--stdin-filename", "tirx.pyi", "-"],
+        input=text,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return done.stdout if done.returncode == 0 else text
 
 
 def main() -> None:

@@ -16,6 +16,7 @@
 # under the License.
 """Tests for the table-driven PTX dialect prototype (``T.ptxd``)."""
 
+import os
 import shutil
 from pathlib import Path
 
@@ -38,10 +39,12 @@ def _cuda_source(func) -> str:
     return mod.mod.imports[0].inspect_source("cuda")
 
 
-def _assert_compiles_to_ptx(src: str) -> None:
+def _assert_ptxas_ok(src: str, rdc: bool = False) -> None:
+    """Assemble through ptxas (cubin) — `-ptx` alone never validates inline asm."""
     from tvm.support import nvcc
 
-    nvcc.compile_cuda(src, target_format="ptx", arch="sm_90", compiler="nvcc")
+    options = ["-rdc=true"] if rdc else None
+    nvcc.compile_cuda(src, target_format="cubin", arch="sm_90", options=options, compiler="nvcc")
 
 
 def test_ptxd_registration():
@@ -300,7 +303,7 @@ def test_ptxd_helper_source_golden():
         '  asm volatile("prefetch.global.L2 [%0];" :  : "l"(__addr) : "memory");\n'
         "}\n"
     )
-    assert render("ld", ("acquire", "gpu", "global", "b32")) == (
+    assert render("ld", ("", "acquire", "gpu", "global", "", "", "", "", "b32")) == (
         "__forceinline__ __device__ uint32_t tvm_builtin_ptxd_ld_acquire_gpu_global_b32"
         "(const void* __addr) {\n"
         "  uint32_t __ret;\n"
@@ -414,7 +417,7 @@ def test_ptxd_all_variants_render_unique():
                 assert pred_helper not in names
                 names.add(pred_helper)
                 assert f"@p {opcode} " in pred_source
-    assert total == 103  # update when the table grows
+    assert total == 9647  # update when the table grows
 
 
 def test_ptxd_stub_up_to_date():
@@ -429,11 +432,69 @@ def test_ptxd_stub_up_to_date():
 
 
 @requires_nvcc
-def test_ptxd_all_helpers_compile():
-    """Soundness gate: every legal variant's helper assembles under nvcc."""
-    from tvm.backend.cuda.ptx_dialect.gen_helpers import generate
+def test_ptxas_gate_rejects_invalid():
+    """Honesty check: the gate path must actually reject bad instructions."""
+    bogus = '__device__ void f(unsigned x) { asm volatile("totally.bogus.instr %0;" : : "r"(x)); }'
+    with pytest.raises(Exception, match="bogus|error"):
+        _assert_ptxas_ok(bogus, rdc=True)
 
-    _assert_compiles_to_ptx("#include <cstdint>\n" + generate())
+
+@requires_nvcc
+def test_ptxd_sampled_helpers_assemble():
+    """Fast tier: a seeded sample of every family's variants assembles."""
+    import random
+
+    from tvm.backend.cuda.ptx_dialect.render import render_variant
+    from tvm.backend.cuda.ptx_dialect.table import TABLE, variants
+
+    rng = random.Random(20260802)
+    chunks = ["#include <cstdint>"]
+    for entry in TABLE.values():
+        combos = variants(entry)
+        for i in rng.sample(range(len(combos)), min(16, len(combos))):
+            for predicated in (False, True) if entry.returns is None else (False,):
+                _, _, source = render_variant(entry, combos[i], predicated)
+                chunks.append(source.replace("__forceinline__ ", ""))
+    _assert_ptxas_ok("\n".join(chunks), rdc=True)
+
+
+_CERT_SHARDS = 32
+
+
+@pytest.mark.skipif(
+    not os.environ.get("PTXD_CERT"),
+    reason="full-table ptxas certification; run with PTXD_CERT=1 after changing the table",
+)
+@requires_nvcc
+@pytest.mark.parametrize("shard", range(_CERT_SHARDS))
+def test_ptxd_all_helpers_certify(shard):
+    """Certification tier: EVERY legal variant assembles under ptxas (sm_90).
+
+    Sharded so pytest-xdist can spread the nvcc work::
+
+        PTXD_CERT=1 pytest -n 16 -k certify tests/python/tirx/codegen/test_ptxd_dialect.py
+
+    Stride slicing keeps shards balanced (ld dominates the variant count).
+    __forceinline__ must be stripped and -rdc used: unreferenced inline
+    device functions are silently dropped before ptxas ever sees them.
+    """
+    from tvm.backend.cuda.ptx_dialect.render import render_variant
+    from tvm.backend.cuda.ptx_dialect.table import TABLE, variants
+
+    chunks = ["#include <cstdint>"]
+    covered = 0
+    index = 0
+    for name in sorted(TABLE):
+        entry = TABLE[name]
+        for combo in variants(entry):
+            if index % _CERT_SHARDS == shard:
+                covered += 1
+                for predicated in (False, True) if entry.returns is None else (False,):
+                    _, _, source = render_variant(entry, combo, predicated)
+                    chunks.append(source.replace("__forceinline__ ", ""))
+            index += 1
+    assert covered, "empty shard: lower _CERT_SHARDS"
+    _assert_ptxas_ok("\n".join(chunks), rdc=True)
 
 
 @requires_nvcc
@@ -454,7 +515,7 @@ def test_ptxd_nvcc_smoke():
         T.cuda.cta_sync()
         B[tx] = smem[tx % 4]
 
-    _assert_compiles_to_ptx(_cuda_source(kernel))
+    _assert_ptxas_ok(_cuda_source(kernel))
 
 
 @pytest.mark.gpu

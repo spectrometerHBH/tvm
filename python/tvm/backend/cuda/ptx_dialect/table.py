@@ -42,6 +42,7 @@ The converged :class:`InstructionEntry` design:
   ``pred=`` at the call site; entries never mention it.
 """
 
+import functools
 import itertools
 import keyword
 from collections.abc import Callable
@@ -52,14 +53,25 @@ EFFECT_PURE = 1
 EFFECT_OPAQUE = 3
 EFFECT_NAMES = {EFFECT_PURE: "pure", EFFECT_OPAQUE: "opaque"}
 
-# PTX operand type token -> (TVM dtype, C type, inline-asm constraint).
+# PTX operand type token -> (TVM dtype, C type, inline-asm constraint, C carrier).
+# The carrier is the C type actually bound to the asm register: 8-bit values
+# have no asm constraint of their own, so they ride in 16-bit "h" registers
+# (PTX ld/st sign/zero-extend into wider registers; ISA "Notes").
 PTX_TYPES = {
-    "b32": ("uint32", "uint32_t", "r"),
-    "u32": ("uint32", "uint32_t", "r"),
-    "s32": ("int32", "int32_t", "r"),
-    "f32": ("float32", "float", "f"),
-    "b64": ("uint64", "uint64_t", "l"),
-    "u64": ("uint64", "uint64_t", "l"),
+    "b8": ("uint8", "uint8_t", "h", "uint16_t"),
+    "u8": ("uint8", "uint8_t", "h", "uint16_t"),
+    "s8": ("int8", "int8_t", "h", "int16_t"),
+    "b16": ("uint16", "uint16_t", "h", "uint16_t"),
+    "u16": ("uint16", "uint16_t", "h", "uint16_t"),
+    "s16": ("int16", "int16_t", "h", "int16_t"),
+    "b32": ("uint32", "uint32_t", "r", "uint32_t"),
+    "u32": ("uint32", "uint32_t", "r", "uint32_t"),
+    "s32": ("int32", "int32_t", "r", "int32_t"),
+    "b64": ("uint64", "uint64_t", "l", "uint64_t"),
+    "u64": ("uint64", "uint64_t", "l", "uint64_t"),
+    "s64": ("int64", "int64_t", "l", "int64_t"),
+    "f32": ("float32", "float", "f", "float"),
+    "f64": ("float64", "double", "d", "double"),
 }
 
 
@@ -133,21 +145,75 @@ def mods(entry: InstructionEntry, tokens) -> dict:
     return {slot.name: tok or "" for slot, tok in zip(entry.slots, tokens)}
 
 
-def variants(entry: InstructionEntry):
-    """Yield every legal modifier combination: the slot product filtered by ``check``."""
+@functools.cache
+def variants(entry: InstructionEntry) -> tuple:
+    """Every legal modifier combination: the slot product filtered by ``check``.
+
+    Cached: for wide entries like ld the raw product is in the millions.
+    """
     axes = [(*slot.choices, "") if slot.optional else slot.choices for slot in entry.slots]
-    for combo in itertools.product(*axes):
-        if entry.check is not None and entry.check(mods(entry, combo)):
-            continue
-        yield combo
+    return tuple(
+        combo
+        for combo in itertools.product(*axes)
+        if entry.check is None or not entry.check(mods(entry, combo))
+    )
 
 
 def _check_ld(m):
-    """acquire/relaxed require a scope; weak (omitted) and volatile forms take none."""
-    if m["sem"] in ("acquire", "relaxed") and not m["scope"]:
-        return f"ld.{m['sem']} requires a scope (cta/gpu/sys)"
-    if m["sem"] in ("", "volatile") and m["scope"]:
-        return f"{'ld.volatile' if m['sem'] else 'weak ld'} takes no scope"
+    """Scalar ld grammar per PTX ISA 9.7.9.8 (ld) and 9.7.9.9 (ld.global.nc)."""
+    sem, scope, ss = m["sem"], m["scope"], m["ss"]
+    mmio, cop, nc = m["mmio"], m["cop"], m["nc"]
+    l1ev, prefetch = m["l1ev"], m["prefetch"]
+    # "ld.relaxed.scope / ld.acquire.scope" — scope is mandatory there and
+    # invalid on the weak/volatile forms (syntax lines).
+    if sem in ("relaxed", "acquire") and not scope:
+        return f"ld.{sem} requires a scope (cta/cluster/gpu/sys)"
+    if sem in ("", "weak", "volatile") and scope:
+        return "only ld.relaxed/ld.acquire take a scope"
+    if mmio:
+        # "ld.mmio.sem.sys{.global}": "Only .sys thread scope is valid";
+        # global or generic addressing only. The ISA also allows .acquire
+        # (PTX ISA 9.3+), but the current toolchain assembles 9.2 and ptxas
+        # rejects it — widen when the toolchain catches up.
+        if sem != "relaxed":
+            return "ld.mmio requires .relaxed"
+        if scope != "sys":
+            return "only the sys scope is valid for ld.mmio"
+        if ss not in ("", "global"):
+            return "ld.mmio may only be used with .global or generic addressing"
+        if cop or nc or l1ev or prefetch:
+            return "ld.mmio takes no cache qualifiers"
+    if sem in ("relaxed", "acquire") and not mmio:
+        # "May be used with .global, .shared spaces, or generic addressing.
+        # Cache operations are not allowed."
+        if ss == "local":
+            return f"ld.{sem} is not valid on .local"
+        if cop:
+            return f"cache operations are not allowed with ld.{sem}"
+        if nc:
+            return "ld.global.nc has no memory-synchronization forms"
+    if sem == "volatile" and (cop or l1ev or nc):
+        # "ld.volatile{.ss}{.level::prefetch_size}" — prefetch is its only
+        # cache qualifier; allowed spaces global/shared/local/generic.
+        return "ld.volatile only takes the prefetch_size cache qualifier"
+    if cop and l1ev:
+        # cop and eviction_priority appear on separate syntax lines.
+        return "cache operators and eviction priorities are mutually exclusive"
+    if nc:
+        # "ld.global{.cop}.nc": .global only, no sem/scope, cop in {ca,cg,cs}.
+        if ss != "global":
+            return "ld.global.nc requires the .global state space"
+        if sem:
+            return "ld.global.nc has no sem qualifier"
+        if cop in ("lu", "cv"):
+            return "ld.global.nc cache operators are limited to ca/cg/cs"
+    if prefetch and ss not in ("", "global"):
+        # "may only be used with .global state space and generic addressing"
+        return "prefetch_size may only be used with .global or generic addressing"
+    if l1ev and ss not in ("", "global"):
+        # ptxas: "Modifier '.evict_*' cannot be applied to '<ss>' space" —
+        # implicit in the ISA prose, enforced by the assembler.
+        return "L1 eviction priorities apply only to .global or generic addressing"
     return None
 
 
@@ -162,7 +228,8 @@ def _check_st(m):
     return None
 
 
-_LDST_TYPES = ("b32", "b64", "u32", "f32")
+_LDST_TYPES = ("b32", "b64", "u32", "u64", "s32", "f32")
+_LD_TYPES = tuple(tok for tok in PTX_TYPES)  # all 14 scalar types (b128 excluded)
 _SCOPES = ("cta", "gpu", "sys")
 
 _ENTRIES = [
@@ -176,13 +243,40 @@ _ENTRIES = [
         effect=EFFECT_OPAQUE,
         returns=None,
     ),
+    # Complete scalar `ld` per PTX ISA 9.7.9.8 + the 9.7.9.9 ld.global.nc
+    # forms. Deliberately excluded (each needs a mechanism this shape lacks):
+    # - .vec/.b128 and the DPS destination forms (multi-register results)
+    # - .level::cache_hint + the cache_policy operand (optional operand)
+    # - .level2::eviction_priority (vector-only per the ISA)
+    # - .unified (variable-attribute addressing)
+    # - .param/.const spaces (require kernel-parameter / const addresses,
+    #   which cannot flow through the helper-function ABI)
     InstructionEntry(
         name="ld",
         slots=(
-            ModifierSlot("sem", ("acquire", "relaxed", "volatile"), optional=True),
-            ModifierSlot("scope", _SCOPES, optional=True),
-            ModifierSlot("space", ("global",)),
-            ModifierSlot("type", _LDST_TYPES),
+            ModifierSlot("mmio", ("mmio",), optional=True),
+            ModifierSlot("sem", ("weak", "acquire", "relaxed", "volatile"), optional=True),
+            ModifierSlot("scope", ("cta", "cluster", "gpu", "sys"), optional=True),
+            ModifierSlot(
+                "ss",
+                ("global", "shared", "shared::cta", "shared::cluster", "local"),
+                optional=True,  # omitted = generic addressing
+            ),
+            ModifierSlot("cop", ("ca", "cg", "cs", "lu", "cv"), optional=True),
+            ModifierSlot("nc", ("nc",), optional=True),
+            ModifierSlot(
+                "l1ev",
+                (
+                    "L1::evict_normal",
+                    "L1::evict_unchanged",
+                    "L1::evict_first",
+                    "L1::evict_last",
+                    "L1::no_allocate",
+                ),
+                optional=True,
+            ),
+            ModifierSlot("prefetch", ("L2::64B", "L2::128B", "L2::256B"), optional=True),
+            ModifierSlot("type", _LD_TYPES),
         ),
         check=_check_ld,
         operands=(OperandSlot("addr", role="addr"),),

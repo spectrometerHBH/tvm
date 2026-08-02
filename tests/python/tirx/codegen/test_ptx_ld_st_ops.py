@@ -164,7 +164,6 @@ def test_ptx_ld_st_ops_registered():
         "ld",
         "ld_global_nc",
         "st",
-        "ld_acquire",
         "st_release",
         "ld_volatile",
         "st_volatile",

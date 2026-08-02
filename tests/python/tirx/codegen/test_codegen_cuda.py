@@ -320,9 +320,9 @@ def test_ptx_ld_acquire_and_volatile_codegen():
         T.device_entry()
         tx = T.thread_id([32])
         if tx == 0:
-            A[0] = T.ptx.ld_acquire(A.data, "uint64", "u64", scope="gpu", space="global")
-            B[0] = T.ptx.ld_acquire(B.data, "int32", "s32", scope="sys", space="global")
-            C[0] = T.ptx.ld_acquire(C.data, "uint32", "b32", scope="gpu", space="global")
+            A[0] = T.ptxd.ld.acquire.gpu.global_.u64(A.data)
+            B[0] = T.ptxd.ld.acquire.sys.global_.s32(B.data)
+            C[0] = T.ptxd.ld.acquire.gpu.global_.b32(C.data)
             T.ptx.ld_global_acquire(B[0], B.data)
             A[0] = T.ptx.ld_volatile(A.data, "uint64", "u64", space="global")
 

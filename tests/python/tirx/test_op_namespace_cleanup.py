@@ -334,7 +334,7 @@ def test_registered_tirx_ops_have_exactly_one_category():
         pytest.skip("TIRx op categories require a rebuilt C++ runtime")
 
     categories = {"builtin", "tile_primitive", "device_intrin"}
-    device_namespaces = {"cuda", "ptx", "nvshmem", "nki", "metal", "webgpu"}
+    device_namespaces = {"cuda", "ptx", "ptxd", "nvshmem", "nki", "metal", "webgpu"}
     flat_tile_only_names = {
         "tirx.add",
         "tirx.binary_chain",

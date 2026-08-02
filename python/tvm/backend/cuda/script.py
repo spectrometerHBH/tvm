@@ -58,7 +58,6 @@ class PTXNamespace:
         self.fetch_register: Callable[..., Any] = _op_wrapper(_cuda_op.ptx_fetch_register)
         self.ld = _op_wrapper(_cuda_op.ptx_ld)
         self.ld_global_nc = _op_wrapper(_cuda_op.ptx_ld_global_nc)
-        self.ld_acquire = _op_wrapper(_cuda_op.ptx_ld_acquire)
         self.ld_relaxed = _op_wrapper(_cuda_op.ptx_ld_relaxed)
         self.ld_volatile = _op_wrapper(_cuda_op.ptx_ld_volatile)
         self.ld_mmio = _op_wrapper(_cuda_op.ptx_ld_mmio)

@@ -590,7 +590,6 @@ def _register_ptx_ld(op_name, form, n_attrs):
 _register_ptx_ld("ptx_ld", "weak", 11)
 _register_ptx_ld("ptx_ld_global_nc", "global_nc", 9)
 _register_ptx_ld("ptx_ld_relaxed", "relaxed", 10)
-_register_ptx_ld("ptx_ld_acquire", "acquire", 10)
 _register_ptx_ld("ptx_ld_volatile", "volatile", 6)
 _register_ptx_ld("ptx_ld_mmio", "mmio", 6)
 

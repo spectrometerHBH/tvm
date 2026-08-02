@@ -41,9 +41,9 @@ def render_variant(entry: InstructionEntry, tokens, predicated=False):
 
     params, inputs, outputs, ptx_operands = [], [], [], []
     idx = 0
-    c_ret = "void"
+    c_ret = carrier = "void"
     if entry.returns is not None:
-        _, c_ret, ret_constraint = PTX_TYPES[mod_map[entry.returns]]
+        _, c_ret, ret_constraint, carrier = PTX_TYPES[mod_map[entry.returns]]
         outputs.append(f'"={ret_constraint}"(__ret)')
         ptx_operands.append(f"%{idx}")
         idx += 1
@@ -63,8 +63,8 @@ def render_variant(entry: InstructionEntry, tokens, predicated=False):
             inputs.append(f'"l"({pname})')
             ptx_operands.append(f"%{idx}")
         else:  # value
-            _, c_ty, constraint = PTX_TYPES[slot.dtype or mod_map["type"]]
-            params.append(f"{c_ty} {pname}")
+            _, _, constraint, value_carrier = PTX_TYPES[slot.dtype or mod_map["type"]]
+            params.append(f"{value_carrier} {pname}")
             inputs.append(f'"{constraint}"({pname})')
             ptx_operands.append(f"%{idx}")
         idx += 1
@@ -83,6 +83,9 @@ def render_variant(entry: InstructionEntry, tokens, predicated=False):
     if entry.returns is None:
         body = f"  {asm_line}"
     else:
-        body = f"  {c_ret} __ret;\n  {asm_line}\n  return __ret;"
+        # __ret lives in the asm carrier type; narrow on return when they
+        # differ (8-bit loads ride in 16-bit "h" registers).
+        ret_stmt = "return __ret;" if carrier == c_ret else f"return ({c_ret})__ret;"
+        body = f"  {carrier} __ret;\n  {asm_line}\n  {ret_stmt}"
     source = f"__forceinline__ __device__ {c_ret} {helper}({', '.join(params)}) {{\n{body}\n}}\n"
     return opcode, helper, source
