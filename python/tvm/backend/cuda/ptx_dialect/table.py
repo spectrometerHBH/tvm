@@ -75,6 +75,13 @@ PTX_TYPES = {
     "s64": ("int64", "int64_t", "l", "int64_t"),
     "f32": ("float32", "float", "f", "float"),
     "f64": ("float64", "double", "d", "double"),
+    # `.f32x2` operands "have .b64 type" (ISA 9.7.3.3): a pair of packed floats
+    # in one 64-bit register, so the carrier is the bit container, not a float.
+    "f32x2": ("uint64", "uint64_t", "l", "uint64_t"),
+    # Mixed-precision sources live in a plain 16-bit register -- the ISA's own
+    # example declares them `.reg .b16` -- so they ride the b16 carrier.
+    "f16": ("uint16", "uint16_t", "h", "uint16_t"),
+    "bf16": ("uint16", "uint16_t", "h", "uint16_t"),
 }
 
 
@@ -185,6 +192,21 @@ def mods(entry: InstructionEntry, tokens) -> dict:
     return {slot.name: tok or "" for slot, tok in zip(entry.slots, tokens)}
 
 
+def operand_type(slot: OperandSlot, mod_map: dict) -> str:
+    """The PTX type token of one operand.
+
+    ``OperandSlot.dtype`` either names a modifier slot or is a literal type
+    token; ``None`` means the entry's ``type`` slot. Naming an *optional* slot
+    that was omitted falls back to ``type``, which is how the mixed-precision
+    forms are typed: ``add.rn.f32.bf16``'s ``a`` is the ``.bf16`` source, while
+    plain ``add.rn.f32``'s ``a`` is just ``.f32``.
+    """
+    key = slot.dtype or "type"
+    if key in mod_map:
+        return mod_map[key] or mod_map["type"]
+    return key
+
+
 @functools.cache
 def variants(entry: InstructionEntry) -> tuple:
     """Every legal modifier combination: the slot product filtered by ``check``.
@@ -288,6 +310,26 @@ def _check_max(m):
     return None
 
 
+def _check_farith(m):
+    """Which qualifiers each add/sub/mul/fma syntax line allows (PTX ISA 9.7.3.{2,3,4,7}, 9.7.5).
+
+    Same-precision lines:  op{.rnd}{.ftz}{.sat}.f32 | op{.rnd}{.ftz}.f32x2 | op{.rnd}.f64
+    Mixed-precision lines: op{.rnd}{.sat}.f32.atype  (.atype = .f16 | .bf16)
+    """
+    ty, src = m["type"], m.get("srctype", "")
+    if src:
+        if ty != "f32":
+            return f"mixed-precision .{src} source only exists on the .f32 line"
+        if m.get("ftz"):
+            return "the mixed-precision line takes no .ftz"
+        return None
+    if m.get("ftz") and ty == "f64":
+        return "only the .f32/.f32x2 lines take .ftz"
+    if m.get("sat") and ty != "f32":
+        return "only the .f32 line takes .sat"
+    return None
+
+
 def _check_prefetch(m):
     """Each prefetch syntax line names exactly one target (PTX ISA 9.7.9.16)."""
     level, evict, tmap = m["level"], m["evict"], m["tensormap"]
@@ -340,8 +382,15 @@ def _check_atomic(m):
 
 
 _LDST_TYPES = ("b32", "b64", "u32", "u64", "s32", "f32")
-_LD_TYPES = tuple(tok for tok in PTX_TYPES)  # all 14 scalar types (b128 excluded)
+# The 14 scalar ld types (.b128 excluded). Spelled out rather than derived from
+# PTX_TYPES, which also carries the packed/mixed tokens (.f32x2, .f16, .bf16)
+# that belong to the arithmetic lines and are not ld types.
+_LD_TYPES = (
+    "b8", "u8", "s8", "b16", "u16", "s16", "b32", "u32",
+    "s32", "b64", "u64", "s64", "f32", "f64",
+)  # fmt: skip
 _SCOPES = ("cta", "gpu", "sys")
+_FRND = ("rn", "rz", "rm", "rp")  # .rnd on the floating-point arithmetic lines
 
 _ENTRIES = [
     # prefetch per PTX ISA 9.7.9.16, covering three of its four syntax lines:
@@ -530,6 +579,65 @@ _ENTRIES = [
             OperandSlot("size", role="value", dtype="u64"),
             OperandSlot("initval", role="imm", literal="0"),
         ),
+    ),
+    # Floating-point add/sub/mul (PTX ISA 9.7.3.{2,3,4}) together with their
+    # mixed-precision lines (9.7.5.{1,2}); `mul` has no mixed-precision line.
+    #   add{.rnd}{.ftz}{.sat}.f32  d, a, b;   add{.rnd}{.ftz}.f32x2  d, a, b;
+    #   add{.rnd}.f64              d, a, b;   add{.rnd}{.sat}.f32.atype  d, a, c;
+    # min_arch is the family's ceiling, not its floor: .f32/.f64 assemble
+    # everywhere, but .f32x2 and the mixed lines need sm_100, and certification
+    # has to run somewhere every legal variant is legal.
+    *[
+        InstructionEntry(
+            name=name,
+            min_arch="sm_100a",
+            slots=(
+                ModifierSlot("rnd", _FRND, optional=True),
+                ModifierSlot("ftz", ("ftz",), optional=True),
+                ModifierSlot("sat", ("sat",), optional=True),
+                ModifierSlot("type", ("f32", "f64", "f32x2")),
+                *(
+                    (ModifierSlot("srctype", ("f16", "bf16"), optional=True),)
+                    if name != "mul"
+                    else ()
+                ),
+            ),
+            check=_check_farith,
+            operands=(
+                OperandSlot("d", role="dst"),
+                # On the mixed line `a` is the converted 16-bit source; on every
+                # other line it is just the instruction type.
+                OperandSlot("a", role="value", dtype="srctype" if name != "mul" else None),
+                OperandSlot("b", role="value"),
+            ),
+            # The legacy scalar and .f32x2 helpers all carried the barrier.
+            asm_volatile=True,
+        )
+        for name in ("add", "sub", "mul")
+    ],
+    # fma differs in shape, so it is its own entry: three sources, and .rnd is
+    # mandatory on every line (PTX ISA 9.7.3.7 / 9.7.5.3).
+    #   fma.rnd{.ftz}{.sat}.f32  d, a, b, c;   fma.rnd{.ftz}.f32x2  d, a, b, c;
+    #   fma.rnd.f64              d, a, b, c;   fma.rnd{.sat}.f32.abtype  d, a, b, c;
+    InstructionEntry(
+        name="fma",
+        min_arch="sm_100a",
+        slots=(
+            ModifierSlot("rnd", _FRND),
+            ModifierSlot("ftz", ("ftz",), optional=True),
+            ModifierSlot("sat", ("sat",), optional=True),
+            ModifierSlot("type", ("f32", "f64", "f32x2")),
+            ModifierSlot("srctype", ("f16", "bf16"), optional=True),
+        ),
+        check=_check_farith,
+        operands=(
+            OperandSlot("d", role="dst"),
+            # .abtype converts both a and b; c is always the instruction type.
+            OperandSlot("a", role="value", dtype="srctype"),
+            OperandSlot("b", role="value", dtype="srctype"),
+            OperandSlot("c", role="value"),
+        ),
+        asm_volatile=True,
     ),
     InstructionEntry(
         name="cvta",

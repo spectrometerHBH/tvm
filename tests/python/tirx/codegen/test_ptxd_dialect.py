@@ -572,7 +572,7 @@ def test_ptxd_all_variants_render_unique():
                 assert pred_helper not in names
                 names.add(pred_helper)
                 assert f"@p {opcode} " in pred_source
-    assert total == 13871  # update when the table grows
+    assert total == 14060  # update when the table grows
 
 
 def test_ptxd_stub_up_to_date():

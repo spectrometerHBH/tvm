@@ -21,7 +21,7 @@ and by :mod:`.gen_helpers`, which dumps the generated helpers for humans to
 inspect without compiling a kernel.
 """
 
-from .table import PTX_TYPES, InstructionEntry, mods
+from .table import PTX_TYPES, InstructionEntry, mods, operand_type
 
 
 def render_variant(entry: InstructionEntry, tokens, predicated=False):
@@ -50,7 +50,7 @@ def render_variant(entry: InstructionEntry, tokens, predicated=False):
     for slot in entry.operands:
         pname = f"__{slot.name}"
         if slot.role == "dst":
-            _, c_ty, constraint, carrier = PTX_TYPES[slot.dtype or mod_map["type"]]
+            _, c_ty, constraint, carrier = PTX_TYPES[operand_type(slot, mod_map)]
             params.append(f"{c_ty}& {pname}")
             if carrier == c_ty:
                 outputs.append(f'"={constraint}"({pname})')
@@ -83,7 +83,7 @@ def render_variant(entry: InstructionEntry, tokens, predicated=False):
             inputs.append(f'"l"({pname})')
             ptx_operands.append(f"%{idx}")
         else:  # value
-            _, _, constraint, value_carrier = PTX_TYPES[slot.dtype or mod_map["type"]]
+            _, _, constraint, value_carrier = PTX_TYPES[operand_type(slot, mod_map)]
             params.append(f"{value_carrier} {pname}")
             inputs.append(f'"{constraint}"({pname})')
             ptx_operands.append(f"%{idx}")

@@ -45,7 +45,14 @@ from tvm.tirx.expr import BufferLoad
 from tvm.tirx.op import call_intrin, reinterpret
 
 from .render import render_variant
-from .table import PTX_TYPES, InstructionEntry, escape_token, mods, unescape_token
+from .table import (
+    PTX_TYPES,
+    InstructionEntry,
+    escape_token,
+    mods,
+    operand_type,
+    unescape_token,
+)
 
 # tvm::tirx::CallEffectKind::kOpaque (include/tvm/tirx/op_attr_types.h). Every
 # ptxd call is a void statement, and RemoveNoOp deletes any Evaluate() whose
@@ -104,7 +111,7 @@ def _coerce_operand(entry, slot, value, mod_map):
         # has to be a writable lvalue: a scalar (`x: T.float32`) or a buffer
         # element. Both are BufferLoad nodes, which the C codegen prints as the
         # lvalue bound to the helper's reference parameter.
-        want = PTX_TYPES[slot.dtype or mod_map["type"]][0]
+        want = PTX_TYPES[operand_type(slot, mod_map)][0]
         value = getattr(value, "scalar", value)  # unwrap T.local_scalar
         if not isinstance(value, BufferLoad):
             raise ValueError(
@@ -116,11 +123,11 @@ def _coerce_operand(entry, slot, value, mod_map):
         if got != want:
             raise ValueError(
                 f"{entry.name}: destination '{slot.name}' must have dtype {want} "
-                f"(from .{slot.dtype or mod_map['type']}), got {got}"
+                f"(from .{operand_type(slot, mod_map)}), got {got}"
             )
         return value
     if slot.role == "value":
-        type_token = slot.dtype or mod_map["type"]
+        type_token = operand_type(slot, mod_map)
         want = PTX_TYPES[type_token][0]
         if isinstance(value, int | float):
             return const(value, want)

@@ -243,6 +243,88 @@ class _Chain_st_bulk:
         self, addr: Any, size: Any, initval: Any, *args: Any, pred: Any = None
     ) -> None: ...
 
+class _Chain_add:
+    """`add` — rnd∈{rn,rz,rm,rp} (opt); ftz∈{ftz} (opt); sat∈{sat} (opt); type∈{f32,f64,f32x2};
+    srctype∈{f16,bf16} (opt) — Which qualifiers each add/sub/mul/fma syntax line allows (PTX
+    ISA 9.7.3.{2,3,4,7}, 9.7.5).      Same-precision lines:  op{.rnd}{.ftz}{.sat}.f32 |
+    op{.rnd}{.ftz}.f32x2 | op{.rnd}.f64     Mixed-precision lines: op{.rnd}{.sat}.f32.atype
+    (.atype = .f16 | .bf16)
+    """
+
+    bf16: _Chain_add
+    f16: _Chain_add
+    f32: _Chain_add
+    f32x2: _Chain_add
+    f64: _Chain_add
+    ftz: _Chain_add
+    rm: _Chain_add
+    rn: _Chain_add
+    rp: _Chain_add
+    rz: _Chain_add
+    sat: _Chain_add
+    def __call__(self, d: Any, a: Any, b: Any, *args: Any) -> None: ...
+
+class _Chain_sub:
+    """`sub` — rnd∈{rn,rz,rm,rp} (opt); ftz∈{ftz} (opt); sat∈{sat} (opt); type∈{f32,f64,f32x2};
+    srctype∈{f16,bf16} (opt) — Which qualifiers each add/sub/mul/fma syntax line allows (PTX
+    ISA 9.7.3.{2,3,4,7}, 9.7.5).      Same-precision lines:  op{.rnd}{.ftz}{.sat}.f32 |
+    op{.rnd}{.ftz}.f32x2 | op{.rnd}.f64     Mixed-precision lines: op{.rnd}{.sat}.f32.atype
+    (.atype = .f16 | .bf16)
+    """
+
+    bf16: _Chain_sub
+    f16: _Chain_sub
+    f32: _Chain_sub
+    f32x2: _Chain_sub
+    f64: _Chain_sub
+    ftz: _Chain_sub
+    rm: _Chain_sub
+    rn: _Chain_sub
+    rp: _Chain_sub
+    rz: _Chain_sub
+    sat: _Chain_sub
+    def __call__(self, d: Any, a: Any, b: Any, *args: Any) -> None: ...
+
+class _Chain_mul:
+    """`mul` — rnd∈{rn,rz,rm,rp} (opt); ftz∈{ftz} (opt); sat∈{sat} (opt); type∈{f32,f64,f32x2}
+    — Which qualifiers each add/sub/mul/fma syntax line allows (PTX ISA 9.7.3.{2,3,4,7},
+    9.7.5).      Same-precision lines:  op{.rnd}{.ftz}{.sat}.f32 | op{.rnd}{.ftz}.f32x2 |
+    op{.rnd}.f64     Mixed-precision lines: op{.rnd}{.sat}.f32.atype  (.atype = .f16 |
+    .bf16)
+    """
+
+    f32: _Chain_mul
+    f32x2: _Chain_mul
+    f64: _Chain_mul
+    ftz: _Chain_mul
+    rm: _Chain_mul
+    rn: _Chain_mul
+    rp: _Chain_mul
+    rz: _Chain_mul
+    sat: _Chain_mul
+    def __call__(self, d: Any, a: Any, b: Any, *args: Any) -> None: ...
+
+class _Chain_fma:
+    """`fma` — rnd∈{rn,rz,rm,rp}; ftz∈{ftz} (opt); sat∈{sat} (opt); type∈{f32,f64,f32x2};
+    srctype∈{f16,bf16} (opt) — Which qualifiers each add/sub/mul/fma syntax line allows (PTX
+    ISA 9.7.3.{2,3,4,7}, 9.7.5).      Same-precision lines:  op{.rnd}{.ftz}{.sat}.f32 |
+    op{.rnd}{.ftz}.f32x2 | op{.rnd}.f64     Mixed-precision lines: op{.rnd}{.sat}.f32.atype
+    (.atype = .f16 | .bf16)
+    """
+
+    bf16: _Chain_fma
+    f16: _Chain_fma
+    f32: _Chain_fma
+    f32x2: _Chain_fma
+    f64: _Chain_fma
+    ftz: _Chain_fma
+    rm: _Chain_fma
+    rn: _Chain_fma
+    rp: _Chain_fma
+    rz: _Chain_fma
+    sat: _Chain_fma
+    def __call__(self, d: Any, a: Any, b: Any, c: Any, *args: Any) -> None: ...
+
 class _Chain_cvta:
     """`cvta` — dir∈{to}; space∈{shared}; type∈{u64}"""
 
@@ -272,18 +354,22 @@ class _Chain_cp:
     ) -> None: ...
 
 class _PTXD:
+    add: _Chain_add
     atom: _Chain_atom
     cp: _Chain_cp
     cvta: _Chain_cvta
     ex2: _Chain_ex2
+    fma: _Chain_fma
     fns: _Chain_fns
     ld: _Chain_ld
     max: _Chain_max
+    mul: _Chain_mul
     prefetch: _Chain_prefetch
     rcp: _Chain_rcp
     red: _Chain_red
     st: _Chain_st
     st_bulk: _Chain_st_bulk
+    sub: _Chain_sub
     def __getitem__(self, text: str) -> Any: ...
 
 ptxd: _PTXD
