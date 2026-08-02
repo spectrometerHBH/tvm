@@ -119,14 +119,18 @@ class _PrefetchCollector(StmtExprVisitor):
         self.names = []
 
     def visit_call_(self, op):
-        if (
-            isinstance(op.op, tvm.ir.Op)
-            and op.op.name == "tirx.ptx.prefetch_tensormap"
-            and isinstance(op.args[0], tvm.ir.Call)
-            and op.args[0].op.name == "tirx.address_of"
-            and isinstance(op.args[0].args[0], Var)
-        ):
-            self.names.append(op.args[0].args[0].name)
+        if isinstance(op.op, tvm.ir.Op) and op.op.name == "tirx.ptxd.prefetch":
+            addr = op.args[0]
+            # A tensormap address arrives as a u64 handle, so the dialect
+            # coerces it with an explicit reinterpret before the call.
+            if isinstance(addr, tvm.ir.Call) and addr.op.name == "tirx.reinterpret":
+                addr = addr.args[0]
+            if (
+                isinstance(addr, tvm.ir.Call)
+                and addr.op.name == "tirx.address_of"
+                and isinstance(addr.args[0], Var)
+            ):
+                self.names.append(addr.args[0].name)
         super().visit_call_(op)
 
 

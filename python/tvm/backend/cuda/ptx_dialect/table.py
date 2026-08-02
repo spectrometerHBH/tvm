@@ -250,6 +250,25 @@ def _check_rcp(m):
     return None
 
 
+def _check_prefetch(m):
+    """Each prefetch syntax line names exactly one target (PTX ISA 9.7.9.16)."""
+    level, evict, tmap = m["level"], m["evict"], m["tensormap"]
+    space = m["space"]
+    if sum(bool(x) for x in (level, evict, tmap)) != 1:
+        return "exactly one of .level, .level::eviction_priority or .tensormap"
+    if tmap:
+        # "prefetch{.tensormap_space}.tensormap", .tensormap_space = .const/.param
+        if space not in ("", "const", "param"):
+            return ".tensormap takes .const or .param (or generic addressing)"
+    else:
+        # "prefetch{.space}.level", .space = .global/.local
+        if space in ("const", "param"):
+            return ".const/.param are only valid with .tensormap"
+        if evict and space != "global":
+            return "eviction priority requires .global"
+    return None
+
+
 _RED_SEM = ("relaxed", "release")
 _ATOM_SEM = ("relaxed", "acquire", "release", "acq_rel")
 _ATOM_SCOPES = ("cta", "cluster", "gpu", "sys")
@@ -287,12 +306,20 @@ _LD_TYPES = tuple(tok for tok in PTX_TYPES)  # all 14 scalar types (b128 exclude
 _SCOPES = ("cta", "gpu", "sys")
 
 _ENTRIES = [
+    # prefetch per PTX ISA 9.7.9.16, covering three of its four syntax lines:
+    #   prefetch{.space}.level [a]
+    #   prefetch.global.level::eviction_priority [a]
+    #   prefetch{.tensormap_space}.tensormap [a]
+    # `prefetchu.L1` is a different mnemonic and would be its own entry.
     InstructionEntry(
         name="prefetch",
         slots=(
-            ModifierSlot("space", ("global",)),
-            ModifierSlot("level", ("L2",)),
+            ModifierSlot("space", ("global", "local", "const", "param"), optional=True),
+            ModifierSlot("level", ("L1", "L2"), optional=True),
+            ModifierSlot("evict", ("L2::evict_last", "L2::evict_normal"), optional=True),
+            ModifierSlot("tensormap", ("tensormap",), optional=True),
         ),
+        check=_check_prefetch,
         operands=(OperandSlot("addr", role="addr"),),
         effect=EFFECT_OPAQUE,
         returns=None,

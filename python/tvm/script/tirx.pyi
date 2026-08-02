@@ -23,10 +23,20 @@ Regenerate:
 from typing import Any
 
 class _Chain_prefetch:
-    """`prefetch` — space∈{global}; level∈{L2}"""
+    """`prefetch` — space∈{global,local,const,param} (opt); level∈{L1,L2} (opt);
+    evict∈{L2::evict_last,L2::evict_normal} (opt); tensormap∈{tensormap} (opt) — Each
+    prefetch syntax line names exactly one target (PTX ISA 9.7.9.16).
+    """
 
+    L1: _Chain_prefetch
     L2: _Chain_prefetch
+    L2__evict_last: _Chain_prefetch
+    L2__evict_normal: _Chain_prefetch
+    const: _Chain_prefetch
     global_: _Chain_prefetch
+    local: _Chain_prefetch
+    param: _Chain_prefetch
+    tensormap: _Chain_prefetch
     def __call__(self, addr: Any, *args: Any, pred: Any = None) -> None: ...
 
 class _Chain_ld:

@@ -4068,11 +4068,6 @@ def ptx_st_bulk(ptr, num_bytes, *, weak=False, space="shared::cta"):
     return call_intrin("", "tirx.ptx.st_bulk", ptr, num_bytes, int(bool(weak)), space)
 
 
-def ptx_prefetch_tensormap(tensormap_addr, space=""):
-    _choice("space", space, _PTX_PREFETCH_TENSORMAP_SPACE)
-    return call_intrin("", "tirx.ptx.prefetch_tensormap", tensormap_addr, space)
-
-
 def ptx_mbarrier_test_wait_parity(barrier, phase, *, sem="", scope="", space="shared::cta"):
     if sem not in ("", "acquire", "relaxed"):
         raise ValueError(f"Unsupported mbarrier.test_wait.parity sem {sem!r}")

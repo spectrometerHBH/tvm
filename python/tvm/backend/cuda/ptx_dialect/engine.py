@@ -41,7 +41,7 @@ from tvm.backend.cuda.op import cuda_cvta_generic_to_shared, cuda_func_call
 from tvm.ir.op import register_op_attr
 from tvm.ir.type import PointerType, PrimType
 from tvm.runtime import const
-from tvm.tirx.op import call_intrin
+from tvm.tirx.op import call_intrin, reinterpret
 
 from .render import render_variant
 from .table import PTX_TYPES, InstructionEntry, escape_token, mods, unescape_token
@@ -134,11 +134,15 @@ def _coerce_operand(entry, slot, value, mod_map):
                 f"but got a shared-scope pointer"
             )
         return value
+    if isinstance(ty, PrimType) and ty.dtype == "uint64":
+        # A 64-bit address handle, e.g. T.address_of(tensormap). The helper
+        # parameter is `const void*` and PTX binds it to the same "l" register
+        # either way, so make the conversion an explicit, visible IR node
+        # rather than a silent type pun.
+        return reinterpret("handle", value)
     if isinstance(ty, PrimType) and ty.dtype == "uint32":
         raise ValueError(f"{entry.name}: uint32 address requires shared state space")
-    # The helper parameter is `const void*`: raw integer addresses are only
-    # meaningful as uint32 shared-window offsets, never in generic space.
-    raise ValueError(f"{entry.name}: operand '{slot.name}' must be a pointer")
+    raise ValueError(f"{entry.name}: operand '{slot.name}' must be a pointer or uint64 handle")
 
 
 def _coerce_pred(entry, pred):

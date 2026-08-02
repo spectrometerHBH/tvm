@@ -778,30 +778,6 @@ device_intrinsic(
 # =============================================================================
 
 
-# PTX prefetch tensormap form:
-#   prefetch{.tensormap_space}.tensormap [a];
-def _prefetch_tensormap_parts(_tensor_map, tensormap_space):
-    space = parse_str(tensormap_space)
-    instr = f"prefetch{_dot(space)}.tensormap"
-    name = f"tvm_builtin_ptx_prefetch{('_' + _safe_attr(space)) if space else ''}_tensormap"
-    body = (
-        f'    asm volatile("{instr} [%0];"\n'
-        "                 :\n"
-        '                 : "l"(tensor_map_addr)\n'
-        '                 : "memory");'
-    )
-    return name, body
-
-
-device_intrinsic(
-    "ptx_prefetch_tensormap",
-    n_attrs=1,
-    helper_name=lambda *a: _prefetch_tensormap_parts(*a)[0],
-    c_signature="(unsigned long long tensor_map_addr)",
-    body=lambda *a: _prefetch_tensormap_parts(*a)[1],
-)
-
-
 # PTX st forms (ISA table entries registered via ``ptx_st`` and siblings):
 #   st{.weak}{.ss}{.cop}{.level::cache_hint}{.vec}.type [a], b{, cache-policy};
 #   st{.weak}{.ss}{.level1::eviction_priority}{.level2::eviction_priority}{.level::cache_hint}{.vec}.type [a], b{, cache-policy};

@@ -240,14 +240,28 @@ def test_ptxd_trace_time_errors():
             T.device_entry()
             out[0] = T.ptxd.ld.global_.acquire.b32(A.ptr_to([0]))
 
-    # Raw uint64 generic address: the helper parameter is `const void*`,
-    # so integer addresses are only accepted as uint32 in shared space.
-    with pytest.raises((ValueError, tvm.error.DiagnosticError), match="must be a pointer"):
+    # A float is not an address in any state space.
+    with pytest.raises((ValueError, tvm.error.DiagnosticError), match="pointer or uint64 handle"):
 
         @T.prim_func
-        def bad_u64_addr(out: T.Buffer((1,), "uint32")):
+        def bad_addr_dtype(out: T.Buffer((1,), "uint32")):
             T.device_entry()
-            out[0] = T.ptxd.ld.global_.b32(T.uint64(0))
+            out[0] = T.ptxd.ld.global_.b32(T.float32(0))
+
+
+def test_ptxd_u64_address_handle_is_reinterpreted():
+    """A 64-bit address handle is accepted via an explicit, visible cast.
+
+    Some PTX address operands reach us as u64 handles rather than typed
+    pointers (``T.address_of(tensormap)`` is the motivating case). PTX binds
+    both to the same "l" register, so the conversion must exist in the IR
+    rather than being punned inside the helper.
+    """
+    handle = tvm.tirx.Var("h", "uint64")
+    call = T.ptxd.prefetch.tensormap(handle)
+    addr = call.args[0]
+    assert addr.op.name == "tirx.reinterpret", addr
+    assert addr.args[0].same_as(handle)
 
 
 def test_ptxd_parser_roundtrip():
@@ -496,7 +510,7 @@ def test_ptxd_all_variants_render_unique():
                 assert pred_helper not in names
                 names.add(pred_helper)
                 assert f"@p {opcode} " in pred_source
-    assert total == 13852  # update when the table grows
+    assert total == 13862  # update when the table grows
 
 
 def test_ptxd_stub_up_to_date():
