@@ -22,22 +22,129 @@ Regenerate:
 
 from typing import Any
 
-class _Chain_prefetch:
-    """`prefetch` — space∈{global,local,const,param} (opt); level∈{L1,L2} (opt);
-    evict∈{L2::evict_last,L2::evict_normal} (opt); tensormap∈{tensormap} (opt) — Each
-    prefetch syntax line names exactly one target (PTX ISA 9.7.9.16).
+class _Chain_add:
+    """`add` — rnd∈{rn,rz,rm,rp} (opt); ftz∈{ftz} (opt); sat∈{sat} (opt); type∈{f32,f64,f32x2};
+    srctype∈{f16,bf16} (opt) — Which qualifiers each add/sub/mul/fma syntax line allows (PTX
+    ISA 9.7.3.{2,3,4,7}, 9.7.5).      Same-precision lines:  op{.rnd}{.ftz}{.sat}.f32 |
+    op{.rnd}{.ftz}.f32x2 | op{.rnd}.f64     Mixed-precision lines: op{.rnd}{.sat}.f32.atype
+    (.atype = .f16 | .bf16)
     """
 
-    L1: _Chain_prefetch
-    L2: _Chain_prefetch
-    L2__evict_last: _Chain_prefetch
-    L2__evict_normal: _Chain_prefetch
-    const: _Chain_prefetch
-    global_: _Chain_prefetch
-    local: _Chain_prefetch
-    param: _Chain_prefetch
-    tensormap: _Chain_prefetch
-    def __call__(self, addr: Any, *args: Any, pred: Any = None) -> None: ...
+    bf16: _Chain_add
+    f16: _Chain_add
+    f32: _Chain_add
+    f32x2: _Chain_add
+    f64: _Chain_add
+    ftz: _Chain_add
+    rm: _Chain_add
+    rn: _Chain_add
+    rp: _Chain_add
+    rz: _Chain_add
+    sat: _Chain_add
+    def __call__(self, d: Any, a: Any, b: Any, *args: Any) -> None: ...
+
+class _Chain_atom:
+    """`atom` — sem∈{relaxed,acquire,release,acq_rel} (opt); scope∈{cta,cluster,gpu,sys} (opt);
+    space∈{global,shared,shared::cta,shared::cluster} (opt);
+    op∈{and,or,xor,add,inc,dec,min,max}; type∈{b32,b64,u32,u64,s32,s64,f32,f64} — op x type
+    pairings for red/atom (PTX ISA 9.7.14.5 / 9.7.14.6).      The allowed type set per op is
+    exactly what ptxas enforces; the ISA prose     lists the union across ops rather than
+    the per-op pairing. Half-precision     types appear in ptxas' message but are excluded
+    from this entry (they need     .noftz and a half carrier type).
+    """
+
+    acq_rel: _Chain_atom
+    acquire: _Chain_atom
+    add: _Chain_atom
+    and_: _Chain_atom
+    b32: _Chain_atom
+    b64: _Chain_atom
+    cluster: _Chain_atom
+    cta: _Chain_atom
+    dec: _Chain_atom
+    f32: _Chain_atom
+    f64: _Chain_atom
+    global_: _Chain_atom
+    gpu: _Chain_atom
+    inc: _Chain_atom
+    max: _Chain_atom
+    min: _Chain_atom
+    or_: _Chain_atom
+    relaxed: _Chain_atom
+    release: _Chain_atom
+    s32: _Chain_atom
+    s64: _Chain_atom
+    shared: _Chain_atom
+    shared__cluster: _Chain_atom
+    shared__cta: _Chain_atom
+    sys: _Chain_atom
+    u32: _Chain_atom
+    u64: _Chain_atom
+    xor: _Chain_atom
+    def __call__(self, d: Any, addr: Any, value: Any, *args: Any) -> None: ...
+
+class _Chain_cp:
+    """`cp` — api∈{async}; kind∈{bulk}; dst_space∈{shared::cta}; src_space∈{global};
+    completion∈{mbarrier::complete_tx::bytes}
+    """
+
+    async_: _Chain_cp
+    bulk: _Chain_cp
+    global_: _Chain_cp
+    mbarrier__complete_tx__bytes: _Chain_cp
+    shared__cta: _Chain_cp
+    def __call__(
+        self,
+        dst: Any,
+        src: Any,
+        size: Any,
+        mbar: Any,
+        *args: Any,
+        pred: Any = None,
+    ) -> None: ...
+
+class _Chain_cvta:
+    """`cvta` — dir∈{to}; space∈{shared}; type∈{u64}"""
+
+    shared: _Chain_cvta
+    to: _Chain_cvta
+    u64: _Chain_cvta
+    def __call__(self, d: Any, ptr: Any, *args: Any) -> None: ...
+
+class _Chain_ex2:
+    """`ex2` — mode∈{approx}; ftz∈{ftz} (opt); type∈{f32}"""
+
+    approx: _Chain_ex2
+    f32: _Chain_ex2
+    ftz: _Chain_ex2
+    def __call__(self, d: Any, value: Any, *args: Any) -> None: ...
+
+class _Chain_fma:
+    """`fma` — rnd∈{rn,rz,rm,rp}; ftz∈{ftz} (opt); sat∈{sat} (opt); type∈{f32,f64,f32x2};
+    srctype∈{f16,bf16} (opt) — Which qualifiers each add/sub/mul/fma syntax line allows (PTX
+    ISA 9.7.3.{2,3,4,7}, 9.7.5).      Same-precision lines:  op{.rnd}{.ftz}{.sat}.f32 |
+    op{.rnd}{.ftz}.f32x2 | op{.rnd}.f64     Mixed-precision lines: op{.rnd}{.sat}.f32.atype
+    (.atype = .f16 | .bf16)
+    """
+
+    bf16: _Chain_fma
+    f16: _Chain_fma
+    f32: _Chain_fma
+    f32x2: _Chain_fma
+    f64: _Chain_fma
+    ftz: _Chain_fma
+    rm: _Chain_fma
+    rn: _Chain_fma
+    rp: _Chain_fma
+    rz: _Chain_fma
+    sat: _Chain_fma
+    def __call__(self, d: Any, a: Any, b: Any, c: Any, *args: Any) -> None: ...
+
+class _Chain_fns:
+    """`fns` — type∈{b32}"""
+
+    b32: _Chain_fns
+    def __call__(self, d: Any, mask: Any, base: Any, offset: Any, *args: Any) -> None: ...
 
 class _Chain_ld:
     """`ld` — mmio∈{mmio} (opt); sem∈{weak,acquire,relaxed,volatile} (opt);
@@ -93,28 +200,78 @@ class _Chain_ld:
     weak: _Chain_ld
     def __call__(self, d: Any, addr: Any, *args: Any) -> None: ...
 
-class _Chain_st:
-    """`st` — sem∈{weak,release,relaxed,volatile} (opt); scope∈{cta,gpu,sys} (opt);
-    space∈{global,shared::cta}; type∈{b32,b64,u32,u64,s32,f32} — release/relaxed require a
-    scope; weak/volatile take none; shared::cta caps scope at cta.
+class _Chain_max:
+    """`max` — ftz∈{ftz} (opt); nan∈{NaN} (opt); type∈{f32,f64} — `max.f64` is the bare form;
+    .ftz/.NaN belong to the .f32 line (PTX ISA 9.7.3.12).
     """
 
-    b32: _Chain_st
-    b64: _Chain_st
-    cta: _Chain_st
-    f32: _Chain_st
-    global_: _Chain_st
-    gpu: _Chain_st
-    relaxed: _Chain_st
-    release: _Chain_st
-    s32: _Chain_st
-    shared__cta: _Chain_st
-    sys: _Chain_st
-    u32: _Chain_st
-    u64: _Chain_st
-    volatile: _Chain_st
-    weak: _Chain_st
-    def __call__(self, addr: Any, value: Any, *args: Any, pred: Any = None) -> None: ...
+    NaN: _Chain_max
+    f32: _Chain_max
+    f64: _Chain_max
+    ftz: _Chain_max
+    def __call__(self, d: Any, a: Any, b: Any, *args: Any) -> None: ...
+
+class _Chain_mov:
+    """`mov` — 16 entries sharing this mnemonic; PTX puts their difference in the operand list,
+    so the call selects one. Shapes: (d, a0, a1); (d0, d1, a); (d, a0, a1, a2, a3); (d0, d1,
+    d2, d3, a)
+    """
+
+    b128: _Chain_mov
+    b32: _Chain_mov
+    b64: _Chain_mov
+    def __call__(self, *args: Any) -> None: ...
+
+class _Chain_mul:
+    """`mul` — rnd∈{rn,rz,rm,rp} (opt); ftz∈{ftz} (opt); sat∈{sat} (opt); type∈{f32,f64,f32x2}
+    — Which qualifiers each add/sub/mul/fma syntax line allows (PTX ISA 9.7.3.{2,3,4,7},
+    9.7.5).      Same-precision lines:  op{.rnd}{.ftz}{.sat}.f32 | op{.rnd}{.ftz}.f32x2 |
+    op{.rnd}.f64     Mixed-precision lines: op{.rnd}{.sat}.f32.atype  (.atype = .f16 |
+    .bf16)
+    """
+
+    f32: _Chain_mul
+    f32x2: _Chain_mul
+    f64: _Chain_mul
+    ftz: _Chain_mul
+    rm: _Chain_mul
+    rn: _Chain_mul
+    rp: _Chain_mul
+    rz: _Chain_mul
+    sat: _Chain_mul
+    def __call__(self, d: Any, a: Any, b: Any, *args: Any) -> None: ...
+
+class _Chain_prefetch:
+    """`prefetch` — space∈{global,local,const,param} (opt); level∈{L1,L2} (opt);
+    evict∈{L2::evict_last,L2::evict_normal} (opt); tensormap∈{tensormap} (opt) — Each
+    prefetch syntax line names exactly one target (PTX ISA 9.7.9.16).
+    """
+
+    L1: _Chain_prefetch
+    L2: _Chain_prefetch
+    L2__evict_last: _Chain_prefetch
+    L2__evict_normal: _Chain_prefetch
+    const: _Chain_prefetch
+    global_: _Chain_prefetch
+    local: _Chain_prefetch
+    param: _Chain_prefetch
+    tensormap: _Chain_prefetch
+    def __call__(self, addr: Any, *args: Any, pred: Any = None) -> None: ...
+
+class _Chain_rcp:
+    """`rcp` — mode∈{approx,rn,rz,rm,rp}; ftz∈{ftz} (opt); type∈{f32,f64} — rcp.approx is
+    f32-only; .f64 is IEEE-rounded and takes no .ftz (PTX ISA 9.7.3.13).
+    """
+
+    approx: _Chain_rcp
+    f32: _Chain_rcp
+    f64: _Chain_rcp
+    ftz: _Chain_rcp
+    rm: _Chain_rcp
+    rn: _Chain_rcp
+    rp: _Chain_rcp
+    rz: _Chain_rcp
+    def __call__(self, d: Any, value: Any, *args: Any) -> None: ...
 
 class _Chain_red:
     """`red` — sem∈{relaxed,release} (opt); scope∈{cta,cluster,gpu,sys} (opt);
@@ -154,85 +311,28 @@ class _Chain_red:
     xor: _Chain_red
     def __call__(self, addr: Any, value: Any, *args: Any, pred: Any = None) -> None: ...
 
-class _Chain_atom:
-    """`atom` — sem∈{relaxed,acquire,release,acq_rel} (opt); scope∈{cta,cluster,gpu,sys} (opt);
-    space∈{global,shared,shared::cta,shared::cluster} (opt);
-    op∈{and,or,xor,add,inc,dec,min,max}; type∈{b32,b64,u32,u64,s32,s64,f32,f64} — op x type
-    pairings for red/atom (PTX ISA 9.7.14.5 / 9.7.14.6).      The allowed type set per op is
-    exactly what ptxas enforces; the ISA prose     lists the union across ops rather than
-    the per-op pairing. Half-precision     types appear in ptxas' message but are excluded
-    from this entry (they need     .noftz and a half carrier type).
+class _Chain_st:
+    """`st` — sem∈{weak,release,relaxed,volatile} (opt); scope∈{cta,gpu,sys} (opt);
+    space∈{global,shared::cta}; type∈{b32,b64,u32,u64,s32,f32} — release/relaxed require a
+    scope; weak/volatile take none; shared::cta caps scope at cta.
     """
 
-    acq_rel: _Chain_atom
-    acquire: _Chain_atom
-    add: _Chain_atom
-    and_: _Chain_atom
-    b32: _Chain_atom
-    b64: _Chain_atom
-    cluster: _Chain_atom
-    cta: _Chain_atom
-    dec: _Chain_atom
-    f32: _Chain_atom
-    f64: _Chain_atom
-    global_: _Chain_atom
-    gpu: _Chain_atom
-    inc: _Chain_atom
-    max: _Chain_atom
-    min: _Chain_atom
-    or_: _Chain_atom
-    relaxed: _Chain_atom
-    release: _Chain_atom
-    s32: _Chain_atom
-    s64: _Chain_atom
-    shared: _Chain_atom
-    shared__cluster: _Chain_atom
-    shared__cta: _Chain_atom
-    sys: _Chain_atom
-    u32: _Chain_atom
-    u64: _Chain_atom
-    xor: _Chain_atom
-    def __call__(self, d: Any, addr: Any, value: Any, *args: Any) -> None: ...
-
-class _Chain_ex2:
-    """`ex2` — mode∈{approx}; ftz∈{ftz} (opt); type∈{f32}"""
-
-    approx: _Chain_ex2
-    f32: _Chain_ex2
-    ftz: _Chain_ex2
-    def __call__(self, d: Any, value: Any, *args: Any) -> None: ...
-
-class _Chain_rcp:
-    """`rcp` — mode∈{approx,rn,rz,rm,rp}; ftz∈{ftz} (opt); type∈{f32,f64} — rcp.approx is
-    f32-only; .f64 is IEEE-rounded and takes no .ftz (PTX ISA 9.7.3.13).
-    """
-
-    approx: _Chain_rcp
-    f32: _Chain_rcp
-    f64: _Chain_rcp
-    ftz: _Chain_rcp
-    rm: _Chain_rcp
-    rn: _Chain_rcp
-    rp: _Chain_rcp
-    rz: _Chain_rcp
-    def __call__(self, d: Any, value: Any, *args: Any) -> None: ...
-
-class _Chain_fns:
-    """`fns` — type∈{b32}"""
-
-    b32: _Chain_fns
-    def __call__(self, d: Any, mask: Any, base: Any, offset: Any, *args: Any) -> None: ...
-
-class _Chain_max:
-    """`max` — ftz∈{ftz} (opt); nan∈{NaN} (opt); type∈{f32,f64} — `max.f64` is the bare form;
-    .ftz/.NaN belong to the .f32 line (PTX ISA 9.7.3.12).
-    """
-
-    NaN: _Chain_max
-    f32: _Chain_max
-    f64: _Chain_max
-    ftz: _Chain_max
-    def __call__(self, d: Any, a: Any, b: Any, *args: Any) -> None: ...
+    b32: _Chain_st
+    b64: _Chain_st
+    cta: _Chain_st
+    f32: _Chain_st
+    global_: _Chain_st
+    gpu: _Chain_st
+    relaxed: _Chain_st
+    release: _Chain_st
+    s32: _Chain_st
+    shared__cta: _Chain_st
+    sys: _Chain_st
+    u32: _Chain_st
+    u64: _Chain_st
+    volatile: _Chain_st
+    weak: _Chain_st
+    def __call__(self, addr: Any, value: Any, *args: Any, pred: Any = None) -> None: ...
 
 class _Chain_st_bulk:
     """`st_bulk` — weak∈{weak} (opt); space∈{shared::cta} (opt)"""
@@ -242,27 +342,6 @@ class _Chain_st_bulk:
     def __call__(
         self, addr: Any, size: Any, initval: Any, *args: Any, pred: Any = None
     ) -> None: ...
-
-class _Chain_add:
-    """`add` — rnd∈{rn,rz,rm,rp} (opt); ftz∈{ftz} (opt); sat∈{sat} (opt); type∈{f32,f64,f32x2};
-    srctype∈{f16,bf16} (opt) — Which qualifiers each add/sub/mul/fma syntax line allows (PTX
-    ISA 9.7.3.{2,3,4,7}, 9.7.5).      Same-precision lines:  op{.rnd}{.ftz}{.sat}.f32 |
-    op{.rnd}{.ftz}.f32x2 | op{.rnd}.f64     Mixed-precision lines: op{.rnd}{.sat}.f32.atype
-    (.atype = .f16 | .bf16)
-    """
-
-    bf16: _Chain_add
-    f16: _Chain_add
-    f32: _Chain_add
-    f32x2: _Chain_add
-    f64: _Chain_add
-    ftz: _Chain_add
-    rm: _Chain_add
-    rn: _Chain_add
-    rp: _Chain_add
-    rz: _Chain_add
-    sat: _Chain_add
-    def __call__(self, d: Any, a: Any, b: Any, *args: Any) -> None: ...
 
 class _Chain_sub:
     """`sub` — rnd∈{rn,rz,rm,rp} (opt); ftz∈{ftz} (opt); sat∈{sat} (opt); type∈{f32,f64,f32x2};
@@ -285,74 +364,6 @@ class _Chain_sub:
     sat: _Chain_sub
     def __call__(self, d: Any, a: Any, b: Any, *args: Any) -> None: ...
 
-class _Chain_mul:
-    """`mul` — rnd∈{rn,rz,rm,rp} (opt); ftz∈{ftz} (opt); sat∈{sat} (opt); type∈{f32,f64,f32x2}
-    — Which qualifiers each add/sub/mul/fma syntax line allows (PTX ISA 9.7.3.{2,3,4,7},
-    9.7.5).      Same-precision lines:  op{.rnd}{.ftz}{.sat}.f32 | op{.rnd}{.ftz}.f32x2 |
-    op{.rnd}.f64     Mixed-precision lines: op{.rnd}{.sat}.f32.atype  (.atype = .f16 |
-    .bf16)
-    """
-
-    f32: _Chain_mul
-    f32x2: _Chain_mul
-    f64: _Chain_mul
-    ftz: _Chain_mul
-    rm: _Chain_mul
-    rn: _Chain_mul
-    rp: _Chain_mul
-    rz: _Chain_mul
-    sat: _Chain_mul
-    def __call__(self, d: Any, a: Any, b: Any, *args: Any) -> None: ...
-
-class _Chain_fma:
-    """`fma` — rnd∈{rn,rz,rm,rp}; ftz∈{ftz} (opt); sat∈{sat} (opt); type∈{f32,f64,f32x2};
-    srctype∈{f16,bf16} (opt) — Which qualifiers each add/sub/mul/fma syntax line allows (PTX
-    ISA 9.7.3.{2,3,4,7}, 9.7.5).      Same-precision lines:  op{.rnd}{.ftz}{.sat}.f32 |
-    op{.rnd}{.ftz}.f32x2 | op{.rnd}.f64     Mixed-precision lines: op{.rnd}{.sat}.f32.atype
-    (.atype = .f16 | .bf16)
-    """
-
-    bf16: _Chain_fma
-    f16: _Chain_fma
-    f32: _Chain_fma
-    f32x2: _Chain_fma
-    f64: _Chain_fma
-    ftz: _Chain_fma
-    rm: _Chain_fma
-    rn: _Chain_fma
-    rp: _Chain_fma
-    rz: _Chain_fma
-    sat: _Chain_fma
-    def __call__(self, d: Any, a: Any, b: Any, c: Any, *args: Any) -> None: ...
-
-class _Chain_cvta:
-    """`cvta` — dir∈{to}; space∈{shared}; type∈{u64}"""
-
-    shared: _Chain_cvta
-    to: _Chain_cvta
-    u64: _Chain_cvta
-    def __call__(self, d: Any, ptr: Any, *args: Any) -> None: ...
-
-class _Chain_cp:
-    """`cp` — api∈{async}; kind∈{bulk}; dst_space∈{shared::cta}; src_space∈{global};
-    completion∈{mbarrier::complete_tx::bytes}
-    """
-
-    async_: _Chain_cp
-    bulk: _Chain_cp
-    global_: _Chain_cp
-    mbarrier__complete_tx__bytes: _Chain_cp
-    shared__cta: _Chain_cp
-    def __call__(
-        self,
-        dst: Any,
-        src: Any,
-        size: Any,
-        mbar: Any,
-        *args: Any,
-        pred: Any = None,
-    ) -> None: ...
-
 class _PTXD:
     add: _Chain_add
     atom: _Chain_atom
@@ -363,6 +374,7 @@ class _PTXD:
     fns: _Chain_fns
     ld: _Chain_ld
     max: _Chain_max
+    mov: _Chain_mov
     mul: _Chain_mul
     prefetch: _Chain_prefetch
     rcp: _Chain_rcp

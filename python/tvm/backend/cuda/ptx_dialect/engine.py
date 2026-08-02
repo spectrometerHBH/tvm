@@ -85,7 +85,7 @@ def register_table(table: dict[str, InstructionEntry]) -> None:
 
 def _make_codegen(entry: InstructionEntry):
     n_slots = len(entry.slots)
-    n_operands = len([s for s in entry.operands if s.role != "imm"])
+    n_operands = len(call_slots(entry))
 
     def codegen(*args):
         tokens = [parse_str(a) for a in args[len(args) - n_slots :]]
@@ -182,13 +182,25 @@ def _coerce_pred(entry, pred):
     raise ValueError(f"{entry.name}: pred must be a bool/uint32/int32 expression")
 
 
+def call_slots(entry):
+    """The operand slot behind each call argument, in order.
+
+    ISA-fixed immediates take no argument; a register group (``lanes`` > 1)
+    takes one argument per lane, mirroring PTX's ``{%k, %k+1, ...}``.
+    """
+    return [s for s in entry.operands if s.role != "imm" for _ in range(s.lanes)]
+
+
 def _emit(entry, filled, operands, pred=None):
-    # ISA-fixed immediates are part of the instruction text, not arguments.
-    supplied = [s for s in entry.operands if s.role != "imm"]
+    supplied = call_slots(entry)
     if len(operands) != len(supplied):
+        names = ", ".join(
+            f"{s.name}[{s.lanes}]" if s.lanes > 1 else s.name
+            for s in entry.operands
+            if s.role != "imm"
+        )
         raise ValueError(
-            f"{entry.name} expects {len(supplied)} operand(s) "
-            f"({', '.join(s.name for s in supplied)}), got {len(operands)}"
+            f"{entry.name} expects {len(supplied)} operand(s) ({names}), got {len(operands)}"
         )
     missing = [
         slot.name for slot, tok in zip(entry.slots, filled) if tok is None and not slot.optional
@@ -247,53 +259,104 @@ def _fill(entry, filled, token):
 
 
 class _InstrChain:
-    """One instruction family with a partially-filled modifier tuple."""
+    """A PTX instruction family with a partially-filled modifier tuple.
 
-    __slots__ = ("_entry", "_filled")
+    Holds *candidate* ``(entry, filled)`` pairs rather than a single entry,
+    because PTX puts some of an instruction's shape in the operand list rather
+    than in the dotted modifier text: ``mov.b64 d, {lo, hi}`` and
+    ``mov.b64 {lo, hi}, a`` are the same opcode with different operand shapes.
+    Each modifier token narrows the candidates; the call's argument count and
+    operand dtypes -- the same information the assembler resolves them by --
+    select the final one.
+    """
 
-    def __init__(self, entry, filled):
-        self._entry = entry
-        self._filled = filled
+    __slots__ = ("_cands",)
+
+    def __init__(self, cands):
+        self._cands = tuple(cands)
+
+    @property
+    def _entry(self):  # single-candidate families read naturally
+        return self._cands[0][0]
 
     def __getattr__(self, name):
         if name.startswith("_"):  # keep copy/pickle/IPython dunder probes out
             raise AttributeError(name)
-        return _InstrChain(self._entry, _fill(self._entry, self._filled, unescape_token(name)))
+        return _InstrChain(_narrow(self._cands, unescape_token(name)))
 
     def __call__(self, *args, pred=None):
         # Also accepts the printed round-trip form: trailing modifier-token
         # strings in slot order ("" = omitted slot) and, for @p calls, the
         # predicate as the last expression operand.
-        entry = self._entry
         split = len(args)
         while split > 0 and isinstance(args[split - 1], str):
             split -= 1
-        filled = self._filled
+        cands = self._cands
         for token in args[split:]:
             if token:
-                filled = _fill(entry, filled, token)
+                cands = _narrow(cands, token)
         operands = args[:split]
-        # ISA-fixed immediates take no argument, so the supplied-operand count
-        # is what a trailing positional predicate is measured against.
-        n_supplied = len([s for s in entry.operands if s.role != "imm"])
-        if len(operands) == n_supplied + 1 and pred is None:
-            operands, pred = operands[:-1], operands[-1]
-        return _emit(entry, filled, operands, pred=pred)
+
+        hits, errors = [], []
+        for entry, filled in cands:
+            ops, p = operands, pred
+            if len(ops) == len(call_slots(entry)) + 1 and p is None:
+                ops, p = ops[:-1], ops[-1]
+            try:
+                hits.append(_emit(entry, filled, ops, pred=p))
+            except (ValueError, TypeError) as err:
+                errors.append(f"{entry.name}: {err}")
+        if len(hits) == 1:
+            return hits[0]
+        if not hits:
+            if len(errors) == 1:
+                raise ValueError(errors[0].split(": ", 1)[1])
+            raise ValueError(
+                "no ptxd instruction matches these operands; candidates rejected it as:\n  "
+                + "\n  ".join(errors)
+            )
+        raise AssertionError(  # a table bug, not a user error
+            f"ambiguous ptxd table: {len(hits)} entries accept the same call "
+            f"({', '.join(e.name for e, _ in cands)})"
+        )
 
     def __dir__(self):
         """Valid next tokens — drives tab completion in IPython/Jupyter."""
         return sorted(
             {
                 escape_token(tok)
-                for i, slot in enumerate(self._entry.slots)
-                if self._filled[i] is None
+                for entry, filled in self._cands
+                for i, slot in enumerate(entry.slots)
+                if filled[i] is None
                 for tok in slot.choices
             }
         )
 
     def __repr__(self):
-        mods_str = [tok for tok in self._filled if tok]
-        return f"<T.ptxd.{'.'.join([self._entry.name, *mods_str])}>"
+        entry, filled = self._cands[0]
+        mods_str = [tok for tok in filled if tok]
+        return f"<T.ptxd.{'.'.join([entry.ptx_name, *mods_str])}>"
+
+
+def _narrow(cands, token):
+    """Keep the candidates that can still take ``token`` in an open slot."""
+    out = [(e, _fill(e, f, token)) for e, f in cands if _accepts(e, f, token)]
+    if not out:
+        entry, filled = cands[0]
+        open_choices = [
+            f"{slot.name}∈{{{','.join(slot.choices)}}}"
+            for i, slot in enumerate(entry.slots)
+            if filled[i] is None
+        ]
+        raise AttributeError(
+            f"'{token}' is not a valid modifier for '{entry.ptx_name}'; "
+            f"open slots: {'; '.join(open_choices) or '(none)'}"
+        )
+    return out
+
+
+def _accepts(entry, filled, token):
+    return any(filled[i] is None and token in slot.choices for i, slot in enumerate(entry.slots))
 
 
 class PTXDNamespace:
@@ -305,10 +368,16 @@ class PTXDNamespace:
         self._table = table
 
     def _family(self, token):
-        entry = self._table.get(token)
-        if entry is None:
-            return None
-        return _InstrChain(entry, (None,) * len(entry.slots))
+        # The attribute name is the mnemonic with dots folded to underscores:
+        # identical to the table key for every single-shape family (st.bulk ->
+        # st_bulk), and the shared surface name for families whose shapes are
+        # separate entries (all `mov_*` entries answer to `mov`).
+        cands = [
+            (e, (None,) * len(e.slots))
+            for e in self._table.values()
+            if e.ptx_name.replace(".", "_") == token
+        ]
+        return _InstrChain(cands) if cands else None
 
     def __getattr__(self, name):
         if name.startswith("_"):
@@ -317,7 +386,7 @@ class PTXDNamespace:
         if chain is None:
             raise AttributeError(
                 f"'{name}' is not a ptxd instruction; known families: "
-                f"{', '.join(sorted(self._table))}"
+                f"{', '.join(sorted(self._family_names()))}"
             )
         return chain
 
@@ -328,20 +397,21 @@ class PTXDNamespace:
         if chain is None:
             raise KeyError(
                 f"'{text}' does not start with a ptxd instruction family; "
-                f"known: {', '.join(sorted(self._table))}"
+                f"known: {', '.join(sorted(self._family_names()))}"
             )
-        filled = chain._filled  # pylint: disable=protected-access
-        entry = chain._entry  # pylint: disable=protected-access
         for token in rest.split(".") if rest else []:
             try:
-                filled = _fill(entry, filled, token)
+                chain = getattr(chain, escape_token(token))
             except AttributeError as err:
                 raise KeyError(str(err)) from None
-        return _InstrChain(entry, filled)
+        return chain
+
+    def _family_names(self):
+        return {e.ptx_name.replace(".", "_") for e in self._table.values()}
 
     def __dir__(self):
         """Family names — drives tab completion."""
-        return sorted(set(self._table) | set(super().__dir__()))
+        return sorted(self._family_names() | set(super().__dir__()))
 
     def __repr__(self):
-        return f"<T.ptxd: {len(self._table)} instruction families>"
+        return f"<T.ptxd: {len(self._family_names())} instruction families>"

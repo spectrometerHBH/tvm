@@ -82,6 +82,9 @@ PTX_TYPES = {
     # example declares them `.reg .b16` -- so they ride the b16 carrier.
     "f16": ("uint16", "uint16_t", "h", "uint16_t"),
     "bf16": ("uint16", "uint16_t", "h", "uint16_t"),
+    # 128-bit: only reachable as a whole register (mov.b128, ld/st .b128). The
+    # "q" constraint requires __int128 support in the host compiler.
+    "b128": ("uint128", "__uint128_t", "q", "__uint128_t"),
 }
 
 
@@ -130,6 +133,10 @@ class OperandSlot:
         ``"value"``. The helper takes it as a C++ reference and the caller
         passes a writable lvalue (a scalar or a buffer element), mirroring
         PTX's own "declare the register, then name it as an operand".
+
+    ``lanes`` > 1 makes the operand a brace-enclosed register group. PTX writes
+    the group in the operand list (``mov.b64 d, {lo, hi}``), so the group is
+    part of the *shape*, never of the dotted modifier text.
     """
 
     name: str
@@ -137,6 +144,10 @@ class OperandSlot:
     space: str | None = None
     dtype: str | None = None
     literal: str | None = None  # role="imm" only
+    # A PTX register group: `{%k, %k+1, ...}`. The operand takes `lanes` call
+    # arguments and renders as one brace-enclosed vector expression. 1 = a plain
+    # scalar operand, which is every operand of every other family.
+    lanes: int = 1
 
 
 CheckFn = Callable[[dict], str | None]
@@ -639,6 +650,65 @@ _ENTRIES = [
         ),
         asm_volatile=True,
     ),
+    # ------------------------------------------------------------------
+    # mov, vector pack/unpack form (PTX ISA 9.7.9.4)
+    #
+    #   mov.type  d, a;   .type = {.b16, .b32, .b64, .b128}
+    #
+    # `.type` is the *aggregate* width, not the element width -- the ISA only
+    # requires that "the overall size of the vector and the size of the scalar
+    # must match the size of the instruction type". Neither the lane count nor
+    # the lane type appears in the instruction text (the doc's own example is
+    # `mov.b64 {lo,hi}, %x;  // %x is a double; lo,hi are .u32`), so both are
+    # part of the operand shape, and each (direction, lanes, lane type) is its
+    # own entry. They all share mnemonic "mov", so the emitted opcode is right
+    # and the call spelling stays `T.ptxd.mov.b64(...)`.
+    #
+    # NOT REGISTERED -- legal PTX that CUDA C inline asm cannot express:
+    #   mov.b16 d, {a,b}      2 x 8-bit lanes
+    #   mov.b32 d, {a,b,c,d}  4 x 8-bit lanes
+    # Inline asm has no 8-bit register constraint (only "h"/"r"/"l"/"q"/"f"/"d"),
+    # so 8-bit values ride a 16-bit carrier and ptxas rejects the widths with
+    # "Arguments mismatch for instruction 'mov'" (4x16 != 32). Both forms are
+    # legal in hand-written PTX, and they are unreachable via make_uchar4 too
+    # (nvcc emits shl/or, not the mov). Declaring `.reg .b8` inside the asm
+    # block assembles but needs four cvt instructions to get the values in --
+    # a multi-instruction template, which this dialect forbids.
+    *[
+        InstructionEntry(
+            name=f"mov_{direction}_{lane_dtype}x{lanes}",
+            mnemonic="mov",
+            slots=(ModifierSlot("type", (agg,)),),
+            operands=(
+                OperandSlot(
+                    "d",
+                    role="dst",
+                    dtype=lane_dtype if unpack else agg,
+                    lanes=lanes if unpack else 1,
+                ),
+                OperandSlot(
+                    "a",
+                    role="value",
+                    dtype=agg if unpack else lane_dtype,
+                    lanes=1 if unpack else lanes,
+                ),
+            ),
+            # .b128 needs PTX ISA 8.3 / sm_70; the sm_90 certification default
+            # already clears that, so no min_arch is needed.
+            asm_volatile=False,  # a register shuffle: let nvcc common it up
+        )
+        for agg, lanes, lane_dtype in (
+            ("b32", 2, "b16"),
+            ("b64", 2, "b32"),
+            ("b64", 2, "f32"),
+            ("b64", 4, "b16"),
+            ("b128", 2, "b64"),
+            ("b128", 2, "f64"),
+            ("b128", 4, "b32"),
+            ("b128", 4, "f32"),
+        )
+        for direction, unpack in (("pack", False), ("unpack", True))
+    ],
     InstructionEntry(
         name="cvta",
         slots=(

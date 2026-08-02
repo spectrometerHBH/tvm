@@ -43,24 +43,47 @@ import textwrap
 from .table import TABLE, InstructionEntry, escape_token
 
 
-def _chain_class(entry: InstructionEntry) -> str:
-    cls = f"_Chain_{entry.name}"
-    tokens = sorted({tok for slot in entry.slots for tok in slot.choices})
+def _operand_params(entry: InstructionEntry) -> list[str]:
+    """One stub parameter per call argument; a register group contributes N."""
+    return [
+        f"{s.name}{i}: Any" if s.lanes > 1 else f"{s.name}: Any"
+        for s in entry.operands
+        for i in range(s.lanes)
+    ]
+
+
+def _chain_class(family: str, entries: list[InstructionEntry]) -> str:
+    """One chain class per *family* — several entries may share a mnemonic."""
+    cls = f"_Chain_{family}"
+    tokens = sorted({tok for e in entries for slot in e.slots for tok in slot.choices})
     lines = [f"class {cls}:"]
+    entry = entries[0]
     doc = "; ".join(
         f"{s.name}∈{{{','.join(s.choices)}}}{' (opt)' if s.optional else ''}" for s in entry.slots
     )
     if entry.check is not None and entry.check.__doc__:
         doc = f"{doc} — {entry.check.__doc__.strip()}" if doc else entry.check.__doc__.strip()
+    if len(entries) > 1:
+        shapes = dict.fromkeys(
+            "(" + ", ".join(_operand_params(e)).replace(": Any", "") + ")" for e in entries
+        )
+        doc = (
+            f"{len(entries)} entries sharing this mnemonic; PTX puts their difference in the "
+            f"operand list, so the call selects one. Shapes: {'; '.join(shapes)}"
+        )
     # *args covers the printed round-trip form (trailing modifier strings,
-    # positional pred) so re-parsed scripts type-check too.
-    params = ["self", *(f"{s.name}: Any" for s in entry.operands), "*args: Any"]
-    if not entry.has_dst:
+    # positional pred) so re-parsed scripts type-check too. Families with more
+    # than one shape take their operands through *args for the same reason.
+    params = ["self"]
+    if len(entries) == 1:
+        params += _operand_params(entry)
+    params.append("*args: Any")
+    if not any(e.has_dst for e in entries):
         params.append("pred: Any = None")
     signature = f"def __call__({', '.join(params)}) -> None"
     # 4 indent + 3 opening quotes + text + 3 closing quotes must stay <= 100,
     # because ruff format collapses a one-line docstring onto a single line.
-    doc_lines = textwrap.wrap(f"`{entry.name}` — {doc or '(no modifiers)'}", width=88)
+    doc_lines = textwrap.wrap(f"`{family}` — {doc or '(no modifiers)'}", width=88)
     lines.append('    """' + doc_lines[0])
     lines.extend(f"    {line}" for line in doc_lines[1:])
     lines.append('    """')
@@ -106,12 +129,15 @@ def generate() -> str:
         "from typing import Any",
         "",
     ]
+    families: dict[str, list[InstructionEntry]] = {}
     for entry in TABLE.values():
-        out.append(_chain_class(entry))
+        families.setdefault(entry.ptx_name.replace(".", "_"), []).append(entry)
+    for family in sorted(families):
+        out.append(_chain_class(family, families[family]))
         out.append("")
     out.append("class _PTXD:")
-    for name in sorted(TABLE):
-        out.append(f"    {escape_token(name)}: _Chain_{name}")
+    for family in sorted(families):
+        out.append(f"    {escape_token(family)}: _Chain_{family}")
     out.append("    def __getitem__(self, text: str) -> Any: ...")
     out.append("")
     out.append("ptxd: _PTXD")

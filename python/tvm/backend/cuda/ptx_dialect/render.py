@@ -39,7 +39,13 @@ def render_variant(entry: InstructionEntry, tokens, predicated=False):
     """
     mod_map = mods(entry, tokens)
     opcode = ".".join([entry.ptx_name] + [tok for tok in tokens if tok])
-    helper = "tvm_builtin_ptxd_" + opcode.replace("::", "__").replace(".", "_")
+    # The helper name keys off the table name rather than the mnemonic. For every
+    # single-shape family the two agree (st.bulk normalizes to st_bulk anyway);
+    # it matters only where several entries share a mnemonic because PTX puts
+    # their difference in the operand list, as `mov`'s pack/unpack shapes do.
+    helper = "tvm_builtin_ptxd_" + "_".join([entry.name] + [tok for tok in tokens if tok]).replace(
+        "::", "__"
+    ).replace(".", "_")
     if predicated:
         assert not entry.has_dst, "@p is only supported on instructions without a destination"
         helper += "_pred"
@@ -49,6 +55,29 @@ def render_variant(entry: InstructionEntry, tokens, predicated=False):
     idx = 0
     for slot in entry.operands:
         pname = f"__{slot.name}"
+        if slot.role == "dst" and slot.lanes > 1:
+            # `{%k, %k+1, ...}` -- the group is one PTX operand but N C params.
+            _, c_ty, constraint, _ = PTX_TYPES[operand_type(slot, mod_map)]
+            lane_regs = []
+            for lane in range(slot.lanes):
+                lname = f"{pname}{lane}"
+                params.append(f"{c_ty}& {lname}")
+                outputs.append(f'"={constraint}"({lname})')
+                lane_regs.append(f"%{idx}")
+                idx += 1
+            ptx_operands.append("{" + ", ".join(lane_regs) + "}")
+            continue
+        if slot.role == "value" and slot.lanes > 1:
+            _, _, constraint, value_carrier = PTX_TYPES[operand_type(slot, mod_map)]
+            lane_regs = []
+            for lane in range(slot.lanes):
+                lname = f"{pname}{lane}"
+                params.append(f"{value_carrier} {lname}")
+                inputs.append(f'"{constraint}"({lname})')
+                lane_regs.append(f"%{idx}")
+                idx += 1
+            ptx_operands.append("{" + ", ".join(lane_regs) + "}")
+            continue
         if slot.role == "dst":
             _, c_ty, constraint, carrier = PTX_TYPES[operand_type(slot, mod_map)]
             params.append(f"{c_ty}& {pname}")
