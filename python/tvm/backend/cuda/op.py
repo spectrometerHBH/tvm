@@ -3556,25 +3556,6 @@ def ptx_fma_f32x2(*args, rounding="rn", ftz=False, dps=True, return_dtype="uint6
     return _ptx_fma_f32x2(*args, rounding=rounding, ftz=ftz, dps=dps, return_dtype=return_dtype)
 
 
-def ptx_max_f32(a, b, *, ftz=False, nan=False):
-    """TVM intrinsic for PTX ``max{.ftz}{.NaN}.f32 d, a, b``.
-
-    2-operand form (distinct from :func:`ptx_reduce3_max_f32` which is the
-    3-operand SM_100+ form). ``.NaN`` qualifier propagates NaN inputs to
-    the output; without it, NaN inputs are silently ignored.
-
-    Parameters
-    ----------
-    a, b : Expr
-        Float32 inputs.
-    ftz : bool
-        If True, flush subnormals to zero (``.ftz``).
-    nan : bool
-        If True, propagate NaN inputs (``.NaN``).
-    """
-    return call_intrin("float32", "tirx.ptx.max_f32", a, b, int(ftz), int(nan))
-
-
 _PTX_CVT_TYPES = {
     "u8",
     "u16",

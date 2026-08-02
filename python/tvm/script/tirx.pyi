@@ -223,6 +223,17 @@ class _Chain_fns:
     b32: _Chain_fns
     def __call__(self, mask: Any, base: Any, offset: Any, *args: Any) -> Any: ...
 
+class _Chain_max:
+    """`max` — ftz∈{ftz} (opt); nan∈{NaN} (opt); type∈{f32,f64} — `max.f64` is the bare form;
+    .ftz/.NaN belong to the .f32 line (PTX ISA 9.7.3.12).
+    """
+
+    NaN: _Chain_max
+    f32: _Chain_max
+    f64: _Chain_max
+    ftz: _Chain_max
+    def __call__(self, a: Any, b: Any, *args: Any) -> Any: ...
+
 class _Chain_cvta:
     """`cvta` — dir∈{to}; space∈{shared}; type∈{u64}"""
 
@@ -258,6 +269,7 @@ class _PTXD:
     ex2: _Chain_ex2
     fns: _Chain_fns
     ld: _Chain_ld
+    max: _Chain_max
     prefetch: _Chain_prefetch
     rcp: _Chain_rcp
     red: _Chain_red

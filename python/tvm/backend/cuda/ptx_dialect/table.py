@@ -250,6 +250,13 @@ def _check_rcp(m):
     return None
 
 
+def _check_max(m):
+    """`max.f64` is the bare form; .ftz/.NaN belong to the .f32 line (PTX ISA 9.7.3.12)."""
+    if m["type"] == "f64" and (m["ftz"] or m["nan"]):
+        return "max.f64 takes no .ftz or .NaN"
+    return None
+
+
 def _check_prefetch(m):
     """Each prefetch syntax line names exactly one target (PTX ISA 9.7.9.16)."""
     level, evict, tmap = m["level"], m["evict"], m["tensormap"]
@@ -463,6 +470,26 @@ _ENTRIES = [
             OperandSlot("offset", role="value", dtype="s32"),
         ),
         effect=EFFECT_PURE,
+        returns="type",
+    ),
+    # max per PTX ISA 9.7.3.12, two-source form. Deliberately excluded:
+    # {.xorsign.abs} (a paired qualifier), the three-source
+    # `max{.ftz}{.NaN}{.abs}.f32 d, a, b, c` line (a different operand shape,
+    # so its own entry), and the half-precision forms of 9.7.4.8.
+    InstructionEntry(
+        name="max",
+        slots=(
+            ModifierSlot("ftz", ("ftz",), optional=True),
+            ModifierSlot("nan", ("NaN",), optional=True),
+            ModifierSlot("type", ("f32", "f64")),
+        ),
+        check=_check_max,
+        operands=(
+            OperandSlot("a", role="value"),
+            OperandSlot("b", role="value"),
+        ),
+        effect=EFFECT_PURE,
+        asm_volatile=True,  # legacy barrier: preserved so migration is byte-identical
         returns="type",
     ),
     InstructionEntry(

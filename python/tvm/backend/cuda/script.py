@@ -85,7 +85,6 @@ class PTXNamespace:
         self.mul_f32x2 = _op_wrapper(_cuda_op.ptx_mul_f32x2)
         self.fma_f32 = _op_wrapper(_cuda_op.ptx_fma_f32)
         self.fma_f32x2 = _op_wrapper(_cuda_op.ptx_fma_f32x2)
-        self.max_f32 = _op_wrapper(_cuda_op.ptx_max_f32)
         self.mma = MmaNamespace()
         self.cp_async = CpAsyncNamespace()
         self.wgmma = WgmmaNamespace()

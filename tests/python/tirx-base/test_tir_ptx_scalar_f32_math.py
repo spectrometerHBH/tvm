@@ -42,7 +42,7 @@ def ptx_scalar_f32_math(
         T.writes(C_add[0:32], C_mul[0:32], C_max[0:32])
         T.evaluate(T.ptx.add_f32(T.address_of(C_add[tx]), A[tx], B[tx]))
         T.evaluate(T.ptx.mul_f32(T.address_of(C_mul[tx]), A[tx], B[tx]))
-        C_max[tx] = T.ptx.max_f32(A[tx], B[tx])
+        C_max[tx] = T.ptxd.max.f32(A[tx], B[tx])
 
 
 @pytest.mark.gpu

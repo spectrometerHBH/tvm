@@ -379,40 +379,6 @@ device_intrinsic(
 _BINARY_F32_SIG = "(float a, float b)"
 
 
-def _ptx_max_f32_body(a, b, ftz, nan):
-    ftz_b = bool(int(ftz)) if hasattr(ftz, "value") else bool(ftz)
-    nan_b = bool(int(nan)) if hasattr(nan, "value") else bool(nan)
-    ftz_suffix = ".ftz" if ftz_b else ""
-    nan_suffix = ".NaN" if nan_b else ""
-    return (
-        "    float result;\n"
-        f'    asm volatile("max{ftz_suffix}{nan_suffix}.f32 %0, %1, %2;"\n'
-        '                 : "=f"(result) : "f"(a), "f"(b));\n'
-        "    return result;"
-    )
-
-
-def _ptx_max_f32_name(a, b, ftz, nan):
-    ftz_b = bool(int(ftz)) if hasattr(ftz, "value") else bool(ftz)
-    nan_b = bool(int(nan)) if hasattr(nan, "value") else bool(nan)
-    suffix = ""
-    if ftz_b:
-        suffix += "_ftz"
-    if nan_b:
-        suffix += "_nan"
-    return f"tvm_builtin_ptx_max_f32{suffix}"
-
-
-device_intrinsic(
-    "ptx_max_f32",
-    n_attrs=2,
-    helper_name=_ptx_max_f32_name,
-    c_signature=_BINARY_F32_SIG,
-    return_type="float",
-    body=_ptx_max_f32_body,
-)
-
-
 # =============================================================================
 # CUDA-side warp / CTA reductions (templated butterfly shuffle-XOR).
 # Emitted directly via ``cuda_func_call`` — the helper signature uses a
