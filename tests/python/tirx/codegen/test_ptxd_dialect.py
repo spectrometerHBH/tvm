@@ -17,6 +17,7 @@
 """Tests for the table-driven PTX dialect prototype (``T.ptxd``)."""
 
 import os
+import re
 import shutil
 from pathlib import Path
 
@@ -39,12 +40,19 @@ def _cuda_source(func) -> str:
     return mod.mod.imports[0].inspect_source("cuda")
 
 
-def _assert_ptxas_ok(src: str, rdc: bool = False) -> None:
+# Architecture the certification assembles at. Families whose ISA floor is
+# higher (tcgen05, clusterlaunchcontrol, several cp.async.bulk forms) MUST be
+# certified at their own floor: assembling them below it makes ptxas report
+# legal variants as illegal, which would then get baked into a check().
+PTXD_ARCH = os.environ.get("PTXD_ARCH", "sm_90")
+
+
+def _assert_ptxas_ok(src: str, rdc: bool = False, arch: str = PTXD_ARCH) -> None:
     """Assemble through ptxas (cubin) — `-ptx` alone never validates inline asm."""
     from tvm.support import nvcc
 
     options = ["-rdc=true"] if rdc else None
-    nvcc.compile_cuda(src, target_format="cubin", arch="sm_90", options=options, compiler="nvcc")
+    nvcc.compile_cuda(src, target_format="cubin", arch=arch, options=options, compiler="nvcc")
 
 
 def test_ptxd_registration():
@@ -394,6 +402,77 @@ def test_ptxd_coercion_ir_forms():
     # @p on a value-returning instruction is rejected.
     with pytest.raises(ValueError, match="only supported on void"):
         T.ptxd.ld.global_.b32(global_ptr, pred=flag)
+
+
+_ASM_RE = re.compile(r'asm(?: volatile)?\("(.*?)"\s*:', re.S)
+_PRED_RE = re.compile(r"^\{ \.reg \.pred p; setp\.ne\.b32 p, %\d+, 0; @p (?P<instr>[^;]+;) \}$")
+
+
+def _sole_instruction(asm_text):
+    """The single PTX statement in ``asm_text``, or None if it is not exactly one.
+
+    The sanctioned ``@p`` wrapper is unwrapped first: it guards one instruction
+    rather than adding one.
+    """
+    m = _PRED_RE.match(asm_text)
+    body = m.group("instr") if m else asm_text
+    if body.count(";") != 1 or not body.endswith(";"):
+        return None
+    return body
+
+
+def test_ptxd_single_instruction_invariant():
+    """Every ptxd variant emits exactly ONE native PTX instruction.
+
+    This is the dialect's defining constraint, enforced mechanically so it
+    cannot erode as the table grows: the only multi-statement form allowed is
+    the framework-level ``@p`` wrapper, which guards a single instruction
+    rather than adding one. cvta coercion is a separate IR node and must never
+    appear inside a helper body.
+    """
+    from tvm.backend.cuda.ptx_dialect.render import render_variant
+    from tvm.backend.cuda.ptx_dialect.table import TABLE, variants
+
+    asm_re, sole_instruction = _ASM_RE, _sole_instruction
+    checked = 0
+    for entry in TABLE.values():
+        for tokens in variants(entry):
+            for predicated in (False, True) if entry.returns is None else (False,):
+                opcode, _, source = render_variant(entry, tokens, predicated)
+                asm_blocks = asm_re.findall(source)
+                assert len(asm_blocks) == 1, f"{opcode}: {len(asm_blocks)} asm blocks, expected 1"
+                instr = sole_instruction(asm_blocks[0])
+                assert instr is not None, f"{opcode}: not a single statement: {asm_blocks[0]!r}"
+                assert instr.startswith(opcode + " ") or instr == opcode + ";", (
+                    f"{opcode}: emitted instruction does not match the opcode: {instr!r}"
+                )
+                assert "cvta" not in source or entry.name == "cvta", (
+                    f"{opcode}: cvta must be a separate IR node, never inside a helper"
+                )
+                checked += 1
+    assert checked > 0
+
+
+def test_ptxd_single_instruction_invariant_detects_violations():
+    """Falsify the probe: it must reject every shape the invariant forbids.
+
+    A guard that has never been shown to fail is worth nothing, so exercise
+    the real helper the invariant test uses.
+    """
+    forbidden = {
+        # two chained instructions
+        "bundle": 'asm volatile("mov.u32 %0, 1; add.u32 %0, %0, 2;" : "=r"(x));',
+        # spin loop with a label and a branch (the mbarrier.try_wait shape)
+        "spin": 'asm volatile("{ LAB: mbarrier.try_wait.b64 p, [%0]; @!p bra LAB; }" :: "r"(a));',
+        # prologue + instruction (the cvt e2m1x2 shape)
+        "prologue": 'asm volatile("{ .reg .b8 t; cvt.u8.u16 t, %1; cvt.f32 %0, t; }" : "=r"(d));',
+    }
+    for shape, src in forbidden.items():
+        assert _sole_instruction(_ASM_RE.findall(src)[0]) is None, f"{shape} slipped through"
+
+    # The sanctioned @p wrapper is NOT a violation — it guards one instruction.
+    guarded = "{ .reg .pred p; setp.ne.b32 p, %2, 0; @p red.relaxed.gpu.global.add.u32 [%0], %1; }"
+    assert _sole_instruction(guarded) == "red.relaxed.gpu.global.add.u32 [%0], %1;"
 
 
 def test_ptxd_all_variants_render_unique():
