@@ -437,39 +437,11 @@ def test_megamoe_extracted_intrinsics_codegen():
         T.device_entry()
         tx = T.thread_id([32])
         if tx == 0:
-            T.ptx.red_scalar(
-                U64.data,
-                U64[0],
-                sem="release",
-                scope="gpu",
-                space="global",
-                op="or",
-                ptx_type="b64",
-            )
-            T.ptx.red_scalar(
-                I32.data,
-                I32[0],
-                sem="release",
-                scope="sys",
-                space="global",
-                op="add",
-                ptx_type="s32",
-            )
-            U32[0] = T.ptx.atom_scalar(
-                U32.data,
-                U32[0],
-                sem="release",
-                scope="gpu",
-                space="global",
-                op="add",
-                ptx_type="u32",
-            )
-            U64[0] = T.ptx.atom_scalar(
-                U64.data, U64[0], scope="sys", space="global", op="add", ptx_type="u64"
-            )
-            T.ptx.red_scalar(
-                U32.data, U32[0], scope="gpu", space="global", op="add", ptx_type="u32"
-            )
+            T.ptxd.red.release.gpu.global_.or_.b64(U64.data, U64[0])
+            T.ptxd.red.release.sys.global_.add.s32(I32.data, I32[0])
+            U32[0] = T.ptxd.atom.release.gpu.global_.add.u32(U32.data, U32[0])
+            U64[0] = T.ptxd.atom.sys.global_.add.u64(U64.data, U64[0])
+            T.ptxd.red.gpu.global_.add.u32(U32.data, U32[0])
             T.ptx.st(U32.data, U32[0], space="shared", ptx_type="u32")
             T.ptx.st(
                 U32.data,

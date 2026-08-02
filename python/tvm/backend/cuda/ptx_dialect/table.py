@@ -250,6 +250,38 @@ def _check_rcp(m):
     return None
 
 
+_RED_SEM = ("relaxed", "release")
+_ATOM_SEM = ("relaxed", "acquire", "release", "acq_rel")
+_ATOM_SCOPES = ("cta", "cluster", "gpu", "sys")
+_ATOM_SPACES = ("global", "shared", "shared::cta", "shared::cluster")
+_ATOM_OPS = ("and", "or", "xor", "add", "inc", "dec", "min", "max")
+_ATOM_TYPES = ("b32", "b64", "u32", "u64", "s32", "s64", "f32", "f64")
+
+
+def _check_atomic(m):
+    """op x type pairings for red/atom (PTX ISA 9.7.14.5 / 9.7.14.6).
+
+    The allowed type set per op is exactly what ptxas enforces; the ISA prose
+    lists the union across ops rather than the per-op pairing. Half-precision
+    types appear in ptxas' message but are excluded from this entry (they need
+    .noftz and a half carrier type).
+    """
+    op, ty = m["op"], m["type"]
+    allowed = {
+        "and": ("b32", "b64"),
+        "or": ("b32", "b64"),
+        "xor": ("b32", "b64"),
+        "inc": ("u32",),
+        "dec": ("u32",),
+        "min": ("u32", "s32", "u64", "s64"),
+        "max": ("u32", "s32", "u64", "s64"),
+        "add": ("u32", "s32", "u64", "f32", "f64"),
+    }[op]
+    if ty not in allowed:
+        return f".{op} requires {' or '.join('.' + t for t in allowed)}"
+    return None
+
+
 _LDST_TYPES = ("b32", "b64", "u32", "u64", "s32", "f32")
 _LD_TYPES = tuple(tok for tok in PTX_TYPES)  # all 14 scalar types (b128 excluded)
 _SCOPES = ("cta", "gpu", "sys")
@@ -321,21 +353,45 @@ _ENTRIES = [
         effect=EFFECT_OPAQUE,
         returns=None,
     ),
+    # red / atom scalar `.op` forms per PTX ISA 9.7.14.6 and 9.7.14.5.
+    # Deliberately excluded (each needs a mechanism this shape lacks):
+    # - {.level::cache_hint} with its trailing cache_policy operand
+    # - the .vec_16_bit/.vec_32_bit vector forms
+    # - .f16/.bf16/.f16x2/.bf16x2 (add.noftz), which need half carrier types
+    # - atom's .cas (3 operands) and .exch (own type set): other syntax shapes
     InstructionEntry(
         name="red",
         slots=(
-            ModifierSlot("sem", ("relaxed", "release")),
-            ModifierSlot("scope", ("gpu", "sys")),
-            ModifierSlot("space", ("global",)),
-            ModifierSlot("op", ("add",)),
-            ModifierSlot("type", ("u32", "s32", "f32")),
+            ModifierSlot("sem", _RED_SEM, optional=True),
+            ModifierSlot("scope", _ATOM_SCOPES, optional=True),
+            ModifierSlot("space", _ATOM_SPACES, optional=True),
+            ModifierSlot("op", _ATOM_OPS),
+            ModifierSlot("type", _ATOM_TYPES),
         ),
+        check=_check_atomic,
         operands=(
             OperandSlot("addr", role="addr"),
             OperandSlot("value", role="value"),
         ),
         effect=EFFECT_OPAQUE,
         returns=None,
+    ),
+    InstructionEntry(
+        name="atom",
+        slots=(
+            ModifierSlot("sem", _ATOM_SEM, optional=True),
+            ModifierSlot("scope", _ATOM_SCOPES, optional=True),
+            ModifierSlot("space", _ATOM_SPACES, optional=True),
+            ModifierSlot("op", _ATOM_OPS),
+            ModifierSlot("type", _ATOM_TYPES),
+        ),
+        check=_check_atomic,
+        operands=(
+            OperandSlot("addr", role="addr"),
+            OperandSlot("value", role="value"),
+        ),
+        effect=EFFECT_OPAQUE,
+        returns="type",
     ),
     # ex2 per PTX ISA 9.7.3.21 (`ex2.approx{.ftz}.f32`). The half-precision
     # forms of 9.7.4.10 (.f16/.f16x2/.bf16/.bf16x2) are deliberately excluded:

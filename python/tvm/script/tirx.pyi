@@ -107,20 +107,82 @@ class _Chain_st:
     def __call__(self, addr: Any, value: Any, *args: Any, pred: Any = None) -> None: ...
 
 class _Chain_red:
-    """`red` — sem∈{relaxed,release}; scope∈{gpu,sys}; space∈{global}; op∈{add};
-    type∈{u32,s32,f32}
+    """`red` — sem∈{relaxed,release} (opt); scope∈{cta,cluster,gpu,sys} (opt);
+    space∈{global,shared,shared::cta,shared::cluster} (opt);
+    op∈{and,or,xor,add,inc,dec,min,max}; type∈{b32,b64,u32,u64,s32,s64,f32,f64} — op x type
+    pairings for red/atom (PTX ISA 9.7.14.5 / 9.7.14.6).      The allowed type set per op is
+    exactly what ptxas enforces; the ISA prose     lists the union across ops rather than
+    the per-op pairing. Half-precision     types appear in ptxas' message but are excluded
+    from this entry (they need     .noftz and a half carrier type).
     """
 
     add: _Chain_red
+    and_: _Chain_red
+    b32: _Chain_red
+    b64: _Chain_red
+    cluster: _Chain_red
+    cta: _Chain_red
+    dec: _Chain_red
     f32: _Chain_red
+    f64: _Chain_red
     global_: _Chain_red
     gpu: _Chain_red
+    inc: _Chain_red
+    max: _Chain_red
+    min: _Chain_red
+    or_: _Chain_red
     relaxed: _Chain_red
     release: _Chain_red
     s32: _Chain_red
+    s64: _Chain_red
+    shared: _Chain_red
+    shared__cluster: _Chain_red
+    shared__cta: _Chain_red
     sys: _Chain_red
     u32: _Chain_red
+    u64: _Chain_red
+    xor: _Chain_red
     def __call__(self, addr: Any, value: Any, *args: Any, pred: Any = None) -> None: ...
+
+class _Chain_atom:
+    """`atom` — sem∈{relaxed,acquire,release,acq_rel} (opt); scope∈{cta,cluster,gpu,sys} (opt);
+    space∈{global,shared,shared::cta,shared::cluster} (opt);
+    op∈{and,or,xor,add,inc,dec,min,max}; type∈{b32,b64,u32,u64,s32,s64,f32,f64} — op x type
+    pairings for red/atom (PTX ISA 9.7.14.5 / 9.7.14.6).      The allowed type set per op is
+    exactly what ptxas enforces; the ISA prose     lists the union across ops rather than
+    the per-op pairing. Half-precision     types appear in ptxas' message but are excluded
+    from this entry (they need     .noftz and a half carrier type).
+    """
+
+    acq_rel: _Chain_atom
+    acquire: _Chain_atom
+    add: _Chain_atom
+    and_: _Chain_atom
+    b32: _Chain_atom
+    b64: _Chain_atom
+    cluster: _Chain_atom
+    cta: _Chain_atom
+    dec: _Chain_atom
+    f32: _Chain_atom
+    f64: _Chain_atom
+    global_: _Chain_atom
+    gpu: _Chain_atom
+    inc: _Chain_atom
+    max: _Chain_atom
+    min: _Chain_atom
+    or_: _Chain_atom
+    relaxed: _Chain_atom
+    release: _Chain_atom
+    s32: _Chain_atom
+    s64: _Chain_atom
+    shared: _Chain_atom
+    shared__cluster: _Chain_atom
+    shared__cta: _Chain_atom
+    sys: _Chain_atom
+    u32: _Chain_atom
+    u64: _Chain_atom
+    xor: _Chain_atom
+    def __call__(self, addr: Any, value: Any, *args: Any) -> Any: ...
 
 class _Chain_ex2:
     """`ex2` — mode∈{approx}; ftz∈{ftz} (opt); type∈{f32}"""
@@ -180,6 +242,7 @@ class _Chain_cp:
     ) -> None: ...
 
 class _PTXD:
+    atom: _Chain_atom
     cp: _Chain_cp
     cvta: _Chain_cvta
     ex2: _Chain_ex2

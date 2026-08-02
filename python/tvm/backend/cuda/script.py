@@ -60,8 +60,6 @@ class PTXNamespace:
         self.ld_global_nc = _op_wrapper(_cuda_op.ptx_ld_global_nc)
         self.ld_volatile = _op_wrapper(_cuda_op.ptx_ld_volatile)
         self.ld_global_acquire = _op_wrapper(_cuda_op.ptx_ld_global_acquire)
-        self.red_scalar = _op_wrapper(_cuda_op.ptx_red_scalar)
-        self.atom_scalar = _op_wrapper(_cuda_op.ptx_atom_scalar)
         self.prefetch_tensormap = _op_wrapper(_cuda_op.ptx_prefetch_tensormap)
         self.mbarrier_test_wait_parity = _op_wrapper(_cuda_op.ptx_mbarrier_test_wait_parity)
         self.cp_async_bulk_g2s_cta = _op_wrapper(_cuda_op.ptx_cp_async_bulk_g2s_cta)

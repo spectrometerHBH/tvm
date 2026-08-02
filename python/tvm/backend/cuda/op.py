@@ -29,7 +29,6 @@ from tvm.tirx.operator.intrinsics._common import (
     CP_ASYNC_BULK_CACHE_HINT as _CP_ASYNC_BULK_CACHE_HINT,
 )
 from tvm.tirx.operator.intrinsics._common import CP_ASYNC_BULK_RED_OP as _CP_ASYNC_BULK_RED_OP
-from tvm.tirx.operator.intrinsics._common import CP_ASYNC_CACHE_HINT as _CP_ASYNC_CACHE_HINT
 from tvm.tirx.operator.intrinsics._common import CP_ASYNC_FILL_MODE as _CP_ASYNC_FILL_MODE
 from tvm.tirx.operator.intrinsics._common import CP_ASYNC_PREFETCH_SIZE as _CP_ASYNC_PREFETCH_SIZE
 from tvm.tirx.operator.intrinsics._common import F32X2_ROUND as _F32X2_ROUND
@@ -4006,76 +4005,6 @@ def ptx_ld_global_acquire(res, addr):
         The call expression.
     """
     return call_intrin("", "tirx.ptx.ld_global_acquire", res, addr)
-
-
-def ptx_red_scalar(
-    address,
-    value,
-    *,
-    sem="",
-    scope="",
-    space="global",
-    op,
-    ptx_type,
-    cache_hint="",
-    cache_policy=None,
-):
-    _choice("scope", scope, _PTX_MEM_SCOPE)
-    _choice("space", space, _PTX_MEM_SPACE)
-    _choice("op", op, _PTX_RED_OP)
-    _choice("ptx_type", ptx_type, _PTX_SCALAR_TYPE)
-    cache_policy, has_cache_policy = _resolve_cache_policy(
-        cache_hint, cache_policy, _CP_ASYNC_CACHE_HINT
-    )
-    if sem not in ("", "relaxed", "release"):
-        raise ValueError(f"Unsupported PTX red sem {sem!r}")
-    return call_intrin(
-        "",
-        "tirx.ptx.red_scalar",
-        address,
-        value,
-        cache_policy,
-        sem,
-        scope,
-        space,
-        op,
-        ptx_type,
-        int(has_cache_policy),
-    )
-
-
-def ptx_atom_scalar(
-    address,
-    value,
-    *,
-    sem="",
-    scope="",
-    space="global",
-    op,
-    ptx_type,
-    cache_hint="",
-    cache_policy=None,
-):
-    _choice("scope", scope, _PTX_MEM_SCOPE)
-    _choice("space", space, _PTX_MEM_SPACE)
-    _choice("op", op, _PTX_ATOM_OP)
-    _choice("ptx_type", ptx_type, _PTX_SCALAR_TYPE)
-    cache_policy, has_cache_policy = _resolve_cache_policy(cache_hint, cache_policy)
-    if sem not in ("", "relaxed", "acquire", "release", "acq_rel"):
-        raise ValueError(f"Unsupported PTX atom sem {sem!r}")
-    return call_intrin(
-        _PTX_SCALAR_RETURN_TYPE[ptx_type],
-        "tirx.ptx.atom_scalar",
-        address,
-        value,
-        cache_policy,
-        sem,
-        scope,
-        space,
-        op,
-        ptx_type,
-        int(has_cache_policy),
-    )
 
 
 def ptx_st(
