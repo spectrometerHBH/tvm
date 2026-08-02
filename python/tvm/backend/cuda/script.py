@@ -58,9 +58,7 @@ class PTXNamespace:
         self.fetch_register: Callable[..., Any] = _op_wrapper(_cuda_op.ptx_fetch_register)
         self.ld = _op_wrapper(_cuda_op.ptx_ld)
         self.ld_global_nc = _op_wrapper(_cuda_op.ptx_ld_global_nc)
-        self.ld_relaxed = _op_wrapper(_cuda_op.ptx_ld_relaxed)
         self.ld_volatile = _op_wrapper(_cuda_op.ptx_ld_volatile)
-        self.ld_mmio = _op_wrapper(_cuda_op.ptx_ld_mmio)
         self.ld_global_acquire = _op_wrapper(_cuda_op.ptx_ld_global_acquire)
         self.red_scalar = _op_wrapper(_cuda_op.ptx_red_scalar)
         self.atom_scalar = _op_wrapper(_cuda_op.ptx_atom_scalar)
@@ -71,10 +69,6 @@ class PTXNamespace:
         self.cp_async_bulk_s2s_cluster = _op_wrapper(_cuda_op.ptx_cp_async_bulk_s2s_cluster)
         self.cp_async_bulk_s2g = _op_wrapper(_cuda_op.ptx_cp_async_bulk_s2g)
         self.st = _op_wrapper(_cuda_op.ptx_st)
-        self.st_relaxed = _op_wrapper(_cuda_op.ptx_st_relaxed)
-        self.st_release = _op_wrapper(_cuda_op.ptx_st_release)
-        self.st_volatile = _op_wrapper(_cuda_op.ptx_st_volatile)
-        self.st_mmio = _op_wrapper(_cuda_op.ptx_st_mmio)
         self.st_bulk = _op_wrapper(_cuda_op.ptx_st_bulk)
         self.fns_b32 = _op_wrapper(_cuda_op.ptx_fns_b32)
         self.add_rn_f32_bf16 = _op_wrapper(_cuda_op.ptx_add_rn_f32_bf16)
@@ -90,18 +84,13 @@ class PTXNamespace:
         # add/sub/mul/fma DPS form: (d_addr, a, b[, c], *, rounding, ftz[, sat])
         self.add_f32 = _op_wrapper(_cuda_op.ptx_add_f32)
         self.add_f32x2 = _op_wrapper(_cuda_op.ptx_add_f32x2)
-        self.add_f64 = _op_wrapper(_cuda_op.ptx_add_f64)
         self.neg_f32 = _op_wrapper(_cuda_op.ptx_neg_f32)
-        self.sub_f32 = _op_wrapper(_cuda_op.ptx_sub_f32)
         self.sub_f16x2 = _op_wrapper(_cuda_op.ptx_sub_f16x2)
         self.sub_f32x2 = _op_wrapper(_cuda_op.ptx_sub_f32x2)
-        self.sub_f64 = _op_wrapper(_cuda_op.ptx_sub_f64)
         self.mul_f32 = _op_wrapper(_cuda_op.ptx_mul_f32)
         self.mul_f32x2 = _op_wrapper(_cuda_op.ptx_mul_f32x2)
-        self.mul_f64 = _op_wrapper(_cuda_op.ptx_mul_f64)
         self.fma_f32 = _op_wrapper(_cuda_op.ptx_fma_f32)
         self.fma_f32x2 = _op_wrapper(_cuda_op.ptx_fma_f32x2)
-        self.fma_f64 = _op_wrapper(_cuda_op.ptx_fma_f64)
         self.max_f32 = _op_wrapper(_cuda_op.ptx_max_f32)
         self.mma = MmaNamespace()
         self.cp_async = CpAsyncNamespace()
@@ -293,26 +282,12 @@ class Tcgen05MmaNamespace:
 
     def __init__(self):
         self.block_scale = _op_wrapper(_cuda_op.ptx_tcgen05_mma_block_scale)
-        self.sp = Tcgen05MmaSpNamespace()
 
     def __call__(self, *args, **kwds):
         return _op_wrapper(_cuda_op.ptx_tcgen05_mma)(*args, **kwds)
 
     # __call__ corresponds to ptx_tcgen05_mma
     __tir_call_op_name__ = "ptx_tcgen05_mma"
-
-
-class Tcgen05MmaSpNamespace:
-    """Tcgen05 Sparse MMA instruction submodule."""
-
-    def __init__(self):
-        self.block_scale = _op_wrapper(_cuda_op.ptx_tcgen05_mma_sp_block_scale)
-
-    def __call__(self, *args, **kwds):
-        return _op_wrapper(_cuda_op.ptx_tcgen05_mma_sp)(*args, **kwds)
-
-    # __call__ corresponds to ptx_tcgen05_mma_sp
-    __tir_call_op_name__ = "ptx_tcgen05_mma_sp"
 
 
 class Tcgen05WaitNamespace:

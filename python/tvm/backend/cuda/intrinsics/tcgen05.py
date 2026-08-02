@@ -989,41 +989,6 @@ def codegen_ptx_tcgen05_mma(
     )
 
 
-@register_codegen("ptx_tcgen05_mma_sp")
-def codegen_ptx_tcgen05_mma_sp(
-    d_dtype,
-    a_dtype,
-    b_dtype,
-    d_tmem_addr,
-    a_operand,
-    b_desc,
-    sp_tmem_addr,
-    i_desc,
-    use_a_tmem,
-    cta_group,
-    enable_input_d,
-    scale_input_d,
-    *disable_output_lane,
-):
-    return _dispatch_tcgen05_mma(
-        d_dtype,
-        a_dtype,
-        b_dtype,
-        d_tmem_addr,
-        a_operand,
-        b_desc,
-        i_desc,
-        use_a_tmem,
-        cta_group,
-        enable_input_d,
-        scale_input_d,
-        False,
-        *disable_output_lane,
-        sparse=True,
-        sp_tmem_addr=sp_tmem_addr,
-    )
-
-
 # tcgen05.mma block-scaled — form 2.
 
 
@@ -1191,44 +1156,6 @@ def codegen_ptx_tcgen05_mma_block_scale(
         use_a_tmem,
         cta_group,
         enable_input_d,
-    )
-
-
-@register_codegen("ptx_tcgen05_mma_sp_block_scale")
-def codegen_ptx_tcgen05_mma_sp_block_scale(
-    d_dtype,
-    a_dtype,
-    b_dtype,
-    sfa_dtype,
-    sfb_dtype,
-    d_tmem_addr,
-    a_operand,
-    b_desc,
-    sfa_tmem_addr,
-    sfb_tmem_addr,
-    sp_tmem_addr,
-    i_desc,
-    use_a_tmem,
-    cta_group,
-    enable_input_d=1,
-):
-    return _dispatch_tcgen05_mma_block_scaled(
-        d_dtype,
-        a_dtype,
-        b_dtype,
-        sfa_dtype,
-        sfb_dtype,
-        d_tmem_addr,
-        a_operand,
-        b_desc,
-        sfa_tmem_addr,
-        sfb_tmem_addr,
-        i_desc,
-        use_a_tmem,
-        cta_group,
-        enable_input_d,
-        sparse=True,
-        sp_tmem_addr=sp_tmem_addr,
     )
 
 

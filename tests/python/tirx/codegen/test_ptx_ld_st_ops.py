@@ -164,9 +164,7 @@ def test_ptx_ld_st_ops_registered():
         "ld",
         "ld_global_nc",
         "st",
-        "st_release",
         "ld_volatile",
-        "st_volatile",
     ):
         assert hasattr(T.ptx, attr), attr
 

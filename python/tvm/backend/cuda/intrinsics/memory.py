@@ -589,9 +589,7 @@ def _register_ptx_ld(op_name, form, n_attrs):
 
 _register_ptx_ld("ptx_ld", "weak", 11)
 _register_ptx_ld("ptx_ld_global_nc", "global_nc", 9)
-_register_ptx_ld("ptx_ld_relaxed", "relaxed", 10)
 _register_ptx_ld("ptx_ld_volatile", "volatile", 6)
-_register_ptx_ld("ptx_ld_mmio", "mmio", 6)
 
 
 # =============================================================================
@@ -1119,23 +1117,7 @@ def _register_ptx_st(op_name, form, n_attrs):
     register_codegen(op_name)(codegen)
 
 
-def _register_ptx_st_mmio(op_name, form, n_attrs):
-    def codegen(*args):
-        parts = _ptx_st_form_parts(form, args[-n_attrs:], False)
-        forward = args[:-n_attrs]
-        name, sig, body_str = parts
-        source_code = f"\n__forceinline__ __device__ void {name}{sig} {{\n{body_str}\n}}\n"
-        return cuda_func_call(name, *forward, source_code=source_code)
-
-    codegen.__name__ = f"codegen_{op_name}"
-    register_codegen(op_name)(codegen)
-
-
 _register_ptx_st("ptx_st", "weak", 9)
-_register_ptx_st("ptx_st_relaxed", "relaxed", 8)
-_register_ptx_st("ptx_st_release", "release", 8)
-_register_ptx_st("ptx_st_volatile", "volatile", 4)
-_register_ptx_st_mmio("ptx_st_mmio", "mmio", 4)
 
 
 # PTX st.bulk form:

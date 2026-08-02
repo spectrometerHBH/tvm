@@ -2690,186 +2690,6 @@ def ptx_tcgen05_mma_block_scale(
     )
 
 
-def ptx_tcgen05_mma_sp(
-    d_tmem_addr,
-    a_operand,
-    b_desc,
-    sp_tmem_addr,
-    i_desc,
-    *disable_output_lane,
-    d_dtype,
-    a_dtype,
-    b_dtype,
-    use_a_tmem,
-    cta_group,
-    enable_input_d=1,
-    scale_input_d=0,
-):
-    """TVM intrinsic to call tcgen05.mma.sp.cta_group.kind without block scaling.
-
-    Parameters
-    ----------
-    d_dtype : str
-        The datatype of resultant matrix D.
-
-    a_dtype : str
-        The datatype of multiplicand matrix A.
-
-    b_dtype : str
-        The datatype of multiplicand matrix B.
-
-    d_tmem_addr : Expr
-        The address of the resultant matrix D in tensor memory, should be uint32_t.
-
-    a_operand : Expr
-        Either the matrix descriptor of multiplicand matrix A in shared memory,
-        or the address of the multiplicand matrix A in tensor memory (uint32_t).
-
-    b_desc : Expr
-        The matrix descriptor of multiplicand matrix B in shared memory.
-
-    sp_tmem_addr : Expr
-        The address of the metadata of sparse matrix in tensor memory, should be uint32_t.
-
-    i_desc : Expr
-        The instruction descriptor of the MMA operation.
-
-    use_a_tmem : bool
-        Whether the multiplicand matrix A is in tensor memory.
-
-    cta_group : int
-        The number of CTA groups involved in the MMA operation.
-
-    enable_input_d : Expr
-        Scale operand for the input accumulator C/D. The inline asm tests
-        `enable_input_d != 0`: zero means D = A*B, non-zero means D = A*B + D.
-
-    scale_input_d : int
-        The optional scaling factor to scale input matrix D.
-        D = A*B+D * (2 ^ - scale-input-d)
-
-    disable_output_lane : list
-        The lanes that should not be updated in the resultant matrix D.
-    """
-
-    _choice("cta_group", cta_group, _TCGEN05_CTA_GROUP)
-
-    # default value for disable_output_lane
-    if len(disable_output_lane) == 0:
-        disable_output_lane = [0] * (4 if cta_group == 1 else 8)
-
-    return call_intrin(
-        "",
-        "tirx.ptx.tcgen05_mma_sp",
-        d_dtype,
-        a_dtype,
-        b_dtype,
-        d_tmem_addr,
-        a_operand,
-        b_desc,
-        sp_tmem_addr,
-        i_desc,
-        use_a_tmem,
-        cta_group,
-        enable_input_d,
-        scale_input_d,
-        *disable_output_lane,
-    )
-
-
-def ptx_tcgen05_mma_sp_block_scale(
-    d_tmem_addr,
-    a_operand,
-    b_desc,
-    sfa_tmem_addr,
-    sfb_tmem_addr,
-    sp_tmem_addr,
-    i_desc,
-    *,
-    d_dtype,
-    a_dtype,
-    b_dtype,
-    sfa_dtype,
-    sfb_dtype,
-    use_a_tmem,
-    cta_group,
-    enable_input_d=1,
-):
-    """TVM intrinsic to call tcgen05.mma.sp.cta_group.kind.block_scale
-        Performs sparse matrix multiplication with block scaling:
-        (A * scale_A)  * (B * scale_B) + D
-
-    Parameters
-    ----------
-    d_dtype : str
-        The datatype of resultant matrix D.
-
-    a_dtype : str
-        The datatype of multiplicand matrix A.
-
-    b_dtype : str
-        The datatype of multiplicand matrix B.
-
-    sfa_dtype : str
-        The datatype of scale factor matrix A.
-
-    sfb_dtype : str
-        The datatype of scale factor matrix B.
-
-    d_tmem_addr : Expr
-        The address of the resultant matrix D in tensor memory, should be uint32_t.
-
-    a_operand : Expr
-        Either the matrix descriptor of multiplicand matrix A in shared memory,
-        or the address of the multiplicand matrix A in tensor memory (uint32_t).
-
-    b_desc : Expr
-        The matrix descriptor of multiplicand matrix B in shared memory.
-
-    sfa_tmem_addr : Expr
-        The address of the scale factor matrix A in tensor memory, should be uint32_t.
-
-    sfb_tmem_addr : Expr
-        The address of the scale factor matrix B in tensor memory, should be uint32_t.
-
-    sp_tmem_addr : Expr
-        The address of the metadata of sparse matrix in tensor memory, should be uint32_t.
-
-    i_desc : Expr
-        The instruction descriptor of the MMA operation.
-
-    use_a_tmem : bool
-        Whether the multiplicand matrix A is in tensor memory.
-
-    cta_group : int
-        The number of CTA groups involved in the MMA operation.
-
-    enable_input_d : Expr
-        Scale operand for the input accumulator C/D. Zero means D = A*B,
-        non-zero means D = A*B + D.
-    """
-    _choice("cta_group", cta_group, _TCGEN05_CTA_GROUP)
-    return call_intrin(
-        "",
-        "tirx.ptx.tcgen05_mma_sp_block_scale",
-        d_dtype,
-        a_dtype,
-        b_dtype,
-        sfa_dtype,
-        sfb_dtype,
-        d_tmem_addr,
-        a_operand,
-        b_desc,
-        sfa_tmem_addr,
-        sfb_tmem_addr,
-        sp_tmem_addr,
-        i_desc,
-        use_a_tmem,
-        cta_group,
-        enable_input_d,
-    )
-
-
 def ptx_tcgen05_fence_before_thread_sync():
     """TVM intrinsic to call tcgen05.fence::before_thread_sync
     Orders all prior asynchronous tcgen05 operations relative to subsequent operations.
@@ -3726,19 +3546,9 @@ def ptx_add_f32x2(*args, rounding="rn", ftz=False, dps=True, return_dtype="uint6
     )
 
 
-def ptx_add_f64(d_addr, a, b, *, rounding="rn"):
-    """PTX ``add{.rnd}.f64 [d_addr], a, b`` — DPS form (no .ftz / .sat)."""
-    return _ptx_binary_arith("add", "f64", d_addr, a, b, rounding=rounding)
-
-
 def ptx_neg_f32(x):
     """Return exact PTX ``neg.f32`` without the fast-math ``.ftz`` modifier."""
     return call_intrin("float32", "tirx.ptx.neg_f32", x)
-
-
-def ptx_sub_f32(d_addr, a, b, *, rounding="rn", ftz=False, sat=False):
-    """PTX ``sub{.rnd}{.ftz}{.sat}.f32 [d_addr], a, b`` — DPS form."""
-    return _ptx_binary_arith("sub", "f32", d_addr, a, b, rounding=rounding, ftz=ftz, sat=sat)
 
 
 def ptx_sub_f16x2(a, b):
@@ -3753,11 +3563,6 @@ def ptx_sub_f32x2(*args, rounding="rn", ftz=False, dps=True, return_dtype="uint6
     )
 
 
-def ptx_sub_f64(d_addr, a, b, *, rounding="rn"):
-    """PTX ``sub{.rnd}.f64 [d_addr], a, b`` — DPS form."""
-    return _ptx_binary_arith("sub", "f64", d_addr, a, b, rounding=rounding)
-
-
 def ptx_mul_f32(d_addr, a, b, *, rounding="rn", ftz=False, sat=False):
     """PTX ``mul{.rnd}{.ftz}{.sat}.f32 [d_addr], a, b`` — DPS form."""
     return _ptx_binary_arith("mul", "f32", d_addr, a, b, rounding=rounding, ftz=ftz, sat=sat)
@@ -3768,11 +3573,6 @@ def ptx_mul_f32x2(*args, rounding="", ftz=False, dps=True, return_dtype="uint64"
     return _ptx_binary_f32x2(
         "mul", *args, rounding=rounding, ftz=ftz, dps=dps, return_dtype=return_dtype
     )
-
-
-def ptx_mul_f64(d_addr, a, b, *, rounding="rn"):
-    """PTX ``mul{.rnd}.f64 [d_addr], a, b`` — DPS form."""
-    return _ptx_binary_arith("mul", "f64", d_addr, a, b, rounding=rounding)
 
 
 def ptx_fma_f32(d_addr, a, b, c, *, rounding="rn", ftz=False, sat=False):
@@ -3787,11 +3587,6 @@ def ptx_fma_f32x2(*args, rounding="rn", ftz=False, dps=True, return_dtype="uint6
     Value form: ``(a, b, c, dps=False)`` returns ``return_dtype``.
     """
     return _ptx_fma_f32x2(*args, rounding=rounding, ftz=ftz, dps=dps, return_dtype=return_dtype)
-
-
-def ptx_fma_f64(d_addr, a, b, c, *, rounding="rn"):
-    """PTX ``fma{.rnd}.f64 [d_addr], a, b, c`` — DPS form."""
-    return _ptx_fma("f64", d_addr, a, b, c, rounding=rounding)
 
 
 def ptx_max_f32(a, b, *, ftz=False, nan=False):
@@ -4185,63 +3980,6 @@ def ptx_ld_global_nc(
     )
 
 
-def ptx_ld_relaxed(
-    addr,
-    return_type,
-    ptx_type,
-    *,
-    scope="gpu",
-    space="global",
-    vec="",
-    dst=None,
-    cache_hint="",
-    cache_policy=None,
-    l1_evict="",
-    l2_evict="",
-    prefetch_size="",
-):
-    _choice("scope", scope, _PTX_LD_SCOPE)
-    _choice("space", space, _PTX_LD_SPACE)
-    _choice("ptx_type", ptx_type, _PTX_LD_TYPE)
-    _choice("vec", vec, _PTX_LD_VEC)
-    cache_policy, has_cache_policy = _resolve_cache_policy(cache_hint, cache_policy)
-    dst_args, to_dst = _normalize_ptx_ld_dst(dst, vec, "ld.relaxed")
-    if to_dst:
-        return call_intrin(
-            "",
-            "tirx.ptx.ld_relaxed",
-            *dst_args,
-            addr,
-            cache_policy,
-            return_type,
-            scope,
-            space,
-            vec,
-            ptx_type,
-            int(has_cache_policy),
-            to_dst,
-            l1_evict,
-            l2_evict,
-            prefetch_size,
-        )
-    return call_intrin(
-        return_type,
-        "tirx.ptx.ld_relaxed",
-        addr,
-        cache_policy,
-        return_type,
-        scope,
-        space,
-        vec,
-        ptx_type,
-        int(has_cache_policy),
-        0,
-        l1_evict,
-        l2_evict,
-        prefetch_size,
-    )
-
-
 def ptx_ld_volatile(
     addr,
     return_type,
@@ -4280,37 +4018,6 @@ def ptx_ld_volatile(
         ptx_type,
         0,
         prefetch_size,
-    )
-
-
-def ptx_ld_mmio(addr, return_type, ptx_type, *, sem="acquire", dst=None):
-    if sem not in ("acquire", "relaxed"):
-        raise ValueError(f"Unsupported PTX ld.mmio sem {sem!r}")
-    _choice("ptx_type", ptx_type, _PTX_LD_TYPE)
-    to_dst = int(dst is not None)
-    if to_dst:
-        return call_intrin(
-            "",
-            "tirx.ptx.ld_mmio",
-            dst,
-            addr,
-            return_type,
-            sem,
-            "sys",
-            "global",
-            ptx_type,
-            1,
-        )
-    return call_intrin(
-        return_type,
-        "tirx.ptx.ld_mmio",
-        addr,
-        return_type,
-        sem,
-        "sys",
-        "global",
-        ptx_type,
-        0,
     )
 
 
@@ -4456,97 +4163,6 @@ def ptx_st(
             raise ValueError("ptx_st expects values or src, not both")
         return call_intrin("", "tirx.ptx.st", address, src, *attrs)
     return call_intrin("", "tirx.ptx.st", address, *values, *attrs)
-
-
-def ptx_st_relaxed(
-    address,
-    *values,
-    src=None,
-    scope="gpu",
-    space="global",
-    vec="",
-    ptx_type,
-    cache_hint="",
-    cache_policy=None,
-    l1_evict="",
-    l2_evict="",
-):
-    _choice("scope", scope, _PTX_LD_SCOPE)
-    _choice("space", space, _PTX_MEM_SPACE | {"local", "param::func"})
-    _choice("vec", vec, _PTX_ST_VEC)
-    _choice("ptx_type", ptx_type, _PTX_SCALAR_TYPE)
-    cache_policy, has_cache_policy = _resolve_cache_policy(cache_hint, cache_policy)
-    attrs = (
-        cache_policy,
-        scope,
-        space,
-        vec,
-        ptx_type,
-        int(has_cache_policy),
-        l1_evict,
-        l2_evict,
-        int(src is not None),
-    )
-    if src is not None:
-        if values:
-            raise ValueError("ptx_st_relaxed expects values or src, not both")
-        return call_intrin("", "tirx.ptx.st_relaxed", address, src, *attrs)
-    return call_intrin("", "tirx.ptx.st_relaxed", address, *values, *attrs)
-
-
-def ptx_st_release(
-    address,
-    *values,
-    src=None,
-    scope="gpu",
-    space="global",
-    vec="",
-    ptx_type,
-    cache_hint="",
-    cache_policy=None,
-    l1_evict="",
-    l2_evict="",
-):
-    _choice("scope", scope, _PTX_LD_SCOPE)
-    _choice("space", space, _PTX_MEM_SPACE | {"local", "param::func"})
-    _choice("vec", vec, _PTX_ST_VEC)
-    _choice("ptx_type", ptx_type, _PTX_SCALAR_TYPE)
-    cache_policy, has_cache_policy = _resolve_cache_policy(cache_hint, cache_policy)
-    attrs = (
-        cache_policy,
-        scope,
-        space,
-        vec,
-        ptx_type,
-        int(has_cache_policy),
-        l1_evict,
-        l2_evict,
-        int(src is not None),
-    )
-    if src is not None:
-        if values:
-            raise ValueError("ptx_st_release expects values or src, not both")
-        return call_intrin("", "tirx.ptx.st_release", address, src, *attrs)
-    return call_intrin("", "tirx.ptx.st_release", address, *values, *attrs)
-
-
-def ptx_st_volatile(address, *values, src=None, space="global", vec="", ptx_type):
-    _choice("space", space, _PTX_MEM_SPACE | {"local", "param::func"})
-    _choice("vec", vec, _PTX_ST_VEC)
-    _choice("ptx_type", ptx_type, _PTX_SCALAR_TYPE)
-    attrs = (space, vec, ptx_type, int(src is not None))
-    if src is not None:
-        if values:
-            raise ValueError("ptx_st_volatile expects values or src, not both")
-        return call_intrin("", "tirx.ptx.st_volatile", address, src, *attrs)
-    return call_intrin("", "tirx.ptx.st_volatile", address, *values, *attrs)
-
-
-def ptx_st_mmio(address, value, *, sem="release", ptx_type):
-    if sem not in ("release", "relaxed"):
-        raise ValueError(f"Unsupported PTX st.mmio sem {sem!r}")
-    _choice("ptx_type", ptx_type, _PTX_SCALAR_TYPE)
-    return call_intrin("", "tirx.ptx.st_mmio", address, value, sem, "sys", "global", ptx_type)
 
 
 def ptx_st_bulk(ptr, num_bytes, *, weak=False, space="shared::cta"):
