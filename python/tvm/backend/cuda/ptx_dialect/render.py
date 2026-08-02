@@ -1,0 +1,88 @@
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
+#
+#   http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License.
+"""Pure CUDA-helper rendering for the ptxd dialect.
+
+tvm-free (imports only :mod:`.table`), so it is shared by the codegen engine
+and by :mod:`.gen_helpers`, which dumps the generated helpers for humans to
+inspect without compiling a kernel.
+"""
+
+from .table import EFFECT_PURE, PTX_TYPES, InstructionEntry, mods
+
+
+def render_variant(entry: InstructionEntry, tokens, predicated=False):
+    """Render one variant: ``(opcode, helper_name, helper_source)``.
+
+    ``predicated`` is a framework-level axis (never in the table): the helper
+    gains a trailing ``uint32_t __pred`` operand, and the instruction is
+    guarded with ``.reg .pred p; setp.ne.b32 p, %N, 0; @p ...``. Only valid
+    for void instructions (a false predicate leaves destinations unwritten).
+    """
+    mod_map = mods(entry, tokens)
+    opcode = ".".join([entry.name] + [tok for tok in tokens if tok])
+    helper = "tvm_builtin_ptxd_" + opcode.replace("::", "__").replace(".", "_")
+    if predicated:
+        assert entry.returns is None, "@p is only supported on void instructions"
+        helper += "_pred"
+
+    params, inputs, outputs, ptx_operands = [], [], [], []
+    idx = 0
+    c_ret = "void"
+    if entry.returns is not None:
+        _, c_ret, ret_constraint = PTX_TYPES[mod_map[entry.returns]]
+        outputs.append(f'"={ret_constraint}"(__ret)')
+        ptx_operands.append(f"%{idx}")
+        idx += 1
+    for slot in entry.operands:
+        pname = f"__{slot.name}"
+        if slot.role == "addr":
+            space = slot.space or mod_map.get("space", "")
+            if space.startswith("shared"):
+                params.append(f"uint32_t {pname}")
+                inputs.append(f'"r"({pname})')
+            else:
+                params.append(f"const void* {pname}")
+                inputs.append(f'"l"({pname})')
+            ptx_operands.append(f"[%{idx}]")
+        elif slot.role == "ptr":
+            params.append(f"const void* {pname}")
+            inputs.append(f'"l"({pname})')
+            ptx_operands.append(f"%{idx}")
+        else:  # value
+            _, c_ty, constraint = PTX_TYPES[slot.dtype or mod_map["type"]]
+            params.append(f"{c_ty} {pname}")
+            inputs.append(f'"{constraint}"({pname})')
+            ptx_operands.append(f"%{idx}")
+        idx += 1
+
+    instr = f"{opcode} {', '.join(ptx_operands)};" if ptx_operands else f"{opcode};"
+    if predicated:
+        params.append("uint32_t __pred")
+        inputs.append('"r"(__pred)')
+        asm_text = f"{{ .reg .pred p; setp.ne.b32 p, %{idx}, 0; @p {instr} }}"
+    else:
+        asm_text = instr
+    effectful = entry.effect != EFFECT_PURE
+    volatile = " volatile" if effectful else ""
+    clobber = ' : "memory"' if effectful else ""
+    asm_line = f'asm{volatile}("{asm_text}" : {", ".join(outputs)} : {", ".join(inputs)}{clobber});'
+    if entry.returns is None:
+        body = f"  {asm_line}"
+    else:
+        body = f"  {c_ret} __ret;\n  {asm_line}\n  return __ret;"
+    source = f"__forceinline__ __device__ {c_ret} {helper}({', '.join(params)}) {{\n{body}\n}}\n"
+    return opcode, helper, source
