@@ -25,15 +25,15 @@ Only imports :mod:`.table` (tvm-free).
 
 import sys
 
-from .table import EFFECT_NAMES, TABLE
+from .table import TABLE
 
 
 def generate() -> str:
     lines = [
         "# ptxd dialect coverage",
         "",
-        "| instruction | modifiers | constraints | operands | returns | effect |",
-        "|---|---|---|---|---|---|",
+        "| instruction | modifiers | constraints | operands |",
+        "|---|---|---|---|",
     ]
     for name in sorted(TABLE):
         e = TABLE[name]
@@ -46,9 +46,7 @@ def generate() -> str:
         )
         check_doc = (e.check.__doc__ or "").strip() if e.check is not None else "—"
         operands = ", ".join(f"{s.name}:{s.role}" for s in e.operands)
-        returns = f"dtype of `{e.returns}`" if e.returns else "void"
-        effect = EFFECT_NAMES.get(e.effect, str(e.effect))
-        lines.append(f"| `{name}` | {mods} | {check_doc} | {operands} | {returns} | {effect} |")
+        lines.append(f"| `{name}` | {mods} | {check_doc} | {operands} |")
     lines.append("")
     lines.append(f"{len(TABLE)} instruction families.")
     return "\n".join(lines) + "\n"

@@ -48,7 +48,7 @@ def generate(families=None) -> str:
             continue
         entry = TABLE[name]
         combos = list(variants(entry))
-        predicated = " (each with a @p twin)" if entry.returns is None else ""
+        predicated = " (each with a @p twin)" if not entry.has_dst else ""
         chunks.append(
             f"// ========== {entry.name} — {len(combos)} variant(s){predicated} ==========\n"
         )
@@ -56,7 +56,7 @@ def generate(families=None) -> str:
             opcode, _, source = render_variant(entry, tokens)
             chunks.append(f"// {opcode}")
             chunks.append(source)
-            if entry.returns is None:
+            if not entry.has_dst:
                 _, _, pred_source = render_variant(entry, tokens, predicated=True)
                 chunks.append(f"// @p {opcode}")
                 chunks.append(pred_source)

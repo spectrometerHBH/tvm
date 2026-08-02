@@ -35,11 +35,19 @@ The converged :class:`InstructionEntry` design:
   reject illegal combinations with a readable message, and as a filter in
   :func:`variants` — so exhaustive nvcc gating still works. Give it a
   one-line docstring; the generators surface it as documentation.
-- One entry = one *syntax shape*: fixed operand list and return convention.
-  Variants that change operand/result structure (e.g. vector DPS loads)
-  become separate entries, each declaring only the slots it uses.
-- Predication (``@p``) is framework-level: every void instruction accepts
-  ``pred=`` at the call site; entries never mention it.
+- One entry = one *syntax shape*: fixed operand list and result structure.
+  Variants that change either (e.g. vector destinations) become separate
+  entries, each declaring only the slots it uses.
+- Predication (``@p``) is framework-level: every instruction without a
+  destination accepts ``pred=`` at the call site; entries never mention it.
+
+Calling convention: PTX has no defining form — a register is declared first
+and instructions then write into it — so a ptxd call mirrors the PTX text
+exactly. Destinations are ordinary operands (``role="dst"``, in PTX operand
+order), every helper is ``void``, and every call is a statement::
+
+    acc: T.float32                        # .reg .f32 acc;
+    T.ptxd.add.rn.f32(acc, x, acc)        # add.rn.f32 acc, x, acc;
 """
 
 import functools
@@ -47,11 +55,6 @@ import itertools
 import keyword
 from collections.abc import Callable
 from dataclasses import dataclass
-
-# Mirrors tvm::tirx::CallEffectKind (include/tvm/tirx/op_attr_types.h).
-EFFECT_PURE = 1
-EFFECT_OPAQUE = 3
-EFFECT_NAMES = {EFFECT_PURE: "pure", EFFECT_OPAQUE: "opaque"}
 
 # PTX operand type token -> (TVM dtype, C type, inline-asm constraint, C carrier).
 # The carrier is the C type actually bound to the asm register: 8-bit values
@@ -116,6 +119,10 @@ class OperandSlot:
       - ``"imm"``   an operand the ISA fixes to a single value (st.bulk's
         initval "must be zero"). Rendered straight into the asm text; it
         takes no C parameter and no call argument.
+      - ``"dst"``   a destination the instruction writes, typed like
+        ``"value"``. The helper takes it as a C++ reference and the caller
+        passes a writable lvalue (a scalar or a buffer element), mirroring
+        PTX's own "declare the register, then name it as an operand".
     """
 
     name: str
@@ -134,19 +141,15 @@ class InstructionEntry:
 
     name: str  # table key and attribute name, e.g. "cvta", "st_bulk"
     operands: tuple[OperandSlot, ...]
-    effect: int  # CallEffectKind int (TCallEffectKind attr)
-    returns: str | None  # None (void) or the slot naming the result dtype
     slots: tuple[ModifierSlot, ...] = ()
     check: CheckFn | None = None  # cross-slot validation, mod_map -> error | None
-    # Whether the emitted inline asm carries `volatile`. This is a C-level
-    # optimization barrier — it never changes *which* PTX instruction is
-    # emitted, only whether nvcc may common up or drop identical calls. It is
-    # deliberately independent of `effect`, which answers the same question
-    # for the IR: ex2/rcp are pure (the IR shares a let-bound result) yet
-    # carry the barrier, while fns is pure and does not. None derives it from
-    # `effect`; set it explicitly to preserve an instruction's established
-    # barrier when migrating.
-    asm_volatile: bool | None = None
+    # Whether the emitted inline asm carries `volatile`. This is purely a
+    # C-level optimization barrier — it never changes *which* PTX instruction
+    # is emitted, only whether nvcc may common up or drop identical calls.
+    # Every op registers as kOpaque (a void call has to survive RemoveNoOp),
+    # so the IR shares nothing either way; this flag exists only to preserve
+    # each instruction's established barrier byte-for-byte across migration.
+    asm_volatile: bool = True
     # The PTX mnemonic, when it is not spellable as a Python identifier.
     # `st.bulk` is one instruction whose name contains a dot, so the table key
     # (st_bulk) and the emitted mnemonic (st.bulk) have to differ.
@@ -164,6 +167,17 @@ class InstructionEntry:
     @property
     def ptx_name(self) -> str:
         return self.mnemonic or self.name
+
+    @property
+    def has_dst(self) -> bool:
+        """Whether the instruction writes a destination operand.
+
+        Gates ``@p``: a false predicate leaves destinations unwritten, and the
+        ``"="`` output constraint tells nvcc the prior value is dead, so a
+        predicated destination silently loses it. Lifting this needs a
+        read-modify-write ("+") constraint, which no entry declares yet.
+        """
+        return any(slot.role == "dst" for slot in self.operands)
 
 
 def mods(entry: InstructionEntry, tokens) -> dict:
@@ -345,8 +359,6 @@ _ENTRIES = [
         ),
         check=_check_prefetch,
         operands=(OperandSlot("addr", role="addr"),),
-        effect=EFFECT_OPAQUE,
-        returns=None,
     ),
     # Complete scalar `ld` per PTX ISA 9.7.9.8 + the 9.7.9.9 ld.global.nc
     # forms. Deliberately excluded (each needs a mechanism this shape lacks):
@@ -384,9 +396,10 @@ _ENTRIES = [
             ModifierSlot("type", _LD_TYPES),
         ),
         check=_check_ld,
-        operands=(OperandSlot("addr", role="addr"),),
-        effect=EFFECT_OPAQUE,
-        returns="type",
+        operands=(
+            OperandSlot("d", role="dst"),
+            OperandSlot("addr", role="addr"),
+        ),
     ),
     InstructionEntry(
         name="st",
@@ -401,8 +414,6 @@ _ENTRIES = [
             OperandSlot("addr", role="addr"),
             OperandSlot("value", role="value"),
         ),
-        effect=EFFECT_OPAQUE,
-        returns=None,
     ),
     # red / atom scalar `.op` forms per PTX ISA 9.7.14.6 and 9.7.14.5.
     # Deliberately excluded (each needs a mechanism this shape lacks):
@@ -424,8 +435,6 @@ _ENTRIES = [
             OperandSlot("addr", role="addr"),
             OperandSlot("value", role="value"),
         ),
-        effect=EFFECT_OPAQUE,
-        returns=None,
     ),
     InstructionEntry(
         name="atom",
@@ -438,11 +447,10 @@ _ENTRIES = [
         ),
         check=_check_atomic,
         operands=(
+            OperandSlot("d", role="dst"),
             OperandSlot("addr", role="addr"),
             OperandSlot("value", role="value"),
         ),
-        effect=EFFECT_OPAQUE,
-        returns="type",
     ),
     # ex2 per PTX ISA 9.7.3.21 (`ex2.approx{.ftz}.f32`). The half-precision
     # forms of 9.7.4.10 (.f16/.f16x2/.bf16/.bf16x2) are deliberately excluded:
@@ -454,10 +462,10 @@ _ENTRIES = [
             ModifierSlot("ftz", ("ftz",), optional=True),
             ModifierSlot("type", ("f32",)),
         ),
-        operands=(OperandSlot("value", role="value"),),
-        effect=EFFECT_PURE,
-        asm_volatile=True,  # legacy barrier: preserved so migration is byte-identical
-        returns="type",
+        operands=(
+            OperandSlot("d", role="dst"),
+            OperandSlot("value", role="value"),
+        ),
     ),
     # rcp per PTX ISA 9.7.3.13. `rcp.approx.ftz.f64` (a separate syntax line in
     # the ISA, with its own sm floor) is excluded until it is needed.
@@ -469,10 +477,10 @@ _ENTRIES = [
             ModifierSlot("type", ("f32", "f64")),
         ),
         check=_check_rcp,
-        operands=(OperandSlot("value", role="value"),),
-        effect=EFFECT_PURE,
-        asm_volatile=True,  # legacy barrier: preserved so migration is byte-identical
-        returns="type",
+        operands=(
+            OperandSlot("d", role="dst"),
+            OperandSlot("value", role="value"),
+        ),
     ),
     # fns per PTX ISA 9.7.1.18: `fns.b32 d, mask, base, offset;` — one form.
     # The operands carry three different types (mask .b32, base .b32/.u32/.s32,
@@ -482,12 +490,12 @@ _ENTRIES = [
         name="fns",
         slots=(ModifierSlot("type", ("b32",)),),
         operands=(
+            OperandSlot("d", role="dst"),
             OperandSlot("mask", role="value", dtype="b32"),
             OperandSlot("base", role="value", dtype="b32"),
             OperandSlot("offset", role="value", dtype="s32"),
         ),
-        effect=EFFECT_PURE,
-        returns="type",
+        asm_volatile=False,  # legacy fns carried no barrier
     ),
     # max per PTX ISA 9.7.3.12, two-source form. Deliberately excluded:
     # {.xorsign.abs} (a paired qualifier), the three-source
@@ -502,12 +510,10 @@ _ENTRIES = [
         ),
         check=_check_max,
         operands=(
+            OperandSlot("d", role="dst"),
             OperandSlot("a", role="value"),
             OperandSlot("b", role="value"),
         ),
-        effect=EFFECT_PURE,
-        asm_volatile=True,  # legacy barrier: preserved so migration is byte-identical
-        returns="type",
     ),
     # st.bulk per PTX ISA 9.7.9.14:
     #   st.bulk{.weak}{.shared::cta} [a], size, initval;  // initval must be zero
@@ -524,8 +530,6 @@ _ENTRIES = [
             OperandSlot("size", role="value", dtype="u64"),
             OperandSlot("initval", role="imm", literal="0"),
         ),
-        effect=EFFECT_OPAQUE,
-        returns=None,
     ),
     InstructionEntry(
         name="cvta",
@@ -534,9 +538,11 @@ _ENTRIES = [
             ModifierSlot("space", ("shared",)),
             ModifierSlot("type", ("u64",)),
         ),
-        operands=(OperandSlot("ptr", role="ptr"),),
-        effect=EFFECT_PURE,
-        returns="type",
+        operands=(
+            OperandSlot("d", role="dst"),
+            OperandSlot("ptr", role="ptr"),
+        ),
+        asm_volatile=False,  # legacy cvta carried no barrier
     ),
     # Mixed-space operands: dst/mbar are shared::cta (u32 carriers), src is
     # global (pointer carrier), size is a plain u32 register — each operand
@@ -556,8 +562,6 @@ _ENTRIES = [
             OperandSlot("size", role="value", dtype="u32"),
             OperandSlot("mbar", role="addr", space="shared::cta"),
         ),
-        effect=EFFECT_OPAQUE,
-        returns=None,
     ),
 ]
 

@@ -91,7 +91,7 @@ class _Chain_ld:
     u8: _Chain_ld
     volatile: _Chain_ld
     weak: _Chain_ld
-    def __call__(self, addr: Any, *args: Any) -> Any: ...
+    def __call__(self, d: Any, addr: Any, *args: Any) -> None: ...
 
 class _Chain_st:
     """`st` — sem∈{weak,release,relaxed,volatile} (opt); scope∈{cta,gpu,sys} (opt);
@@ -192,7 +192,7 @@ class _Chain_atom:
     u32: _Chain_atom
     u64: _Chain_atom
     xor: _Chain_atom
-    def __call__(self, addr: Any, value: Any, *args: Any) -> Any: ...
+    def __call__(self, d: Any, addr: Any, value: Any, *args: Any) -> None: ...
 
 class _Chain_ex2:
     """`ex2` — mode∈{approx}; ftz∈{ftz} (opt); type∈{f32}"""
@@ -200,7 +200,7 @@ class _Chain_ex2:
     approx: _Chain_ex2
     f32: _Chain_ex2
     ftz: _Chain_ex2
-    def __call__(self, value: Any, *args: Any) -> Any: ...
+    def __call__(self, d: Any, value: Any, *args: Any) -> None: ...
 
 class _Chain_rcp:
     """`rcp` — mode∈{approx,rn,rz,rm,rp}; ftz∈{ftz} (opt); type∈{f32,f64} — rcp.approx is
@@ -215,13 +215,13 @@ class _Chain_rcp:
     rn: _Chain_rcp
     rp: _Chain_rcp
     rz: _Chain_rcp
-    def __call__(self, value: Any, *args: Any) -> Any: ...
+    def __call__(self, d: Any, value: Any, *args: Any) -> None: ...
 
 class _Chain_fns:
     """`fns` — type∈{b32}"""
 
     b32: _Chain_fns
-    def __call__(self, mask: Any, base: Any, offset: Any, *args: Any) -> Any: ...
+    def __call__(self, d: Any, mask: Any, base: Any, offset: Any, *args: Any) -> None: ...
 
 class _Chain_max:
     """`max` — ftz∈{ftz} (opt); nan∈{NaN} (opt); type∈{f32,f64} — `max.f64` is the bare form;
@@ -232,7 +232,7 @@ class _Chain_max:
     f32: _Chain_max
     f64: _Chain_max
     ftz: _Chain_max
-    def __call__(self, a: Any, b: Any, *args: Any) -> Any: ...
+    def __call__(self, d: Any, a: Any, b: Any, *args: Any) -> None: ...
 
 class _Chain_st_bulk:
     """`st_bulk` — weak∈{weak} (opt); space∈{shared::cta} (opt)"""
@@ -249,7 +249,7 @@ class _Chain_cvta:
     shared: _Chain_cvta
     to: _Chain_cvta
     u64: _Chain_cvta
-    def __call__(self, ptr: Any, *args: Any) -> Any: ...
+    def __call__(self, d: Any, ptr: Any, *args: Any) -> None: ...
 
 class _Chain_cp:
     """`cp` — api∈{async}; kind∈{bulk}; dst_space∈{shared::cta}; src_space∈{global};

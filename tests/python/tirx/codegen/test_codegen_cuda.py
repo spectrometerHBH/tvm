@@ -320,9 +320,9 @@ def test_ptx_ld_acquire_and_volatile_codegen():
         T.device_entry()
         tx = T.thread_id([32])
         if tx == 0:
-            A[0] = T.ptxd.ld.acquire.gpu.global_.u64(A.data)
-            B[0] = T.ptxd.ld.acquire.sys.global_.s32(B.data)
-            C[0] = T.ptxd.ld.acquire.gpu.global_.b32(C.data)
+            T.ptxd.ld.acquire.gpu.global_.u64(A[0], A.data)
+            T.ptxd.ld.acquire.sys.global_.s32(B[0], B.data)
+            T.ptxd.ld.acquire.gpu.global_.b32(C[0], C.data)
             T.ptx.ld_global_acquire(B[0], B.data)
             A[0] = T.ptx.ld_volatile(A.data, "uint64", "u64", space="global")
 
@@ -439,8 +439,8 @@ def test_megamoe_extracted_intrinsics_codegen():
         if tx == 0:
             T.ptxd.red.release.gpu.global_.or_.b64(U64.data, U64[0])
             T.ptxd.red.release.sys.global_.add.s32(I32.data, I32[0])
-            U32[0] = T.ptxd.atom.release.gpu.global_.add.u32(U32.data, U32[0])
-            U64[0] = T.ptxd.atom.sys.global_.add.u64(U64.data, U64[0])
+            T.ptxd.atom.release.gpu.global_.add.u32(U32[0], U32.data, U32[0])
+            T.ptxd.atom.sys.global_.add.u64(U64[0], U64.data, U64[0])
             T.ptxd.red.gpu.global_.add.u32(U32.data, U32[0])
             T.ptx.st(U32.data, U32[0], space="shared", ptx_type="u32")
             T.ptx.st(
@@ -454,7 +454,7 @@ def test_megamoe_extracted_intrinsics_codegen():
                 ptx_type="b32",
             )
             T.ptxd.st_bulk.weak.shared__cta(U32.data, T.uint64(16))
-            U32[0] = T.ptxd.fns.b32(U32[0], U32[1], I32[0])
+            T.ptxd.fns.b32(U32[0], U32[0], U32[1], I32[0])
             T.ptx.stmatrix(
                 True,  # trans
                 1,  # num

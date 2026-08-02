@@ -91,7 +91,9 @@ def test_ptxd_ld_st_codegen():
         T.cta_id([1])
         tx = T.thread_id([32])
         if tx == 0:
-            val: T.uint32 = T.ptxd.ld.global_.acquire.gpu.b32(A.ptr_to([0]))
+            # Declare the register, then name it as an operand — the PTX model.
+            val = T.local_scalar("uint32")
+            T.ptxd.ld.global_.acquire.gpu.b32(val, A.ptr_to([0]))
             T.ptxd.st.release.gpu.global_.b32(B.ptr_to([0]), val)
         B[tx] = B[tx]
 
@@ -134,7 +136,7 @@ def test_ptxd_explicit_cvta():
         smem = T.alloc_buffer((4,), "uint32", scope="shared")
         smem[tx % 4] = T.uint32(0)
         if tx == 0:
-            out[0] = T.ptxd.cvta.to.shared.u64(smem.data)
+            T.ptxd.cvta.to.shared.u64(out[0], smem.data)
 
     src = _cuda_source(kernel)
     assert "cvta.to.shared.u64 %0, %1;" in src
@@ -187,7 +189,7 @@ def test_ptxd_string_form_matches_chain():
             T.cta_id([1])
             tx = T.thread_id([32])
             if tx == 0:
-                B[0] = fn(A.ptr_to([0]))
+                fn(B[0], A.ptr_to([0]))
             B[tx] = B[tx]
 
         return kernel
@@ -202,7 +204,7 @@ def test_ptxd_trace_time_errors():
         @T.prim_func
         def bad_global_addr(out: T.Buffer((1,), "uint32")):
             T.device_entry()
-            out[0] = T.ptxd.ld.global_.b32(T.uint32(0))
+            T.ptxd.ld.global_.b32(out[0], T.uint32(0))
 
     # Bogus modifier token.
     with pytest.raises((AttributeError, tvm.error.DiagnosticError), match="not a valid modifier"):
@@ -210,7 +212,7 @@ def test_ptxd_trace_time_errors():
         @T.prim_func
         def bad_modifier(out: T.Buffer((1,), "uint32")):
             T.device_entry()
-            out[0] = T.ptxd.ld.global_.bogus.b32(T.uint32(0))
+            T.ptxd.ld.global_.bogus.b32(out[0], T.uint32(0))
 
     # Value dtype mismatching the type modifier.
     with pytest.raises((ValueError, tvm.error.DiagnosticError), match="must have dtype"):
@@ -238,7 +240,7 @@ def test_ptxd_trace_time_errors():
         def acquire_without_scope(out: T.Buffer((1,), "uint32"), a_ptr: T.handle):
             A = T.match_buffer(a_ptr, (1,), "uint32")
             T.device_entry()
-            out[0] = T.ptxd.ld.global_.acquire.b32(A.ptr_to([0]))
+            T.ptxd.ld.global_.acquire.b32(out[0], A.ptr_to([0]))
 
     # A float is not an address in any state space.
     with pytest.raises((ValueError, tvm.error.DiagnosticError), match="pointer or uint64 handle"):
@@ -246,7 +248,48 @@ def test_ptxd_trace_time_errors():
         @T.prim_func
         def bad_addr_dtype(out: T.Buffer((1,), "uint32")):
             T.device_entry()
-            out[0] = T.ptxd.ld.global_.b32(T.float32(0))
+            T.ptxd.ld.global_.b32(out[0], T.float32(0))
+
+
+def test_ptxd_destination_errors():
+    """A destination is a register the caller declared: it must be a writable lvalue."""
+    # Destination dtype disagreeing with the .type modifier.
+    with pytest.raises((ValueError, tvm.error.DiagnosticError), match="must have dtype uint32"):
+
+        @T.prim_func
+        def wrong_dst_dtype(out: T.Buffer((1,), "float32"), a_ptr: T.handle):
+            A = T.match_buffer(a_ptr, (1,), "uint32")
+            T.device_entry()
+            T.ptxd.ld.global_.b32(out[0], A.ptr_to([0]))
+
+    # A T.let binding is immutable, so it cannot be written into. This is the
+    # gate that keeps the analyzer from re-expanding one call into N.
+    with pytest.raises((ValueError, tvm.error.DiagnosticError), match="writable scalar"):
+
+        @T.prim_func
+        def let_destination(out: T.Buffer((1,), "uint32"), a_ptr: T.handle):
+            A = T.match_buffer(a_ptr, (1,), "uint32")
+            T.device_entry()
+            bound: T.let = out[0] + T.uint32(1)
+            T.ptxd.ld.global_.b32(bound, A.ptr_to([0]))
+
+    # An rvalue is not a destination either.
+    with pytest.raises((ValueError, tvm.error.DiagnosticError), match="writable scalar"):
+
+        @T.prim_func
+        def rvalue_destination(a_ptr: T.handle):
+            A = T.match_buffer(a_ptr, (1,), "uint32")
+            T.device_entry()
+            T.ptxd.ld.global_.b32(T.uint32(0), A.ptr_to([0]))
+
+    # @p is rejected on any instruction that writes a destination.
+    with pytest.raises((ValueError, tvm.error.DiagnosticError), match="without a destination"):
+
+        @T.prim_func
+        def predicated_destination(out: T.Buffer((1,), "uint32"), a_ptr: T.handle):
+            A = T.match_buffer(a_ptr, (1,), "uint32")
+            T.device_entry()
+            T.ptxd.ld.global_.b32(out[0], A.ptr_to([0]), pred=T.uint32(1))
 
 
 def test_ptxd_u64_address_handle_is_reinterpreted():
@@ -276,11 +319,13 @@ def test_ptxd_parser_roundtrip():
         tx = T.thread_id([32])
         smem = T.alloc_buffer((4,), "uint32", scope="shared")
         if tx == 0:
-            val: T.uint32 = T.ptxd.ld.global_.acquire.gpu.b32(A.ptr_to([0]))
+            val = T.local_scalar("uint32")
+            smem_addr = T.local_scalar("uint64")
+            T.ptxd.ld.global_.acquire.gpu.b32(val, A.ptr_to([0]))
             T.ptxd.st.shared__cta.b32(smem.ptr_to([0]), val)
             T.ptxd.red.relaxed.gpu.global_.add.u32(B.ptr_to([0]), T.uint32(1), pred=val)
             T.ptxd.prefetch.global_.L2(A.ptr_to([16]))
-            T.evaluate(T.ptxd.cvta.to.shared.u64(smem.data))
+            T.ptxd.cvta.to.shared.u64(smem_addr, smem.data)
         T.cuda.cta_sync()
         B[tx] = smem[tx % 4]
 
@@ -297,7 +342,7 @@ def test_ptxd_printer_form():
         T.cta_id([1])
         tx = T.thread_id([32])
         if tx == 0:
-            B[0] = T.ptxd.ld.global_.acquire.gpu.b32(A.ptr_to([0]))
+            T.ptxd.ld.global_.acquire.gpu.b32(B[0], A.ptr_to([0]))
         B[tx] = B[tx]
 
     script = kernel.script()
@@ -325,13 +370,24 @@ def test_ptxd_helper_source_golden():
         '  asm volatile("prefetch.global.L2 [%0];" :  : "l"(__addr) : "memory");\n'
         "}\n"
     )
+    # A destination is an ordinary operand taken by reference, so the C
+    # parameter list is the PTX operand list in order and the helper is void.
     assert render("ld", ("", "acquire", "gpu", "global", "", "", "", "", "b32")) == (
-        "__forceinline__ __device__ uint32_t tvm_builtin_ptxd_ld_acquire_gpu_global_b32"
-        "(const void* __addr) {\n"
-        "  uint32_t __ret;\n"
-        '  asm volatile("ld.acquire.gpu.global.b32 %0, [%1];" : "=r"(__ret) : "l"(__addr)'
+        "__forceinline__ __device__ void tvm_builtin_ptxd_ld_acquire_gpu_global_b32"
+        "(uint32_t& __d, const void* __addr) {\n"
+        '  asm volatile("ld.acquire.gpu.global.b32 %0, [%1];" : "=r"(__d) : "l"(__addr)'
         ' : "memory");\n'
-        "  return __ret;\n"
+        "}\n"
+    )
+    # 8-bit destination: no asm constraint of its own, so it rides a 16-bit
+    # carrier register and is narrowed into the reference afterwards. The asm
+    # block still holds exactly one instruction.
+    assert render("ld", ("", "", "", "global", "", "", "", "", "b8")) == (
+        "__forceinline__ __device__ void tvm_builtin_ptxd_ld_global_b8"
+        "(uint8_t& __d, const void* __addr) {\n"
+        "  uint16_t __d_reg;\n"
+        '  asm volatile("ld.global.b8 %0, [%1];" : "=h"(__d_reg) : "l"(__addr) : "memory");\n'
+        "  __d = (uint8_t)__d_reg;\n"
         "}\n"
     )
     # Shared-space addr slot: helper takes uint32_t (post-coercion form), not void*.
@@ -342,13 +398,11 @@ def test_ptxd_helper_source_golden():
         ' : "memory");\n'
         "}\n"
     )
-    # Pure op: plain asm, no volatile, no memory clobber.
+    # Register-only op: plain asm (asm_volatile=False), no memory clobber.
     assert render("cvta", ("to", "shared", "u64")) == (
-        "__forceinline__ __device__ uint64_t tvm_builtin_ptxd_cvta_to_shared_u64"
-        "(const void* __ptr) {\n"
-        "  uint64_t __ret;\n"
-        '  asm("cvta.to.shared.u64 %0, %1;" : "=l"(__ret) : "l"(__ptr));\n'
-        "  return __ret;\n"
+        "__forceinline__ __device__ void tvm_builtin_ptxd_cvta_to_shared_u64"
+        "(uint64_t& __d, const void* __ptr) {\n"
+        '  asm("cvta.to.shared.u64 %0, %1;" : "=l"(__d) : "l"(__ptr));\n'
         "}\n"
     )
     # Predicated twin (framework-level @p): extra uint32 pred param,
@@ -413,9 +467,11 @@ def test_ptxd_coercion_ir_forms():
     call = T.ptxd.st.release.gpu.global_.b32(global_ptr, val, pred=flag)
     assert call.args[2].same_as(flag)
     assert len(call.args) == 2 + 1 + 4  # operands + pred + slot tokens
-    # @p on a value-returning instruction is rejected.
-    with pytest.raises(ValueError, match="only supported on void"):
-        T.ptxd.ld.global_.b32(global_ptr, pred=flag)
+    # @p on an instruction with a destination is rejected: a false predicate
+    # leaves it unwritten while "=" tells nvcc its prior value is dead.
+    dst = tvm.tirx.Var("d", "uint32")
+    with pytest.raises(ValueError, match="without a destination"):
+        T.ptxd.ld.global_.b32(dst, global_ptr, pred=flag)
 
 
 _ASM_RE = re.compile(r'asm(?: volatile)?\("(.*?)"\s*:', re.S)
@@ -451,7 +507,7 @@ def test_ptxd_single_instruction_invariant():
     checked = 0
     for entry in TABLE.values():
         for tokens in variants(entry):
-            for predicated in (False, True) if entry.returns is None else (False,):
+            for predicated in (False,) if entry.has_dst else (False, True):
                 opcode, _, source = render_variant(entry, tokens, predicated)
                 asm_blocks = asm_re.findall(source)
                 assert len(asm_blocks) == 1, f"{opcode}: {len(asm_blocks)} asm blocks, expected 1"
@@ -463,6 +519,12 @@ def test_ptxd_single_instruction_invariant():
                 assert "cvta" not in source or entry.name == "cvta", (
                     f"{opcode}: cvta must be a separate IR node, never inside a helper"
                 )
+                # Every helper is void: a PTX destination is an operand, never
+                # a C return value.
+                assert source.startswith("__forceinline__ __device__ void "), (
+                    f"{opcode}: helper must be void, got {source.splitlines()[0]!r}"
+                )
+                assert "return" not in source, f"{opcode}: helper must not return a value"
                 checked += 1
     assert checked > 0
 
@@ -505,7 +567,7 @@ def test_ptxd_all_variants_render_unique():
             assert helper not in names, f"helper name collision: {helper}"
             names.add(helper)
             assert f'"{opcode} ' in source or f'"{opcode};"' in source
-            if entry.returns is None:  # framework-level @p twin
+            if not entry.has_dst:  # framework-level @p twin
                 _, pred_helper, pred_source = render_variant(entry, tokens, predicated=True)
                 assert pred_helper not in names
                 names.add(pred_helper)
@@ -546,7 +608,7 @@ def test_ptxd_sampled_helpers_assemble():
         combos = variants(entry)
         arch = entry.min_arch or PTXD_ARCH
         for i in rng.sample(range(len(combos)), min(16, len(combos))):
-            for predicated in (False, True) if entry.returns is None else (False,):
+            for predicated in (False,) if entry.has_dst else (False, True):
                 _, _, source = render_variant(entry, combos[i], predicated)
                 by_arch.setdefault(arch, []).append(source.replace("__forceinline__ ", ""))
     for arch, sources in by_arch.items():
@@ -588,7 +650,7 @@ def test_ptxd_all_helpers_certify(shard):
         for combo in variants(entry):
             if index % _CERT_SHARDS == shard:
                 covered += 1
-                for predicated in (False, True) if entry.returns is None else (False,):
+                for predicated in (False,) if entry.has_dst else (False, True):
                     _, _, source = render_variant(entry, combo, predicated)
                     by_arch.setdefault(arch, []).append(source.replace("__forceinline__ ", ""))
             index += 1
@@ -608,7 +670,8 @@ def test_ptxd_nvcc_smoke():
         tx = T.thread_id([32])
         smem = T.alloc_buffer((4,), "uint32", scope="shared")
         if tx == 0:
-            val: T.uint32 = T.ptxd.ld.global_.acquire.gpu.b32(A.ptr_to([0]))
+            val = T.local_scalar("uint32")
+            T.ptxd.ld.global_.acquire.gpu.b32(val, A.ptr_to([0]))
             T.ptxd.st.shared__cta.b32(smem.ptr_to([0]), val)
             T.ptxd.red.relaxed.gpu.global_.add.u32(B.ptr_to([0]), T.uint32(1))
             T.ptxd.prefetch.global_.L2(A.ptr_to([16]))
@@ -628,7 +691,8 @@ def test_ptxd_ld_st_gpu_roundtrip():
         T.device_entry()
         T.cta_id([1])
         tx = T.thread_id([32])
-        val: T.uint32 = T.ptxd.ld.global_.acquire.gpu.b32(A.ptr_to([tx]))
+        val = T.local_scalar("uint32")
+        T.ptxd.ld.global_.acquire.gpu.b32(val, A.ptr_to([tx]))
         T.ptxd.st.release.gpu.global_.b32(B.ptr_to([tx]), val)
 
     with TARGET:

@@ -55,11 +55,9 @@ def _chain_class(entry: InstructionEntry) -> str:
     # *args covers the printed round-trip form (trailing modifier strings,
     # positional pred) so re-parsed scripts type-check too.
     params = ["self", *(f"{s.name}: Any" for s in entry.operands), "*args: Any"]
-    if entry.returns is None:
+    if not entry.has_dst:
         params.append("pred: Any = None")
-        signature = f"def __call__({', '.join(params)}) -> None"
-    else:
-        signature = f"def __call__({', '.join(params)}) -> Any"
+    signature = f"def __call__({', '.join(params)}) -> None"
     # 4 indent + 3 opening quotes + text + 3 closing quotes must stay <= 100,
     # because ruff format collapses a one-line docstring onto a single line.
     doc_lines = textwrap.wrap(f"`{entry.name}` — {doc or '(no modifiers)'}", width=88)

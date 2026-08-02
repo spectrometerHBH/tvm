@@ -21,35 +21,50 @@ and by :mod:`.gen_helpers`, which dumps the generated helpers for humans to
 inspect without compiling a kernel.
 """
 
-from .table import EFFECT_PURE, PTX_TYPES, InstructionEntry, mods
+from .table import PTX_TYPES, InstructionEntry, mods
 
 
 def render_variant(entry: InstructionEntry, tokens, predicated=False):
     """Render one variant: ``(opcode, helper_name, helper_source)``.
 
+    Every helper is ``void`` and its C parameter list is the PTX operand list
+    in order, so the generated call reads like the PTX text it wraps.
+    Destinations (``role="dst"``) are taken by reference; the caller passes a
+    writable lvalue.
+
     ``predicated`` is a framework-level axis (never in the table): the helper
     gains a trailing ``uint32_t __pred`` operand, and the instruction is
     guarded with ``.reg .pred p; setp.ne.b32 p, %N, 0; @p ...``. Only valid
-    for void instructions (a false predicate leaves destinations unwritten).
+    for instructions without a destination — see ``InstructionEntry.has_dst``.
     """
     mod_map = mods(entry, tokens)
     opcode = ".".join([entry.ptx_name] + [tok for tok in tokens if tok])
     helper = "tvm_builtin_ptxd_" + opcode.replace("::", "__").replace(".", "_")
     if predicated:
-        assert entry.returns is None, "@p is only supported on void instructions"
+        assert not entry.has_dst, "@p is only supported on instructions without a destination"
         helper += "_pred"
 
     params, inputs, outputs, ptx_operands = [], [], [], []
+    pre, post = [], []  # carrier declarations / narrowing write-backs
     idx = 0
-    c_ret = carrier = "void"
-    if entry.returns is not None:
-        _, c_ret, ret_constraint, carrier = PTX_TYPES[mod_map[entry.returns]]
-        outputs.append(f'"={ret_constraint}"(__ret)')
-        ptx_operands.append(f"%{idx}")
-        idx += 1
     for slot in entry.operands:
         pname = f"__{slot.name}"
-        if slot.role == "addr":
+        if slot.role == "dst":
+            _, c_ty, constraint, carrier = PTX_TYPES[slot.dtype or mod_map["type"]]
+            params.append(f"{c_ty}& {pname}")
+            if carrier == c_ty:
+                outputs.append(f'"={constraint}"({pname})')
+            else:
+                # 8-bit destinations have no asm constraint of their own and
+                # ride a 16-bit register (ISA: "A destination register wider
+                # than the specified type may be used"), so the asm writes a
+                # carrier local that is then narrowed into the reference.
+                reg = f"{pname}_reg"
+                pre.append(f"{carrier} {reg};")
+                outputs.append(f'"={constraint}"({reg})')
+                post.append(f"{pname} = ({c_ty}){reg};")
+            ptx_operands.append(f"%{idx}")
+        elif slot.role == "addr":
             space = slot.space or mod_map.get("space", "")
             if space.startswith("shared"):
                 params.append(f"uint32_t {pname}")
@@ -81,32 +96,18 @@ def render_variant(entry: InstructionEntry, tokens, predicated=False):
         asm_text = f"{{ .reg .pred p; setp.ne.b32 p, %{idx}, 0; @p {instr} }}"
     else:
         asm_text = instr
-    # Three independent properties, deliberately not conflated:
+    # Two independent C-level properties, deliberately not conflated:
     #
-    #   entry.effect  - may the *IR* reorder, CSE or drop this call?
-    #   asm volatile  - may *nvcc* reorder or drop the emitted asm?
+    #   asm volatile  - may nvcc reorder or drop the emitted asm?
     #   "memory"      - does the instruction touch memory?
     #
-    # `volatile` defaults to the IR's answer but may be stated per entry, because
-    # the two genuinely disagree in practice: ex2/rcp are pure yet carry the
-    # barrier, fns is pure and does not.
-    #
-    # The memory clobber is separate again: an instruction with no memory
-    # operand cannot clobber memory, and claiming it does is a needless
-    # optimization barrier around pure-register instructions like ex2.
-    touches_memory = any(slot.role == "addr" for slot in entry.operands)
-    is_volatile = (
-        entry.asm_volatile if entry.asm_volatile is not None else entry.effect != EFFECT_PURE
-    )
-    volatile = " volatile" if is_volatile else ""
-    clobber = ' : "memory"' if entry.effect != EFFECT_PURE and touches_memory else ""
+    # `volatile` is stated per entry so each instruction keeps the barrier its
+    # legacy helper had. The clobber is derived instead: an instruction with no
+    # memory operand cannot clobber memory, and claiming it does is a needless
+    # optimization barrier around register-only instructions like ex2.
+    volatile = " volatile" if entry.asm_volatile else ""
+    clobber = ' : "memory"' if any(s.role == "addr" for s in entry.operands) else ""
     asm_line = f'asm{volatile}("{asm_text}" : {", ".join(outputs)} : {", ".join(inputs)}{clobber});'
-    if entry.returns is None:
-        body = f"  {asm_line}"
-    else:
-        # __ret lives in the asm carrier type; narrow on return when they
-        # differ (8-bit loads ride in 16-bit "h" registers).
-        ret_stmt = "return __ret;" if carrier == c_ret else f"return ({c_ret})__ret;"
-        body = f"  {carrier} __ret;\n  {asm_line}\n  {ret_stmt}"
-    source = f"__forceinline__ __device__ {c_ret} {helper}({', '.join(params)}) {{\n{body}\n}}\n"
+    body = "\n".join(f"  {line}" for line in [*pre, asm_line, *post])
+    source = f"__forceinline__ __device__ void {helper}({', '.join(params)}) {{\n{body}\n}}\n"
     return opcode, helper, source

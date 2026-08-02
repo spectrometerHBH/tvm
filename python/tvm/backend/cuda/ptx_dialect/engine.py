@@ -41,10 +41,18 @@ from tvm.backend.cuda.op import cuda_cvta_generic_to_shared, cuda_func_call
 from tvm.ir.op import register_op_attr
 from tvm.ir.type import PointerType, PrimType
 from tvm.runtime import const
+from tvm.tirx.expr import BufferLoad
 from tvm.tirx.op import call_intrin, reinterpret
 
 from .render import render_variant
 from .table import PTX_TYPES, InstructionEntry, escape_token, mods, unescape_token
+
+# tvm::tirx::CallEffectKind::kOpaque (include/tvm/tirx/op_attr_types.h). Every
+# ptxd call is a void statement, and RemoveNoOp deletes any Evaluate() whose
+# value is <= kReadState, so kOpaque is what keeps the instruction alive. It is
+# also the honest answer: "do not touch my instruction" is exactly the contract
+# a hand-written PTX call wants.
+_EFFECT_OPAQUE = 3
 
 # ---------------------------------------------------------------------------
 # Registration (import time)
@@ -56,7 +64,7 @@ def register_table(table: dict[str, InstructionEntry]) -> None:
     for entry in table.values():
         # First attr call implicitly creates the Op registry entry. Effect
         # kind must exist before any side-effect analysis sees the op.
-        register_op_attr(entry.op_name, "TCallEffectKind", entry.effect)
+        register_op_attr(entry.op_name, "TCallEffectKind", _EFFECT_OPAQUE)
         register_op_attr(entry.op_name, "TScriptPrinterName", f"ptxd.{entry.name}", level=20)
         register_op_attr(entry.op_name, "TIRxOpCategory", "device_intrin")
         register_op_attr(entry.op_name, "TDeviceIntrinsicNamespace", "ptxd")
@@ -77,12 +85,9 @@ def _make_codegen(entry: InstructionEntry):
         rest = args[: len(args) - n_slots]  # operands, plus pred when present
         predicated = len(rest) > n_operands
         _, helper, source = render_variant(entry, tokens, predicated)
-        if entry.returns is None:
-            return cuda_func_call(helper, *rest, source_code=source)
-        # return_type is the TVM dtype of the traced Call; the C return type
-        # only appears inside the helper source.
-        tvm_ret = PTX_TYPES[mods(entry, tokens)[entry.returns]][0]
-        return cuda_func_call(helper, *rest, source_code=source, return_type=tvm_ret)
+        # Every helper is void; a destination is an ordinary argument, printed
+        # by the C codegen as the lvalue it binds the reference parameter to.
+        return cuda_func_call(helper, *rest, source_code=source)
 
     return codegen
 
@@ -94,6 +99,26 @@ def _make_codegen(entry: InstructionEntry):
 
 def _coerce_operand(entry, slot, value, mod_map):
     ty = getattr(value, "ty", None)
+    if slot.role == "dst":
+        # A PTX destination is a register the caller declared, so the argument
+        # has to be a writable lvalue: a scalar (`x: T.float32`) or a buffer
+        # element. Both are BufferLoad nodes, which the C codegen prints as the
+        # lvalue bound to the helper's reference parameter.
+        want = PTX_TYPES[slot.dtype or mod_map["type"]][0]
+        value = getattr(value, "scalar", value)  # unwrap T.local_scalar
+        if not isinstance(value, BufferLoad):
+            raise ValueError(
+                f"{entry.name}: destination '{slot.name}' must be a writable scalar or "
+                f"buffer element (declare it first, e.g. `d: T.{want}`), got "
+                f"{type(value).__name__} — a T.let binding is immutable and cannot be one"
+            )
+        got = value.buffer.dtype
+        if got != want:
+            raise ValueError(
+                f"{entry.name}: destination '{slot.name}' must have dtype {want} "
+                f"(from .{slot.dtype or mod_map['type']}), got {got}"
+            )
+        return value
     if slot.role == "value":
         type_token = slot.dtype or mod_map["type"]
         want = PTX_TYPES[type_token][0]
@@ -169,19 +194,19 @@ def _emit(entry, filled, operands, pred=None):
         if error:
             raise ValueError(f"{entry.name}: {error}")
     if pred is not None:
-        if entry.returns is not None:
+        if entry.has_dst:
             raise ValueError(
-                f"{entry.name}: @p predication is only supported on void instructions "
-                f"(a false predicate would leave the result undefined)"
+                f"{entry.name}: @p predication is only supported on instructions without a "
+                f"destination (a false predicate leaves the destination unwritten, and the "
+                f'"=" output constraint would discard its prior value)'
             )
         pred = _coerce_pred(entry, pred)
-    ret_dtype = PTX_TYPES[mod_map[entry.returns]][0] if entry.returns is not None else ""
     coerced = [
         _coerce_operand(entry, slot, value, mod_map) for slot, value in zip(supplied, operands)
     ]
     # Call arg layout: [operands..., pred?] [slot tokens ("" = omitted)].
     return call_intrin(
-        ret_dtype,
+        "",  # every ptxd call is a void statement; destinations are operands
         entry.op_name,
         *coerced,
         *((pred,) if pred is not None else ()),
@@ -241,7 +266,10 @@ class _InstrChain:
             if token:
                 filled = _fill(entry, filled, token)
         operands = args[:split]
-        if len(operands) == len(entry.operands) + 1 and pred is None:
+        # ISA-fixed immediates take no argument, so the supplied-operand count
+        # is what a trailing positional predicate is measured against.
+        n_supplied = len([s for s in entry.operands if s.role != "imm"])
+        if len(operands) == n_supplied + 1 and pred is None:
             operands, pred = operands[:-1], operands[-1]
         return _emit(entry, filled, operands, pred=pred)
 
