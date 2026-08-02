@@ -77,18 +77,6 @@ _PACKED_ROUNDING = ("rz", "rn", "rm", "rp")
 #  - c_in: C type of input register operand (matches PTX register type)
 #  - out_cast: pointer cast applied at d_addr (callers may pass float*/double*/...)
 #  - in_cstr / out_cstr: GCC asm constraint letter
-_DTYPE_INFO = {
-    "f32": {"c_in": "float", "out_cast": "float*", "in_cstr": "f", "out_cstr": "f"},
-    "f32x2": {
-        "c_in": "unsigned long long",
-        "out_cast": "uint64_t*",
-        "in_cstr": "l",
-        "out_cstr": "l",
-    },
-    "f64": {"c_in": "double", "out_cast": "double*", "in_cstr": "d", "out_cstr": "d"},
-}
-
-
 def _ptx_arith_modifier_string(dtype, rounding, ftz, sat, op=None):
     """Build the `.rnd.ftz.sat` modifier substring + name suffix."""
     rnd = parse_str(rounding)
@@ -117,32 +105,6 @@ def _ptx_arith_modifier_string(dtype, rounding, ftz, sat, op=None):
     if sat_b:
         name_suffix += "_sat"
     return mod, name_suffix
-
-
-def _ptx_binary_arith_parts(op, dtype):
-    """Return (name_fn, sig, body_fn) for ptx_{op}_{dtype} binary form."""
-    info = _DTYPE_INFO[dtype]
-    # Destination is ``void*`` so callers can pass any element-type pointer
-    # (float* / double* / uint64_t*); body reinterpret-casts to the right type.
-    sig = f"(void* d, {info['c_in']} a, {info['c_in']} b)"
-
-    def _name(d, a, b, rounding, ftz, sat):
-        _, suf = _ptx_arith_modifier_string(dtype, rounding, ftz, sat, op=op)
-        return f"tvm_builtin_ptx_{op}_{dtype}{suf}"
-
-    out_c = info["out_cstr"]
-    in_c = info["in_cstr"]
-    out_cast = info["out_cast"]
-
-    def _body(d, a, b, rounding, ftz, sat):
-        mod, _ = _ptx_arith_modifier_string(dtype, rounding, ftz, sat, op=op)
-        return (
-            f'    asm volatile("{op}{mod}.{dtype} %0, %1, %2;"\n'
-            f'        : "={out_c}"(*reinterpret_cast<{out_cast}>(d))\n'
-            f'        : "{in_c}"(a), "{in_c}"(b));'
-        )
-
-    return _name, sig, _body
 
 
 _F32X2_VALUE_RETURN_TYPES = {
@@ -212,52 +174,6 @@ def _ptx_binary_f32x2_parts(op):
         )
 
     return _name, _sig, _return_type, _body
-
-
-def _ptx_fma_parts(dtype):
-    """Return (name_fn, sig, body_fn) for ptx_fma_{dtype}."""
-    info = _DTYPE_INFO[dtype]
-    sig = f"(void* d, {info['c_in']} a, {info['c_in']} b, {info['c_in']} c)"
-
-    def _name(d, a, b, c, rounding, ftz, sat):
-        _, suf = _ptx_arith_modifier_string(dtype, rounding, ftz, sat, op="fma")
-        return f"tvm_builtin_ptx_fma_{dtype}{suf}"
-
-    out_c = info["out_cstr"]
-    in_c = info["in_cstr"]
-    out_cast = info["out_cast"]
-
-    def _body(d, a, b, c, rounding, ftz, sat):
-        mod, _ = _ptx_arith_modifier_string(dtype, rounding, ftz, sat, op="fma")
-        return (
-            f'    asm volatile("fma{mod}.{dtype} %0, %1, %2, %3;"\n'
-            f'        : "={out_c}"(*reinterpret_cast<{out_cast}>(d))\n'
-            f'        : "{in_c}"(a), "{in_c}"(b), "{in_c}"(c));'
-        )
-
-    return _name, sig, _body
-
-
-# Register scalar DPS ops: {add, sub, mul, fma} x {f32, f64}.
-for _dtype in ("f32", "f64"):
-    for _op in ("add", "sub", "mul"):
-        _name_fn, _sig, _body_fn = _ptx_binary_arith_parts(_op, _dtype)
-        device_intrinsic(
-            f"ptx_{_op}_{_dtype}",
-            n_attrs=3,  # rounding, ftz, sat
-            helper_name=_name_fn,
-            c_signature=_sig,
-            body=_body_fn,
-        )
-    _name_fn, _sig, _body_fn = _ptx_fma_parts(_dtype)
-    device_intrinsic(
-        f"ptx_fma_{_dtype}",
-        n_attrs=3,
-        helper_name=_name_fn,
-        c_signature=_sig,
-        body=_body_fn,
-    )
-del _dtype, _op, _name_fn, _sig, _body_fn
 
 
 for _op in ("add", "sub", "mul"):
@@ -472,15 +388,6 @@ device_intrinsic(
     return_type="int",
     body="    return __ffs(value);",
 )
-
-device_intrinsic(
-    "ptx_add_rn_f32_bf16",
-    helper_name="tvm_builtin_ptx_add_rn_f32_bf16",
-    c_signature="(float acc, unsigned short x)",
-    return_type="float",
-    body=('    asm("add.rn.f32.bf16 %0, %1, %0;" : "+f"(acc) : "h"(x));\n    return acc;'),
-)
-
 
 device_intrinsic(
     "cuda_make_float2",

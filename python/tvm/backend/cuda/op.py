@@ -3365,25 +3365,6 @@ def ptx_reduce3_min_f32(a, b, c):
     return call_intrin("float32", "tirx.ptx.reduce3_min_f32", a, b, c)
 
 
-def _ptx_binary_arith(op_name, dtype, d, a, b, *, rounding="rn", ftz=False, sat=False):
-    """Shared helper for add/sub/mul over (f32 | f32x2 | f64), DPS form."""
-    _choice("rounding", rounding, _F32X2_ROUND)
-    if dtype == "f64" and (ftz or sat):
-        raise ValueError(f"PTX {op_name}.f64 does not accept .ftz or .sat")
-    if dtype == "f32x2" and sat:
-        raise ValueError(f"PTX {op_name}.f32x2 does not accept .sat")
-    return call_intrin(
-        "",
-        f"tirx.ptx.{op_name}_{dtype}",
-        d,
-        a,
-        b,
-        rounding,
-        int(ftz),
-        int(sat),
-    )
-
-
 _PTX_F32X2_VALUE_RETURN_DTYPES = ("uint64", "float32x2")
 
 
@@ -3441,26 +3422,6 @@ def _ptx_binary_f32x2(op_name, *args, rounding="rn", ftz=False, dps=True, return
     )
 
 
-def _ptx_fma(dtype, d, a, b, c, *, rounding="rn", ftz=False, sat=False):
-    """Shared helper for fma over (f32 | f32x2 | f64), DPS form."""
-    _choice("rounding", rounding, _F32X2_ROUND)
-    if dtype == "f64" and (ftz or sat):
-        raise ValueError("PTX fma.f64 does not accept .ftz or .sat")
-    if dtype == "f32x2" and sat:
-        raise ValueError("PTX fma.f32x2 does not accept .sat")
-    return call_intrin(
-        "",
-        f"tirx.ptx.fma_{dtype}",
-        d,
-        a,
-        b,
-        c,
-        rounding,
-        int(ftz),
-        int(sat),
-    )
-
-
 def _ptx_fma_f32x2(*args, rounding="rn", ftz=False, dps=True, return_dtype="uint64"):
     """Shared helper for packed f32x2 fma forms."""
     _choice("rounding", rounding, _F32X2_ROUND)
@@ -3497,11 +3458,6 @@ def _ptx_fma_f32x2(*args, rounding="rn", ftz=False, dps=True, return_dtype="uint
     )
 
 
-def ptx_add_f32(d_addr, a, b, *, rounding="rn", ftz=False, sat=False):
-    """PTX ``add{.rnd}{.ftz}{.sat}.f32 [d_addr], a, b`` — DPS form."""
-    return _ptx_binary_arith("add", "f32", d_addr, a, b, rounding=rounding, ftz=ftz, sat=sat)
-
-
 def ptx_add_f32x2(*args, rounding="rn", ftz=False, dps=True, return_dtype="uint64"):
     """PTX ``add{.rnd}{.ftz}.f32x2``.
 
@@ -3530,21 +3486,11 @@ def ptx_sub_f32x2(*args, rounding="rn", ftz=False, dps=True, return_dtype="uint6
     )
 
 
-def ptx_mul_f32(d_addr, a, b, *, rounding="rn", ftz=False, sat=False):
-    """PTX ``mul{.rnd}{.ftz}{.sat}.f32 [d_addr], a, b`` — DPS form."""
-    return _ptx_binary_arith("mul", "f32", d_addr, a, b, rounding=rounding, ftz=ftz, sat=sat)
-
-
 def ptx_mul_f32x2(*args, rounding="", ftz=False, dps=True, return_dtype="uint64"):
     """PTX ``mul{.rnd}{.ftz}.f32x2``; see :func:`ptx_add_f32x2`."""
     return _ptx_binary_f32x2(
         "mul", *args, rounding=rounding, ftz=ftz, dps=dps, return_dtype=return_dtype
     )
-
-
-def ptx_fma_f32(d_addr, a, b, c, *, rounding="rn", ftz=False, sat=False):
-    """PTX ``fma{.rnd}{.ftz}{.sat}.f32 [d_addr], a, b, c`` — DPS form."""
-    return _ptx_fma("f32", d_addr, a, b, c, rounding=rounding, ftz=ftz, sat=sat)
 
 
 def ptx_fma_f32x2(*args, rounding="rn", ftz=False, dps=True, return_dtype="uint64"):
@@ -4132,10 +4078,6 @@ def ptx_cp_async_bulk_s2g(
         int(has_cache_policy),
         int(bool(cp_mask)),
     )
-
-
-def ptx_add_rn_f32_bf16(acc, x):
-    return call_intrin("float32", "tirx.ptx.add_rn_f32_bf16", acc, x)
 
 
 def cuda_uint_as_float(bits):

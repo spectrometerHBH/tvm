@@ -470,7 +470,7 @@ def test_megamoe_extracted_intrinsics_codegen():
             F32[2] = T.cuda.ldg(T.handle_add_byte_offset(F32.data, 4), "float32")
             F32[3] = T.cuda.fdividef(F32[0], F32[1])
             U32[3] = T.cuda.float_as_uint(F32[1])
-            F32[0] = T.ptx.add_rn_f32_bf16(F32[0], T.cast(U32[0], "uint16"))
+            T.ptxd.add.rn.f32.bf16(F32[0], T.cast(U32[0], "uint16"), F32[0])
             U64[0] = T.reinterpret("uint64", U32.data)
             U32[0] = T.cuda.ballot_sync(T.uint32(0xFFFFFFFF), I32[0])
             I32[0] = T.cuda.ffs_u32(U32[0])
