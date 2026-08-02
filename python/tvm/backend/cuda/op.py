@@ -4043,12 +4043,6 @@ def ptx_st(
     return call_intrin("", "tirx.ptx.st", address, *values, *attrs)
 
 
-def ptx_st_bulk(ptr, num_bytes, *, weak=False, space="shared::cta"):
-    if space not in ("", "shared::cta"):
-        raise ValueError(f"Unsupported PTX st.bulk space {space!r}")
-    return call_intrin("", "tirx.ptx.st_bulk", ptr, num_bytes, int(bool(weak)), space)
-
-
 def ptx_mbarrier_test_wait_parity(barrier, phase, *, sem="", scope="", space="shared::cta"):
     if sem not in ("", "acquire", "relaxed"):
         raise ValueError(f"Unsupported mbarrier.test_wait.parity sem {sem!r}")

@@ -33,7 +33,7 @@ def render_variant(entry: InstructionEntry, tokens, predicated=False):
     for void instructions (a false predicate leaves destinations unwritten).
     """
     mod_map = mods(entry, tokens)
-    opcode = ".".join([entry.name] + [tok for tok in tokens if tok])
+    opcode = ".".join([entry.ptx_name] + [tok for tok in tokens if tok])
     helper = "tvm_builtin_ptxd_" + opcode.replace("::", "__").replace(".", "_")
     if predicated:
         assert entry.returns is None, "@p is only supported on void instructions"
@@ -58,6 +58,11 @@ def render_variant(entry: InstructionEntry, tokens, predicated=False):
                 params.append(f"const void* {pname}")
                 inputs.append(f'"l"({pname})')
             ptx_operands.append(f"[%{idx}]")
+        elif slot.role == "imm":
+            # ISA-fixed immediate: part of the instruction text, not a operand
+            # the caller supplies.
+            ptx_operands.append(slot.literal)
+            continue
         elif slot.role == "ptr":
             params.append(f"const void* {pname}")
             inputs.append(f'"l"({pname})')

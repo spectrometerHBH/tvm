@@ -113,12 +113,16 @@ class OperandSlot:
       - ``"ptr"``   raw pointer value, rendered ``%k`` (e.g. ``cvta`` input).
       - ``"value"`` register operand typed by ``dtype`` (fixed per operand)
         or else the entry's ``type`` modifier slot.
+      - ``"imm"``   an operand the ISA fixes to a single value (st.bulk's
+        initval "must be zero"). Rendered straight into the asm text; it
+        takes no C parameter and no call argument.
     """
 
     name: str
     role: str
     space: str | None = None
     dtype: str | None = None
+    literal: str | None = None  # role="imm" only
 
 
 CheckFn = Callable[[dict], str | None]
@@ -128,7 +132,7 @@ CheckFn = Callable[[dict], str | None]
 class InstructionEntry:
     """One PTX instruction family (one syntax shape)."""
 
-    name: str  # single-token family name, e.g. "cvta"
+    name: str  # table key and attribute name, e.g. "cvta", "st_bulk"
     operands: tuple[OperandSlot, ...]
     effect: int  # CallEffectKind int (TCallEffectKind attr)
     returns: str | None  # None (void) or the slot naming the result dtype
@@ -143,10 +147,23 @@ class InstructionEntry:
     # `effect`; set it explicitly to preserve an instruction's established
     # barrier when migrating.
     asm_volatile: bool | None = None
+    # The PTX mnemonic, when it is not spellable as a Python identifier.
+    # `st.bulk` is one instruction whose name contains a dot, so the table key
+    # (st_bulk) and the emitted mnemonic (st.bulk) have to differ.
+    mnemonic: str | None = None
+    # Lowest -arch that assembles this family, when it is above the table
+    # default. Certification must use it: assembling below an instruction's
+    # floor makes ptxas report legal variants as illegal, and those verdicts
+    # would then get baked into a check() and silently delete coverage.
+    min_arch: str | None = None
 
     @property
     def op_name(self) -> str:
         return f"tirx.ptxd.{self.name}"
+
+    @property
+    def ptx_name(self) -> str:
+        return self.mnemonic or self.name
 
 
 def mods(entry: InstructionEntry, tokens) -> dict:
@@ -491,6 +508,24 @@ _ENTRIES = [
         effect=EFFECT_PURE,
         asm_volatile=True,  # legacy barrier: preserved so migration is byte-identical
         returns="type",
+    ),
+    # st.bulk per PTX ISA 9.7.9.14:
+    #   st.bulk{.weak}{.shared::cta} [a], size, initval;  // initval must be zero
+    InstructionEntry(
+        name="st_bulk",
+        mnemonic="st.bulk",
+        min_arch="sm_100a",  # PTX ISA 8.6; ptxas: "requires .target sm_100 or higher"
+        slots=(
+            ModifierSlot("weak", ("weak",), optional=True),
+            ModifierSlot("space", ("shared::cta",), optional=True),
+        ),
+        operands=(
+            OperandSlot("addr", role="addr"),
+            OperandSlot("size", role="value", dtype="u64"),
+            OperandSlot("initval", role="imm", literal="0"),
+        ),
+        effect=EFFECT_OPAQUE,
+        returns=None,
     ),
     InstructionEntry(
         name="cvta",

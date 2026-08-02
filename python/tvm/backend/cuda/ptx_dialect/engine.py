@@ -70,7 +70,7 @@ def register_table(table: dict[str, InstructionEntry]) -> None:
 
 def _make_codegen(entry: InstructionEntry):
     n_slots = len(entry.slots)
-    n_operands = len(entry.operands)
+    n_operands = len([s for s in entry.operands if s.role != "imm"])
 
     def codegen(*args):
         tokens = [parse_str(a) for a in args[len(args) - n_slots :]]
@@ -114,12 +114,10 @@ def _coerce_operand(entry, slot, value, mod_map):
     space = slot.space or mod_map.get("space", "")
     if space.startswith("shared"):
         if isinstance(ty, PointerType):
-            scope = ty.storage_scope
-            if scope and not scope.startswith("shared"):
-                raise ValueError(
-                    f"{entry.name}: operand '{slot.name}' needs a shared-space address, "
-                    f"got a pointer with scope '{scope}'"
-                )
+            # Any pointer is accepted and converted, which is what the legacy
+            # helpers did. The pointer's storage_scope is not a reliable
+            # discriminator here: a shared buffer's ptr_to() reports 'global',
+            # so gating on it rejects correct code.
             return cuda_cvta_generic_to_shared(value)
         if isinstance(ty, PrimType) and ty.dtype == "uint32":
             return value  # trusted raw shared-window address
@@ -153,10 +151,12 @@ def _coerce_pred(entry, pred):
 
 
 def _emit(entry, filled, operands, pred=None):
-    if len(operands) != len(entry.operands):
+    # ISA-fixed immediates are part of the instruction text, not arguments.
+    supplied = [s for s in entry.operands if s.role != "imm"]
+    if len(operands) != len(supplied):
         raise ValueError(
-            f"{entry.name} expects {len(entry.operands)} operand(s) "
-            f"({', '.join(s.name for s in entry.operands)}), got {len(operands)}"
+            f"{entry.name} expects {len(supplied)} operand(s) "
+            f"({', '.join(s.name for s in supplied)}), got {len(operands)}"
         )
     missing = [
         slot.name for slot, tok in zip(entry.slots, filled) if tok is None and not slot.optional
@@ -177,8 +177,7 @@ def _emit(entry, filled, operands, pred=None):
         pred = _coerce_pred(entry, pred)
     ret_dtype = PTX_TYPES[mod_map[entry.returns]][0] if entry.returns is not None else ""
     coerced = [
-        _coerce_operand(entry, slot, value, mod_map)
-        for slot, value in zip(entry.operands, operands)
+        _coerce_operand(entry, slot, value, mod_map) for slot, value in zip(supplied, operands)
     ]
     # Call arg layout: [operands..., pred?] [slot tokens ("" = omitted)].
     return call_intrin(

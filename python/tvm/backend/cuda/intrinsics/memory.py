@@ -996,35 +996,6 @@ def _register_ptx_st(op_name, form, n_attrs):
 _register_ptx_st("ptx_st", "weak", 9)
 
 
-# PTX st.bulk form:
-#   st.bulk{.weak}{.shared::cta} [a], size, initval;
-# ``initval`` is an immediate operand whose only legal value is 0.
-def _ptx_st_bulk_parts(_ptr, _num_bytes, weak, space):
-    weak = bool(int(weak)) if hasattr(weak, "value") else bool(weak)
-    space = parse_str(space)
-    instr = f"st.bulk{'.weak' if weak else ''}{_dot(space)}"
-    name = f"tvm_builtin_ptx_st_bulk{'_weak' if weak else ''}{('_' + _safe_attr(space)) if space else ''}"
-    addr_arg = (
-        '"r"((unsigned int)__cvta_generic_to_shared(ptr))' if space == "shared::cta" else '"l"(ptr)'
-    )
-    body = (
-        f'    asm volatile("{instr} [%0], %1, 0;"\n'
-        "                 :\n"
-        f"                 : {addr_arg}, "
-        '"l"(static_cast<uint64_t>(num_bytes))\n'
-        '                 : "memory");'
-    )
-    return name, body
-
-
-device_intrinsic(
-    "ptx_st_bulk",
-    n_attrs=2,
-    helper_name=lambda *a: _ptx_st_bulk_parts(*a)[0],
-    c_signature="(void* ptr, unsigned int num_bytes)",
-    body=lambda *a: _ptx_st_bulk_parts(*a)[1],
-)
-
 device_intrinsic(
     "cuda_uint_as_float",
     helper_name="tvm_builtin_uint_as_float",

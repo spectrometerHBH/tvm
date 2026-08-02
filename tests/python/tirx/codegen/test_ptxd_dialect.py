@@ -401,11 +401,11 @@ def test_ptxd_coercion_ir_forms():
     # Modifiers ride as trailing positional string args in slot order.
     assert [str(a).strip('"') for a in call.args[2:]] == ["release", "gpu", "global", "b32"]
 
-    # Scope mismatches are trace-time errors.
-    with pytest.raises(ValueError, match="shared-space address"):
-        T.ptxd.st.shared__cta.b32(global_ptr, val)
-    with pytest.raises(ValueError, match="shared-scope pointer"):
-        T.ptxd.st.release.gpu.global_.b32(shared_ptr, val)
+    # A shared-space slot converts whatever pointer it is given: TIRx pointer
+    # scopes are not a reliable discriminator (a shared buffer's ptr_to()
+    # reports 'global'), and the legacy helpers converted unconditionally too.
+    call = T.ptxd.st.shared__cta.b32(global_ptr, val)
+    assert call.args[0].op.name == "tirx.cuda.cvta_generic_to_shared"
 
     # Predication: pred rides after the operands (codegen derives the
     # predicated form from the arg count).
@@ -510,7 +510,7 @@ def test_ptxd_all_variants_render_unique():
                 assert pred_helper not in names
                 names.add(pred_helper)
                 assert f"@p {opcode} " in pred_source
-    assert total == 13867  # update when the table grows
+    assert total == 13871  # update when the table grows
 
 
 def test_ptxd_stub_up_to_date():
@@ -541,14 +541,16 @@ def test_ptxd_sampled_helpers_assemble():
     from tvm.backend.cuda.ptx_dialect.table import TABLE, variants
 
     rng = random.Random(20260802)
-    chunks = ["#include <cstdint>"]
+    by_arch = {}
     for entry in TABLE.values():
         combos = variants(entry)
+        arch = entry.min_arch or PTXD_ARCH
         for i in rng.sample(range(len(combos)), min(16, len(combos))):
             for predicated in (False, True) if entry.returns is None else (False,):
                 _, _, source = render_variant(entry, combos[i], predicated)
-                chunks.append(source.replace("__forceinline__ ", ""))
-    _assert_ptxas_ok("\n".join(chunks), rdc=True)
+                by_arch.setdefault(arch, []).append(source.replace("__forceinline__ ", ""))
+    for arch, sources in by_arch.items():
+        _assert_ptxas_ok("\n".join(["#include <cstdint>", *sources]), rdc=True, arch=arch)
 
 
 _CERT_SHARDS = 32
@@ -561,33 +563,38 @@ _CERT_SHARDS = 32
 @requires_nvcc
 @pytest.mark.parametrize("shard", range(_CERT_SHARDS))
 def test_ptxd_all_helpers_certify(shard):
-    """Certification tier: EVERY legal variant assembles under ptxas (sm_90).
+    """Certification tier: EVERY legal variant assembles under ptxas.
 
     Sharded so pytest-xdist can spread the nvcc work::
 
         PTXD_CERT=1 pytest -n 16 -k certify tests/python/tirx/codegen/test_ptxd_dialect.py
 
     Stride slicing keeps shards balanced (ld dominates the variant count).
+    Variants are grouped by their family's arch floor and each group is
+    assembled at that arch: below an instruction's floor ptxas rejects legal
+    variants, and believing it would delete real coverage.
     __forceinline__ must be stripped and -rdc used: unreferenced inline
     device functions are silently dropped before ptxas ever sees them.
     """
     from tvm.backend.cuda.ptx_dialect.render import render_variant
     from tvm.backend.cuda.ptx_dialect.table import TABLE, variants
 
-    chunks = ["#include <cstdint>"]
+    by_arch = {}
     covered = 0
     index = 0
     for name in sorted(TABLE):
         entry = TABLE[name]
+        arch = entry.min_arch or PTXD_ARCH
         for combo in variants(entry):
             if index % _CERT_SHARDS == shard:
                 covered += 1
                 for predicated in (False, True) if entry.returns is None else (False,):
                     _, _, source = render_variant(entry, combo, predicated)
-                    chunks.append(source.replace("__forceinline__ ", ""))
+                    by_arch.setdefault(arch, []).append(source.replace("__forceinline__ ", ""))
             index += 1
     assert covered, "empty shard: lower _CERT_SHARDS"
-    _assert_ptxas_ok("\n".join(chunks), rdc=True)
+    for arch, sources in by_arch.items():
+        _assert_ptxas_ok("\n".join(["#include <cstdint>", *sources]), rdc=True, arch=arch)
 
 
 @requires_nvcc

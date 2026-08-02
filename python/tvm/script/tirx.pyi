@@ -234,6 +234,15 @@ class _Chain_max:
     ftz: _Chain_max
     def __call__(self, a: Any, b: Any, *args: Any) -> Any: ...
 
+class _Chain_st_bulk:
+    """`st_bulk` — weak∈{weak} (opt); space∈{shared::cta} (opt)"""
+
+    shared__cta: _Chain_st_bulk
+    weak: _Chain_st_bulk
+    def __call__(
+        self, addr: Any, size: Any, initval: Any, *args: Any, pred: Any = None
+    ) -> None: ...
+
 class _Chain_cvta:
     """`cvta` — dir∈{to}; space∈{shared}; type∈{u64}"""
 
@@ -274,6 +283,7 @@ class _PTXD:
     rcp: _Chain_rcp
     red: _Chain_red
     st: _Chain_st
+    st_bulk: _Chain_st_bulk
     def __getitem__(self, text: str) -> Any: ...
 
 ptxd: _PTXD
