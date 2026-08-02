@@ -4235,10 +4235,6 @@ def ptx_cp_async_bulk_s2g(
     )
 
 
-def ptx_fns_b32(mask, base, offset):
-    return call_intrin("uint32", "tirx.ptx.fns_b32", mask, base, offset)
-
-
 def ptx_add_rn_f32_bf16(acc, x):
     return call_intrin("float32", "tirx.ptx.add_rn_f32_bf16", acc, x)
 

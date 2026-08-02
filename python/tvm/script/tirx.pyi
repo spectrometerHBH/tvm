@@ -145,6 +145,12 @@ class _Chain_rcp:
     rz: _Chain_rcp
     def __call__(self, value: Any, *args: Any) -> Any: ...
 
+class _Chain_fns:
+    """`fns` — type∈{b32}"""
+
+    b32: _Chain_fns
+    def __call__(self, mask: Any, base: Any, offset: Any, *args: Any) -> Any: ...
+
 class _Chain_cvta:
     """`cvta` — dir∈{to}; space∈{shared}; type∈{u64}"""
 
@@ -177,6 +183,7 @@ class _PTXD:
     cp: _Chain_cp
     cvta: _Chain_cvta
     ex2: _Chain_ex2
+    fns: _Chain_fns
     ld: _Chain_ld
     prefetch: _Chain_prefetch
     rcp: _Chain_rcp

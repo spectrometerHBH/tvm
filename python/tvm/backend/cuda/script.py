@@ -70,7 +70,6 @@ class PTXNamespace:
         self.cp_async_bulk_s2g = _op_wrapper(_cuda_op.ptx_cp_async_bulk_s2g)
         self.st = _op_wrapper(_cuda_op.ptx_st)
         self.st_bulk = _op_wrapper(_cuda_op.ptx_st_bulk)
-        self.fns_b32 = _op_wrapper(_cuda_op.ptx_fns_b32)
         self.add_rn_f32_bf16 = _op_wrapper(_cuda_op.ptx_add_rn_f32_bf16)
         self.mapa = _op_wrapper(_cuda_op.ptx_mapa)
         self.map_shared_rank = _op_wrapper(_cuda_op.ptx_map_shared_rank)

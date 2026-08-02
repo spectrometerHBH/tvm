@@ -134,6 +134,15 @@ class InstructionEntry:
     returns: str | None  # None (void) or the slot naming the result dtype
     slots: tuple[ModifierSlot, ...] = ()
     check: CheckFn | None = None  # cross-slot validation, mod_map -> error | None
+    # Whether the emitted inline asm carries `volatile`. This is a C-level
+    # optimization barrier — it never changes *which* PTX instruction is
+    # emitted, only whether nvcc may common up or drop identical calls. It is
+    # deliberately independent of `effect`, which answers the same question
+    # for the IR: ex2/rcp are pure (the IR shares a let-bound result) yet
+    # carry the barrier, while fns is pure and does not. None derives it from
+    # `effect`; set it explicitly to preserve an instruction's established
+    # barrier when migrating.
+    asm_volatile: bool | None = None
 
     @property
     def op_name(self) -> str:
@@ -340,6 +349,7 @@ _ENTRIES = [
         ),
         operands=(OperandSlot("value", role="value"),),
         effect=EFFECT_PURE,
+        asm_volatile=True,  # legacy barrier: preserved so migration is byte-identical
         returns="type",
     ),
     # rcp per PTX ISA 9.7.3.13. `rcp.approx.ftz.f64` (a separate syntax line in
@@ -353,6 +363,22 @@ _ENTRIES = [
         ),
         check=_check_rcp,
         operands=(OperandSlot("value", role="value"),),
+        effect=EFFECT_PURE,
+        asm_volatile=True,  # legacy barrier: preserved so migration is byte-identical
+        returns="type",
+    ),
+    # fns per PTX ISA 9.7.1.18: `fns.b32 d, mask, base, offset;` — one form.
+    # The operands carry three different types (mask .b32, base .b32/.u32/.s32,
+    # offset .s32), so each declares its own dtype rather than sharing the
+    # entry's type slot.
+    InstructionEntry(
+        name="fns",
+        slots=(ModifierSlot("type", ("b32",)),),
+        operands=(
+            OperandSlot("mask", role="value", dtype="b32"),
+            OperandSlot("base", role="value", dtype="b32"),
+            OperandSlot("offset", role="value", dtype="s32"),
+        ),
         effect=EFFECT_PURE,
         returns="type",
     ),

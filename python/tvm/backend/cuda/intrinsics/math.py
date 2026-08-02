@@ -498,17 +498,6 @@ def codegen_cuda_cta_reduce(value, op, num_warps, scratch):
 
 # PTX integer bit-search form:
 #   fns.b32 d, mask, base, offset;
-device_intrinsic(
-    "ptx_fns_b32",
-    helper_name="tvm_builtin_ptx_fns_b32",
-    c_signature="(unsigned int mask, unsigned int base, int offset)",
-    return_type="unsigned int",
-    body=(
-        "    unsigned int ret;\n"
-        '    asm("fns.b32 %0, %1, %2, %3;" : "=r"(ret) : "r"(mask), "r"(base), "r"(offset));\n'
-        "    return ret;"
-    ),
-)
 
 device_intrinsic(
     "cuda_ffs_u32",

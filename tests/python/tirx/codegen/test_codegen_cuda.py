@@ -482,7 +482,7 @@ def test_megamoe_extracted_intrinsics_codegen():
                 ptx_type="b32",
             )
             T.ptx.st_bulk(U32.data, T.uint32(16), weak=True, space="shared::cta")
-            U32[0] = T.ptx.fns_b32(U32[0], U32[1], I32[0])
+            U32[0] = T.ptxd.fns.b32(U32[0], U32[1], I32[0])
             T.ptx.stmatrix(
                 True,  # trans
                 1,  # num
