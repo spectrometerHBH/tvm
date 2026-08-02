@@ -76,9 +76,24 @@ def render_variant(entry: InstructionEntry, tokens, predicated=False):
         asm_text = f"{{ .reg .pred p; setp.ne.b32 p, %{idx}, 0; @p {instr} }}"
     else:
         asm_text = instr
-    effectful = entry.effect != EFFECT_PURE
-    volatile = " volatile" if effectful else ""
-    clobber = ' : "memory"' if effectful else ""
+    # Three independent properties, deliberately not conflated:
+    #
+    #   entry.effect  - may the *IR* reorder, CSE or drop this call?
+    #   asm volatile  - may *nvcc* reorder or drop the emitted asm?
+    #   "memory"      - does the instruction touch memory?
+    #
+    # We always emit `volatile`: the caller asked for a specific hardware
+    # instruction, so the C compiler must not delete or duplicate it. That is
+    # also what every hand-written TIRx helper does, which keeps migrated call
+    # sites byte-identical. IR-level purity is expressed by entry.effect and
+    # is what lets the IR share a let-bound result.
+    #
+    # The memory clobber is separate: an instruction with no memory operand
+    # cannot clobber memory, and claiming it does is a needless optimization
+    # barrier around pure-register instructions like ex2.
+    touches_memory = any(slot.role == "addr" for slot in entry.operands)
+    volatile = " volatile"
+    clobber = ' : "memory"' if entry.effect != EFFECT_PURE and touches_memory else ""
     asm_line = f'asm{volatile}("{asm_text}" : {", ".join(outputs)} : {", ".join(inputs)}{clobber});'
     if entry.returns is None:
         body = f"  {asm_line}"

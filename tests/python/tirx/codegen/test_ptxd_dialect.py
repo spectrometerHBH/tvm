@@ -333,7 +333,7 @@ def test_ptxd_helper_source_golden():
         "__forceinline__ __device__ uint64_t tvm_builtin_ptxd_cvta_to_shared_u64"
         "(const void* __ptr) {\n"
         "  uint64_t __ret;\n"
-        '  asm("cvta.to.shared.u64 %0, %1;" : "=l"(__ret) : "l"(__ptr));\n'
+        '  asm volatile("cvta.to.shared.u64 %0, %1;" : "=l"(__ret) : "l"(__ptr));\n'
         "  return __ret;\n"
         "}\n"
     )
@@ -496,7 +496,7 @@ def test_ptxd_all_variants_render_unique():
                 assert pred_helper not in names
                 names.add(pred_helper)
                 assert f"@p {opcode} " in pred_source
-    assert total == 9647  # update when the table grows
+    assert total == 9663  # update when the table grows
 
 
 def test_ptxd_stub_up_to_date():

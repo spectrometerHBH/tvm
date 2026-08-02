@@ -3316,38 +3316,6 @@ def cuda_sm100_2sm_leader_smem_addr(ptr):
     return bitwise_and(cuda_cvta_generic_to_shared(ptr), const(0xFEFFFFFF, dtype="uint32"))
 
 
-def ptx_exp2(x):
-    """TVM intrinsic for PTX fast exp2 approximation (ex2.approx.ftz.f32)
-
-    Parameters
-    ----------
-    x : Expr
-        The float32 input value.
-
-    Returns
-    -------
-    call : Expr
-        The call expression returning 2^x (approximate).
-    """
-    return call_intrin("float32", "tirx.ptx.exp2", x)
-
-
-def ptx_rcp(x):
-    """TVM intrinsic for PTX fast reciprocal approximation (rcp.approx.ftz.f32)
-
-    Parameters
-    ----------
-    x : Expr
-        The float32 input value.
-
-    Returns
-    -------
-    call : Expr
-        The call expression returning 1/x (approximate).
-    """
-    return call_intrin("float32", "tirx.ptx.rcp", x)
-
-
 def ptx_any_sync(mask, pred):
     """TVM intrinsic for PTX warp-wide any predicate (__any_sync)
 

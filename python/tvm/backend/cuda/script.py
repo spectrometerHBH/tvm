@@ -76,8 +76,6 @@ class PTXNamespace:
         self.map_shared_rank = _op_wrapper(_cuda_op.ptx_map_shared_rank)
         self.any_sync = _op_wrapper(_cuda_op.ptx_any_sync)
         # Math operations
-        self.exp2 = _op_wrapper(_cuda_op.ptx_exp2)
-        self.rcp = _op_wrapper(_cuda_op.ptx_rcp)
         self.reduce3_min_f32 = _op_wrapper(_cuda_op.ptx_reduce3_min_f32)
         self.reduce3_max_f32 = _op_wrapper(_cuda_op.ptx_reduce3_max_f32)
         self.cvt = _dtype_forward(_cuda_op.ptx_cvt)

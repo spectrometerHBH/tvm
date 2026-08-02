@@ -336,26 +336,6 @@ del _op, _name_fn, _sig_fn, _ret_fn, _body_fn
 # =============================================================================
 # ex2.approx.ftz.f32 / rcp.approx.ftz.f32 — 1 form each.
 # =============================================================================
-device_intrinsic(
-    "ptx_exp2",
-    c_signature="(float x)",
-    return_type="float",
-    body=(
-        "    float result;\n"
-        '    asm volatile("ex2.approx.ftz.f32 %0, %1;" : "=f"(result) : "f"(x));\n'
-        "    return result;"
-    ),
-)
-device_intrinsic(
-    "ptx_rcp",
-    c_signature="(float x)",
-    return_type="float",
-    body=(
-        "    float result;\n"
-        '    asm volatile("rcp.approx.ftz.f32 %0, %1;" : "=f"(result) : "f"(x));\n'
-        "    return result;"
-    ),
-)
 
 device_intrinsic(
     "cuda_fdividef",

@@ -228,6 +228,19 @@ def _check_st(m):
     return None
 
 
+def _check_rcp(m):
+    """rcp.approx is f32-only; .f64 is IEEE-rounded and takes no .ftz (PTX ISA 9.7.3.13)."""
+    # Syntax lines: rcp.approx{.ftz}.f32 / rcp.rnd{.ftz}.f32 / rcp.rnd.f64
+    if m["mode"] == "approx" and m["type"] != "f32":
+        return "rcp.approx is only defined for .f32"
+    if m["type"] == "f64":
+        if m["mode"] == "approx":
+            return "rcp.f64 requires an IEEE rounding mode (.rn/.rz/.rm/.rp)"
+        if m["ftz"]:
+            return "rcp.rnd.f64 takes no .ftz"
+    return None
+
+
 _LDST_TYPES = ("b32", "b64", "u32", "u64", "s32", "f32")
 _LD_TYPES = tuple(tok for tok in PTX_TYPES)  # all 14 scalar types (b128 excluded)
 _SCOPES = ("cta", "gpu", "sys")
@@ -314,6 +327,34 @@ _ENTRIES = [
         ),
         effect=EFFECT_OPAQUE,
         returns=None,
+    ),
+    # ex2 per PTX ISA 9.7.3.21 (`ex2.approx{.ftz}.f32`). The half-precision
+    # forms of 9.7.4.10 (.f16/.f16x2/.bf16/.bf16x2) are deliberately excluded:
+    # they need f16/bf16 carrier types, which PTX_TYPES does not model yet.
+    InstructionEntry(
+        name="ex2",
+        slots=(
+            ModifierSlot("mode", ("approx",)),
+            ModifierSlot("ftz", ("ftz",), optional=True),
+            ModifierSlot("type", ("f32",)),
+        ),
+        operands=(OperandSlot("value", role="value"),),
+        effect=EFFECT_PURE,
+        returns="type",
+    ),
+    # rcp per PTX ISA 9.7.3.13. `rcp.approx.ftz.f64` (a separate syntax line in
+    # the ISA, with its own sm floor) is excluded until it is needed.
+    InstructionEntry(
+        name="rcp",
+        slots=(
+            ModifierSlot("mode", ("approx", "rn", "rz", "rm", "rp")),
+            ModifierSlot("ftz", ("ftz",), optional=True),
+            ModifierSlot("type", ("f32", "f64")),
+        ),
+        check=_check_rcp,
+        operands=(OperandSlot("value", role="value"),),
+        effect=EFFECT_PURE,
+        returns="type",
     ),
     InstructionEntry(
         name="cvta",

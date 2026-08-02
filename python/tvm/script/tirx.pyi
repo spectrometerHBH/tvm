@@ -122,6 +122,29 @@ class _Chain_red:
     u32: _Chain_red
     def __call__(self, addr: Any, value: Any, *args: Any, pred: Any = None) -> None: ...
 
+class _Chain_ex2:
+    """`ex2` — mode∈{approx}; ftz∈{ftz} (opt); type∈{f32}"""
+
+    approx: _Chain_ex2
+    f32: _Chain_ex2
+    ftz: _Chain_ex2
+    def __call__(self, value: Any, *args: Any) -> Any: ...
+
+class _Chain_rcp:
+    """`rcp` — mode∈{approx,rn,rz,rm,rp}; ftz∈{ftz} (opt); type∈{f32,f64} — rcp.approx is
+    f32-only; .f64 is IEEE-rounded and takes no .ftz (PTX ISA 9.7.3.13).
+    """
+
+    approx: _Chain_rcp
+    f32: _Chain_rcp
+    f64: _Chain_rcp
+    ftz: _Chain_rcp
+    rm: _Chain_rcp
+    rn: _Chain_rcp
+    rp: _Chain_rcp
+    rz: _Chain_rcp
+    def __call__(self, value: Any, *args: Any) -> Any: ...
+
 class _Chain_cvta:
     """`cvta` — dir∈{to}; space∈{shared}; type∈{u64}"""
 
@@ -153,8 +176,10 @@ class _Chain_cp:
 class _PTXD:
     cp: _Chain_cp
     cvta: _Chain_cvta
+    ex2: _Chain_ex2
     ld: _Chain_ld
     prefetch: _Chain_prefetch
+    rcp: _Chain_rcp
     red: _Chain_red
     st: _Chain_st
     def __getitem__(self, text: str) -> Any: ...
