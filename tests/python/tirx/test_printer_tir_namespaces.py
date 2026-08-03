@@ -119,15 +119,6 @@ def test_printer_ptx_more():
         "d = T.handle()\n"
         'T.ptx.tcgen05.cp(a, d, "128x128b", 2, "", "b8x16.b6x16_p32", 0, 0)',
     )
-    _assert_print(cuda_op.ptx_tcgen05_shift(a, 1), "a = T.handle()\nT.ptx.tcgen05.shift(a, 1)")
-    _assert_print(
-        cuda_op.ptx_tcgen05_ld(a, 0, shape="16x64b", num=1, row=0, col=0, pack=False),
-        'a = T.handle()\nT.ptx.tcgen05.ld(a, 0, 0, "16x64b", 1, T.bool(False), 0)',
-    )
-    _assert_print(
-        cuda_op.ptx_tcgen05_st(a, 0, shape="16x64b", num=1, row=0, col=0, unpack=False),
-        'a = T.handle()\nT.ptx.tcgen05.st(a, 0, 0, "16x64b", 1, T.bool(False), 0)',
-    )
 
 
 @pytest.mark.parametrize(

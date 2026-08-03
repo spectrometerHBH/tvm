@@ -180,7 +180,9 @@ def _make_cp_kernel(
                 for i in range(W32):
                     zero_reg[i] = T.uint32(0)
                 for i in range(W32):
-                    T.ptx.tcgen05.st(tmem_addr[0], zero_reg[i], shape="32x32b", num=1, row=0, col=i)
+                    T.ptxd["tcgen05.st.sync.aligned.32x32b.x1.b32"](
+                        T.cuda.get_tmem_addr(tmem_addr[0], 0, i), zero_reg[i]
+                    )
                 T.ptxd.tcgen05.wait__st.sync.aligned()
                 T.cuda.cta_sync()
                 T.ptxd.tcgen05.fence__after_thread_sync()
@@ -196,7 +198,9 @@ def _make_cp_kernel(
             # warp-slab-relative for .32x32b), covering all 128 TMEM lanes.
             reg = T.alloc_buffer((W32,), "uint32", scope="local")
             for i in range(W32):
-                T.ptx.tcgen05.ld(tmem_addr[0], reg[i], shape="32x32b", num=1, row=0, col=i)
+                T.ptxd["tcgen05.ld.sync.aligned.32x32b.x1.b32"](
+                    reg[i], T.cuda.get_tmem_addr(tmem_addr[0], 0, i)
+                )
             T.ptxd.tcgen05.wait__ld.sync.aligned()
             for i in range(W32):
                 B[tid_in_wg, i] = reg[i]
@@ -502,7 +506,9 @@ def _make_cp_kernel_cta2(s_full, s_shape, t_full, t_shape, dtype, cfg, W32, n_co
         for i in range(W32):
             zero_reg[i] = T.uint32(0)
         for i in range(W32):
-            T.ptx.tcgen05.st(tmem_addr[0], zero_reg[i], shape="32x32b", num=1, row=0, col=i)
+            T.ptxd["tcgen05.st.sync.aligned.32x32b.x1.b32"](
+                T.cuda.get_tmem_addr(tmem_addr[0], 0, i), zero_reg[i]
+            )
         T.ptxd.tcgen05.wait__st.sync.aligned()
         Tx.cta.copy(A_smem[s_sl], A[(cbx, *s_sl)])
         T.cuda.cta_sync()
@@ -518,7 +524,9 @@ def _make_cp_kernel_cta2(s_full, s_shape, t_full, t_shape, dtype, cfg, W32, n_co
         T.ptxd.tcgen05.fence__after_thread_sync()
         reg = T.alloc_buffer((W32,), "uint32", scope="local")
         for i in range(W32):
-            T.ptx.tcgen05.ld(tmem_addr[0], reg[i], shape="32x32b", num=1, row=0, col=i)
+            T.ptxd["tcgen05.ld.sync.aligned.32x32b.x1.b32"](
+                reg[i], T.cuda.get_tmem_addr(tmem_addr[0], 0, i)
+            )
         T.ptxd.tcgen05.wait__ld.sync.aligned()
         for i in range(W32):
             B[cbx * 128 + tid_in_wg, i] = reg[i]
@@ -967,13 +975,8 @@ def _make_2d_kernel(
             if warp_id == 0:
                 reg = T.alloc_buffer((4,), "uint32", scope="local")
                 for i in range(4):
-                    T.ptx.tcgen05.ld(
-                        tmem.allocated_addr[0],
-                        reg[i],
-                        shape="32x32b",
-                        num=1,
-                        row=0,
-                        col=i,
+                    T.ptxd["tcgen05.ld.sync.aligned.32x32b.x1.b32"](
+                        reg[i], T.cuda.get_tmem_addr(tmem.allocated_addr[0], 0, i)
                     )
                 T.ptxd.tcgen05.wait__ld.sync.aligned()
                 B_bytes = reg.view(dtype)
@@ -1037,13 +1040,8 @@ def _make_3d_4tile_kernel(s_full, t_full, s_full_shape, t_full_shape, dtype, cta
             if warp_id == 0:
                 reg = T.alloc_buffer((4,), "uint32", scope="local")
                 for i in range(4):
-                    T.ptx.tcgen05.ld(
-                        tmem.allocated_addr[0],
-                        reg[i],
-                        shape="32x32b",
-                        num=1,
-                        row=0,
-                        col=i,
+                    T.ptxd["tcgen05.ld.sync.aligned.32x32b.x1.b32"](
+                        reg[i], T.cuda.get_tmem_addr(tmem.allocated_addr[0], 0, i)
                     )
                 T.ptxd.tcgen05.wait__ld.sync.aligned()
                 B_bytes = reg.view(dtype)
@@ -1218,13 +1216,8 @@ def test_align_middle_2_to_1_nvfp4_sfb():
             if warp_id == 0:
                 reg = T.alloc_buffer((4,), "uint32", scope="local")
                 for i in range(4):
-                    T.ptx.tcgen05.ld(
-                        tmem.allocated_addr[0],
-                        reg[i],
-                        shape="32x32b",
-                        num=1,
-                        row=0,
-                        col=i,
+                    T.ptxd["tcgen05.ld.sync.aligned.32x32b.x1.b32"](
+                        reg[i], T.cuda.get_tmem_addr(tmem.allocated_addr[0], 0, i)
                     )
                 T.ptxd.tcgen05.wait__ld.sync.aligned()
                 B_bytes = reg.view("uint8")

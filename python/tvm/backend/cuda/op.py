@@ -41,7 +41,6 @@ from tvm.tirx.operator.intrinsics._common import TCGEN05_CP_DECOMPRESS as _TCGEN
 from tvm.tirx.operator.intrinsics._common import TCGEN05_CP_MULTICAST as _TCGEN05_CP_MULTICAST
 from tvm.tirx.operator.intrinsics._common import TCGEN05_CP_SHAPES as _TCGEN05_CP_SHAPES
 from tvm.tirx.operator.intrinsics._common import TCGEN05_CTA_GROUP as _TCGEN05_CTA_GROUP
-from tvm.tirx.operator.intrinsics._common import TCGEN05_LDST_SHAPES as _TCGEN05_LDST_SHAPES
 
 tir = tirx
 
@@ -2210,85 +2209,6 @@ def ptx_tcgen05_cp(
         row,
         col,
     )
-
-
-def ptx_tcgen05_shift(taddr, cta_group=1):
-    """TVM intrinsic to call tcgen05.shift.cta_group.down
-        Asynchronously shift down the rows of the matrix in Tensor Memory for a warp.
-
-    Parameters
-    ----------
-    taddr : Expr
-        The address of matrix in tensor memory, should be uint32_t.
-
-    cta_group : int
-        The number of CTA groups involved in the shift.
-        If cta_group=1, shift operation is performed in the Tensor Memory of current CTA.
-        Else, shift operation is performed in the Tensor Memory of both the current CTA and
-        the peer CTA.
-    """
-    _choice("cta_group", cta_group, _TCGEN05_CTA_GROUP)
-    return call_intrin("", "tirx.ptx.tcgen05_shift", taddr, cta_group)
-
-
-def ptx_tcgen05_ld(src_addr, *regs, shape, num, row=0, col=0, pack=False):
-    """TVM intrinsic for tcgen05.ld.sync.aligned — async collective load from TMEM.
-
-    Emits ``tcgen05.ld.sync.aligned.{shape}.x{num}[.pack::16b].b32 {regs}, [addr];``
-
-    Parameters
-    ----------
-    src_addr : Expr
-        Tensor-memory source address (uint32).
-
-    regs : list[Expr]
-        Destination registers. Count depends on shape x num.
-
-    shape : str
-        One of ``"16x32bx2"``, ``"16x64b"``, ``"16x128b"``, ``"16x256b"``, ``"32x32b"``.
-
-    num : int
-        Repeat factor along the columns. Power-of-two in [1, 128].
-
-    row, col : Expr
-        Optional TMEM row/col offsets added to ``src_addr`` at runtime (row must be
-        a multiple of 32). Default 0.
-
-    pack : bool
-        Pack two 16-bit chunks into a single 32-bit register.
-    """
-    _choice("shape", shape, _TCGEN05_LDST_SHAPES)
-    return call_intrin("", "tirx.ptx.tcgen05_ld", src_addr, row, col, shape, num, pack, *regs)
-
-
-def ptx_tcgen05_st(dst_addr, *regs, shape, num, row=0, col=0, unpack=False):
-    """TVM intrinsic for tcgen05.st.sync.aligned — async collective store to TMEM.
-
-    Emits ``tcgen05.st.sync.aligned.{shape}.x{num}[.unpack::16b].b32 [addr], {regs};``
-
-    Parameters
-    ----------
-    dst_addr : Expr
-        Tensor-memory destination address (uint32).
-
-    regs : list[Expr]
-        Source registers. Count depends on shape x num.
-
-    shape : str
-        One of ``"16x32bx2"``, ``"16x64b"``, ``"16x128b"``, ``"16x256b"``, ``"32x32b"``.
-
-    num : int
-        Repeat factor along the columns. Power-of-two in [1, 128].
-
-    row, col : Expr
-        Optional TMEM row/col offsets added to ``dst_addr`` at runtime (row must be
-        a multiple of 32). Default 0.
-
-    unpack : bool
-        Unpack a 32-bit register into two 16-bit chunks.
-    """
-    _choice("shape", shape, _TCGEN05_LDST_SHAPES)
-    return call_intrin("", "tirx.ptx.tcgen05_st", dst_addr, row, col, shape, num, unpack, *regs)
 
 
 def timer_init_cuda(profiler_buffer, profiler_tag, profiler_write_offset, num_groups, group_id):

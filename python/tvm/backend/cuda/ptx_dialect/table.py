@@ -785,6 +785,20 @@ def _check_ldmatrix_b8fmt(m):
     return None
 
 
+def _tcgen05_ldst_lanes(m):
+    # ISA 9.7.17.8.3 Table 52 / 9.7.17.8.4 Table 53: the register vector holds
+    # `.num` x (shape width / 32b) registers, capped at 128.
+    per_num = {"16x64b": 1, "32x32b": 1, "16x128b": 2, "16x256b": 4}
+    return int(m["num"][1:]) * per_num[m["shape"]]
+
+
+def _check_tcgen05_ldst(m):
+    """The Table 52/53 rows marked NA -- the products that exceed 128 registers."""
+    if _tcgen05_ldst_lanes(m) > 128:
+        return f"shape {m['shape']} caps .num where the vector would exceed 128 registers"
+    return None
+
+
 _ENTRIES = [
     # prefetch per PTX ISA 9.7.9.16, covering three of its four syntax lines:
     #   prefetch{.space}.level [a]
@@ -1984,6 +1998,60 @@ _ENTRIES = [
         operands=(
             OperandSlot("p", role="addr"),
             OperandSlot("r", role="value", dtype="b32", lanes=_matrix_num_lanes),
+        ),
+    ),
+    # tcgen05.ld / .st per PTX ISA 9.7.17.8.3 / 9.7.17.8.4. The register vector
+    # length is `.num` scaled by the shape width, which is what a callable
+    # `lanes` transcribes; `taddr` is a tmem address, a packed 32-bit
+    # (row << 16 | col) value rather than a pointer.
+    #
+    #   tcgen05.ld.sync.aligned.shape.num{.pack::16b}.b32   r, [taddr];
+    #   tcgen05.st.sync.aligned.shape.num{.unpack::16b}.b32 [taddr], r;
+    #
+    # Note the operand orders mirror each other.
+    #
+    # NOT REGISTERED:
+    # - The `.16x32bx2` shape, whose extra `immHalfSplitoff` operand is an
+    #   instruction-text immediate the ISA gives no value domain for -- the
+    #   `choices` mechanism needs a closed set, and no call site uses it.
+    # - `tcgen05.ld.red`, which is sm_101a-only (not sm_100a, so it cannot be
+    #   certified here) and has no call sites.
+    InstructionEntry(
+        name="tcgen05_ld",
+        mnemonic="tcgen05",
+        slots=(
+            ModifierSlot("action", ("ld",)),
+            ModifierSlot("sync", ("sync",)),
+            ModifierSlot("aligned", ("aligned",)),
+            ModifierSlot("shape", ("16x64b", "16x128b", "16x256b", "32x32b")),
+            ModifierSlot("num", ("x1", "x2", "x4", "x8", "x16", "x32", "x64", "x128")),
+            ModifierSlot("pack", ("pack::16b",), optional=True),
+            ModifierSlot("type", ("b32",)),
+        ),
+        cert_arch="sm_100a",
+        check=_check_tcgen05_ldst,
+        operands=(
+            OperandSlot("r", role="dst", dtype="b32", lanes=_tcgen05_ldst_lanes),
+            OperandSlot("taddr", role="addr", space="tmem"),
+        ),
+    ),
+    InstructionEntry(
+        name="tcgen05_st",
+        mnemonic="tcgen05",
+        slots=(
+            ModifierSlot("action", ("st",)),
+            ModifierSlot("sync", ("sync",)),
+            ModifierSlot("aligned", ("aligned",)),
+            ModifierSlot("shape", ("16x64b", "16x128b", "16x256b", "32x32b")),
+            ModifierSlot("num", ("x1", "x2", "x4", "x8", "x16", "x32", "x64", "x128")),
+            ModifierSlot("unpack", ("unpack::16b",), optional=True),
+            ModifierSlot("type", ("b32",)),
+        ),
+        cert_arch="sm_100a",
+        check=_check_tcgen05_ldst,
+        operands=(
+            OperandSlot("taddr", role="addr", space="tmem"),
+            OperandSlot("r", role="value", dtype="b32", lanes=_tcgen05_ldst_lanes),
         ),
     ),
 ]

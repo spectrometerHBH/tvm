@@ -321,7 +321,7 @@ def test_tcgen05_ld_st_roundtrip():
             reg[i] = A[tx, i]
         # RF -> TMEM
         for i in range(WIDTH):
-            T.ptx.tcgen05.st(tmem_addr, reg[i], shape="32x32b", num=REPEAT_NUM, row=warp_id * 32, col=i)  # noqa: E501
+            T.ptxd[f"tcgen05.st.sync.aligned.32x32b.x{REPEAT_NUM}.b32"](T.cuda.get_tmem_addr(tmem_addr, warp_id * 32, i), reg[i])  # noqa: E501
         T.ptxd.tcgen05.wait__st.sync.aligned()
         T.cuda.cta_sync()
         # reset RF
@@ -331,7 +331,7 @@ def test_tcgen05_ld_st_roundtrip():
         # TMEM -> RF
         T.ptxd.tcgen05.fence__after_thread_sync()
         for i in range(WIDTH):
-            T.ptx.tcgen05.ld(tmem_addr, reg[i], shape="32x32b", num=REPEAT_NUM, row=warp_id * 32, col=i)  # noqa: E501
+            T.ptxd[f"tcgen05.ld.sync.aligned.32x32b.x{REPEAT_NUM}.b32"](reg[i], T.cuda.get_tmem_addr(tmem_addr, warp_id * 32, i))  # noqa: E501
         T.ptxd.tcgen05.wait__ld.sync.aligned()
         # RF -> GMEM
         for i in range(WIDTH):
@@ -420,7 +420,7 @@ def test_tcgen05_cp_ld_roundtrip():
         # TMEM -> RF (ld)
         T.ptxd.tcgen05.fence__after_thread_sync()
         for i in range(WIDTH):
-            T.ptx.tcgen05.ld(tmem_addr, reg[i], shape="32x32b", num=REPEAT_NUM, row=warp_id * 32, col=i)  # noqa: E501
+            T.ptxd[f"tcgen05.ld.sync.aligned.32x32b.x{REPEAT_NUM}.b32"](reg[i], T.cuda.get_tmem_addr(tmem_addr, warp_id * 32, i))  # noqa: E501
         T.ptxd.tcgen05.wait__ld.sync.aligned()
         # RF -> GMEM
         for i in range(WIDTH):
@@ -539,7 +539,7 @@ def test_tcgen05_mma_ss_no_tma(swizzle):
         # TMEM -> RF
         T.ptxd.tcgen05.fence__after_thread_sync()
         for i in range(N):
-            T.ptx.tcgen05.ld(tmem_addr, reg[i], shape="32x32b", num=REPEAT_NUM, row=warp_id * 32, col=i)  # noqa: E501
+            T.ptxd[f"tcgen05.ld.sync.aligned.32x32b.x{REPEAT_NUM}.b32"](reg[i], T.cuda.get_tmem_addr(tmem_addr, warp_id * 32, i))  # noqa: E501
         T.ptxd.tcgen05.wait__ld.sync.aligned()
         # RF -> GMEM
         for i in range(N):

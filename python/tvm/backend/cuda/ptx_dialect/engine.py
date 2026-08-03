@@ -222,6 +222,16 @@ def _coerce_address(entry, slot, value, mod_map):
             return value
         raise ValueError(f"{entry.name}: operand '{slot.name}' must be a pointer")
     space = operand_space(slot, mod_map)
+    if space == "tmem":
+        # A tmem address is a packed (row << 16 | col) 32-bit value, not a
+        # pointer into any address space the host language can name -- there is
+        # nothing to convert, and a pointer here would be a category error.
+        if isinstance(ty, PrimType) and ty.dtype == "uint32":
+            return value
+        raise ValueError(
+            f"{entry.name}: operand '{slot.name}' is a tmem address and must be a uint32 "
+            f"(compose it with T.cuda.get_tmem_addr)"
+        )
     if space.startswith("shared"):
         if isinstance(ty, PointerType):
             # Any pointer is accepted and converted, which is what the legacy

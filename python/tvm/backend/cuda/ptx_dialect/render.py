@@ -176,7 +176,9 @@ def render_variant(entry: InstructionEntry, tokens, predicated=False, dtypes=Non
                     outputs.append(f'"={constraint}"({reg})')
                     post.append(f"{lname} = {cb.from_carrier.format(reg)};")
             elif slot.role == "addr":
-                if operand_space(slot, mod_map).startswith("shared"):
+                # A tmem address rides the same 32-bit carrier a shared window
+                # address does; only its provenance differs.
+                if operand_space(slot, mod_map).startswith(("shared", "tmem")):
                     params.append(f"uint32_t {lname}")
                     inputs.append(f'"r"({lname})')
                 else:

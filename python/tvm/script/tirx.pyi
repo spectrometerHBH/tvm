@@ -590,9 +590,9 @@ class _Chain_sub:
     def __call__(self, d: Any, a: Any, b: Any, *args: Any) -> None: ...
 
 class _Chain_tcgen05:
-    """`tcgen05` — 7 entries sharing this mnemonic; PTX puts their difference in the operand
+    """`tcgen05` — 9 entries sharing this mnemonic; PTX puts their difference in the operand
     list, so the call selects one. Shapes: (dst, ncols); (taddr, ncols); (); (mbar); (mbar,
-    mask)
+    mask); (*__operands)
     """
 
     aligned: _Chain_tcgen05
@@ -605,15 +605,27 @@ class _Chain_tcgen05:
     dealloc: _Chain_tcgen05
     fence__after_thread_sync: _Chain_tcgen05
     fence__before_thread_sync: _Chain_tcgen05
+    ld: _Chain_tcgen05
     mbarrier__arrive__one: _Chain_tcgen05
     multicast__cluster: _Chain_tcgen05
+    pack__16b: _Chain_tcgen05
     relinquish_alloc_permit: _Chain_tcgen05
     shared__cluster: _Chain_tcgen05
     shared__cta: _Chain_tcgen05
+    st: _Chain_tcgen05
     sync: _Chain_tcgen05
+    unpack__16b: _Chain_tcgen05
     wait__ld: _Chain_tcgen05
     wait__st: _Chain_tcgen05
-    def __call__(self, *args: Any, pred: Any = None) -> None: ...
+    x1: _Chain_tcgen05
+    x128: _Chain_tcgen05
+    x16: _Chain_tcgen05
+    x2: _Chain_tcgen05
+    x32: _Chain_tcgen05
+    x4: _Chain_tcgen05
+    x64: _Chain_tcgen05
+    x8: _Chain_tcgen05
+    def __call__(self, *args: Any) -> None: ...
 
 class _Chain_wgmma:
     """`wgmma` — 3 entries sharing this mnemonic; PTX puts their difference in the operand

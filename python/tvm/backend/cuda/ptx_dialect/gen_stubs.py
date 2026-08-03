@@ -98,7 +98,13 @@ def _chain_class(family: str, entries: list[InstructionEntry]) -> str:
     lines.extend(f"    {line}" for line in doc_lines[1:])
     lines.append('    """')
     for tok in tokens:
-        lines.append(f"    {escape_token(tok)}: {cls}")
+        attr = escape_token(tok)
+        if not attr.isidentifier():
+            # A token like `16x64b` cannot be an attribute name, so the chain
+            # form cannot reach it; those variants are written as strings,
+            # `T.ptxd["tcgen05.ld.sync.aligned.16x64b.x4.b32"](...)`.
+            continue
+        lines.append(f"    {attr}: {cls}")
     if len(signature) > 92:  # keep the generated stub within the repo line limit
         joined = ",\n        ".join(params)
         ret = signature[signature.rindex(")") + 1 :]

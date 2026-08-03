@@ -186,10 +186,7 @@ class Tcgen05Namespace:
         self.encode_instr_descriptor_block_scaled = _op_wrapper(
             _cuda_op.ptx_tcgen05_encode_instr_descriptor_block_scaled
         )
-        self.ld = _op_wrapper(_cuda_op.ptx_tcgen05_ld)
-        self.st = _op_wrapper(_cuda_op.ptx_tcgen05_st)
         self.cp = _op_wrapper(_cuda_op.ptx_tcgen05_cp)
-        self.shift = _op_wrapper(_cuda_op.ptx_tcgen05_shift)
         self.mma = Tcgen05MmaNamespace()
 
 
