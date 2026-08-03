@@ -455,7 +455,7 @@ def test_megamoe_extracted_intrinsics_codegen():
             T.ptxd.stmatrix.sync.aligned.m16n8.x1.trans.shared.b8(U32.data, U32[0])
 
             F32[1] = T.cuda.uint_as_float(U32[0])
-            F32[2] = T.ptx.ld(F32.data, "float32", "f32", space="global")
+            T.ptxd.ld.global_.f32(F32[2], F32.data)
             F32[2] = T.cuda.ldg(T.handle_add_byte_offset(F32.data, 4), "float32")
             F32[3] = T.cuda.fdividef(F32[0], F32[1])
             U32[3] = T.cuda.float_as_uint(F32[1])

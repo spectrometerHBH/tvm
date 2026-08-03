@@ -474,6 +474,27 @@ def _check_ld(m):
     return None
 
 
+def _scalar_view(m):
+    """The scalar grammar reads slots the vector entries do not declare."""
+    return {**m, "mmio": "", "scope": "", "l2ev": m.get("l2ev", "")}
+
+
+def _check_ld_vec(m):
+    return _check_vec128(m) or _check_ld(_scalar_view(m))
+
+
+def _check_st_vec(m):
+    return _check_vec128(m) or _check_st(_scalar_view(m))
+
+
+def _check_ld_vec256(m):
+    return _check_vec256(m) or _check_ld(_scalar_view(m))
+
+
+def _check_st_vec256(m):
+    return _check_vec256(m) or _check_st(_scalar_view(m))
+
+
 def _check_st(m):
     """Scalar st grammar per PTX ISA 9.7.9.11 (the mirror of _check_ld)."""
     sem, scope, ss = m["sem"], m["scope"], m["space"]
@@ -689,6 +710,49 @@ _LD_TYPES = (
     "b8", "u8", "s8", "b16", "u16", "s16", "b32", "u32",
     "s32", "b64", "u64", "s64", "f32", "f64",
 )  # fmt: skip
+# ISA 5.4.2 caps a vector register at 128 bits, so .v2.b128 does not exist --
+# the vector lines take the scalar type set as-is.
+_LD_VEC_TYPES = _LD_TYPES
+_L1_EVICT = (
+    "L1::evict_normal",
+    "L1::evict_unchanged",
+    "L1::evict_first",
+    "L1::evict_last",
+    "L1::no_allocate",
+)
+# ptxas rejects ".L2::evict_unchanged" on ld/st ("Illegal modifier"), though
+# the ISA lists it among the eviction priorities.
+_L2_EVICT = ("L2::evict_first", "L2::evict_last", "L2::evict_normal")
+_BITS32 = ("b32", "u32", "s32", "f32")
+_BITS64 = ("b64", "u64", "s64", "f64")
+
+
+def _vec_lanes(m):
+    # ISA 9.7.9.8/9.7.9.11: the destination/source is a brace-enclosed vector
+    # of `.vec` registers.
+    return int(m["vec"][1:])
+
+
+def _check_vec128(m):
+    """The .vec lines up to 128 bits wide."""
+    if m["vec"] == "v4" and m["type"] in _BITS64:
+        # 256 bits wide: a separate entry, with its own sm_100 floor.
+        return "a 64-bit .v4 is a 256-bit access -- use the 256-bit entry"
+    return None
+
+
+def _check_vec256(m):
+    """The two 256-bit .vec lines, which the ISA spells out individually."""
+    vec, ty, ss = m["vec"], m["type"], m["space"]
+    if not ((vec == "v8" and ty in _BITS32) or (vec == "v4" and ty in _BITS64)):
+        return "the 256-bit lines are .v8 with a 32-bit type or .v4 with a 64-bit type"
+    if ss not in ("", "global"):
+        # Both lines: "State space is .global or generic addressing where the
+        # address points to .global".
+        return "a 256-bit access takes .global or generic addressing"
+    return None
+
+
 _FRND = ("rn", "rz", "rm", "rp")  # .rnd on the floating-point arithmetic lines
 
 
@@ -740,11 +804,12 @@ _ENTRIES = [
     ),
     # Complete scalar `ld` per PTX ISA 9.7.9.8 + the 9.7.9.9 ld.global.nc
     # forms. Deliberately excluded (each needs a mechanism this shape lacks):
-    # - .vec and the multi-register destination forms
-    # - .b128: single-register and already in PTX_TYPES, but its "q" constraint
-    #   needs __int128 in the host compiler; register on demand
+    # - .b128: the rendered helper is correct and assembles, but nothing can
+    #   call it -- the operand would have to be a 128-bit TVM value, and the
+    #   CUDA codegen has no uint128 type ("Cannot convert type T.uint128").
+    #   The legacy helper sidestepped this by doing the 128-bit load itself,
+    #   inside the helper, so the wide value never entered the IR.
     # - .level::cache_hint + the cache_policy operand (optional operand)
-    # - .level2::eviction_priority (vector-only per the ISA)
     # - .unified (variable-attribute addressing)
     # - .param/.const spaces (require kernel-parameter / const addresses,
     #   which cannot flow through the helper-function ABI)
@@ -769,17 +834,7 @@ _ENTRIES = [
             ),
             ModifierSlot("cop", ("ca", "cg", "cs", "lu", "cv"), optional=True),
             ModifierSlot("nc", ("nc",), optional=True),
-            ModifierSlot(
-                "l1ev",
-                (
-                    "L1::evict_normal",
-                    "L1::evict_unchanged",
-                    "L1::evict_first",
-                    "L1::evict_last",
-                    "L1::no_allocate",
-                ),
-                optional=True,
-            ),
+            ModifierSlot("l1ev", _L1_EVICT, optional=True),
             ModifierSlot("prefetch", ("L2::64B", "L2::128B", "L2::256B"), optional=True),
             ModifierSlot("type", _LD_TYPES),
         ),
@@ -791,9 +846,8 @@ _ENTRIES = [
     ),
     # Complete scalar `st` per PTX ISA 9.7.9.11, at parity with `ld`.
     # Deliberately excluded (each needs a mechanism this shape lacks):
-    # - .vec/.b128 and the multi-register source forms
+    # - .b128, for the reason spelled out on `ld` above
     # - .level::cache_hint + its trailing cache_policy operand (optional operand)
-    # - .level2::eviction_priority (vector-only per the ISA)
     # - .param::func (kernel-parameter addresses cannot flow through the
     #   helper-function ABI)
     InstructionEntry(
@@ -808,23 +862,109 @@ _ENTRIES = [
                 optional=True,  # omitted = generic addressing
             ),
             ModifierSlot("cop", ("wb", "cg", "cs", "wt"), optional=True),
-            ModifierSlot(
-                "l1ev",
-                (
-                    "L1::evict_normal",
-                    "L1::evict_unchanged",
-                    "L1::evict_first",
-                    "L1::evict_last",
-                    "L1::no_allocate",
-                ),
-                optional=True,
-            ),
+            ModifierSlot("l1ev", _L1_EVICT, optional=True),
             ModifierSlot("type", _LD_TYPES),
         ),
         check=_check_st,
         operands=(
             OperandSlot("addr", role="addr"),
             OperandSlot("value", role="value"),
+        ),
+    ),
+    # The `.vec` lines of ld / st (PTX ISA 9.7.9.8 / 9.7.9.11). Separate
+    # entries rather than an optional slot on the scalar ones: a vector operand
+    # is brace-enclosed even at one register, so vector-ness has to be a
+    # property of the entry, and the .v8/.v4-64bit lines carry a
+    # .level2::eviction_priority the scalar lines do not have.
+    #
+    # NOT REGISTERED: the sink symbol `_` in the two 256-bit lines (it needs an
+    # operand role for "this lane is discarded"), and .level::cache_hint with
+    # its trailing cache_policy operand.
+    InstructionEntry(
+        name="ld_vec",
+        mnemonic="ld",
+        slots=(
+            ModifierSlot("sem", ("weak", "volatile"), optional=True),
+            ModifierSlot(
+                "space",
+                ("global", "shared", "shared::cta", "shared::cluster", "local"),
+                optional=True,
+            ),
+            ModifierSlot("cop", ("ca", "cg", "cs", "lu", "cv"), optional=True),
+            ModifierSlot("nc", ("nc",), optional=True),
+            ModifierSlot("l1ev", _L1_EVICT, optional=True),
+            ModifierSlot("prefetch", ("L2::64B", "L2::128B", "L2::256B"), optional=True),
+            ModifierSlot("vec", ("v2", "v4")),
+            ModifierSlot("type", _LD_VEC_TYPES),
+        ),
+        check=_check_ld_vec,
+        operands=(
+            OperandSlot("d", role="dst", lanes=_vec_lanes),
+            OperandSlot("addr", role="addr"),
+        ),
+    ),
+    InstructionEntry(
+        # The two 256-bit lines. ptxas: "Feature '256 bit wide load/store'
+        # requires .target sm_100 or higher", and .level2::eviction_priority is
+        # spelled only here.
+        name="ld_vec256",
+        mnemonic="ld",
+        slots=(
+            ModifierSlot("sem", ("weak", "volatile"), optional=True),
+            ModifierSlot("space", ("global",), optional=True),
+            ModifierSlot("cop", ("ca", "cg", "cs", "lu", "cv"), optional=True),
+            ModifierSlot("nc", ("nc",), optional=True),
+            ModifierSlot("l1ev", _L1_EVICT, optional=True),
+            ModifierSlot("l2ev", _L2_EVICT, optional=True),
+            ModifierSlot("prefetch", ("L2::64B", "L2::128B", "L2::256B"), optional=True),
+            ModifierSlot("vec", ("v4", "v8")),
+            ModifierSlot("type", _BITS32 + _BITS64),
+        ),
+        cert_arch="sm_100",
+        check=_check_ld_vec256,
+        operands=(
+            OperandSlot("d", role="dst", lanes=_vec_lanes),
+            OperandSlot("addr", role="addr"),
+        ),
+    ),
+    InstructionEntry(
+        name="st_vec",
+        mnemonic="st",
+        slots=(
+            ModifierSlot("sem", ("weak", "volatile"), optional=True),
+            ModifierSlot(
+                "space",
+                ("global", "shared", "shared::cta", "shared::cluster", "local"),
+                optional=True,
+            ),
+            ModifierSlot("cop", ("wb", "cg", "cs", "wt"), optional=True),
+            ModifierSlot("l1ev", _L1_EVICT, optional=True),
+            ModifierSlot("vec", ("v2", "v4")),
+            ModifierSlot("type", _LD_VEC_TYPES),
+        ),
+        check=_check_st_vec,
+        operands=(
+            OperandSlot("addr", role="addr"),
+            OperandSlot("value", role="value", lanes=_vec_lanes),
+        ),
+    ),
+    InstructionEntry(
+        name="st_vec256",
+        mnemonic="st",
+        slots=(
+            ModifierSlot("sem", ("weak", "volatile"), optional=True),
+            ModifierSlot("space", ("global",), optional=True),
+            ModifierSlot("cop", ("wb", "cg", "cs", "wt"), optional=True),
+            ModifierSlot("l1ev", _L1_EVICT, optional=True),
+            ModifierSlot("l2ev", _L2_EVICT, optional=True),
+            ModifierSlot("vec", ("v4", "v8")),
+            ModifierSlot("type", _BITS32 + _BITS64),
+        ),
+        cert_arch="sm_100",
+        check=_check_st_vec256,
+        operands=(
+            OperandSlot("addr", role="addr"),
+            OperandSlot("value", role="value", lanes=_vec_lanes),
         ),
     ),
     # red / atom scalar `.op` forms per PTX ISA 9.7.14.6 and 9.7.14.5.

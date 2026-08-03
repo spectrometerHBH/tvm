@@ -218,13 +218,8 @@ class _Chain_griddepcontrol:
     def __call__(self, *args: Any, pred: Any = None) -> None: ...
 
 class _Chain_ld:
-    """`ld` — mmio∈{mmio} (opt); sem∈{weak,acquire,relaxed,volatile} (opt);
-    scope∈{cta,cluster,gpu,sys} (opt);
-    space∈{global,shared,shared::cta,shared::cluster,local} (opt); cop∈{ca,cg,cs,lu,cv}
-    (opt); nc∈{nc} (opt); l1ev∈{L1::evict_normal,L1::evict_unchanged,L1::evict_first,L1::evi
-    ct_last,L1::no_allocate} (opt); prefetch∈{L2::64B,L2::128B,L2::256B} (opt);
-    type∈{b8,u8,s8,b16,u16,s16,b32,u32,s32,b64,u64,s64,f32,f64} — Scalar ld grammar per PTX
-    ISA 9.7.9.8 (ld) and 9.7.9.9 (ld.global.nc).
+    """`ld` — 3 entries sharing this mnemonic; PTX puts their difference in the operand list,
+    so the call selects one. Shapes: (d, addr); (*__operands)
     """
 
     L1__evict_first: _Chain_ld
@@ -235,6 +230,9 @@ class _Chain_ld:
     L2__128B: _Chain_ld
     L2__256B: _Chain_ld
     L2__64B: _Chain_ld
+    L2__evict_first: _Chain_ld
+    L2__evict_last: _Chain_ld
+    L2__evict_normal: _Chain_ld
     acquire: _Chain_ld
     b16: _Chain_ld
     b32: _Chain_ld
@@ -267,9 +265,12 @@ class _Chain_ld:
     u32: _Chain_ld
     u64: _Chain_ld
     u8: _Chain_ld
+    v2: _Chain_ld
+    v4: _Chain_ld
+    v8: _Chain_ld
     volatile: _Chain_ld
     weak: _Chain_ld
-    def __call__(self, d: Any, addr: Any, *args: Any) -> None: ...
+    def __call__(self, *args: Any) -> None: ...
 
 class _Chain_ldmatrix:
     """`ldmatrix` — 3 entries sharing this mnemonic; PTX puts their difference in the operand
@@ -492,12 +493,8 @@ class _Chain_setmaxnreg:
     def __call__(self, nreg: Any, *args: Any, pred: Any = None) -> None: ...
 
 class _Chain_st:
-    """`st` — mmio∈{mmio} (opt); sem∈{weak,release,relaxed,volatile} (opt);
-    scope∈{cta,cluster,gpu,sys} (opt);
-    space∈{global,shared,shared::cta,shared::cluster,local} (opt); cop∈{wb,cg,cs,wt} (opt);
-    l1ev∈{L1::evict_normal,L1::evict_unchanged,L1::evict_first,L1::evict_last,L1::no_allocat
-    e} (opt); type∈{b8,u8,s8,b16,u16,s16,b32,u32,s32,b64,u64,s64,f32,f64} — Scalar st
-    grammar per PTX ISA 9.7.9.11 (the mirror of _check_ld).
+    """`st` — 3 entries sharing this mnemonic; PTX puts their difference in the operand list,
+    so the call selects one. Shapes: (addr, value); (*__operands)
     """
 
     L1__evict_first: _Chain_st
@@ -505,6 +502,9 @@ class _Chain_st:
     L1__evict_normal: _Chain_st
     L1__evict_unchanged: _Chain_st
     L1__no_allocate: _Chain_st
+    L2__evict_first: _Chain_st
+    L2__evict_last: _Chain_st
+    L2__evict_normal: _Chain_st
     b16: _Chain_st
     b32: _Chain_st
     b64: _Chain_st
@@ -533,11 +533,14 @@ class _Chain_st:
     u32: _Chain_st
     u64: _Chain_st
     u8: _Chain_st
+    v2: _Chain_st
+    v4: _Chain_st
+    v8: _Chain_st
     volatile: _Chain_st
     wb: _Chain_st
     weak: _Chain_st
     wt: _Chain_st
-    def __call__(self, addr: Any, value: Any, *args: Any, pred: Any = None) -> None: ...
+    def __call__(self, *args: Any, pred: Any = None) -> None: ...
 
 class _Chain_st_bulk:
     """`st_bulk` — weak∈{weak} (opt); space∈{shared::cta} (opt)"""

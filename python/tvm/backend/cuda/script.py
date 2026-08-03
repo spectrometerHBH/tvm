@@ -53,8 +53,6 @@ class PTXNamespace:
         self.elect_sync: Callable[..., Any] = _op_wrapper(_cuda_op.ptx_elect_sync)
         self.clc_query_cancel = _op_wrapper(_cuda_op.ptx_clc_query_cancel)
         self.fetch_register: Callable[..., Any] = _op_wrapper(_cuda_op.ptx_fetch_register)
-        self.ld = _op_wrapper(_cuda_op.ptx_ld)
-        self.ld_global_nc = _op_wrapper(_cuda_op.ptx_ld_global_nc)
         self.mbarrier_test_wait_parity = _op_wrapper(_cuda_op.ptx_mbarrier_test_wait_parity)
         self.cp_async_bulk_g2s_cta = _op_wrapper(_cuda_op.ptx_cp_async_bulk_g2s_cta)
         self.cp_async_bulk_g2s_cluster = _op_wrapper(_cuda_op.ptx_cp_async_bulk_g2s_cluster)

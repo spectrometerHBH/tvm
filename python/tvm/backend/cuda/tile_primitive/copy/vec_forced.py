@@ -41,7 +41,7 @@ from tvm.tirx.operator.tile_primitive.registry import DispatchContext
 from tvm.tirx.stmt import BufferRegion
 from tvm.tirx.tile_primitive import TilePrimitiveCall
 
-from ._common import copy_ptx_form, copy_ptx_ld_return_type
+from ._common import copy_ptxd_form, copy_ptxd_ld_chain
 from .utils import _scope_allowed
 
 
@@ -148,45 +148,57 @@ def _emit_forced_vec_copy(op_call: TilePrimitiveCall, _sctx: DispatchContext, nu
     src_ptr = src.ptr_to(_region_start(op_call.src))
     dst_ptr = dst.ptr_to(_region_start(op_call.dst))
     elem_bits = DataType(src.dtype).bits
-    n_elements = num_bytes * 8 // elem_bits
-    vec, ptx_type = copy_ptx_form(num_bytes)
-    return_type = copy_ptx_ld_return_type(ptx_type)
+    tail, lanes, reg_dtype = copy_ptxd_form(num_bytes)
+    container_bits = num_bytes * 8 // lanes
+
+    def _words(buf, region):
+        """The container lvalues a local region's registers land in.
+
+        The instruction moves whole containers, so the element region start is
+        scaled to a container index; the vector alignment rule the caller
+        already enforced makes the division exact.
+        """
+        flat = buf.view(-1).view(reg_dtype)
+        start, stride = 0, 1
+        for idx, extent in zip(reversed(_region_start(region)), reversed(list(buf.shape))):
+            start = start + idx * stride
+            stride = stride * extent
+        base = (
+            start * (elem_bits // container_bits)
+            if elem_bits > container_bits
+            else start // (container_bits // elem_bits)
+        )
+        return [flat[base + i] for i in range(lanes)]
+
+    # Chains are built here: a Python string bound inside the traced body is
+    # not something the parser can carry. `nc` folds into the chain, so the
+    # use_nc branches collapse.
+    st_chain = f"st.{dst_space}.{tail}"
     cache, hints = _ld_cache_config(op_call)
     use_nc = cache == "nc"
     l1_evict = hints.get("l1_evict", "")
     l2_evict = hints.get("l2_evict", "")
     prefetch_size = hints.get("prefetch_size", "")
+    ld_chain = copy_ptxd_ld_chain(
+        src_space,
+        tail,
+        nc=use_nc,
+        l1_evict=l1_evict,
+        l2_evict=l2_evict,
+        prefetch_size=prefetch_size,
+    )
 
     # fmt: off
     @T.prim_func(check_well_formed=False)
     def impl():
         if src_is_local:
-            T.ptx.st(dst_ptr, src=src_ptr, space=dst_space, vec=vec, ptx_type=ptx_type)
+            T.ptxd[st_chain](dst_ptr, *_words(src, op_call.src))
         elif dst_is_local:
-            if use_nc:
-                T.ptx.ld_global_nc(
-                    src_ptr, return_type, ptx_type, dst=dst_ptr, vec=vec,
-                    l1_evict=l1_evict, l2_evict=l2_evict, prefetch_size=prefetch_size,
-                )
-            else:
-                T.ptx.ld(
-                    src_ptr, return_type, ptx_type, dst=dst_ptr, space=src_space, vec=vec,
-                    l1_evict=l1_evict, l2_evict=l2_evict, prefetch_size=prefetch_size,
-                )
+            T.ptxd[ld_chain](*_words(dst, op_call.dst), src_ptr)
         else:
-            tmp = T.alloc_local((n_elements,), src.dtype)
-            tmp_ptr = tmp.ptr_to([0])
-            if use_nc:
-                T.ptx.ld_global_nc(
-                    src_ptr, return_type, ptx_type, dst=tmp_ptr, vec=vec,
-                    l1_evict=l1_evict, l2_evict=l2_evict, prefetch_size=prefetch_size,
-                )
-            else:
-                T.ptx.ld(
-                    src_ptr, return_type, ptx_type, dst=tmp_ptr, space=src_space, vec=vec,
-                    l1_evict=l1_evict, l2_evict=l2_evict, prefetch_size=prefetch_size,
-                )
-            T.ptx.st(dst_ptr, src=tmp_ptr, space=dst_space, vec=vec, ptx_type=ptx_type)
+            tmp = T.alloc_local((lanes,), reg_dtype)
+            T.ptxd[ld_chain](*[tmp[i] for i in range(lanes)], src_ptr)
+            T.ptxd[st_chain](dst_ptr, *[tmp[i] for i in range(lanes)])
     # fmt: on
     return impl
 
