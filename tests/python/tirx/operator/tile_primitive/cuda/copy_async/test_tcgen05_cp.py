@@ -163,7 +163,9 @@ def _make_cp_kernel(
         cp_mbar = T.alloc_shared([1], "uint64")
         if wg_id == 0:
             if warp_id == 0:
-                T.ptx.tcgen05.alloc(T.address_of(tmem_addr), n_cols=n_tmem_cols, cta_group=1)
+                T.ptxd.tcgen05.alloc.cta_group__1.sync.aligned.shared__cta.b32(
+                    T.address_of(tmem_addr), T.uint32(n_tmem_cols)
+                )
             if tid_in_wg == 0:
                 T.ptx.mbarrier.init(cp_mbar.ptr_to([0]), 1)
             T.ptxd.fence.proxy.async_.shared__cta()
@@ -179,26 +181,28 @@ def _make_cp_kernel(
                     zero_reg[i] = T.uint32(0)
                 for i in range(W32):
                     T.ptx.tcgen05.st(tmem_addr[0], zero_reg[i], shape="32x32b", num=1, row=0, col=i)
-                T.ptx.tcgen05.wait.st()
+                T.ptxd.tcgen05.wait__st.sync.aligned()
                 T.cuda.cta_sync()
-                T.ptx.tcgen05.fence.after_thread_sync()
+                T.ptxd.tcgen05.fence__after_thread_sync()
             if tid_in_wg == 0:
                 Tx.copy_async(tmem[t_sl], A_smem[s_sl], **cfg)
                 T.ptx.tcgen05.commit(cp_mbar.ptr_to([0]), cta_group=1)
             T.ptx.mbarrier.try_wait(cp_mbar.ptr_to([0]), 0)
             T.cuda.cta_sync()
-            T.ptx.tcgen05.fence.after_thread_sync()
+            T.ptxd.tcgen05.fence__after_thread_sync()
             # Each of the 4 warps reads its own 32-lane slab (taddr lane 0 is
             # warp-slab-relative for .32x32b), covering all 128 TMEM lanes.
             reg = T.alloc_buffer((W32,), "uint32", scope="local")
             for i in range(W32):
                 T.ptx.tcgen05.ld(tmem_addr[0], reg[i], shape="32x32b", num=1, row=0, col=i)
-            T.ptx.tcgen05.wait.ld()
+            T.ptxd.tcgen05.wait__ld.sync.aligned()
             for i in range(W32):
                 B[tid_in_wg, i] = reg[i]
             if warp_id == 0:
-                T.ptx.tcgen05.relinquish_alloc_permit(cta_group=1)
-                T.ptx.tcgen05.dealloc(tmem_addr[0], n_cols=n_tmem_cols, cta_group=1)
+                T.ptxd.tcgen05.relinquish_alloc_permit.cta_group__1.sync.aligned()
+                T.ptxd.tcgen05.dealloc.cta_group__1.sync.aligned.b32(
+                    tmem_addr[0], T.uint32(n_tmem_cols)
+                )
 
     return kernel
 
@@ -480,7 +484,9 @@ def _make_cp_kernel_cta2(s_full, s_shape, t_full, t_shape, dtype, cfg, W32, n_co
         if tid_in_wg == 0:
             T.ptx.mbarrier.init(cp_mbar.ptr_to([0]), 1)
         if warp_id == 0:
-            T.ptx.tcgen05.alloc(T.address_of(tmem_addr), n_cols=n_cols, cta_group=2)
+            T.ptxd.tcgen05.alloc.cta_group__2.sync.aligned.shared__cta.b32(
+                T.address_of(tmem_addr), T.uint32(n_cols)
+            )
         tmem = T.decl_buffer(
             t_shape, dtype, scope="tmem", allocated_addr=tmem_addr[0], layout=t_full
         )
@@ -495,7 +501,7 @@ def _make_cp_kernel_cta2(s_full, s_shape, t_full, t_shape, dtype, cfg, W32, n_co
             zero_reg[i] = T.uint32(0)
         for i in range(W32):
             T.ptx.tcgen05.st(tmem_addr[0], zero_reg[i], shape="32x32b", num=1, row=0, col=i)
-        T.ptx.tcgen05.wait.st()
+        T.ptxd.tcgen05.wait__st.sync.aligned()
         Tx.cta.copy(A_smem[s_sl], A[(cbx, *s_sl)])
         T.cuda.cta_sync()
         T.cuda.cluster_sync()
@@ -505,17 +511,17 @@ def _make_cp_kernel_cta2(s_full, s_shape, t_full, t_shape, dtype, cfg, W32, n_co
                 T.ptx.tcgen05.commit(cp_mbar.ptr_to([0]), cta_group=2, cta_mask=3)
         T.ptx.mbarrier.try_wait(cp_mbar.ptr_to([0]), 0)
         T.cuda.cta_sync()
-        T.ptx.tcgen05.fence.after_thread_sync()
+        T.ptxd.tcgen05.fence__after_thread_sync()
         reg = T.alloc_buffer((W32,), "uint32", scope="local")
         for i in range(W32):
             T.ptx.tcgen05.ld(tmem_addr[0], reg[i], shape="32x32b", num=1, row=0, col=i)
-        T.ptx.tcgen05.wait.ld()
+        T.ptxd.tcgen05.wait__ld.sync.aligned()
         for i in range(W32):
             B[cbx * 128 + tid_in_wg, i] = reg[i]
         T.cuda.cluster_sync()
         if warp_id == 0:
-            T.ptx.tcgen05.relinquish_alloc_permit(cta_group=2)
-            T.ptx.tcgen05.dealloc(tmem_addr[0], n_cols=n_cols, cta_group=2)
+            T.ptxd.tcgen05.relinquish_alloc_permit.cta_group__2.sync.aligned()
+            T.ptxd.tcgen05.dealloc.cta_group__2.sync.aligned.b32(tmem_addr[0], T.uint32(n_cols))
 
     return kernel
 
@@ -638,7 +644,9 @@ def test_cp_default_32x128b_instruction_sequence_unchanged():
         tmem_addr = T.alloc_shared([1], "uint32")
         if wg_id == 0:
             if warp_id == 0:
-                T.ptx.tcgen05.alloc(T.address_of(tmem_addr), n_cols=32, cta_group=1)
+                T.ptxd.tcgen05.alloc.cta_group__1.sync.aligned.shared__cta.b32(
+                    T.address_of(tmem_addr), T.uint32(32)
+                )
             T.cuda.cta_sync()
             Tx.cta.copy(A_smem[:, :, :], A[:, :, :])
             T.cuda.cta_sync()
@@ -649,8 +657,8 @@ def test_cp_default_32x128b_instruction_sequence_unchanged():
                 # NOTE: no shape/multicast config — the legacy default route.
                 Tx.copy_async(tmem[:, :, :], A_smem[:, :, :], cta_group=1)
             if warp_id == 0:
-                T.ptx.tcgen05.relinquish_alloc_permit(cta_group=1)
-                T.ptx.tcgen05.dealloc(tmem_addr[0], n_cols=32, cta_group=1)
+                T.ptxd.tcgen05.relinquish_alloc_permit.cta_group__1.sync.aligned()
+                T.ptxd.tcgen05.dealloc.cta_group__1.sync.aligned.b32(tmem_addr[0], T.uint32(32))
 
     mod = _compile(kernel)
     src = mod.mod.imports[0].inspect_source()
@@ -924,10 +932,8 @@ def _make_2d_kernel(
         cp_mbar = T.alloc_shared([1], "uint64")
         if wg_id == 0:
             if warp_id == 0:
-                T.ptx.tcgen05.alloc(
-                    T.address_of(tmem_addr),
-                    n_cols=n_tmem_cols_total,
-                    cta_group=cta_group,
+                T.ptxd[f"tcgen05.alloc.cta_group::{cta_group}.sync.aligned.shared::cta.b32"](
+                    T.address_of(tmem_addr), T.uint32(n_tmem_cols_total)
                 )
             if tid_in_wg == 0:
                 T.ptx.mbarrier.init(cp_mbar.ptr_to([0]), 1)
@@ -951,7 +957,7 @@ def _make_2d_kernel(
                 T.ptx.tcgen05.commit(cp_mbar.ptr_to([0]), cta_group=cta_group)
             T.ptx.mbarrier.try_wait(cp_mbar.ptr_to([0]), 0)
             T.cuda.cta_sync()
-            T.ptx.tcgen05.fence.after_thread_sync()
+            T.ptxd.tcgen05.fence__after_thread_sync()
             if warp_id == 0:
                 reg = T.alloc_buffer((4,), "uint32", scope="local")
                 for i in range(4):
@@ -963,13 +969,15 @@ def _make_2d_kernel(
                         row=0,
                         col=i,
                     )
-                T.ptx.tcgen05.wait.ld()
+                T.ptxd.tcgen05.wait__ld.sync.aligned()
                 B_bytes = reg.view(dtype)
                 for i in range(OUT_BYTES):
                     B[lane_id, i] = B_bytes[i]
             if warp_id == 0:
-                T.ptx.tcgen05.relinquish_alloc_permit(cta_group=cta_group)
-                T.ptx.tcgen05.dealloc(tmem_addr[0], n_cols=n_tmem_cols_total, cta_group=cta_group)
+                T.ptxd[f"tcgen05.relinquish_alloc_permit.cta_group::{cta_group}.sync.aligned"]()
+                T.ptxd[f"tcgen05.dealloc.cta_group::{cta_group}.sync.aligned.b32"](
+                    tmem_addr[0], T.uint32(n_tmem_cols_total)
+                )
 
     return kernel
 
@@ -992,10 +1000,8 @@ def _make_3d_4tile_kernel(s_full, t_full, s_full_shape, t_full_shape, dtype, cta
         cp_mbar = T.alloc_shared([1], "uint64")
         if wg_id == 0:
             if warp_id == 0:
-                T.ptx.tcgen05.alloc(
-                    T.address_of(tmem_addr),
-                    n_cols=n_tmem_cols_total,
-                    cta_group=cta_group,
+                T.ptxd[f"tcgen05.alloc.cta_group::{cta_group}.sync.aligned.shared::cta.b32"](
+                    T.address_of(tmem_addr), T.uint32(n_tmem_cols_total)
                 )
             if tid_in_wg == 0:
                 T.ptx.mbarrier.init(cp_mbar.ptr_to([0]), 1)
@@ -1019,7 +1025,7 @@ def _make_3d_4tile_kernel(s_full, t_full, s_full_shape, t_full_shape, dtype, cta
                 T.ptx.tcgen05.commit(cp_mbar.ptr_to([0]), cta_group=cta_group)
             T.ptx.mbarrier.try_wait(cp_mbar.ptr_to([0]), 0)
             T.cuda.cta_sync()
-            T.ptx.tcgen05.fence.after_thread_sync()
+            T.ptxd.tcgen05.fence__after_thread_sync()
             if warp_id == 0:
                 reg = T.alloc_buffer((4,), "uint32", scope="local")
                 for i in range(4):
@@ -1031,13 +1037,15 @@ def _make_3d_4tile_kernel(s_full, t_full, s_full_shape, t_full_shape, dtype, cta
                         row=0,
                         col=i,
                     )
-                T.ptx.tcgen05.wait.ld()
+                T.ptxd.tcgen05.wait__ld.sync.aligned()
                 B_bytes = reg.view(dtype)
                 for i in range(16):
                     B[lane_id, i] = B_bytes[i]
             if warp_id == 0:
-                T.ptx.tcgen05.relinquish_alloc_permit(cta_group=cta_group)
-                T.ptx.tcgen05.dealloc(tmem_addr[0], n_cols=n_tmem_cols_total, cta_group=cta_group)
+                T.ptxd[f"tcgen05.relinquish_alloc_permit.cta_group::{cta_group}.sync.aligned"]()
+                T.ptxd[f"tcgen05.dealloc.cta_group::{cta_group}.sync.aligned.b32"](
+                    tmem_addr[0], T.uint32(n_tmem_cols_total)
+                )
 
     return kernel
 
@@ -1175,7 +1183,9 @@ def test_align_middle_2_to_1_nvfp4_sfb():
         cp_mbar = T.alloc_shared([1], "uint64")
         if wg_id == 0:
             if warp_id == 0:
-                T.ptx.tcgen05.alloc(T.address_of(tmem_addr), n_cols=n_tmem_cols_total, cta_group=1)
+                T.ptxd.tcgen05.alloc.cta_group__1.sync.aligned.shared__cta.b32(
+                    T.address_of(tmem_addr), T.uint32(n_tmem_cols_total)
+                )
             if tid_in_wg == 0:
                 T.ptx.mbarrier.init(cp_mbar.ptr_to([0]), 1)
             T.ptxd.fence.proxy.async_.shared__cta()
@@ -1194,7 +1204,7 @@ def test_align_middle_2_to_1_nvfp4_sfb():
                 T.ptx.tcgen05.commit(cp_mbar.ptr_to([0]), cta_group=1)
             T.ptx.mbarrier.try_wait(cp_mbar.ptr_to([0]), 0)
             T.cuda.cta_sync()
-            T.ptx.tcgen05.fence.after_thread_sync()
+            T.ptxd.tcgen05.fence__after_thread_sync()
             if warp_id == 0:
                 reg = T.alloc_buffer((4,), "uint32", scope="local")
                 for i in range(4):
@@ -1206,13 +1216,15 @@ def test_align_middle_2_to_1_nvfp4_sfb():
                         row=0,
                         col=i,
                     )
-                T.ptx.tcgen05.wait.ld()
+                T.ptxd.tcgen05.wait__ld.sync.aligned()
                 B_bytes = reg.view("uint8")
                 for i in range(16):
                     B[lane_id, i] = B_bytes[i]
             if warp_id == 0:
-                T.ptx.tcgen05.relinquish_alloc_permit(cta_group=1)
-                T.ptx.tcgen05.dealloc(tmem_addr[0], n_cols=n_tmem_cols_total, cta_group=1)
+                T.ptxd.tcgen05.relinquish_alloc_permit.cta_group__1.sync.aligned()
+                T.ptxd.tcgen05.dealloc.cta_group__1.sync.aligned.b32(
+                    tmem_addr[0], T.uint32(n_tmem_cols_total)
+                )
 
     A_np = (np.arange(256 * 16, dtype=np.int32) & 0xFF).astype(np.uint8).reshape(256, 16)
 

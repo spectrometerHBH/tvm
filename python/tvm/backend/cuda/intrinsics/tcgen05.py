@@ -38,20 +38,6 @@ def _safe(s):
 # =============================================================================
 # Trivial fence / wait — single PTX line, no operands, no attrs.
 # =============================================================================
-device_intrinsic(
-    "ptx_tcgen05_fence_before_thread_sync",
-    body='    asm volatile("tcgen05.fence::before_thread_sync;" ::: "memory");',
-)
-device_intrinsic(
-    "ptx_tcgen05_fence_after_thread_sync",
-    body='    asm volatile("tcgen05.fence::after_thread_sync;" ::: "memory");',
-)
-device_intrinsic(
-    "ptx_tcgen05_wait_ld", body='    asm volatile("tcgen05.wait::ld.sync.aligned;" ::: "memory");'
-)
-device_intrinsic(
-    "ptx_tcgen05_wait_st", body='    asm volatile("tcgen05.wait::st.sync.aligned;" ::: "memory");'
-)
 
 
 # =============================================================================
@@ -65,47 +51,6 @@ device_intrinsic(
     body=lambda taddr_, cta_group: (
         f'    asm volatile("tcgen05.shift.cta_group::{int(cta_group)}.down [%0];" '
         ': : "r"(taddr) : "memory");'
-    ),
-)
-
-device_intrinsic(
-    "ptx_tcgen05_relinquish_alloc_permit",
-    n_attrs=1,
-    helper_name=lambda n_cta_group: (
-        f"tvm_builtin_ptx_tcgen05_relinquish_alloc_permit_cta_group_{int(n_cta_group)}"
-    ),
-    body=lambda n_cta_group: (
-        f'    asm volatile("tcgen05.relinquish_alloc_permit.cta_group::{int(n_cta_group)}'
-        '.sync.aligned;" ::: "memory");'
-    ),
-)
-
-device_intrinsic(
-    "ptx_tcgen05_alloc",
-    n_attrs=1,
-    c_signature="(void* dst, int nCols)",
-    helper_name=lambda dst_, nCols_, n_cta_group: (
-        f"tvm_builtin_ptx_tcgen05_alloc_cta_group_{int(n_cta_group)}"
-    ),
-    body=lambda dst_, nCols_, n_cta_group: (
-        "    unsigned int dst_addr = __cvta_generic_to_shared(dst);\n"
-        f'    asm volatile("tcgen05.alloc.cta_group::{int(n_cta_group)}'
-        '.sync.aligned.shared::cta.b32 [%0], %1;" '
-        ': : "r"(dst_addr), "r"(nCols) : "memory");'
-    ),
-)
-
-device_intrinsic(
-    "ptx_tcgen05_dealloc",
-    n_attrs=1,
-    c_signature="(uint32_t taddr, int nCols)",
-    helper_name=lambda taddr_, nCols_, n_cta_group: (
-        f"tvm_builtin_ptx_tcgen05_dealloc_cta_group_{int(n_cta_group)}"
-    ),
-    body=lambda taddr_, nCols_, n_cta_group: (
-        f'    asm volatile("tcgen05.dealloc.cta_group::{int(n_cta_group)}'
-        '.sync.aligned.b32 %0, %1;" '
-        ': : "r"(taddr), "r"(nCols) : "memory");'
     ),
 )
 

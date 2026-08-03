@@ -1310,6 +1310,108 @@ _ENTRIES = [
         )
         for act in ("arrive", "wait")
     ],
+    # ------------------------------------------------------------------
+    # tcgen05 memory-allocation and synchronisation, per PTX ISA 9.7.16.
+    #
+    # Every one of these carries `orders_memory=True`: the legacy helpers all
+    # had `::: "memory"`, and the waits/fences name no address at all.
+    #
+    # NOT REGISTERED:
+    # - `tcgen05.shift.cta_group.down [taddr]` -- the operand is bracketed, so
+    #   it needs the `addr` role, but `addr` only picks the 32-bit carrier when
+    #   the state space starts with "shared". A tmem address is neither shared
+    #   nor generic, and labelling it shared to get the right carrier would be
+    #   a lie in the table; it needs a tmem address space first.
+    # - `tcgen05.commit`'s `{.multicast}{, ctaMask}` form: the optional trailing
+    #   operand would make a one-operand entry and a two-operand entry both
+    #   accept a two-operand call, because the framework's positional `pred`
+    #   consumes the difference (same collision as `bar.sync`).
+    # - `tcgen05.ld` / `.st` / `.mma` / `.cp`, which need register groups whose
+    #   length is a function of the modifiers.
+    InstructionEntry(  # tcgen05.alloc.cta_group.sync.aligned{.shared::cta}.b32 [dst], nCols;
+        name="tcgen05_alloc",
+        mnemonic="tcgen05",
+        slots=(
+            ModifierSlot("action", ("alloc",)),
+            ModifierSlot("cta_group", ("cta_group::1", "cta_group::2")),
+            ModifierSlot("sync", ("sync",)),
+            ModifierSlot("aligned", ("aligned",)),
+            ModifierSlot("space", ("shared::cta",), optional=True),
+            ModifierSlot("type", ("b32",)),
+        ),
+        cert_arch="sm_100a",
+        orders_memory=True,
+        operands=(
+            OperandSlot("dst", role="addr", space="shared::cta"),
+            OperandSlot("ncols", role="value", dtype="u32"),
+        ),
+    ),
+    InstructionEntry(  # tcgen05.dealloc.cta_group.sync.aligned.b32 taddr, nCols;
+        name="tcgen05_dealloc",
+        mnemonic="tcgen05",
+        slots=(
+            ModifierSlot("action", ("dealloc",)),
+            ModifierSlot("cta_group", ("cta_group::1", "cta_group::2")),
+            ModifierSlot("sync", ("sync",)),
+            ModifierSlot("aligned", ("aligned",)),
+            ModifierSlot("type", ("b32",)),
+        ),
+        cert_arch="sm_100a",
+        orders_memory=True,
+        operands=(
+            # `taddr` is a plain register operand here, not bracketed.
+            OperandSlot("taddr", role="value", dtype="u32"),
+            OperandSlot("ncols", role="value", dtype="u32"),
+        ),
+    ),
+    InstructionEntry(  # tcgen05.relinquish_alloc_permit.cta_group.sync.aligned;
+        name="tcgen05_relinquish_alloc_permit",
+        mnemonic="tcgen05",
+        slots=(
+            ModifierSlot("action", ("relinquish_alloc_permit",)),
+            ModifierSlot("cta_group", ("cta_group::1", "cta_group::2")),
+            ModifierSlot("sync", ("sync",)),
+            ModifierSlot("aligned", ("aligned",)),
+        ),
+        cert_arch="sm_100a",
+        orders_memory=True,
+        operands=(),
+    ),
+    InstructionEntry(  # tcgen05.wait::{ld,st}.sync.aligned;
+        name="tcgen05_wait",
+        mnemonic="tcgen05",
+        slots=(
+            ModifierSlot("action", ("wait::ld", "wait::st")),
+            ModifierSlot("sync", ("sync",)),
+            ModifierSlot("aligned", ("aligned",)),
+        ),
+        cert_arch="sm_100a",
+        orders_memory=True,
+        operands=(),
+    ),
+    InstructionEntry(  # tcgen05.fence::{before,after}_thread_sync;
+        name="tcgen05_fence",
+        mnemonic="tcgen05",
+        slots=(ModifierSlot("action", ("fence::before_thread_sync", "fence::after_thread_sync")),),
+        cert_arch="sm_100a",
+        orders_memory=True,
+        operands=(),
+    ),
+    # tcgen05.commit.cta_group.mbarrier::arrive::one{.shared::cluster}.b64 [mbar];
+    InstructionEntry(
+        name="tcgen05_commit",
+        mnemonic="tcgen05",
+        slots=(
+            ModifierSlot("action", ("commit",)),
+            ModifierSlot("cta_group", ("cta_group::1", "cta_group::2")),
+            ModifierSlot("completion", ("mbarrier::arrive::one",)),
+            ModifierSlot("space", ("shared::cluster",), optional=True),
+            ModifierSlot("type", ("b64",)),
+        ),
+        cert_arch="sm_100a",
+        orders_memory=True,
+        operands=(OperandSlot("mbar", role="addr", space="shared::cluster"),),
+    ),
 ]
 
 TABLE: dict[str, InstructionEntry] = {e.name: e for e in _ENTRIES}

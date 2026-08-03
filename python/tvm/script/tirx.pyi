@@ -514,6 +514,30 @@ class _Chain_sub:
     sat: _Chain_sub
     def __call__(self, d: Any, a: Any, b: Any, *args: Any) -> None: ...
 
+class _Chain_tcgen05:
+    """`tcgen05` — 6 entries sharing this mnemonic; PTX puts their difference in the operand
+    list, so the call selects one. Shapes: (dst, ncols); (taddr, ncols); (); (mbar)
+    """
+
+    aligned: _Chain_tcgen05
+    alloc: _Chain_tcgen05
+    b32: _Chain_tcgen05
+    b64: _Chain_tcgen05
+    commit: _Chain_tcgen05
+    cta_group__1: _Chain_tcgen05
+    cta_group__2: _Chain_tcgen05
+    dealloc: _Chain_tcgen05
+    fence__after_thread_sync: _Chain_tcgen05
+    fence__before_thread_sync: _Chain_tcgen05
+    mbarrier__arrive__one: _Chain_tcgen05
+    relinquish_alloc_permit: _Chain_tcgen05
+    shared__cluster: _Chain_tcgen05
+    shared__cta: _Chain_tcgen05
+    sync: _Chain_tcgen05
+    wait__ld: _Chain_tcgen05
+    wait__st: _Chain_tcgen05
+    def __call__(self, *args: Any, pred: Any = None) -> None: ...
+
 class _PTXD:
     add: _Chain_add
     atom: _Chain_atom
@@ -539,6 +563,7 @@ class _PTXD:
     st: _Chain_st
     st_bulk: _Chain_st_bulk
     sub: _Chain_sub
+    tcgen05: _Chain_tcgen05
     def __getitem__(self, text: str) -> Any: ...
 
 ptxd: _PTXD

@@ -789,7 +789,7 @@ def test_ptxd_all_variants_render_unique():
             else:
                 assert f'"{opcode} ' in source or f'"{opcode};"' in source
             total += not predicated  # a @p twin is not a separate variant
-    assert total == 31187  # update when the table grows
+    assert total == 31203  # update when the table grows
 
 
 def test_ptxd_stub_up_to_date():

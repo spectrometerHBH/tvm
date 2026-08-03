@@ -228,9 +228,6 @@ class Tcgen05Namespace:
     """The Tcgen05 instruction submodule."""
 
     def __init__(self):
-        self.alloc = _op_wrapper(_cuda_op.ptx_tcgen05_alloc)
-        self.dealloc = _op_wrapper(_cuda_op.ptx_tcgen05_dealloc)
-        self.relinquish_alloc_permit = _op_wrapper(_cuda_op.ptx_tcgen05_relinquish_alloc_permit)
         self.encode_matrix_descriptor = _op_wrapper(_cuda_op.ptx_tcgen05_encode_matrix_descriptor)
         self.encode_instr_descriptor = _op_wrapper(_cuda_op.ptx_tcgen05_encode_instr_descriptor)
         self.encode_instr_descriptor_block_scaled = _op_wrapper(
@@ -241,17 +238,7 @@ class Tcgen05Namespace:
         self.cp = _op_wrapper(_cuda_op.ptx_tcgen05_cp)
         self.shift = _op_wrapper(_cuda_op.ptx_tcgen05_shift)
         self.commit = _op_wrapper(_cuda_op.ptx_tcgen05_commit)
-        self.wait = Tcgen05WaitNamespace()
         self.mma = Tcgen05MmaNamespace()
-        self.fence = Tcgen05FenceNamespace()
-
-
-class Tcgen05FenceNamespace:
-    """The Tcgen05 Fence instruction submodule."""
-
-    def __init__(self):
-        self.before_thread_sync = _op_wrapper(_cuda_op.ptx_tcgen05_fence_before_thread_sync)
-        self.after_thread_sync = _op_wrapper(_cuda_op.ptx_tcgen05_fence_after_thread_sync)
 
 
 class Tcgen05MmaNamespace:
@@ -265,14 +252,6 @@ class Tcgen05MmaNamespace:
 
     # __call__ corresponds to ptx_tcgen05_mma
     __tir_call_op_name__ = "ptx_tcgen05_mma"
-
-
-class Tcgen05WaitNamespace:
-    """The Tcgen05 Wait instruction submodule."""
-
-    def __init__(self):
-        self.ld = _op_wrapper(_cuda_op.ptx_tcgen05_wait_ld)
-        self.st = _op_wrapper(_cuda_op.ptx_tcgen05_wait_st)
 
 
 class IketNamespace:

@@ -107,13 +107,17 @@ def test_tmem_alloc_dealloc_relinquish():
 
         # alloc TMEM
         if warp_id == 0:
-            T.ptx.tcgen05.alloc(T.address_of(tmem_addr), n_cols=N_COLS, cta_group=cta_group)
+            T.ptxd[f"tcgen05.alloc.cta_group::{cta_group}.sync.aligned.shared::cta.b32"](
+                T.address_of(tmem_addr), T.uint32(N_COLS)
+            )
         T.cuda.cta_sync()
 
         # dealloc TMEM
         if warp_id == 0:
-            T.ptx.tcgen05.relinquish_alloc_permit(cta_group=cta_group)
-            T.ptx.tcgen05.dealloc(tmem_addr, n_cols=N_COLS, cta_group=cta_group)
+            T.ptxd[f"tcgen05.relinquish_alloc_permit.cta_group::{cta_group}.sync.aligned"]()
+            T.ptxd[f"tcgen05.dealloc.cta_group::{cta_group}.sync.aligned.b32"](
+                tmem_addr, T.uint32(N_COLS)
+            )
     # fmt: on
 
     target = tvm.target.Target("cuda")
@@ -281,9 +285,9 @@ def test_fence_before_after_thread_sync():
         warp_id = T.warp_id([4])
         lane_id = T.lane_id([32])
         tid = T.thread_id([128])
-        T.ptx.tcgen05.fence.before_thread_sync()
+        T.ptxd.tcgen05.fence__before_thread_sync()
         T.ptxd.bar.sync(0, 32)
-        T.ptx.tcgen05.fence.after_thread_sync()
+        T.ptxd.tcgen05.fence__after_thread_sync()
     # fmt: on
 
     target = tvm.target.Target("cuda")
@@ -316,7 +320,9 @@ def test_tcgen05_ld_st_roundtrip():
 
         # alloc TMEM
         if warp_id == 0:
-            T.ptx.tcgen05.alloc(T.address_of(tmem_addr), n_cols=N_COLS, cta_group=cta_group)
+            T.ptxd[f"tcgen05.alloc.cta_group::{cta_group}.sync.aligned.shared::cta.b32"](
+                T.address_of(tmem_addr), T.uint32(N_COLS)
+            )
         T.cuda.cta_sync()
         # GMEM -> RF
         for i in range(WIDTH):
@@ -324,25 +330,27 @@ def test_tcgen05_ld_st_roundtrip():
         # RF -> TMEM
         for i in range(WIDTH):
             T.ptx.tcgen05.st(tmem_addr, reg[i], shape="32x32b", num=REPEAT_NUM, row=warp_id * 32, col=i)  # noqa: E501
-        T.ptx.tcgen05.wait.st()
+        T.ptxd.tcgen05.wait__st.sync.aligned()
         T.cuda.cta_sync()
         # reset RF
         for i in range(WIDTH):
             reg[i] = 0.0
         T.cuda.cta_sync()
         # TMEM -> RF
-        T.ptx.tcgen05.fence.after_thread_sync()
+        T.ptxd.tcgen05.fence__after_thread_sync()
         for i in range(WIDTH):
             T.ptx.tcgen05.ld(tmem_addr, reg[i], shape="32x32b", num=REPEAT_NUM, row=warp_id * 32, col=i)  # noqa: E501
-        T.ptx.tcgen05.wait.ld()
+        T.ptxd.tcgen05.wait__ld.sync.aligned()
         # RF -> GMEM
         for i in range(WIDTH):
             B[tx, i] = reg[i]
 
         # dealloc TMEM
         if warp_id == 0:
-            T.ptx.tcgen05.relinquish_alloc_permit(cta_group=cta_group)
-            T.ptx.tcgen05.dealloc(tmem_addr, n_cols=N_COLS, cta_group=cta_group)
+            T.ptxd[f"tcgen05.relinquish_alloc_permit.cta_group::{cta_group}.sync.aligned"]()
+            T.ptxd[f"tcgen05.dealloc.cta_group::{cta_group}.sync.aligned.b32"](
+                tmem_addr, T.uint32(N_COLS)
+            )
     # fmt: on
 
     target = tvm.target.Target("cuda")
@@ -396,7 +404,9 @@ def test_tcgen05_cp_ld_roundtrip():
 
         # alloc TMEM
         if warp_id == 0:
-            T.ptx.tcgen05.alloc(T.address_of(tmem_addr), n_cols=N_COLS, cta_group=cta_group)
+            T.ptxd[f"tcgen05.alloc.cta_group::{cta_group}.sync.aligned.shared::cta.b32"](
+                T.address_of(tmem_addr), T.uint32(N_COLS)
+            )
         T.cuda.cta_sync()
         Tx.cta.copy(A_smem[:, :], A[:, :])
         T.ptxd.fence.proxy.async_.shared__cta()
@@ -416,18 +426,20 @@ def test_tcgen05_cp_ld_roundtrip():
         phase[0] = phase[0] ^ 1
         T.cuda.cta_sync()
         # TMEM -> RF (ld)
-        T.ptx.tcgen05.fence.after_thread_sync()
+        T.ptxd.tcgen05.fence__after_thread_sync()
         for i in range(WIDTH):
             T.ptx.tcgen05.ld(tmem_addr, reg[i], shape="32x32b", num=REPEAT_NUM, row=warp_id * 32, col=i)  # noqa: E501
-        T.ptx.tcgen05.wait.ld()
+        T.ptxd.tcgen05.wait__ld.sync.aligned()
         # RF -> GMEM
         for i in range(WIDTH):
             B[tx, i] = reg[i]
 
         # dealloc TMEM
         if warp_id == 0:
-            T.ptx.tcgen05.relinquish_alloc_permit(cta_group=cta_group)
-            T.ptx.tcgen05.dealloc(tmem_addr, n_cols=N_COLS, cta_group=cta_group)
+            T.ptxd[f"tcgen05.relinquish_alloc_permit.cta_group::{cta_group}.sync.aligned"]()
+            T.ptxd[f"tcgen05.dealloc.cta_group::{cta_group}.sync.aligned.b32"](
+                tmem_addr, T.uint32(N_COLS)
+            )
     # fmt: on
 
     target = tvm.target.Target("cuda")
@@ -505,7 +517,9 @@ def test_tcgen05_mma_ss_no_tma(swizzle):
 
         # alloc TMEM
         if warp_id == 0:
-            T.ptx.tcgen05.alloc(T.address_of(tmem_addr), n_cols=N_COLS, cta_group=cta_group)
+            T.ptxd[f"tcgen05.alloc.cta_group::{cta_group}.sync.aligned.shared::cta.b32"](
+                T.address_of(tmem_addr), T.uint32(N_COLS)
+            )
         T.cuda.cta_sync()
         for i in range(N):
             reg[i] = 0.0
@@ -531,18 +545,20 @@ def test_tcgen05_mma_ss_no_tma(swizzle):
         T.cuda.cta_sync()
 
         # TMEM -> RF
-        T.ptx.tcgen05.fence.after_thread_sync()
+        T.ptxd.tcgen05.fence__after_thread_sync()
         for i in range(N):
             T.ptx.tcgen05.ld(tmem_addr, reg[i], shape="32x32b", num=REPEAT_NUM, row=warp_id * 32, col=i)  # noqa: E501
-        T.ptx.tcgen05.wait.ld()
+        T.ptxd.tcgen05.wait__ld.sync.aligned()
         # RF -> GMEM
         for i in range(N):
             C[tx, i] = reg[i]
 
         # dealloc TMEM
         if warp_id == 0:
-            T.ptx.tcgen05.relinquish_alloc_permit(cta_group=cta_group)
-            T.ptx.tcgen05.dealloc(tmem_addr, n_cols=N_COLS, cta_group=cta_group)
+            T.ptxd[f"tcgen05.relinquish_alloc_permit.cta_group::{cta_group}.sync.aligned"]()
+            T.ptxd[f"tcgen05.dealloc.cta_group::{cta_group}.sync.aligned.b32"](
+                tmem_addr, T.uint32(N_COLS)
+            )
     # fmt: on
 
     import torch

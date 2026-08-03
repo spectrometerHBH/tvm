@@ -2081,67 +2081,6 @@ def ptx_setmaxnreg(inc: bool, reg_count):
     return call_intrin("", "tirx.ptx.setmaxnreg", inc, reg_count)
 
 
-def ptx_tcgen05_alloc(dst_ptr, n_cols, cta_group=1):
-    """TVM intrinsic to call tcgen05.alloc.cta_group.sync.aligned
-        Dynamically allocates the number of cols in tensor memory, and write
-        the address of allocated memory to shared memory.
-
-    Parameters
-    ----------
-    dst_ptr : Var
-        The pointer to the destination shared memory.
-
-    n_cols : int
-        The number of columns to allocate in tensor memory.
-        Must be a multiple of 32 and a power of 2, and within the range [32, 512].
-
-    cta_group : int
-        The number of CTA groups involved in the allocation.
-        If cta_group=1, one warp from CTA performs the allocation. Else, if cta_group=2,
-        one warp from each of the peer CTAs perform the allocation.
-    """
-    _choice("cta_group", cta_group, _TCGEN05_CTA_GROUP)
-    return call_intrin("", "tirx.ptx.tcgen05_alloc", dst_ptr, n_cols, cta_group)
-
-
-def ptx_tcgen05_dealloc(taddr, n_cols, cta_group=1):
-    """TVM intrinsic to call tcgen05.dealloc.cta_group.sync.aligned
-        Deallocates the tensor memory specified by the tensor memory address taddr.
-
-    Parameters
-    ----------
-    taddr : Expr
-        The address of previously allocated tensor memory, should be uint32_t.
-
-    n_cols : int
-        The number of columns to deallocate in tensor memory.
-        Must be a multiple of 32 and a power of 2, and within the range [32, 512].
-
-    cta_group : int
-        The number of CTA groups involved in the deallocation.
-        If cta_group=1, one warp from CTA performs the deallocation. Else, if cta_group=2,
-        one warp from each of the peer CTAs perform the deallocation.
-    """
-    _choice("cta_group", cta_group, _TCGEN05_CTA_GROUP)
-    return call_intrin("", "tirx.ptx.tcgen05_dealloc", taddr, n_cols, cta_group)
-
-
-def ptx_tcgen05_relinquish_alloc_permit(cta_group=1):
-    """TVM intrinsic to call tcgen05.relinquish_alloc_permit.cta_group.sync.aligned
-        The CTA of the executing thread is relinquishing the right to allocate
-        Tensor Memory after calling this op.
-
-    Parameters
-    ----------
-    cta_group : int
-        The number of CTA groups involved in relinquishing.
-        If cta_group=1, one warp from CTA performs the relinquishing. Else, if cta_group=2,
-        one warp from each of the peer CTAs perform the relinquishing.
-    """
-    _choice("cta_group", cta_group, _TCGEN05_CTA_GROUP)
-    return call_intrin("", "tirx.ptx.tcgen05_relinquish_alloc_permit", cta_group)
-
-
 def ptx_tcgen05_encode_matrix_descriptor(desc, addr, ldo, sdo, swizzle):
     """TVM intrinsic to create memory descriptor for tcgen05 instructions
 
@@ -2539,20 +2478,6 @@ def ptx_tcgen05_mma_block_scale(
     )
 
 
-def ptx_tcgen05_fence_before_thread_sync():
-    """TVM intrinsic to call tcgen05.fence::before_thread_sync
-    Orders all prior asynchronous tcgen05 operations relative to subsequent operations.
-    """
-    return call_intrin("", "tirx.ptx.tcgen05_fence_before_thread_sync")
-
-
-def ptx_tcgen05_fence_after_thread_sync():
-    """TVM intrinsic to call tcgen05.fence::after_thread_sync
-    Orders all subsequent asynchronous tcgen05 operations relative to previous operations.
-    """
-    return call_intrin("", "tirx.ptx.tcgen05_fence_after_thread_sync")
-
-
 def _choice(name: str, value, options):
     """Validate `value` is one of `options`. Raise a clear ValueError otherwise.
 
@@ -2735,20 +2660,6 @@ def ptx_tcgen05_st(dst_addr, *regs, shape, num, row=0, col=0, unpack=False):
     """
     _choice("shape", shape, _TCGEN05_LDST_SHAPES)
     return call_intrin("", "tirx.ptx.tcgen05_st", dst_addr, row, col, shape, num, unpack, *regs)
-
-
-def ptx_tcgen05_wait_ld():
-    """TVM intrinsic to call tcgen05.wait::ld.sync.aligned
-    Wait for the completion of all prior async tcgen05.ld operations.
-    """
-    return call_intrin("", "tirx.ptx.tcgen05_wait_ld")
-
-
-def ptx_tcgen05_wait_st():
-    """TVM intrinsic to call tcgen05.wait::st.sync.aligned
-    Wait for the completion of all prior async tcgen05.st operations.
-    """
-    return call_intrin("", "tirx.ptx.tcgen05_wait_st")
 
 
 def ptx_tcgen05_commit(bar, cta_group=1, cta_mask=0, *, pred=None):

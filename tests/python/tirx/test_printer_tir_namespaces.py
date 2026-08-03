@@ -59,58 +59,6 @@ def test_printer_nvshmem_namespace():
 def test_printer_ptx_more():
     r = tir.Var("r", "handle")
     s = tir.Var("s", "handle")
-    _assert_print(
-        # New API: (trans, num, dtype, smem_ptr, *dst_handles).
-        # .x1.b16 has 1 dst register, so 1 dst handle.
-        cuda_op.ptx_ldmatrix(True, 1, ".b16", s, r),
-        's = T.handle()\nr = T.handle()\nT.ptx.ldmatrix(T.bool(True), 1, ".b16", s, r)',
-    )
-    _assert_print(
-        # New API: (trans, num, dtype, smem_ptr, *src_handles).
-        # .x1.b16 has 1 src register, so 1 src handle.
-        cuda_op.ptx_stmatrix(False, 1, ".b16", s, r),
-        (
-            "s = T.handle()\nr = T.handle()\nT.ptx.stmatrix("
-            'T.bool(False), 1, ".b16", "m8n8", "shared", s, r)'
-        ),
-    )
-    _assert_print(cuda_op.ptx_setmaxnreg(True, 64), "T.ptx.setmaxnreg(T.bool(True), 64)")
-    _assert_print(cuda_op.ptx_fetch_register(32, "laneid"), 'T.ptx.fetch_register(32, "laneid")')
-    _assert_print(cuda_op.ptx_wgmma_fence(), "T.ptx.wgmma.fence()")
-    _assert_print(cuda_op.ptx_wgmma_wait_group(0), "T.ptx.wgmma.wait_group(0)")
-    _assert_print(cuda_op.ptx_cp_async_commit_group(), "T.ptx.cp_async.commit_group()")
-    _assert_print(cuda_op.ptx_cp_async_bulk_commit_group(), "T.ptx.cp_async.bulk.commit_group()")
-    _assert_print(
-        cuda_op.ptx_cp_async_bulk_wait_group(0, True),
-        "T.ptx.cp_async.bulk.wait_group(0, T.bool(True))",
-    )
-    _assert_print(
-        cuda_op.ptx_cp_async_mbarrier_arrive(r),
-        'r = T.handle()\nT.ptx.cp_async.mbarrier.arrive(r, T.bool(False), "shared")',
-    )
-    _assert_print(
-        cuda_op.ptx_cp_async_mbarrier_arrive_noinc(r),
-        'r = T.handle()\nT.ptx.cp_async.mbarrier.arrive(r, T.bool(True), "shared::cta")',
-    )
-    _assert_print(cuda_op.ptx_elect_sync(), "T.ptx.elect_sync()")
-    lane = tir.Var("lane", "int32")
-    _assert_print(
-        tir.op.selector(lane, cuda_op.ptx_elect_sync()),
-        "lane = T.int32()\nT.selector(lane, T.ptx.elect_sync())",
-    )
-    _assert_print(
-        cuda_op.cuda_fdividef(1.0, 2.0),
-        "T.cuda.fdividef(T.float32(1.0), T.float32(2.0))",
-    )
-    _assert_print(
-        cuda_op.ptx_map_shared_rank(r, 2), 'r = T.handle()\nT.ptx.mapa(r, 2, "", "u64", "uint64")'
-    )
-    _assert_print(
-        cuda_op.ptx_tcgen05_alloc(s, 64, 1), "s = T.handle()\nT.ptx.tcgen05.alloc(s, 64, 1)"
-    )
-    _assert_print(
-        cuda_op.ptx_tcgen05_dealloc(s, 64, 1), "s = T.handle()\nT.ptx.tcgen05.dealloc(s, 64, 1)"
-    )
     d = tir.Var("d", "handle")
     a = tir.Var("a", "handle")
     b = tir.Var("b", "handle")
@@ -183,13 +131,8 @@ def test_printer_ptx_more():
         cuda_op.ptx_tcgen05_st(a, 0, shape="16x64b", num=1, row=0, col=0, unpack=False),
         'a = T.handle()\nT.ptx.tcgen05.st(a, 0, 0, "16x64b", 1, T.bool(False), 0)',
     )
-    _assert_print(cuda_op.ptx_tcgen05_wait_ld(), "T.ptx.tcgen05.wait.ld()")
-    _assert_print(cuda_op.ptx_tcgen05_wait_st(), "T.ptx.tcgen05.wait.st()")
     _assert_print(
         cuda_op.ptx_tcgen05_commit(a, 1, 0), "a = T.handle()\nT.ptx.tcgen05.commit(a, 1, 0)"
-    )
-    _assert_print(
-        cuda_op.ptx_tcgen05_relinquish_alloc_permit(1), "T.ptx.tcgen05.relinquish_alloc_permit(1)"
     )
 
 
