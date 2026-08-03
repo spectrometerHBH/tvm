@@ -274,6 +274,10 @@ def _coerce_imm(entry, slot, value):
 
 
 def _coerce_pred(entry, pred):
+    # A Python bool names no dtype but is unambiguous, so type it here rather
+    # than making every call site spell `T.bool(True)`.
+    if isinstance(pred, bool):
+        return const(pred, "bool")
     ty = getattr(pred, "ty", None)
     if isinstance(ty, PrimType) and ty.dtype in ("bool", "uint32", "int32"):
         return pred

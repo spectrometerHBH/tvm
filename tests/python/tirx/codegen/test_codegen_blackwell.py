@@ -33,25 +33,7 @@ def _get_source(func: tvm.tirx.PrimFunc) -> str:
     return src, mod
 
 
-def _remote_operand_index(call):
-    """Index of the ``remote`` operand in a tirx mbarrier arrive call.
-
-    Both arrive ops pack their optional operands positionally and record which
-    ones are present in trailing int flags, so the remote operand's index moves
-    with what the caller actually passed:
-
-    - ``mbarrier_arrive``: ``[bar, count?, remote?, pred?]`` followed by
-      ``sem, scope, space, has_count, has_remote, has_pred``.
-    - ``mbarrier_arrive_expect_tx``: ``[bar, byte_count, remote?, pred?]``
-      followed by ``sem, scope, space, has_remote, has_pred`` (``byte_count``
-      is mandatory, so the index is fixed).
-    """
-    if call.op.name == "tirx.ptx.mbarrier_arrive":
-        return 1 + int(call.args[-3])
-    return 2
-
-
-def _assert_remote_mbarrier_ir(func, arrive_op_name):
+def _assert_remote_mbarrier_ir(func, arrive_op_name, n_arrives=1):
     bindings = []
     buffers = []
     mapa_calls = []
@@ -84,20 +66,13 @@ def _assert_remote_mbarrier_ir(func, arrive_op_name):
     # ptxd operand order is the PTX operand order: mapa writes its result into
     # a destination the caller declared, so args are (d, a, b) and the arrive
     # reads the mapped address back out of that destination rather than
-    # re-deriving it.
-    mapped_dst, mapped_ptr, mapped_rank = mapa_calls[0].args[:3]
+    # re-deriving it. One mapa serves every arrive on the view -- the arrive
+    # instruction has no remote operand of its own, it just takes the mapped
+    # address.
+    mapped_dst, mapped_ptr, _rank = mapa_calls[0].args[:3]
     assert isinstance(mapped_dst, tvm.tirx.BufferLoad)
     assert mapped_ptr is not None
-
-    # mapa's rank operand is `.u32` per the ISA, so it carries a cast that the
-    # arrive's own remote operand does not; compare what they denote.
-    def rank_value(e):
-        while hasattr(e, "value") and not isinstance(getattr(e, "value", None), int | float):
-            e = e.value
-        return getattr(e, "value", e)
-
-    for arrive in arrive_calls:
-        assert rank_value(arrive.args[_remote_operand_index(arrive)]) == rank_value(mapped_rank)
+    assert len(arrive_calls) == n_arrives
 
 
 @pytest.mark.gpu
@@ -180,14 +155,17 @@ def test_mbarrier_remote_view_codegen():
         remote_bar.arrive(0, count=2)
     # fmt: on
 
-    _assert_remote_mbarrier_ir(test_remote_view, "tirx.ptx.mbarrier_arrive")
+    # One mapa serves both arrives: the view maps once, and each arrive takes
+    # the mapped address rather than re-deriving it the way the fused wrapper
+    # did. The two arrives are different ISA lines (implicit count vs explicit),
+    # hence different entries.
+    _assert_remote_mbarrier_ir(test_remote_view, "tirx.ptxd.mbarrier_arrive_nocount")
+    _assert_remote_mbarrier_ir(test_remote_view, "tirx.ptxd.mbarrier_arrive")
     with tvm.target.Target("cuda"):
         src, _ = _get_source(test_remote_view)
         assert "tvm_builtin_ptxd_mapa_u64" in src
-        # The emitted helper name spells out the full attribute set it was
-        # specialized for: <space>_<count?>_<remote>_<pred>.
-        assert "tvm_builtin_ptx_mbarrier_arrive_shared_cluster_remote_pred" in src
-        assert "tvm_builtin_ptx_mbarrier_arrive_shared_cluster_count_remote_pred" in src
+        assert "tvm_builtin_ptxd_mbarrier_arrive_nocount_arrive_shared__cluster_b64" in src
+        assert "tvm_builtin_ptxd_mbarrier_arrive_arrive_shared__cluster_b64" in src
         assert "mbarrier.arrive.shared::cluster.b64" in src
         assert 'asm volatile("mbarrier.arrive.shared.b64' not in src
 
@@ -211,10 +189,12 @@ def test_tma_mbarrier_remote_view_codegen():
         remote_bar.arrive(0, tx_count=128)
     # fmt: on
 
-    _assert_remote_mbarrier_ir(test_remote_view, "tirx.ptx.mbarrier_arrive_expect_tx")
+    _assert_remote_mbarrier_ir(test_remote_view, "tirx.ptxd.mbarrier_arrive_expect_tx")
     with tvm.target.Target("cuda"):
         src, _ = _get_source(test_remote_view)
-        assert "tvm_builtin_ptx_mbarrier_arrive_expect_tx_shared_cluster_remote_pred" in src
+        assert (
+            "tvm_builtin_ptxd_mbarrier_arrive_expect_tx_arrive_expect_tx_shared__cluster_b64" in src
+        )
         assert "mbarrier.arrive.expect_tx.shared::cluster.b64" in src
         assert 'asm volatile("mbarrier.arrive.expect_tx.shared.b64' not in src
 

@@ -644,29 +644,6 @@ def test_ptx_mbarrier_complete_tx_rejects_remote_non_cluster_space():
         T.ptx.mbarrier.complete_tx(bar, T.uint32(16), space="shared::cta", remote=T.int32(0))
 
 
-def test_ptx_mbarrier_arrive_remote_codegen():
-    @T.prim_func
-    def main(Pred: T.Buffer((1,), "int32")):
-        T.device_entry()
-        tx = T.thread_id([32])
-        if tx == 0:
-            bar = T.alloc_buffer((3,), "uint64", scope="shared", align=16)
-            T.ptx.mbarrier.arrive(bar.ptr_to([0]), remote=T.int32(0), pred=True)
-            T.ptx.mbarrier.arrive(bar.ptr_to([1]), remote=T.int32(0), pred=Pred[0])
-            T.ptx.mbarrier.arrive(bar.ptr_to([2]), remote=T.int32(0), pred=True, count=T.int32(2))
-
-    target = tvm.target.Target({"kind": "cuda", "arch": "sm_100a"})
-    with target:
-        mod = tvm.compile(tvm.IRModule({"main": main}), target=target, tir_pipeline="tirx")
-    src = mod.mod.imports[0].inspect_source()
-    assert "tvm_builtin_ptx_mbarrier_arrive_remote_unpred" not in src
-    assert "tvm_builtin_ptx_mbarrier_arrive_remote_count_unpred" not in src
-    assert "tvm_builtin_ptx_mbarrier_arrive_shared_cluster_remote_pred(" in src
-    assert "tvm_builtin_ptx_mbarrier_arrive_shared_cluster_count_remote_pred(" in src
-    assert src.count("@p mbarrier.arrive.shared::cluster.b64  _, [remAddr32];") == 1
-    assert "@p mbarrier.arrive.shared::cluster.b64  _, [remAddr32], %1;" in src
-
-
 def test_ptx_mbarrier_arrive_new_forms_codegen():
     @T.prim_func
     def main(Pred: T.Buffer((1,), "int32")):
@@ -674,13 +651,11 @@ def test_ptx_mbarrier_arrive_new_forms_codegen():
         tx = T.thread_id([32])
         if tx == 0:
             bar = T.alloc_buffer((6,), "uint64", scope="shared", align=16)
-            T.ptx.mbarrier.arrive(bar.ptr_to([0]), sem="relaxed", scope="cta", space="shared::cta")
-            T.ptx.mbarrier.arrive(
-                bar.ptr_to([1]), sem="relaxed", scope="cluster", remote=T.int32(1)
-            )
-            T.ptx.mbarrier.arrive(bar.ptr_to([2]), sem="release", scope="cta", pred=Pred[0])
-            T.ptx.mbarrier.arrive.expect_tx(
-                bar.ptr_to([3]), T.int32(128), sem="relaxed", scope="cluster", remote=T.int32(1)
+            T.ptxd.mbarrier.arrive.relaxed.cta.shared__cta.b64(bar.ptr_to([0]))
+            T.ptxd.mbarrier.arrive.relaxed.cluster.shared__cluster.b64(bar.ptr_to([1]))
+            T.ptxd.mbarrier.arrive.release.cta.shared.b64(bar.ptr_to([2]), pred=Pred[0])
+            T.ptxd.mbarrier.arrive.expect_tx.relaxed.cluster.shared__cluster.b64(
+                bar.ptr_to([3]), T.uint32(128)
             )
             T.ptx.mbarrier.arrive.no_complete(bar.ptr_to([4]), T.int32(2))
             T.ptx.mbarrier.arrive.no_complete(
@@ -692,25 +667,15 @@ def test_ptx_mbarrier_arrive_new_forms_codegen():
         mod = tvm.compile(tvm.IRModule({"main": main}), target=target, tir_pipeline="tirx")
     src = mod.mod.imports[0].inspect_source()
     assert "mbarrier.arrive.relaxed.cta.shared::cta.b64 _, [%0];" in src
-    assert "mapa.shared::cluster.u32  remAddr32, %0, %2;" in src
-    assert "mbarrier.arrive.relaxed.cluster.shared::cluster.b64  _, [remAddr32];" in src
-    assert "@p mbarrier.arrive.release.cta.shared.b64  _, [%0];" in src
-    assert "mbarrier.arrive.expect_tx.relaxed.cluster.shared::cluster.b64" in src
+    assert "mbarrier.arrive.relaxed.cluster.shared::cluster.b64 _, [%0];" in src
+    assert "@p mbarrier.arrive.release.cta.shared.b64 _, [%0];" in src
+    assert "mbarrier.arrive.expect_tx.relaxed.cluster.shared::cluster.b64 _, [%0], %1;" in src
     assert "mbarrier.arrive.noComplete.release.cta.shared.b64 _, [%0], %1;" in src
     assert "@p mbarrier.arrive.noComplete.release.cta.shared::cta.b64 _, [%0], %1;" in src
 
 
-def test_ptx_mbarrier_arrive_rejects_removed_and_invalid_forms():
+def test_ptx_mbarrier_arrive_no_complete_rejects_invalid_forms():
     bar = tir.Var("bar", "handle")
-    with pytest.raises(ValueError, match="remote=.*cta_id"):
-        T.ptx.mbarrier.arrive(bar, cta_id=T.int32(0), pred=True)
-    with pytest.raises(ValueError, match="remote=.*cta_id"):
-        T.ptx.mbarrier.arrive.expect_tx(bar, T.int32(128), cta_id=T.int32(0))
-    assert not hasattr(T.ptx.mbarrier.arrive, "cluster_count")
-    with pytest.raises(ValueError, match="sem and scope"):
-        T.ptx.mbarrier.arrive(bar, sem="relaxed")
-    with pytest.raises(ValueError, match="requires space='shared::cluster'"):
-        T.ptx.mbarrier.arrive(bar, remote=T.int32(0), space="shared::cta")
     with pytest.raises(ValueError, match="does not support remote"):
         T.ptx.mbarrier.arrive.no_complete(bar, T.int32(1), remote=T.int32(0))
     with pytest.raises(ValueError, match="space must"):

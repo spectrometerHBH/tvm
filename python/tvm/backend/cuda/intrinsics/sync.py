@@ -22,7 +22,7 @@ PTX side:
 * ``barrier.sync`` — unaligned named barrier for divergent control flow
 * ``fence{.sem}.scope`` / ``fence.proxy.async`` / ``fence.mbarrier_init``
 * ``barrier.cluster.arrive`` / ``barrier.cluster.wait``
-* ``mbarrier.init`` / ``mbarrier.arrive[.expect_tx]`` (local + remote) / ``mbarrier.try_wait``
+* ``mbarrier.init`` / ``mbarrier.arrive.noComplete`` / ``mbarrier.try_wait``
 * ``elect.sync``  — warp leader election
 * warp-vote ``__any_sync``
 
@@ -35,9 +35,6 @@ CUDA-side helpers:
 
 from tvm.tirx.operator.intrinsics._common import (
     CLUSTER_BARRIER_SEM,
-    MBARRIER_ARRIVE_SCOPE,
-    MBARRIER_ARRIVE_SEM,
-    MBARRIER_ARRIVE_SPACE,
     MBARRIER_COMPLETE_TX_SCOPE,
     MBARRIER_COMPLETE_TX_SEM,
     MBARRIER_COMPLETE_TX_SPACE,
@@ -174,125 +171,6 @@ device_intrinsic(
 
 
 # =============================================================================
-# mbarrier.arrive{.sem.scope}{.space}.b64 _, [addr]{, count};
-# =============================================================================
-def _check_mbarrier_arrive_attrs(sem, scope, space):
-    sem = parse_str(sem)
-    scope = parse_str(scope)
-    space = parse_str(space)
-    if (sem == "") != (scope == ""):
-        raise ValueError("mbarrier.arrive sem and scope must be specified together")
-    if sem not in MBARRIER_ARRIVE_SEM:
-        raise ValueError(f"invalid mbarrier.arrive sem {sem!r}")
-    if scope not in MBARRIER_ARRIVE_SCOPE:
-        raise ValueError(f"invalid mbarrier.arrive scope {scope!r}")
-    if space not in MBARRIER_ARRIVE_SPACE:
-        raise ValueError(f"invalid mbarrier.arrive space {space!r}")
-    return sem, scope, space
-
-
-def _mbarrier_address_parts(barrier):
-    """Return the CUDA parameter/address spelling for an mbarrier operand."""
-    raw_address = str(barrier.ty) == "uint32"
-    if raw_address:
-        return "unsigned int", "", "barrier", "_raw_u32"
-    return (
-        "void*",
-        "    unsigned int barrier_addr = __cvta_generic_to_shared(barrier);\n",
-        "barrier_addr",
-        "",
-    )
-
-
-def _ptx_mbarrier_arrive_parts(*args):
-    sem, scope, space, has_count, has_remote, has_pred = args[-6:]
-    sem, scope, space = _check_mbarrier_arrive_attrs(sem, scope, space)
-    has_count = _as_bool(has_count)
-    has_remote = _as_bool(has_remote)
-    has_pred = _as_bool(has_pred)
-    if has_remote and space != "shared::cluster":
-        raise ValueError("remote mbarrier.arrive requires space='shared::cluster'")
-
-    barrier_type, address_decl, barrier_addr, raw_suffix = _mbarrier_address_parts(args[0])
-    name = "tvm_builtin_ptx_mbarrier_arrive"
-    if sem:
-        name += f"_{_safe_attr(sem)}_{_safe_attr(scope)}"
-    name += f"_{_safe_attr(space)}"
-    if has_count:
-        name += "_count"
-    if has_remote:
-        name += "_remote"
-    if has_pred:
-        name += "_pred"
-    name += raw_suffix
-
-    params = [f"{barrier_type} barrier"]
-    arg_idx = 1
-    if has_count:
-        params.append("int count")
-        count_idx = arg_idx
-        arg_idx += 1
-    if has_remote:
-        params.append("int remote")
-        remote_idx = arg_idx
-        arg_idx += 1
-    if has_pred:
-        params.append("int pred")
-        pred_idx = arg_idx
-
-    instr_suffix = f".{sem}.{scope}" if sem else ""
-    instr = f"mbarrier.arrive{instr_suffix}.{space}.b64"
-    body = address_decl
-
-    if has_remote or has_pred:
-        body += "    asm volatile(\n"
-        body += '        "{\\n"\n'
-        if has_pred:
-            body += '        ".reg .pred p;\\n"\n'
-        if has_remote:
-            body += '        ".reg .b32 remAddr32;\\n"\n'
-        if has_pred:
-            body += f'        "setp.ne.s32 p, %{pred_idx}, 0;\\n"\n'
-        if has_remote:
-            prefix = "@p " if has_pred else ""
-            body += (
-                f'        "{prefix}mapa.shared::cluster.u32  remAddr32, %0, %{remote_idx};\\n"\n'
-            )
-            addr = "remAddr32"
-        else:
-            addr = "%0"
-        pred_prefix = "@p " if has_pred else ""
-        count_suffix = f", %{count_idx}" if has_count else ""
-        body += f'        "{pred_prefix}{instr}  _, [{addr}]{count_suffix};\\n"\n'
-        body += '        "}\\n"\n'
-        constraints = [f'"r"({barrier_addr})']
-        if has_count:
-            constraints.append('"r"(count)')
-        if has_remote:
-            constraints.append('"r"(remote)')
-        if has_pred:
-            constraints.append('"r"(pred)')
-        body += f'        :: {", ".join(constraints)} : "memory");'
-    else:
-        count_suffix = ", %1" if has_count else ""
-        constraints = f'"r"({barrier_addr})'
-        if has_count:
-            constraints += ', "r"(count)'
-        body += f'    asm volatile("{instr} _, [%0]{count_suffix};"\n'
-        body += f'                 :: {constraints} : "memory");'
-
-    return name, f"({', '.join(params)})", body
-
-
-device_intrinsic(
-    "ptx_mbarrier_arrive",
-    n_attrs=6,
-    helper_name=lambda *a: _ptx_mbarrier_arrive_parts(*a)[0],
-    c_signature=lambda *a: _ptx_mbarrier_arrive_parts(*a)[1],
-    body=lambda *a: _ptx_mbarrier_arrive_parts(*a)[2],
-)
-
-
 # mbarrier.complete_tx{.sem.scope}{.space}.b64 [addr], txCount;
 #   sem={.relaxed} scope={.cta,.cluster} space={.shared{::cta},.shared::cluster}
 def _ptx_mbarrier_complete_tx_parts(*args):
@@ -361,82 +239,6 @@ device_intrinsic(
     helper_name=lambda *a: _ptx_mbarrier_complete_tx_parts(*a)[0],
     c_signature=lambda *a: _ptx_mbarrier_complete_tx_parts(*a)[1],
     body=lambda *a: _ptx_mbarrier_complete_tx_parts(*a)[2],
-)
-
-
-# mbarrier.arrive.expect_tx{.sem.scope}{.space}.b64 _, [addr], txCount;
-def _ptx_mbarrier_arrive_expect_tx_parts(*args):
-    sem, scope, space, has_remote, has_pred = args[-5:]
-    sem, scope, space = _check_mbarrier_arrive_attrs(sem, scope, space)
-    has_remote = _as_bool(has_remote)
-    has_pred = _as_bool(has_pred)
-    if has_remote and space != "shared::cluster":
-        raise ValueError("remote mbarrier.arrive.expect_tx requires space='shared::cluster'")
-
-    barrier_type, address_decl, barrier_addr, raw_suffix = _mbarrier_address_parts(args[0])
-    name = "tvm_builtin_ptx_mbarrier_arrive_expect_tx"
-    if sem:
-        name += f"_{_safe_attr(sem)}_{_safe_attr(scope)}"
-    name += f"_{_safe_attr(space)}"
-    if has_remote:
-        name += "_remote"
-    if has_pred:
-        name += "_pred"
-    name += raw_suffix
-
-    params = [f"{barrier_type} barrier", "int byte_count"]
-    arg_idx = 2
-    if has_remote:
-        params.append("int remote")
-        remote_idx = arg_idx
-        arg_idx += 1
-    if has_pred:
-        params.append("int pred")
-        pred_idx = arg_idx
-
-    instr_suffix = f".{sem}.{scope}" if sem else ""
-    instr = f"mbarrier.arrive.expect_tx{instr_suffix}.{space}.b64"
-    body = address_decl
-
-    if has_remote or has_pred:
-        body += "    asm volatile(\n"
-        body += '        "{\\n"\n'
-        if has_pred:
-            body += '        ".reg .pred p;\\n"\n'
-        if has_remote:
-            body += '        ".reg .b32 remAddr32;\\n"\n'
-        if has_pred:
-            body += f'        "setp.ne.s32 p, %{pred_idx}, 0;\\n"\n'
-        if has_remote:
-            prefix = "@p " if has_pred else ""
-            body += (
-                f'        "{prefix}mapa.shared::cluster.u32  remAddr32, %0, %{remote_idx};\\n"\n'
-            )
-            addr = "remAddr32"
-        else:
-            addr = "%0"
-        pred_prefix = "@p " if has_pred else ""
-        body += f'        "{pred_prefix}{instr}  _, [{addr}], %1;\\n"\n'
-        body += '        "}\\n"\n'
-        constraints = [f'"r"({barrier_addr})', '"r"(byte_count)']
-        if has_remote:
-            constraints.append('"r"(remote)')
-        if has_pred:
-            constraints.append('"r"(pred)')
-        body += f'        :: {", ".join(constraints)} : "memory");'
-    else:
-        body += f'    asm volatile("{instr} _, [%0], %1;"\n'
-        body += f'                 :: "r"({barrier_addr}), "r"(byte_count) : "memory");'
-
-    return name, f"({', '.join(params)})", body
-
-
-device_intrinsic(
-    "ptx_mbarrier_arrive_expect_tx",
-    n_attrs=5,
-    helper_name=lambda *a: _ptx_mbarrier_arrive_expect_tx_parts(*a)[0],
-    c_signature=lambda *a: _ptx_mbarrier_arrive_expect_tx_parts(*a)[1],
-    body=lambda *a: _ptx_mbarrier_arrive_expect_tx_parts(*a)[2],
 )
 
 

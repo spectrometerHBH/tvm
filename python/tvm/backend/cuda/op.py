@@ -597,55 +597,6 @@ def _validate_mbarrier_arrive_attrs(sem, scope, space, remote):
         raise ValueError("remote mbarrier.arrive requires space='shared::cluster'")
 
 
-def ptx_mbarrier_arrive(
-    bar,
-    *,
-    count=None,
-    sem="",
-    scope="",
-    space=None,
-    remote=None,
-    pred=None,
-    **kwargs,
-):
-    """PTX ``mbarrier.arrive{.sem.scope}{.space}.b64 _, [bar]{, count}``.
-
-    ``remote`` maps ``bar`` with ``mapa.shared::cluster.u32`` before the arrive
-    instruction. ``pred`` predicates the map and arrive instruction.
-    """
-    if "cta_id" in kwargs:
-        raise ValueError("T.ptx.mbarrier.arrive uses remote= instead of cta_id=")
-    if kwargs:
-        raise TypeError(f"unexpected keyword argument(s): {', '.join(kwargs)}")
-
-    if space is not None:
-        effective_space = space
-    elif remote is not None:
-        effective_space = "shared::cluster"
-    else:
-        effective_space = "shared"
-    _validate_mbarrier_arrive_attrs(sem, scope, effective_space, remote)
-
-    args = [bar]
-    if count is not None:
-        args.append(count)
-    if remote is not None:
-        args.append(remote)
-    if pred is not None:
-        args.append(pred)
-    return call_intrin(
-        "",
-        "tirx.ptx.mbarrier_arrive",
-        *args,
-        sem,
-        scope,
-        effective_space,
-        int(count is not None),
-        int(remote is not None),
-        int(pred is not None),
-    )
-
-
 def ptx_mbarrier_complete_tx(
     bar,
     tx_count,
@@ -682,48 +633,6 @@ def ptx_mbarrier_complete_tx(
         sem,
         scope,
         space,
-        int(remote is not None),
-        int(pred is not None),
-    )
-
-
-def ptx_mbarrier_arrive_expect_tx(
-    bar,
-    byte_count,
-    *,
-    sem="",
-    scope="",
-    space=None,
-    remote=None,
-    pred=None,
-    **kwargs,
-):
-    """PTX ``mbarrier.arrive.expect_tx{.sem.scope}{.space}.b64 _, [bar], txCount``."""
-    if "cta_id" in kwargs:
-        raise ValueError("T.ptx.mbarrier.arrive.expect_tx uses remote= instead of cta_id=")
-    if kwargs:
-        raise TypeError(f"unexpected keyword argument(s): {', '.join(kwargs)}")
-
-    if space is not None:
-        effective_space = space
-    elif remote is not None:
-        effective_space = "shared::cluster"
-    else:
-        effective_space = "shared"
-    _validate_mbarrier_arrive_attrs(sem, scope, effective_space, remote)
-
-    args = [bar, byte_count]
-    if remote is not None:
-        args.append(remote)
-    if pred is not None:
-        args.append(pred)
-    return call_intrin(
-        "",
-        "tirx.ptx.mbarrier_arrive_expect_tx",
-        *args,
-        sem,
-        scope,
-        effective_space,
         int(remote is not None),
         int(pred is not None),
     )

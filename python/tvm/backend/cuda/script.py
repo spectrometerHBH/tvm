@@ -179,14 +179,7 @@ class MbarrierArriveNamespace:
     """The Mbarrier Arrive instruction submodule."""
 
     def __init__(self):
-        self.expect_tx = _op_wrapper(_cuda_op.ptx_mbarrier_arrive_expect_tx)
         self.no_complete = _op_wrapper(_cuda_op.ptx_mbarrier_arrive_no_complete)
-
-    def __call__(self, *args, **kwds):
-        return _op_wrapper(_cuda_op.ptx_mbarrier_arrive)(*args, **kwds)
-
-    # __call__ corresponds to ptx_mbarrier_arrive
-    __tir_call_op_name__ = "ptx_mbarrier_arrive"
 
 
 class Tcgen05Namespace:
