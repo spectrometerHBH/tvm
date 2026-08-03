@@ -343,8 +343,8 @@ def test_ptx_f32x2_value_codegen():
         if tx == 0:
             lhs: T.let = T.cuda.make_float2(B[0], B[1])
             rhs: T.let = T.cuda.make_float2(B[1], B[0])
-            prod: T.uint64
-            sum_pair: T.uint64
+            prod = T.local_scalar("uint64")
+            sum_pair = T.local_scalar("uint64")
             T.ptxd.mul.f32x2(prod, lhs, rhs)
             T.ptxd.fma.rn.f32x2(A[0], lhs, rhs, prod)
             T.ptxd.add.rn.f32x2(sum_pair, lhs, rhs)
