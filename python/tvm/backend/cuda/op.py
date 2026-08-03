@@ -23,7 +23,7 @@ from tvm import tirx
 from tvm.ir import Call, Op, is_prim_expr
 from tvm.ir.type import PointerType, PrimType
 from tvm.runtime import const
-from tvm.tirx.op import bitwise_and, call_intrin, reinterpret, tvm_access_ptr
+from tvm.tirx.op import bitwise_and, call_intrin, tvm_access_ptr
 from tvm.tirx.operator.intrinsics._common import CLUSTER_BARRIER_SEM as _CLUSTER_BARRIER_SEM
 from tvm.tirx.operator.intrinsics._common import (
     CP_ASYNC_BULK_CACHE_HINT as _CP_ASYNC_BULK_CACHE_HINT,
@@ -31,7 +31,6 @@ from tvm.tirx.operator.intrinsics._common import (
 from tvm.tirx.operator.intrinsics._common import CP_ASYNC_BULK_RED_OP as _CP_ASYNC_BULK_RED_OP
 from tvm.tirx.operator.intrinsics._common import CP_ASYNC_FILL_MODE as _CP_ASYNC_FILL_MODE
 from tvm.tirx.operator.intrinsics._common import CP_ASYNC_PREFETCH_SIZE as _CP_ASYNC_PREFETCH_SIZE
-from tvm.tirx.operator.intrinsics._common import F32X2_ROUND as _F32X2_ROUND
 from tvm.tirx.operator.intrinsics._common import FENCE_PROXY_ASYNC_SPACE as _FENCE_PROXY_ASYNC_SPACE
 from tvm.tirx.operator.intrinsics._common import FENCE_SCOPE as _FENCE_SCOPE
 from tvm.tirx.operator.intrinsics._common import FENCE_SEM as _FENCE_SEM
@@ -3365,143 +3364,10 @@ def ptx_reduce3_min_f32(a, b, c):
     return call_intrin("float32", "tirx.ptx.reduce3_min_f32", a, b, c)
 
 
-_PTX_F32X2_VALUE_RETURN_DTYPES = ("uint64", "float32x2")
-
-
-def _validate_f32x2_value_return_dtype(return_dtype: str) -> str:
-    if return_dtype not in _PTX_F32X2_VALUE_RETURN_DTYPES:
-        raise ValueError(
-            f"invalid return_dtype={return_dtype!r}; expected one of "
-            f"{_PTX_F32X2_VALUE_RETURN_DTYPES}"
-        )
-    return return_dtype
-
-
-def _as_f32x2_bits(value):
-    if is_prim_expr(value) and str(value.ty) == "float32x2":
-        return reinterpret("uint64", value)
-    return value
-
-
-def _ptx_binary_f32x2(op_name, *args, rounding="rn", ftz=False, dps=True, return_dtype="uint64"):
-    """Shared helper for packed f32x2 binary forms.
-
-    ``dps=True`` emits the destination-passing form and returns void.
-    ``dps=False`` returns either packed ``uint64`` bits or ``float32x2``.
-    """
-    rounding_options = ("", *_F32X2_ROUND) if op_name in ("add", "mul") else _F32X2_ROUND
-    _choice("rounding", rounding, rounding_options)
-    if dps:
-        if len(args) != 3:
-            raise TypeError(f"ptx_{op_name}_f32x2 dps form expects (d_addr, a, b)")
-        d, a, b = args
-        return call_intrin(
-            "",
-            f"tirx.ptx.{op_name}_f32x2",
-            d,
-            _as_f32x2_bits(a),
-            _as_f32x2_bits(b),
-            rounding,
-            int(ftz),
-            int(True),
-            "void",
-        )
-    if len(args) != 2:
-        raise TypeError(f"ptx_{op_name}_f32x2 value form expects (a, b)")
-    return_dtype = _validate_f32x2_value_return_dtype(return_dtype)
-    a, b = args
-    return call_intrin(
-        return_dtype,
-        f"tirx.ptx.{op_name}_f32x2",
-        _as_f32x2_bits(a),
-        _as_f32x2_bits(b),
-        rounding,
-        int(ftz),
-        int(False),
-        return_dtype,
-    )
-
-
-def _ptx_fma_f32x2(*args, rounding="rn", ftz=False, dps=True, return_dtype="uint64"):
-    """Shared helper for packed f32x2 fma forms."""
-    _choice("rounding", rounding, _F32X2_ROUND)
-    if dps:
-        if len(args) != 4:
-            raise TypeError("ptx_fma_f32x2 dps form expects (d_addr, a, b, c)")
-        d, a, b, c = args
-        return call_intrin(
-            "",
-            "tirx.ptx.fma_f32x2",
-            d,
-            _as_f32x2_bits(a),
-            _as_f32x2_bits(b),
-            _as_f32x2_bits(c),
-            rounding,
-            int(ftz),
-            int(True),
-            "void",
-        )
-    if len(args) != 3:
-        raise TypeError("ptx_fma_f32x2 value form expects (a, b, c)")
-    return_dtype = _validate_f32x2_value_return_dtype(return_dtype)
-    a, b, c = args
-    return call_intrin(
-        return_dtype,
-        "tirx.ptx.fma_f32x2",
-        _as_f32x2_bits(a),
-        _as_f32x2_bits(b),
-        _as_f32x2_bits(c),
-        rounding,
-        int(ftz),
-        int(False),
-        return_dtype,
-    )
-
-
-def ptx_add_f32x2(*args, rounding="rn", ftz=False, dps=True, return_dtype="uint64"):
-    """PTX ``add{.rnd}{.ftz}.f32x2``.
-
-    DPS form: ``(d_addr, a, b, dps=True)`` returns void.
-    Value form: ``(a, b, dps=False)`` returns ``return_dtype``.
-    """
-    return _ptx_binary_f32x2(
-        "add", *args, rounding=rounding, ftz=ftz, dps=dps, return_dtype=return_dtype
-    )
-
-
 def ptx_neg_f32(x):
-    """Return exact PTX ``neg.f32`` without the fast-math ``.ftz`` modifier."""
     return call_intrin("float32", "tirx.ptx.neg_f32", x)
-
-
 def ptx_sub_f16x2(a, b):
-    """Return packed PTX ``sub.f16x2`` bits for two packed ``uint32`` operands."""
     return call_intrin("uint32", "tirx.ptx.sub_f16x2", a, b)
-
-
-def ptx_sub_f32x2(*args, rounding="rn", ftz=False, dps=True, return_dtype="uint64"):
-    """PTX ``sub{.rnd}{.ftz}.f32x2``; see :func:`ptx_add_f32x2`."""
-    return _ptx_binary_f32x2(
-        "sub", *args, rounding=rounding, ftz=ftz, dps=dps, return_dtype=return_dtype
-    )
-
-
-def ptx_mul_f32x2(*args, rounding="", ftz=False, dps=True, return_dtype="uint64"):
-    """PTX ``mul{.rnd}{.ftz}.f32x2``; see :func:`ptx_add_f32x2`."""
-    return _ptx_binary_f32x2(
-        "mul", *args, rounding=rounding, ftz=ftz, dps=dps, return_dtype=return_dtype
-    )
-
-
-def ptx_fma_f32x2(*args, rounding="rn", ftz=False, dps=True, return_dtype="uint64"):
-    """PTX ``fma{.rnd}{.ftz}.f32x2``.
-
-    DPS form: ``(d_addr, a, b, c, dps=True)`` returns void.
-    Value form: ``(a, b, c, dps=False)`` returns ``return_dtype``.
-    """
-    return _ptx_fma_f32x2(*args, rounding=rounding, ftz=ftz, dps=dps, return_dtype=return_dtype)
-
-
 _PTX_CVT_TYPES = {
     "u8",
     "u16",

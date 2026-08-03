@@ -19,7 +19,6 @@
 
 PTX side:
 * ``sub.f16x2`` — packed f16x2.
-* ``add{.rnd}{.ftz}.f32x2`` / ``sub`` / ``mul`` / ``fma`` — packed f32x2.
 * ``ex2.approx.ftz.f32`` / ``rcp.approx.ftz.f32`` — special functions.
 * ``max.f32`` / ``min.f32`` — 3-operand reduction form.
 
@@ -58,200 +57,14 @@ device_intrinsic(
 )
 
 # =============================================================================
-# Packed f32x2 arithmetic — `add{.rnd}{.ftz}.f32x2 d, a, b ;` and friends.
 # Inputs are packed into a `.b64` register (low half = elem 0, high half =
 # elem 1); the body packs/unpacks via ``make_float2`` + ``reinterpret_cast``.
 # =============================================================================
-
-# PTX add/sub/mul/fma over (f32 | f32x2 | f64), DPS form.
-#   add{.rnd}{.ftz}{.sat}.f32     [d], a, b
-#   add{.rnd}{.ftz}.f32x2          [d], a, b      (a,b are packed-as-u64)
-#   add{.rnd}.f64                  [d], a, b
-#   (sub / mul same shape; fma adds a `c` operand)
-# Inputs a/b/c are register operands (scalar fp32 / packed u64 / scalar fp64).
-# Result is written through `d` (a pointer).
-_PACKED_ROUNDING = ("rz", "rn", "rm", "rp")
-
-
-# Per-dtype operand types and asm constraints.
-#  - c_in: C type of input register operand (matches PTX register type)
-#  - out_cast: pointer cast applied at d_addr (callers may pass float*/double*/...)
-#  - in_cstr / out_cstr: GCC asm constraint letter
-def _ptx_arith_modifier_string(dtype, rounding, ftz, sat, op=None):
-    """Build the `.rnd.ftz.sat` modifier substring + name suffix."""
-    rnd = parse_str(rounding)
-    ftz_b = bool(int(ftz)) if hasattr(ftz, "value") else bool(ftz)
-    sat_b = bool(int(sat)) if hasattr(sat, "value") else bool(sat)
-    if dtype == "f64" and (ftz_b or sat_b):
-        raise ValueError("PTX <op>.f64 does not accept .ftz or .sat")
-    if dtype == "f32x2" and sat_b:
-        raise ValueError("PTX <op>.f32x2 does not accept .sat")
-    if dtype == "f32x2" and op in ("add", "mul") and rnd in ("", "none"):
-        mod = ""
-        name_suffix = ""
-        if ftz_b:
-            mod += ".ftz"
-            name_suffix += "_ftz"
-        return mod, name_suffix
-    assert rnd in _PACKED_ROUNDING, f"invalid rounding {rnd!r}, expected one of {_PACKED_ROUNDING}"
-    mod = f".{rnd}"
-    if ftz_b:
-        mod += ".ftz"
-    if sat_b:
-        mod += ".sat"
-    name_suffix = f"_{rnd}"
-    if ftz_b:
-        name_suffix += "_ftz"
-    if sat_b:
-        name_suffix += "_sat"
-    return mod, name_suffix
-
-
-_F32X2_VALUE_RETURN_TYPES = {
-    "uint64": ("unsigned long long", "ret_u64"),
-    "float32x2": ("float2", "ret_f32x2"),
-}
 
 
 def _as_bool_attr(value):
     return bool(int(value))
 
-
-def _f32x2_value_return(return_dtype):
-    ret = parse_str(return_dtype)
-    if ret not in _F32X2_VALUE_RETURN_TYPES:
-        raise ValueError(
-            f"invalid f32x2 return dtype {ret!r}, expected one of "
-            f"{tuple(_F32X2_VALUE_RETURN_TYPES)}"
-        )
-    return ret
-
-
-def _ptx_binary_f32x2_parts(op):
-    """Return helper pieces for ptx_{op}_f32x2 DPS and value forms."""
-
-    def _name(*args):
-        rounding, ftz, dps, return_dtype = args[-4:]
-        _, suf = _ptx_arith_modifier_string("f32x2", rounding, ftz, False, op=op)
-        if _as_bool_attr(dps):
-            return f"tvm_builtin_ptx_{op}_f32x2{suf}"
-        ret = _f32x2_value_return(return_dtype)
-        _, ret_suffix = _F32X2_VALUE_RETURN_TYPES[ret]
-        return f"tvm_builtin_ptx_{op}_f32x2_{ret_suffix}{suf}"
-
-    def _sig(*args):
-        if _as_bool_attr(args[-2]):
-            return "(void* d, unsigned long long a, unsigned long long b)"
-        return "(unsigned long long a, unsigned long long b)"
-
-    def _return_type(*args):
-        if _as_bool_attr(args[-2]):
-            return "void"
-        ret = _f32x2_value_return(args[-1])
-        return _F32X2_VALUE_RETURN_TYPES[ret][0]
-
-    def _body(*args):
-        rounding, ftz, dps, return_dtype = args[-4:]
-        mod, _ = _ptx_arith_modifier_string("f32x2", rounding, ftz, False, op=op)
-        if _as_bool_attr(dps):
-            return (
-                f'    asm volatile("{op}{mod}.f32x2 %0, %1, %2;"\n'
-                '        : "=l"(*reinterpret_cast<uint64_t*>(d))\n'
-                '        : "l"(a), "l"(b));'
-            )
-        ret = _f32x2_value_return(return_dtype)
-        ret_stmt = (
-            "    return result;"
-            if ret == "uint64"
-            else "    return *reinterpret_cast<float2*>(&result);"
-        )
-        return (
-            "    unsigned long long result;\n"
-            f'    asm volatile("{op}{mod}.f32x2 %0, %1, %2;"\n'
-            '        : "=l"(result)\n'
-            '        : "l"(a), "l"(b));\n'
-            f"{ret_stmt}"
-        )
-
-    return _name, _sig, _return_type, _body
-
-
-for _op in ("add", "sub", "mul"):
-    _name_fn, _sig_fn, _ret_fn, _body_fn = _ptx_binary_f32x2_parts(_op)
-    device_intrinsic(
-        f"ptx_{_op}_f32x2",
-        n_attrs=4,  # rounding, ftz, dps, return_dtype
-        helper_name=_name_fn,
-        c_signature=_sig_fn,
-        body=_body_fn,
-        return_type=_ret_fn,
-    )
-
-
-def _ptx_fma_f32x2_parts():
-    """Return helper pieces for ptx_fma_f32x2 DPS and value forms."""
-
-    def _name(*args):
-        rounding, ftz, dps, return_dtype = args[-4:]
-        _, suf = _ptx_arith_modifier_string("f32x2", rounding, ftz, False, op="fma")
-        if _as_bool_attr(dps):
-            return f"tvm_builtin_ptx_fma_f32x2{suf}"
-        ret = _f32x2_value_return(return_dtype)
-        _, ret_suffix = _F32X2_VALUE_RETURN_TYPES[ret]
-        return f"tvm_builtin_ptx_fma_f32x2_{ret_suffix}{suf}"
-
-    def _sig(*args):
-        if _as_bool_attr(args[-2]):
-            return "(void* d, unsigned long long a, unsigned long long b, unsigned long long c)"
-        return "(unsigned long long a, unsigned long long b, unsigned long long c)"
-
-    def _return_type(*args):
-        if _as_bool_attr(args[-2]):
-            return "void"
-        ret = _f32x2_value_return(args[-1])
-        return _F32X2_VALUE_RETURN_TYPES[ret][0]
-
-    def _body(*args):
-        rounding, ftz, dps, return_dtype = args[-4:]
-        mod, _ = _ptx_arith_modifier_string("f32x2", rounding, ftz, False, op="fma")
-        if _as_bool_attr(dps):
-            return (
-                f'    asm volatile("fma{mod}.f32x2 %0, %1, %2, %3;"\n'
-                '        : "=l"(*reinterpret_cast<uint64_t*>(d))\n'
-                '        : "l"(a), "l"(b), "l"(c));'
-            )
-        ret = _f32x2_value_return(return_dtype)
-        ret_stmt = (
-            "    return result;"
-            if ret == "uint64"
-            else "    return *reinterpret_cast<float2*>(&result);"
-        )
-        return (
-            "    unsigned long long result;\n"
-            f'    asm volatile("fma{mod}.f32x2 %0, %1, %2, %3;"\n'
-            '        : "=l"(result)\n'
-            '        : "l"(a), "l"(b), "l"(c));\n'
-            f"{ret_stmt}"
-        )
-
-    return _name, _sig, _return_type, _body
-
-
-_name_fn, _sig_fn, _ret_fn, _body_fn = _ptx_fma_f32x2_parts()
-device_intrinsic(
-    "ptx_fma_f32x2",
-    n_attrs=4,  # rounding, ftz, dps, return_dtype
-    helper_name=_name_fn,
-    c_signature=_sig_fn,
-    body=_body_fn,
-    return_type=_ret_fn,
-)
-del _op, _name_fn, _sig_fn, _ret_fn, _body_fn
-
-
-# =============================================================================
-# ex2.approx.ftz.f32 / rcp.approx.ftz.f32 — 1 form each.
-# =============================================================================
 
 device_intrinsic(
     "cuda_fdividef",

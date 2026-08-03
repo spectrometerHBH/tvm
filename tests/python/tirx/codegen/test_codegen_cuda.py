@@ -343,26 +343,24 @@ def test_ptx_f32x2_value_codegen():
         if tx == 0:
             lhs: T.let = T.cuda.make_float2(B[0], B[1])
             rhs: T.let = T.cuda.make_float2(B[1], B[0])
-            prod: T.let = T.ptx.mul_f32x2(lhs, rhs, dps=False)
-            A[0] = T.ptx.fma_f32x2(lhs, rhs, prod, dps=False)
-            sum_pair: T.let = T.ptx.add_f32x2(lhs, rhs, dps=False, return_dtype="float32x2")
-            A[1] = T.ptx.sub_f32x2(sum_pair, rhs, dps=False)
+            prod: T.uint64
+            sum_pair: T.uint64
+            T.ptxd.mul.f32x2(prod, lhs, rhs)
+            T.ptxd.fma.rn.f32x2(A[0], lhs, rhs, prod)
+            T.ptxd.add.rn.f32x2(sum_pair, lhs, rhs)
+            T.ptxd.sub.rn.f32x2(A[1], sum_pair, rhs)
 
     src, _ = _get_source(main)
-    assert "tirx.ptx.fma_f32x2_val" not in src
-    assert "tvm_builtin_ptx_mul_f32x2_ret_u64" in src
-    assert "tvm_builtin_ptx_fma_f32x2_ret_u64_rn" in src
-    assert "tvm_builtin_ptx_add_f32x2_ret_f32x2_rn" in src
-    assert "tvm_builtin_ptx_sub_f32x2_ret_u64_rn" in src
-    assert src.count("tvm_builtin_ptx_mul_f32x2_ret_u64") == 2
-    assert src.count("tvm_builtin_ptx_fma_f32x2_ret_u64_rn") == 2
-    assert "A_ptr[0] = tvm_builtin_ptx_fma_f32x2_ret_u64_rn(lhs, rhs, prod);" in src
-    assert "float2 tvm_builtin_ptx_add_f32x2_ret_f32x2_rn" in src
-    assert "float2 sum_pair" in src
-    assert "return *reinterpret_cast<float2*>(&result);" in src
+    assert "tvm_builtin_ptxd_mul_f32x2" in src
+    assert "tvm_builtin_ptxd_fma_rn_f32x2" in src
+    assert "tvm_builtin_ptxd_add_rn_f32x2" in src
+    assert "tvm_builtin_ptxd_sub_rn_f32x2" in src
+    # `.rnd` is optional on add/mul and mandatory on fma; the tokens written at
+    # the call site are exactly the tokens emitted.
     assert "mul.f32x2 %0, %1, %2;" in src
     assert "mul.rn.f32x2 %0, %1, %2;" not in src
     assert "fma.rn.f32x2 %0, %1, %2, %3;" in src
+    assert "add.rn.f32x2 %0, %1, %2;" in src
 
 
 def test_ptx_neg_f32_codegen():
@@ -414,7 +412,7 @@ def test_sparse_decode_conversion_intrinsics_codegen(monkeypatch):
             U16[0] = T.ptx.cvt(F32[1], F32[0], dtype="ue8m0x2", atype="f32", rounding="rz")
             U32[0] = T.ptx.cvt(U16[0], dtype="bf16x2", atype="ue8m0x2", rounding="rn")
             U32[1] = T.ptx.cvt(U16[0], dtype="bf16x2", atype="e4m3x2", rounding="rn")
-            U64[0] = T.ptx.add_f32x2(pair, pair, rounding="", dps=False)
+            T.ptxd.add.f32x2(U64[0], pair, pair)
 
     src, _ = _get_source(main)
     assert "cvt.rz.ue8m0x2.f32 %0, %1, %2;" in src

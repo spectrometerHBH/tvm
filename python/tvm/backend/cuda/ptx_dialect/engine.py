@@ -72,7 +72,11 @@ def register_table(table: dict[str, InstructionEntry]) -> None:
         # First attr call implicitly creates the Op registry entry. Effect
         # kind must exist before any side-effect analysis sees the op.
         register_op_attr(entry.op_name, "TCallEffectKind", _EFFECT_OPAQUE)
-        register_op_attr(entry.op_name, "TScriptPrinterName", f"ptxd.{entry.name}", level=20)
+        # The printer name is the *surface* path a user can type, which is the
+        # mnemonic (several `mov_*` entries all answer to `T.ptxd.mov`), not the
+        # table key. Reparsing re-dispatches on the operand shape.
+        family = entry.ptx_name.replace(".", "_")
+        register_op_attr(entry.op_name, "TScriptPrinterName", f"ptxd.{family}", level=20)
         register_op_attr(entry.op_name, "TIRxOpCategory", "device_intrin")
         register_op_attr(entry.op_name, "TDeviceIntrinsicNamespace", "ptxd")
         register_codegen(f"ptxd.{entry.name}")(_make_codegen(entry))
@@ -105,6 +109,9 @@ def _make_codegen(entry: InstructionEntry):
 
 
 def _coerce_operand(entry, slot, value, mod_map):
+    # T.local_scalar / `x: T.float32` hand back a wrapper around the BufferLoad;
+    # unwrap once here so every role sees the node itself.
+    value = getattr(value, "scalar", value)
     ty = getattr(value, "ty", None)
     if slot.role == "dst":
         # A PTX destination is a register the caller declared, so the argument
@@ -112,7 +119,6 @@ def _coerce_operand(entry, slot, value, mod_map):
         # element. Both are BufferLoad nodes, which the C codegen prints as the
         # lvalue bound to the helper's reference parameter.
         want = PTX_TYPES[operand_type(slot, mod_map)][0]
-        value = getattr(value, "scalar", value)  # unwrap T.local_scalar
         if not isinstance(value, BufferLoad):
             raise ValueError(
                 f"{entry.name}: destination '{slot.name}' must be a writable scalar or "

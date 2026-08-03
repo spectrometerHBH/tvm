@@ -63,7 +63,8 @@ def test_ptxd_registration():
     for entry in TABLE.values():
         op = Op.get(entry.op_name)  # raises if unregistered
         assert op.get_attr("TCallEffectKind") is not None, entry.name
-        assert op.get_attr("TScriptPrinterName") == f"ptxd.{entry.name}", entry.name
+        family = entry.ptx_name.replace(".", "_")  # several entries may share a mnemonic
+        assert op.get_attr("TScriptPrinterName") == f"ptxd.{family}", entry.name
         assert entry.op_name in CODEGEN_REGISTRY, entry.name
 
 
@@ -321,6 +322,13 @@ def test_ptxd_parser_roundtrip():
         if tx == 0:
             val = T.local_scalar("uint32")
             smem_addr = T.local_scalar("uint64")
+            lo = T.local_scalar("float32")
+            hi = T.local_scalar("float32")
+            packed = T.local_scalar("uint64")
+            # Several `mov` entries share one mnemonic; the printed form names
+            # the family and reparsing re-dispatches on the operand shape.
+            T.ptxd.mov.b64(packed, lo, hi)
+            T.ptxd.mov.b64(lo, hi, packed)
             T.ptxd.ld.global_.acquire.gpu.b32(val, A.ptr_to([0]))
             T.ptxd.st.shared__cta.b32(smem.ptr_to([0]), val)
             T.ptxd.red.relaxed.gpu.global_.add.u32(B.ptr_to([0]), T.uint32(1), pred=val)
