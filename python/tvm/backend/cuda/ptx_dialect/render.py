@@ -21,15 +21,63 @@ and by :mod:`.gen_helpers`, which dumps the generated helpers for humans to
 inspect without compiling a kernel.
 """
 
-from .table import (
-    DTYPE_C,
-    DTYPE_SUFFIX,
-    InstructionEntry,
-    dtype_combos,
-    mods,
-    operand_space,
-    typed_operands,
-)
+from typing import NamedTuple
+
+from .table import InstructionEntry, canonical_dtypes, mods, operand_space
+
+
+class CBinding(NamedTuple):
+    """How one TVM dtype crosses the C / inline-asm boundary.
+
+    ``carrier`` is the C type actually bound to the asm register. When it equals
+    ``c_type`` the value binds its register directly; otherwise it rides a
+    differently-typed register and converts at each boundary, because 8-bit
+    values have no constraint letter of their own and __half/__nv_bfloat16
+    cannot bind one at all (nvcc: "more than one conversion function applies").
+
+    Every conversion here is a bit pun, never an arithmetic cast. That is the
+    whole point of the dtype axis: handing a float to a uint32_t parameter is a
+    *numeric* conversion and emits `cvt.rzi.u32.f32`, silently changing the
+    value. ``suffix`` is the token that names this dtype in a helper name.
+    """
+
+    c_type: str
+    constraint: str
+    carrier: str
+    to_carrier: str  # format string, applied on the way into the asm
+    from_carrier: str  # format string, applied on the way out
+    suffix: str
+
+
+# Named fields, not a positional tuple: this is the same table shape whose
+# modifier-token twin needed `tokens_for`, and a new column would otherwise
+# shift every unpacking site.
+C_BINDING = {
+    "uint8": CBinding("uint8_t", "h", "uint16_t", "(uint16_t){}", "(uint8_t){}", "u8"),
+    "int8": CBinding("int8_t", "h", "int16_t", "(int16_t){}", "(int8_t){}", "s8"),
+    "uint16": CBinding("uint16_t", "h", "uint16_t", "{}", "{}", "u16"),
+    "int16": CBinding("int16_t", "h", "int16_t", "{}", "{}", "s16"),
+    "float16": CBinding(
+        "__half", "h", "uint16_t", "__half_as_ushort({})", "__ushort_as_half({})", "f16"
+    ),
+    "bfloat16": CBinding(
+        "__nv_bfloat16",
+        "h",
+        "uint16_t",
+        "__bfloat16_as_ushort({})",
+        "__ushort_as_bfloat16({})",
+        "bf16",
+    ),
+    "uint32": CBinding("uint32_t", "r", "uint32_t", "{}", "{}", "u32"),
+    "int32": CBinding("int32_t", "r", "int32_t", "{}", "{}", "s32"),
+    "float32": CBinding("float", "f", "float", "{}", "{}", "f32"),
+    "uint64": CBinding("uint64_t", "l", "uint64_t", "{}", "{}", "u64"),
+    "int64": CBinding("int64_t", "l", "int64_t", "{}", "{}", "s64"),
+    "float64": CBinding("double", "d", "double", "{}", "{}", "f64"),
+    # 128-bit: the "q" constraint needs __int128 support in the host compiler.
+    "uint128": CBinding("__uint128_t", "q", "__uint128_t", "{}", "{}", "u128"),
+    "int128": CBinding("__int128_t", "q", "__int128_t", "{}", "{}", "s128"),
+}
 
 
 def render_variant(entry: InstructionEntry, tokens, predicated=False, dtypes=None):
@@ -40,7 +88,7 @@ def render_variant(entry: InstructionEntry, tokens, predicated=False, dtypes=Non
     Destinations (``role="dst"``) are taken by reference; the caller passes a
     writable lvalue.
 
-    ``dtypes`` picks one TVM dtype per typed operand (see ``dtype_combos``);
+    ``dtypes`` picks one TVM dtype per typed operand (see ``table.dtype_combos``);
     None means the canonical choice, which is what every non-bit-typed operand
     has anyway. A non-canonical choice appends the dtypes to the helper name, so
     the names a table without bit-typed operands would produce are untouched.
@@ -53,29 +101,33 @@ def render_variant(entry: InstructionEntry, tokens, predicated=False, dtypes=Non
     mod_map = mods(entry, tokens)
     written = [tok for tok in tokens if tok]
     opcode = ".".join([entry.ptx_name, *written])
-    canonical = dtype_combos(entry, tokens)[0]
+    canonical = canonical_dtypes(entry, tokens)
     if dtypes is None:
         dtypes = canonical
-    # The opcode alone no longer determines the signature once an operand may
-    # take several dtypes. A non-canonical choice names *every* typed operand,
-    # positionally: naming only the ones that changed would collide whenever two
-    # operands swap which of them is non-canonical (atom's d and b, for one).
-    if tuple(dtypes) != tuple(canonical):
-        written = written + [DTYPE_SUFFIX[d] for d in dtypes]
-    # The helper name keys off the table name rather than the mnemonic. For every
+    # A helper name is the instruction's ISA identity plus, only when it is no
+    # longer enough, a signature discriminator. The opcode alone stopped being
+    # enough once an operand could take several dtypes; a non-canonical choice
+    # then names *every* typed operand, positionally, because naming only the
+    # ones that changed collides whenever two operands swap which of them is
+    # non-canonical (atom's d and b do exactly that).
+    isa_name = [entry.name, *written]  # table name, not mnemonic: see below
+    discriminator = (
+        [] if tuple(dtypes) == tuple(canonical) else [C_BINDING[d].suffix for d in dtypes]
+    )
+    # The name keys off the table name rather than the mnemonic. For every
     # single-shape family the two agree (st.bulk normalizes to st_bulk anyway);
     # it matters only where several entries share a mnemonic because PTX puts
     # their difference in the operand list, as `mov`'s pack/unpack shapes do.
-    helper = "tvm_builtin_ptxd_" + "_".join([entry.name, *written]).replace("::", "__").replace(
-        ".", "_"
-    )
+    helper = "tvm_builtin_ptxd_" + "_".join([*isa_name, *discriminator]).replace(
+        "::", "__"
+    ).replace(".", "_")
     if predicated:
         assert not entry.has_dst, "@p is only supported on instructions without a destination"
         helper += "_pred"
 
     params, inputs, outputs, ptx_operands = [], [], [], []
     pre, post = [], []  # carrier declarations / boundary conversions
-    dtype_of = dict(zip(typed_operands(entry), dtypes, strict=True))
+    dtype_of = dict(zip(entry.typed_operands, dtypes, strict=True))
     idx = 0
     for slot in entry.operands:
         pname = f"__{slot.name}"
@@ -90,7 +142,8 @@ def render_variant(entry: InstructionEntry, tokens, predicated=False, dtypes=Non
             # operand list, so a lane is a C parameter but not an operand.
             lname = pname if slot.lanes == 1 else f"{pname}{lane}"
             if slot.role == "dst":
-                c_ty, constraint, carrier, _, out_fmt = DTYPE_C[dtype_of[slot]]
+                cb = C_BINDING[dtype_of[slot]]
+                c_ty, constraint, carrier = cb.c_type, cb.constraint, cb.carrier
                 params.append(f"{c_ty}& {lname}")
                 if carrier == c_ty:
                     outputs.append(f'"={constraint}"({lname})')
@@ -101,7 +154,7 @@ def render_variant(entry: InstructionEntry, tokens, predicated=False, dtypes=Non
                     reg = f"{lname}_reg"
                     pre.append(f"{carrier} {reg};")
                     outputs.append(f'"={constraint}"({reg})')
-                    post.append(f"{lname} = {out_fmt.format(reg)};")
+                    post.append(f"{lname} = {cb.from_carrier.format(reg)};")
             elif slot.role == "addr":
                 if operand_space(slot, mod_map).startswith("shared"):
                     params.append(f"uint32_t {lname}")
@@ -113,9 +166,9 @@ def render_variant(entry: InstructionEntry, tokens, predicated=False, dtypes=Non
                 params.append(f"const void* {lname}")
                 inputs.append(f'"l"({lname})')
             else:  # value
-                c_ty, constraint, carrier, in_fmt, _ = DTYPE_C[dtype_of[slot]]
-                params.append(f"{c_ty} {lname}")
-                inputs.append(f'"{constraint}"({in_fmt.format(lname)})')
+                cb = C_BINDING[dtype_of[slot]]
+                params.append(f"{cb.c_type} {lname}")
+                inputs.append(f'"{cb.constraint}"({cb.to_carrier.format(lname)})')
             regs.append(f"[%{idx}]" if slot.role == "addr" else f"%{idx}")
             idx += 1
         ptx_operands.append(regs[0] if slot.lanes == 1 else "{" + ", ".join(regs) + "}")

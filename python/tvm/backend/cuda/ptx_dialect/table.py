@@ -56,98 +56,42 @@ import keyword
 from collections.abc import Callable
 from dataclasses import dataclass
 
-# PTX operand type token -> (TVM dtype, C type, inline-asm constraint, C carrier).
-# The carrier is the C type actually bound to the asm register: 8-bit values
-# have no asm constraint of their own, so they ride in 16-bit "h" registers
-# (PTX ld/st sign/zero-extend into wider registers; ISA "Notes").
-PTX_TYPES = {
-    "b8": ("uint8", "uint8_t", "h", "uint16_t"),
-    "u8": ("uint8", "uint8_t", "h", "uint16_t"),
-    "s8": ("int8", "int8_t", "h", "int16_t"),
-    "b16": ("uint16", "uint16_t", "h", "uint16_t"),
-    "u16": ("uint16", "uint16_t", "h", "uint16_t"),
-    "s16": ("int16", "int16_t", "h", "int16_t"),
-    "b32": ("uint32", "uint32_t", "r", "uint32_t"),
-    "u32": ("uint32", "uint32_t", "r", "uint32_t"),
-    "s32": ("int32", "int32_t", "r", "int32_t"),
-    "b64": ("uint64", "uint64_t", "l", "uint64_t"),
-    "u64": ("uint64", "uint64_t", "l", "uint64_t"),
-    "s64": ("int64", "int64_t", "l", "int64_t"),
-    "f32": ("float32", "float", "f", "float"),
-    "f64": ("float64", "double", "d", "double"),
-    # `.f32x2` operands "have .b64 type" (ISA 9.7.3.3): a pair of packed floats
-    # in one 64-bit register, so the carrier is the bit container, not a float.
-    "f32x2": ("uint64", "uint64_t", "l", "uint64_t"),
-    # Mixed-precision sources live in a plain 16-bit register -- the ISA's own
-    # example declares them `.reg .b16` -- so they ride the b16 carrier.
-    "f16": ("uint16", "uint16_t", "h", "uint16_t"),
-    "bf16": ("uint16", "uint16_t", "h", "uint16_t"),
-    # 128-bit: only reachable as a whole register (mov.b128, ld/st .b128). The
-    # "q" constraint requires __int128 support in the host compiler.
-    "b128": ("uint128", "__uint128_t", "q", "__uint128_t"),
-}
-
-
-# TVM dtype -> (C type, asm constraint, carrier, into-carrier, out-of-carrier).
-# `carrier == c_type` means the value binds its register directly. Where it does
-# not, the value rides a differently-typed register and converts at the asm
-# boundary: 8-bit values have no constraint letter of their own, and
-# __half/__nv_bfloat16 cannot bind one at all (nvcc: "more than one conversion
-# function ... applies"), so both go through a 16-bit integer register.
+# PTX operand type token -> the TVM dtypes it accepts, canonical first.
 #
-# Every conversion here is a bit pun, never an arithmetic cast. That distinction
-# is the whole point of the axis: handing a float to a uint32_t parameter is a
-# *numeric* conversion and emits `cvt.rzi.u32.f32`, silently changing the value.
-DTYPE_C = {
-    "uint8": ("uint8_t", "h", "uint16_t", "(uint16_t){}", "(uint8_t){}"),
-    "int8": ("int8_t", "h", "int16_t", "(int16_t){}", "(int8_t){}"),
-    "uint16": ("uint16_t", "h", "uint16_t", "{}", "{}"),
-    "int16": ("int16_t", "h", "int16_t", "{}", "{}"),
-    "float16": ("__half", "h", "uint16_t", "__half_as_ushort({})", "__ushort_as_half({})"),
-    "bfloat16": (
-        "__nv_bfloat16",
-        "h",
-        "uint16_t",
-        "__bfloat16_as_ushort({})",
-        "__ushort_as_bfloat16({})",
-    ),
-    "uint32": ("uint32_t", "r", "uint32_t", "{}", "{}"),
-    "int32": ("int32_t", "r", "int32_t", "{}", "{}"),
-    "float32": ("float", "f", "float", "{}", "{}"),
-    "uint64": ("uint64_t", "l", "uint64_t", "{}", "{}"),
-    "int64": ("int64_t", "l", "int64_t", "{}", "{}"),
-    "float64": ("double", "d", "double", "{}", "{}"),
-    "uint128": ("__uint128_t", "q", "__uint128_t", "{}", "{}"),
-    "int128": ("__int128_t", "q", "__int128_t", "{}", "{}"),
-}
-
-# A bit-size PTX type names a width, not an interpretation -- ISA 5.2: "The
+# A *bit-size* type names a width, not an interpretation -- ISA 5.2: "The
 # bit-size type is compatible with any fundamental type having the same size."
-# So an operand typed `.bN` accepts every TVM dtype of that width, and each gets
-# its own helper. The canonical dtype is first: a variant that uses only
-# canonical dtypes keeps the helper name it had before this axis existed.
+# So `.bN` accepts every TVM dtype of that width and each gets its own helper
+# (see `operand_dtypes`). The canonical one is listed first: a variant using
+# only canonical dtypes keeps the helper name it had before the axis existed.
 #
-# Concretely typed operands (.u32/.s32/.f32/...) are NOT widened: those name an
-# interpretation, and substituting one is a semantic change rather than a
-# relabelling. `.f32x2` likewise stays fixed -- it names a packed layout whose
-# container happens to be .b64, not a bit container.
-BIT_DTYPES = {
+# A concretely typed operand (.u32/.s32/.f32/...) names an interpretation, so
+# it accepts that one dtype -- substituting another would be a semantic change
+# rather than a relabelling.
+PTX_TYPE_DTYPES = {
     "b8": ("uint8", "int8"),
     "b16": ("uint16", "int16", "float16", "bfloat16"),
     "b32": ("uint32", "int32", "float32"),
     "b64": ("uint64", "int64", "float64"),
     "b128": ("uint128", "int128"),
+    "u8": ("uint8",),
+    "s8": ("int8",),
+    "u16": ("uint16",),
+    "s16": ("int16",),
+    "u32": ("uint32",),
+    "s32": ("int32",),
+    "u64": ("uint64",),
+    "s64": ("int64",),
+    "f32": ("float32",),
+    "f64": ("float64",),
+    # `.f32x2` operands "have .b64 type" (ISA 9.7.3.3): a pair of packed floats
+    # in one 64-bit register. It names a packed layout whose container happens
+    # to be .b64, not a bit container, so it is not widened.
+    "f32x2": ("uint64",),
+    # Mixed-precision sources live in a plain 16-bit register -- the ISA's own
+    # example declares them `.reg .b16`.
+    "f16": ("uint16",),
+    "bf16": ("uint16",),
 }
-
-
-# Short token appended to a helper name for a non-canonical dtype choice.
-DTYPE_SUFFIX = {
-    "uint8": "u8", "int8": "s8",
-    "uint16": "u16", "int16": "s16", "float16": "f16", "bfloat16": "bf16",
-    "uint32": "u32", "int32": "s32", "float32": "f32",
-    "uint64": "u64", "int64": "s64", "float64": "f64",
-    "uint128": "u128", "int128": "s128",
-}  # fmt: skip
 
 
 def escape_token(token: str) -> str:
@@ -259,6 +203,36 @@ class InstructionEntry:
         """
         return self.ptx_name.replace(".", "_")
 
+    @functools.cached_property
+    def call_slots(self) -> tuple[OperandSlot, ...]:
+        """The operand slot behind each call argument, in order.
+
+        ISA-fixed immediates take no argument; a register group (``lanes`` > 1)
+        takes one argument per lane, mirroring PTX's ``{%k, %k+1, ...}``.
+        """
+        return tuple(s for s in self.operands if s.role != "imm" for _ in range(s.lanes))
+
+    @functools.cached_property
+    def typed_operands(self) -> tuple[OperandSlot, ...]:
+        """The operands carrying a dtype, in order: a dtype tuple aligns with these."""
+        return tuple(s for s in self.operands if s.role in ("value", "dst"))
+
+    @functools.cached_property
+    def operand_args(self) -> tuple[tuple[OperandSlot, int, int], ...]:
+        """``(slot, first_arg_index, lanes)`` per operand the caller supplies.
+
+        One row per *operand*, not per argument: a register group is one operand
+        occupying N registers, so its dtype and its coercion are decided once for
+        the whole group. ``call_slots`` is this list flattened to arguments.
+        """
+        rows, i = [], 0
+        for slot in self.operands:
+            if slot.role == "imm":
+                continue
+            rows.append((slot, i, slot.lanes))
+            i += slot.lanes
+        return tuple(rows)
+
     @property
     def has_dst(self) -> bool:
         """Whether the instruction writes a destination operand.
@@ -294,7 +268,15 @@ def tokens_for(entry: InstructionEntry, **by_name) -> tuple[str, ...]:
         if not token and not slot.optional:
             raise ValueError(f"{entry.name}.{slot.name} is required")
         out.append(token)
-    return tuple(out)
+    out = tuple(out)
+    # Slot-level legality is not the whole rule: `check` rejects combinations
+    # whose tokens are individually fine (ld.volatile takes no scope). Without
+    # this a golden test could pin a variant the dialect refuses to emit.
+    if entry.check is not None:
+        error = entry.check(mods(entry, out))
+        if error:
+            raise ValueError(f"{entry.name}: {error}")
+    return out
 
 
 def operand_type(slot: OperandSlot, mod_map: dict) -> str:
@@ -324,24 +306,19 @@ def operand_space(slot: OperandSlot, mod_map: dict) -> str:
     return slot.space or mod_map.get("space", "")
 
 
-def call_slots(entry: InstructionEntry) -> list[OperandSlot]:
-    """The operand slot behind each call argument, in order.
-
-    ISA-fixed immediates take no argument; a register group (``lanes`` > 1)
-    takes one argument per lane, mirroring PTX's ``{%k, %k+1, ...}``.
-    """
-    return [s for s in entry.operands if s.role != "imm" for _ in range(s.lanes)]
-
-
-def typed_operands(entry: InstructionEntry) -> list[OperandSlot]:
-    """The operands that carry a dtype, in order: the dtype tuple aligns with these."""
-    return [s for s in entry.operands if s.role in ("value", "dst")]
-
-
 def operand_dtypes(slot: OperandSlot, mod_map: dict) -> tuple[str, ...]:
-    """Every TVM dtype this operand accepts; the canonical one first."""
-    token = operand_type(slot, mod_map)
-    return BIT_DTYPES.get(token, (PTX_TYPES[token][0],))
+    """The TVM dtypes one operand accepts, canonical first (see PTX_TYPE_DTYPES)."""
+    return PTX_TYPE_DTYPES[operand_type(slot, mod_map)]
+
+
+def canonical_dtypes(entry: InstructionEntry, tokens) -> tuple[str, ...]:
+    """The canonical dtype of each typed operand, in operand order.
+
+    This is `dtype_combos(...)[0]`, but as the per-operand fact it actually is:
+    "canonical" belongs to an operand, not to the product of all of them.
+    """
+    mod_map = mods(entry, tokens)
+    return tuple(operand_dtypes(s, mod_map)[0] for s in entry.typed_operands)
 
 
 def dtype_combos(entry: InstructionEntry, tokens) -> tuple[tuple[str, ...], ...]:
@@ -353,8 +330,21 @@ def dtype_combos(entry: InstructionEntry, tokens) -> tuple[tuple[str, ...], ...]
     has the product of their choices.
     """
     mod_map = mods(entry, tokens)
-    axes = [operand_dtypes(s, mod_map) for s in typed_operands(entry)]
+    axes = [operand_dtypes(s, mod_map) for s in entry.typed_operands]
     return tuple(itertools.product(*axes)) if axes else ((),)
+
+
+def renderings(entry: InstructionEntry):
+    """Every ``(tokens, dtypes, predicated)`` this entry renders to.
+
+    The product of the three independent axes -- modifiers, operand dtypes,
+    predication. Defined once so a fourth axis lands in one place instead of in
+    every consumer (the certification tiers, the helper dump, the stub writer).
+    """
+    for tokens in variants(entry):
+        for dtypes in dtype_combos(entry, tokens):
+            for predicated in pred_forms(entry):
+                yield tokens, dtypes, predicated
 
 
 def pred_forms(entry: InstructionEntry) -> tuple[bool, ...]:

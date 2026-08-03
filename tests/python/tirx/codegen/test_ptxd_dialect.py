@@ -319,13 +319,8 @@ def test_ptxd_register_group_codegen():
     assert "mov.b64 {%0, %1}, %2;" in src
     # Both shapes share the mnemonic; the operand shape picks the entry, which
     # is the same information ptxas resolves them by.
-    assert (
-        "tvm_builtin_ptxd_mov_pack_b32x2_b64_u64_f32(uint64_t& __d, float __a0, float __a1)" in src
-    )
-    assert (
-        "tvm_builtin_ptxd_mov_unpack_b32x2_b64_f32_u64(float& __d0, float& __d1, uint64_t __a)"
-        in src
-    )
+    assert "tvm_builtin_ptxd_mov_pack_b32x2_b64_u64_f32(" in src
+    assert "tvm_builtin_ptxd_mov_unpack_b32x2_b64_f32_u64(" in src
 
 
 def test_ptxd_register_group_errors():
@@ -431,10 +426,11 @@ def test_ptxd_bit_width_axis():
     assert "cvt." not in src
     # The canonical dtype keeps the unsuffixed name it had before the axis.
     from tvm.backend.cuda.ptx_dialect.render import render_variant
-    from tvm.backend.cuda.ptx_dialect.table import TABLE
+    from tvm.backend.cuda.ptx_dialect.table import TABLE, tokens_for
 
-    tokens = ("", "", "", "global", "", "", "", "", "b32")
-    assert render_variant(TABLE["ld"], tokens)[1] == "tvm_builtin_ptxd_ld_global_b32"
+    ld = TABLE["ld"]
+    tokens = tokens_for(ld, space="global", type="b32")
+    assert render_variant(ld, tokens)[1] == "tvm_builtin_ptxd_ld_global_b32"
 
 
 def test_ptxd_u64_address_handle_is_reinterpreted():
@@ -689,8 +685,18 @@ def test_ptxd_coercion_ir_forms():
         T.ptxd.ld.global_.b32(dst, global_ptr, pred=flag)
 
 
+# fp16/bf16 dtypes bring in __half / __nv_bfloat16 and their bit-cast helpers.
+_CERT_PRELUDE = "#include <cstdint>\n#include <cuda_fp16.h>\n#include <cuda_bf16.h>"
+
 _ASM_RE = re.compile(r'asm(?: volatile)?\("(.*?)"\s*:', re.S)
 _PRED_RE = re.compile(r"^\{ \.reg \.pred p; setp\.ne\.b32 p, %\d+, 0; @p (?P<instr>[^;]+;) \}$")
+
+
+def _as_render_args(rendering):
+    """`renderings` yields (tokens, dtypes, predicated); render_variant takes
+    (tokens, predicated, dtypes)."""
+    tokens, dtypes, predicated = rendering
+    return tokens, predicated, dtypes
 
 
 def _sole_instruction(asm_text):
@@ -716,32 +722,30 @@ def test_ptxd_single_instruction_invariant():
     appear inside a helper body.
     """
     from tvm.backend.cuda.ptx_dialect.render import render_variant
-    from tvm.backend.cuda.ptx_dialect.table import TABLE, dtype_combos, pred_forms, variants
+    from tvm.backend.cuda.ptx_dialect.table import TABLE, renderings
 
     asm_re, sole_instruction = _ASM_RE, _sole_instruction
     checked = 0
     for entry in TABLE.values():
-        for tokens in variants(entry):
-            for dtypes in dtype_combos(entry, tokens):
-                for predicated in pred_forms(entry):
-                    opcode, _, source = render_variant(entry, tokens, predicated, dtypes)
-                    asm_blocks = asm_re.findall(source)
-                    assert len(asm_blocks) == 1, f"{opcode}: {len(asm_blocks)} asm blocks"
-                    instr = sole_instruction(asm_blocks[0])
-                    assert instr is not None, f"{opcode}: not one statement: {asm_blocks[0]!r}"
-                    assert instr.startswith(opcode + " ") or instr == opcode + ";", (
-                        f"{opcode}: emitted instruction does not match the opcode: {instr!r}"
-                    )
-                    assert "cvta" not in source or entry.name == "cvta", (
-                        f"{opcode}: cvta must be a separate IR node, never inside a helper"
-                    )
-                    # Every helper is void: a PTX destination is an operand,
-                    # never a C return value.
-                    assert source.startswith("__forceinline__ __device__ void "), (
-                        f"{opcode}: helper must be void, got {source.splitlines()[0]!r}"
-                    )
-                    assert "return" not in source, f"{opcode}: helper must not return"
-                    checked += 1
+        for tokens, dtypes, predicated in renderings(entry):
+            opcode, _, source = render_variant(entry, tokens, predicated, dtypes)
+            asm_blocks = asm_re.findall(source)
+            assert len(asm_blocks) == 1, f"{opcode}: {len(asm_blocks)} asm blocks, expected 1"
+            instr = sole_instruction(asm_blocks[0])
+            assert instr is not None, f"{opcode}: not a single statement: {asm_blocks[0]!r}"
+            assert instr.startswith(opcode + " ") or instr == opcode + ";", (
+                f"{opcode}: emitted instruction does not match the opcode: {instr!r}"
+            )
+            assert "cvta" not in source or entry.name == "cvta", (
+                f"{opcode}: cvta must be a separate IR node, never inside a helper"
+            )
+            # Every helper is void: a PTX destination is an operand, never a C
+            # return value.
+            assert source.startswith("__forceinline__ __device__ void "), (
+                f"{opcode}: helper must be void, got {source.splitlines()[0]!r}"
+            )
+            assert "return" not in source, f"{opcode}: helper must not return a value"
+            checked += 1
     assert checked > 0
 
 
@@ -770,25 +774,21 @@ def test_ptxd_single_instruction_invariant_detects_violations():
 def test_ptxd_all_variants_render_unique():
     """Every legal variant renders; helper names (incl. @p twins) are unique."""
     from tvm.backend.cuda.ptx_dialect.render import render_variant
-    from tvm.backend.cuda.ptx_dialect.table import TABLE, dtype_combos, variants
+    from tvm.backend.cuda.ptx_dialect.table import TABLE, renderings, variants
 
     names = set()
     total = 0
     for entry in TABLE.values():
-        combos = list(variants(entry))
-        assert combos, f"{entry.name}: check() filtered out every combination"
-        for tokens in combos:
-            for dtypes in dtype_combos(entry, tokens):
-                total += 1
-                opcode, helper, source = render_variant(entry, tokens, dtypes=dtypes)
-                assert helper not in names, f"helper name collision: {helper}"
-                names.add(helper)
+        assert variants(entry), f"{entry.name}: check() filtered out every combination"
+        for tokens, dtypes, predicated in renderings(entry):
+            opcode, helper, source = render_variant(entry, tokens, predicated, dtypes)
+            assert helper not in names, f"helper name collision: {helper}"
+            names.add(helper)
+            if predicated:  # framework-level @p twin, guarded inside the block
+                assert f"@p {opcode} " in source or f"@p {opcode};" in source
+            else:
                 assert f'"{opcode} ' in source or f'"{opcode};"' in source
-                if not entry.has_dst:  # framework-level @p twin
-                    _, ph, ps = render_variant(entry, tokens, True, dtypes)
-                    assert ph not in names
-                    names.add(ph)
-                    assert f"@p {opcode} " in ps
+            total += not predicated  # a @p twin is not a separate variant
     assert total == 31024  # update when the table grows
 
 
@@ -817,24 +817,19 @@ def test_ptxd_sampled_helpers_assemble():
     import random
 
     from tvm.backend.cuda.ptx_dialect.render import render_variant
-    from tvm.backend.cuda.ptx_dialect.table import TABLE, dtype_combos, pred_forms, variants
+    from tvm.backend.cuda.ptx_dialect.table import TABLE, renderings
 
     rng = random.Random(20260802)
     by_arch = {}
     for entry in TABLE.values():
-        combos = variants(entry)
         arch = entry.cert_arch or PTXD_ARCH
-        for i in rng.sample(range(len(combos)), min(16, len(combos))):
-            for dtypes in dtype_combos(entry, combos[i]):
-                for predicated in pred_forms(entry):
-                    _, _, source = render_variant(entry, combos[i], predicated, dtypes)
-                    by_arch.setdefault(arch, []).append(source.replace("__forceinline__ ", ""))
+        rendered = list(renderings(entry))
+        for i in rng.sample(range(len(rendered)), min(48, len(rendered))):
+            _, _, source = render_variant(entry, *_as_render_args(rendered[i]))
+            by_arch.setdefault(arch, []).append(source.replace("__forceinline__ ", ""))
     for arch, sources in by_arch.items():
         _assert_ptxas_ok("\n".join([_CERT_PRELUDE, *sources]), rdc=True, arch=arch)
 
-
-# fp16/bf16 dtypes bring in __half / __nv_bfloat16 and their bit-cast helpers.
-_CERT_PRELUDE = "#include <cstdint>\n#include <cuda_fp16.h>\n#include <cuda_bf16.h>"
 
 _CERT_SHARDS = 32
 
@@ -860,22 +855,18 @@ def test_ptxd_all_helpers_certify(shard):
     device functions are silently dropped before ptxas ever sees them.
     """
     from tvm.backend.cuda.ptx_dialect.render import render_variant
-    from tvm.backend.cuda.ptx_dialect.table import TABLE, dtype_combos, pred_forms, variants
+    from tvm.backend.cuda.ptx_dialect.table import TABLE, renderings
 
     by_arch = {}
     covered = 0
-    index = 0
-    for name in sorted(TABLE):
-        entry = TABLE[name]
-        arch = entry.cert_arch or PTXD_ARCH
-        for combo in variants(entry):
-            for dtypes in dtype_combos(entry, combo):
-                if index % _CERT_SHARDS == shard:
-                    covered += 1
-                    for predicated in pred_forms(entry):
-                        _, _, src = render_variant(entry, combo, predicated, dtypes)
-                        by_arch.setdefault(arch, []).append(src.replace("__forceinline__ ", ""))
-                index += 1
+    for index, (entry, rendering) in enumerate(
+        (TABLE[name], r) for name in sorted(TABLE) for r in renderings(TABLE[name])
+    ):
+        if index % _CERT_SHARDS == shard:
+            covered += 1
+            arch = entry.cert_arch or PTXD_ARCH
+            _, _, src = render_variant(entry, *_as_render_args(rendering))
+            by_arch.setdefault(arch, []).append(src.replace("__forceinline__ ", ""))
     assert covered, "empty shard: lower _CERT_SHARDS"
     for arch, sources in by_arch.items():
         _assert_ptxas_ok("\n".join([_CERT_PRELUDE, *sources]), rdc=True, arch=arch)

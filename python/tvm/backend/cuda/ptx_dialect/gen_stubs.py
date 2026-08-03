@@ -41,7 +41,7 @@ import sys
 import textwrap
 from pathlib import Path
 
-from .table import TABLE, InstructionEntry, call_slots, escape_token
+from .table import TABLE, InstructionEntry, escape_token
 
 # The checked-in stub this module generates.
 STUB_PATH = Path(__file__).resolve().parents[3] / "script" / "tirx.pyi"
@@ -51,7 +51,7 @@ def _operand_params(entry: InstructionEntry) -> list[str]:
     """One stub parameter per call argument, from the single call-layout definition."""
     seen: dict[str, int] = {}
     out = []
-    for slot in call_slots(entry):
+    for slot in entry.call_slots:
         lane = seen.get(slot.name, 0)
         seen[slot.name] = lane + 1
         out.append(f"{slot.name}{lane}: Any" if slot.lanes > 1 else f"{slot.name}: Any")

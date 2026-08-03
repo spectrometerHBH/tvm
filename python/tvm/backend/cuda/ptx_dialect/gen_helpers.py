@@ -32,7 +32,7 @@ import argparse
 import sys
 
 from .render import render_variant
-from .table import TABLE, variants
+from .table import TABLE, renderings
 
 
 def generate(families=None) -> str:
@@ -47,19 +47,14 @@ def generate(families=None) -> str:
         if families and name not in families:
             continue
         entry = TABLE[name]
-        combos = list(variants(entry))
-        predicated = " (each with a @p twin)" if not entry.has_dst else ""
-        chunks.append(
-            f"// ========== {entry.name} — {len(combos)} variant(s){predicated} ==========\n"
-        )
-        for tokens in combos:
-            opcode, _, source = render_variant(entry, tokens)
-            chunks.append(f"// {opcode}")
+        # `renderings` is the one place the axes are multiplied, so this dump
+        # covers every helper the engine can emit -- dtype choices included.
+        rendered = list(renderings(entry))
+        chunks.append(f"// ========== {entry.name} — {len(rendered)} helper(s) ==========\n")
+        for tokens, dtypes, predicated in rendered:
+            opcode, _, source = render_variant(entry, tokens, predicated, dtypes)
+            chunks.append(f"// {'@p ' if predicated else ''}{opcode}")
             chunks.append(source)
-            if not entry.has_dst:
-                _, _, pred_source = render_variant(entry, tokens, predicated=True)
-                chunks.append(f"// @p {opcode}")
-                chunks.append(pred_source)
     return "\n".join(chunks)
 
 

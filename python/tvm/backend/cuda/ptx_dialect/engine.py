@@ -49,13 +49,11 @@ from tvm.tirx.op import call_intrin, reinterpret
 from .render import render_variant
 from .table import (
     InstructionEntry,
-    call_slots,
     escape_token,
     mods,
     operand_dtypes,
     operand_space,
     operand_type,
-    typed_operands,
     unescape_token,
 )
 
@@ -91,33 +89,26 @@ def register_table(table: dict[str, InstructionEntry]) -> None:
 # ---------------------------------------------------------------------------
 
 
-def _value_dtype(arg) -> str:
-    """The TVM dtype one argument carries (buffer element, or the node's type)."""
-    buf = getattr(arg, "buffer", None)
-    if buf is not None:
-        return buf.dtype
-    return getattr(getattr(arg, "ty", None), "dtype", "")
+def arg_dtype(value) -> str:
+    """The TVM dtype one argument carries.
 
-
-def _arg_dtypes(entry: InstructionEntry, args) -> tuple[str, ...]:
-    """The TVM dtype each typed operand was called with, in operand order.
-
-    One dtype per *operand*, not per lane: a register group is one operand
-    occupying N registers, so its lanes share a dtype. Trace time already
-    enforced that (see ``_check_lane_dtypes``), so the first lane speaks for
-    the group.
+    One definition, used by both layers: trace time decides acceptance with it
+    and codegen selects the helper with it, so the two cannot drift.
     """
-    by_slot, i = {}, 0
-    for slot in call_slots(entry):
-        if slot.role in ("value", "dst") and slot not in by_slot:
-            by_slot[slot] = _value_dtype(args[i])
-        i += 1
-    return tuple(by_slot[s] for s in typed_operands(entry))
+    buf = getattr(value, "buffer", None)
+    if buf is not None:
+        return buf.dtype  # scalar or buffer element: the element type
+    ty = getattr(value, "ty", None)
+    return ty.dtype if isinstance(ty, PrimType) else type(value).__name__
 
 
 def _make_codegen(entry: InstructionEntry):
     n_slots = len(entry.slots)
-    n_operands = len(call_slots(entry))
+    n_operands = len(entry.call_slots)
+    # Where each typed operand's first lane sits in the argument list. Fixed by
+    # the entry, so it is resolved once here rather than regrouping the operands
+    # on every codegen call. Lanes share a dtype, so one lane speaks for a group.
+    typed_at = [i for slot, i, _ in entry.operand_args if slot.role in ("value", "dst")]
 
     def codegen(*args):
         tokens = [parse_str(a) for a in args[len(args) - n_slots :]]
@@ -126,7 +117,7 @@ def _make_codegen(entry: InstructionEntry):
         # Which dtype each typed operand actually carries. It is already in the
         # Call -- the same channel PTX uses, where a register's type lives in its
         # .reg declaration rather than in the instruction text.
-        dtypes = _arg_dtypes(entry, rest)
+        dtypes = tuple(arg_dtype(rest[i]) for i in typed_at)
         _, helper, source = render_variant(entry, tokens, predicated, dtypes)
         # Every helper is void; a destination is an ordinary argument, printed
         # by the C codegen as the lvalue it binds the reference parameter to.
@@ -140,57 +131,82 @@ def _make_codegen(entry: InstructionEntry):
 # ---------------------------------------------------------------------------
 
 
-def _coerce_operand(entry, slot, value, mod_map):
+def _coerce_operand(entry, slot, values, mod_map):
+    """Coerce one whole operand: ``slot.lanes`` arguments in, that many out.
+
+    Per operand rather than per argument, because a dtype belongs to the
+    operand: a register group is ONE PTX operand occupying N registers, and ISA
+    6.4.3 calls the brace list "similarly typed scalars". Choosing the dtype
+    once for the group *is* the lane-agreement rule, so there is nothing left to
+    re-check afterwards -- and a bare literal lane can take its dtype from the
+    group instead of being typed on its own.
+    """
     # T.local_scalar / `x: T.float32` hand back a wrapper around the BufferLoad;
     # unwrap once here so every role sees the node itself.
-    value = getattr(value, "scalar", value)
-    ty = getattr(value, "ty", None)
+    values = [getattr(v, "scalar", v) for v in values]
+    if slot.role in ("dst", "value"):
+        return _coerce_typed(entry, slot, values, mod_map)
+    return [_coerce_address(entry, slot, v, mod_map) for v in values]
+
+
+def _coerce_typed(entry, slot, values, mod_map):
+    """Coerce a dtype-carrying operand (``role`` dst or value)."""
+    allowed = operand_dtypes(slot, mod_map)
+    token = operand_type(slot, mod_map)
     if slot.role == "dst":
-        # A PTX destination is a register the caller declared, so the argument
-        # has to be a writable lvalue: a scalar (`x: T.float32`) or a buffer
-        # element. Both are BufferLoad nodes, which the C codegen prints as the
-        # lvalue bound to the helper's reference parameter.
-        allowed = operand_dtypes(slot, mod_map)
-        if not isinstance(value, BufferLoad):
-            raise ValueError(
-                f"{entry.name}: destination '{slot.name}' must be a writable scalar or "
-                f"buffer element (declare it first, e.g. `d: T.{allowed[0]}`), got "
-                f"{type(value).__name__} — a T.let binding is immutable and cannot be one"
-            )
-        got = value.buffer.dtype
-        if got not in allowed:
-            raise ValueError(
-                f"{entry.name}: destination '{slot.name}' must have dtype "
-                f"{' / '.join(allowed)} (from .{operand_type(slot, mod_map)}), got {got}"
-            )
-        return value
-    if slot.role == "value":
-        type_token = operand_type(slot, mod_map)
-        allowed = operand_dtypes(slot, mod_map)
-        if isinstance(value, int | float):
-            # A bare Python literal carries no dtype. An integer one is still
-            # unambiguous -- its bits are its bits. A float one is not: on a
-            # `.b32` operand it could mean the float's bit pattern or the
-            # number 1, and on `.u32` it silently truncates. Make it explicit.
-            if isinstance(value, float) and not allowed[0].startswith("float"):
+        # A PTX destination is a register the caller declared, so every lane has
+        # to be a writable lvalue: a scalar (`x: T.float32`) or a buffer element.
+        # Both are BufferLoad nodes, which the C codegen prints as the lvalue
+        # bound to the helper's reference parameter.
+        for value in values:
+            if not isinstance(value, BufferLoad):
                 raise ValueError(
-                    f"{entry.name}: operand '{slot.name}' is .{type_token}, so the float "
-                    f"literal {value!r} is ambiguous — write the constant you mean, e.g. "
-                    f"T.float32({value!r}) for its bits or T.{allowed[0]}(...) for a number"
+                    f"{entry.name}: destination '{slot.name}' must be a writable scalar or "
+                    f"buffer element (declare it first, e.g. `d: T.{allowed[0]}`), got "
+                    f"{type(value).__name__} — a T.let binding is immutable and cannot be one"
                 )
-            return const(value, allowed[0])
-        if isinstance(ty, PrimType) and ty.dtype in allowed:
-            return value
-        got = ty.dtype if isinstance(ty, PrimType) else type(value).__name__
+    role = "destination" if slot.role == "dst" else "operand"
+    # A bare Python literal names no dtype, so it does not get a vote.
+    carried = [None if isinstance(v, int | float) else arg_dtype(v) for v in values]
+    named = sorted({d for d in carried if d is not None})
+    if len(named) > 1:
         raise ValueError(
-            f"{entry.name}: operand '{slot.name}' must have dtype "
-            f"{' / '.join(allowed)} (from .{type_token}), got {got}"
+            f"{entry.name}: {role} '{slot.name}' is one {slot.lanes}-register group, so all "
+            f"its lanes must have one dtype, got {', '.join(d or 'literal' for d in carried)}"
         )
+    dtype = named[0] if named else allowed[0]
+    if dtype not in allowed:
+        raise ValueError(
+            f"{entry.name}: {role} '{slot.name}' must have dtype "
+            f"{' / '.join(allowed)} (from .{token}), got {dtype}"
+        )
+    for value in values:
+        # An integer literal is unambiguous -- its bits are its bits. A float one
+        # is not, and which complaint it earns depends on why: an operand with a
+        # dtype axis cannot tell which same-width type was meant, while a
+        # concretely typed one would simply truncate.
+        if isinstance(value, float) and not dtype.startswith("float"):
+            if len(allowed) > 1:
+                raise ValueError(
+                    f"{entry.name}: {role} '{slot.name}' is .{token}, which accepts "
+                    f"{' / '.join(allowed)}, so the float literal {value!r} is ambiguous — "
+                    f"write the constant you mean, e.g. T.float32({value!r}) for its bits "
+                    f"or T.{dtype}(...) for a number"
+                )
+            raise ValueError(
+                f"{entry.name}: {role} '{slot.name}' is .{token}, so the float literal "
+                f"{value!r} would be truncated — write T.{dtype}(...) if that is what you mean"
+            )
+    return [const(v, dtype) if isinstance(v, int | float) else v for v in values]
+
+
+def _coerce_address(entry, slot, value, mod_map):
+    """Coerce an address-like operand (``role`` addr or ptr)."""
+    ty = getattr(value, "ty", None)
     if slot.role == "ptr":
         if isinstance(ty, PointerType):
             return value
         raise ValueError(f"{entry.name}: operand '{slot.name}' must be a pointer")
-    # role == "addr"
     space = operand_space(slot, mod_map)
     if space.startswith("shared"):
         if isinstance(ty, PointerType):
@@ -223,29 +239,6 @@ def _coerce_operand(entry, slot, value, mod_map):
     raise ValueError(f"{entry.name}: operand '{slot.name}' must be a pointer or uint64 handle")
 
 
-def _check_lane_dtypes(entry, supplied, coerced):
-    """Every lane of one operand carries the same dtype.
-
-    A register group is ONE PTX operand spanning N registers, and ISA 6.4.3
-    requires its elements be "similarly typed", so it has one dtype and one C
-    parameter type. Per-lane coercion cannot see this: each lane on its own is
-    a legal dtype for the operand's bit type. Left unchecked, the group would
-    be typed from its first lane and the rest bound to a parameter of another
-    type -- an implicit numeric conversion, which is the exact failure the
-    dtype axis exists to prevent.
-    """
-    by_slot = {}
-    for slot, value in zip(supplied, coerced):
-        if slot.role in ("value", "dst") and slot.lanes > 1:
-            by_slot.setdefault(slot, []).append(_value_dtype(value))
-    for slot, dtypes in by_slot.items():
-        if len(set(dtypes)) > 1:
-            raise ValueError(
-                f"{entry.name}: operand '{slot.name}' is one {slot.lanes}-register group, so "
-                f"all its lanes must have one dtype, got {', '.join(dtypes)}"
-            )
-
-
 def _coerce_pred(entry, pred):
     ty = getattr(pred, "ty", None)
     if isinstance(ty, PrimType) and ty.dtype in ("bool", "uint32", "int32"):
@@ -254,7 +247,7 @@ def _coerce_pred(entry, pred):
 
 
 def _emit(entry, filled, operands, pred=None):
-    supplied = call_slots(entry)
+    supplied = entry.call_slots
     if len(operands) != len(supplied):
         names = ", ".join(
             f"{s.name}[{s.lanes}]" if s.lanes > 1 else s.name
@@ -283,9 +276,10 @@ def _emit(entry, filled, operands, pred=None):
             )
         pred = _coerce_pred(entry, pred)
     coerced = [
-        _coerce_operand(entry, slot, value, mod_map) for slot, value in zip(supplied, operands)
+        value
+        for slot, i, lanes in entry.operand_args
+        for value in _coerce_operand(entry, slot, operands[i : i + lanes], mod_map)
     ]
-    _check_lane_dtypes(entry, supplied, coerced)
     # Call arg layout: [operands..., pred?] [slot tokens ("" = omitted)].
     return call_intrin(
         "",  # every ptxd call is a void statement; destinations are operands
@@ -353,7 +347,7 @@ class _InstrChain:
         hits, errors = [], []
         for entry, filled in cands:
             ops, p = operands, pred
-            if len(ops) == len(call_slots(entry)) + 1 and p is None:
+            if len(ops) == len(entry.call_slots) + 1 and p is None:
                 ops, p = ops[:-1], ops[-1]
             try:
                 hits.append(_emit(entry, filled, ops, pred=p))
@@ -417,14 +411,18 @@ class PTXDNamespace:
         if table is None:
             from .table import TABLE as table  # pylint: disable=import-outside-toplevel
         self._table = table
+        # Grouped once: the table is fixed here, and this lookup is the first
+        # step of every traced call. The key is the mnemonic with dots folded to
+        # underscores -- identical to the table key for every single-shape
+        # family (st.bulk -> st_bulk), and the shared surface name for families
+        # whose shapes are separate entries (all `mov_*` answer to `mov`).
+        self._by_family = {}
+        for entry in table.values():
+            self._by_family.setdefault(entry.family, []).append((entry, (None,) * len(entry.slots)))
 
     def _family(self, token):
-        # The attribute name is the mnemonic with dots folded to underscores:
-        # identical to the table key for every single-shape family (st.bulk ->
-        # st_bulk), and the shared surface name for families whose shapes are
-        # separate entries (all `mov_*` entries answer to `mov`).
-        cands = [(e, (None,) * len(e.slots)) for e in self._table.values() if e.family == token]
-        return _InstrChain(cands) if cands else None
+        cands = self._by_family.get(token)
+        return _InstrChain(list(cands)) if cands else None
 
     def __getattr__(self, name):
         if name.startswith("_"):
@@ -454,7 +452,7 @@ class PTXDNamespace:
         return chain
 
     def _family_names(self):
-        return {e.family for e in self._table.values()}
+        return set(self._by_family)
 
     def __dir__(self):
         """Family names — drives tab completion."""
