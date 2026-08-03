@@ -575,7 +575,7 @@ def test_ptx_sync_and_clc_codegen():
             T.ptxd.cp.async_.mbarrier.arrive.shared.b64(bar.ptr_to([0]))
             T.ptxd.cp.async_.mbarrier.arrive.noinc.shared__cta.b64(bar.ptr_to([0]))
             T.ptx.mbarrier.try_wait(bar.ptr_to([0]), T.int32(0))
-            T.ptx.mbarrier.complete_tx(bar.ptr_to([0]), T.uint32(16))
+            T.ptxd.mbarrier.complete_tx.shared.b64(bar.ptr_to([0]), T.uint32(T.uint32(16)))
             T.ptx.mbarrier.complete_tx(
                 bar.ptr_to([1]), T.uint32(24), scope="cta", space="shared::cta"
             )

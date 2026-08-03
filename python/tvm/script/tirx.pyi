@@ -305,6 +305,26 @@ class _Chain_max:
     xorsign: _Chain_max
     def __call__(self, *args: Any) -> None: ...
 
+class _Chain_mbarrier:
+    """`mbarrier` — 6 entries sharing this mnemonic; PTX puts their difference in the operand
+    list, so the call selects one. Shapes: (addr, count); (addr); (addr, tx_count)
+    """
+
+    arrive: _Chain_mbarrier
+    b64: _Chain_mbarrier
+    cluster: _Chain_mbarrier
+    complete_tx: _Chain_mbarrier
+    cta: _Chain_mbarrier
+    expect_tx: _Chain_mbarrier
+    init: _Chain_mbarrier
+    inval: _Chain_mbarrier
+    relaxed: _Chain_mbarrier
+    release: _Chain_mbarrier
+    shared: _Chain_mbarrier
+    shared__cluster: _Chain_mbarrier
+    shared__cta: _Chain_mbarrier
+    def __call__(self, *args: Any, pred: Any = None) -> None: ...
+
 class _Chain_min:
     """`min` — 2 entries sharing this mnemonic; PTX puts their difference in the operand list,
     so the call selects one. Shapes: (d, a, b); (d, a, b, c)
@@ -552,6 +572,7 @@ class _PTXD:
     ld: _Chain_ld
     mapa: _Chain_mapa
     max: _Chain_max
+    mbarrier: _Chain_mbarrier
     min: _Chain_min
     mov: _Chain_mov
     mul: _Chain_mul

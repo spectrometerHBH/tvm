@@ -1533,7 +1533,7 @@ def selector_gather(
     )
     mbar = T.decl_buffer((1,), "uint64", dyn.data, elem_offset=64)
     if tid == 0:
-        T.ptx.mbarrier.init(mbar.ptr_to([0]), 1)
+        T.ptxd.mbarrier.init.shared.b64(mbar.ptr_to([0]), T.uint32(1))
         Tx.copy_async(
             A_smem[:, :],
             A[0:1, :],
@@ -1973,7 +1973,7 @@ def _build_selector_gather_gpu_kernel(dtype="float16"):
         mbar = T.decl_buffer((1,), "uint64", dyn.data, elem_offset=shared_bytes // 8)
         mbar_ptr = T.meta_var(mbar.ptr_to([0]))
         if tid == 0:
-            T.ptx.mbarrier.init(mbar_ptr, 1)
+            T.ptxd.mbarrier.init.shared.b64(mbar_ptr, T.uint32(1))
         T.ptxd.fence.proxy.async_.shared__cta()
         T.cuda.cta_sync()
         if tid == 0:
@@ -1985,7 +1985,7 @@ def _build_selector_gather_gpu_kernel(dtype="float16"):
                 gather4=[7, 3, 19, 5],
                 src_selector=[(flag != 0, B)],
             )
-            T.ptx.mbarrier.arrive.expect_tx(mbar_ptr, shared_bytes)
+            T.ptxd.mbarrier.arrive.expect_tx.shared.b64(mbar_ptr, T.uint32(shared_bytes))
         T.ptx.mbarrier.try_wait(mbar_ptr, 0)
         T.ptxd.fence.proxy.async_.shared__cta()
         T.cuda.cta_sync()

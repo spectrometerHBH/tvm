@@ -201,7 +201,7 @@ def test_dsmem(shape, dtype, src_spec, dst_spec, expected):
                     remote_cta_id=T.int32(1),
                 )
             else:
-                T.ptx.mbarrier.arrive.expect_tx(mbar.ptr_to([0]), copy_bytes)
+                T.ptxd.mbarrier.arrive.expect_tx.shared.b64(mbar.ptr_to([0]), T.uint32(copy_bytes))
                 mbar.wait(0, 0)
 
                 Tx.copy(B[r], dst_smem[r])

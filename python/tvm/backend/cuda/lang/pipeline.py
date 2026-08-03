@@ -108,7 +108,7 @@ class MBarrier:
     def _init(self, count):
         if self.leader:
             for i in T.unroll(self.depth):
-                T.ptx.mbarrier.init(self.buf.ptr_to([i]), count)
+                T.ptxd.mbarrier.init.shared.b64(self.buf.ptr_to([i]), T.uint32(count))
 
     def wait(self, stage, phase):
         if self._remote_cta_id is not None:
@@ -147,7 +147,7 @@ class MBarrier:
         # When ``None`` the implicit count-of-1 form is emitted. Passing
         # ``count=1`` is semantically identical but spells the count explicitly.
         if remote is None:
-            T.ptx.mbarrier.arrive(bar)
+            T.ptxd.mbarrier.arrive.shared.b64(bar, T.uint32(1))
         else:
             actual_pred = True if pred is None else pred
             T.ptx.mbarrier.arrive(bar, remote=remote, pred=actual_pred, count=count)
@@ -215,12 +215,12 @@ class TMABar(MBarrier):
         # full default-local rationale.
         if tx_count is not None:
             if remote is None:
-                T.ptx.mbarrier.arrive.expect_tx(bar, tx_count)
+                T.ptxd.mbarrier.arrive.expect_tx.shared.b64(bar, T.uint32(tx_count))
             else:
                 actual_pred = True if pred is None else pred
                 T.ptx.mbarrier.arrive.expect_tx(bar, tx_count, remote=remote, pred=actual_pred)
         elif remote is None:
-            T.ptx.mbarrier.arrive(bar)
+            T.ptxd.mbarrier.arrive.shared.b64(bar, T.uint32(1))
         else:
             actual_pred = True if pred is None else pred
             T.ptx.mbarrier.arrive(bar, remote=remote, pred=actual_pred)

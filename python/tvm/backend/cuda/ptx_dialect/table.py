@@ -510,6 +510,13 @@ _MINMAX_INT_RELU = ("s16x2", "s32")
 _MINMAX_FP = ("f32", "f64", "f16", "f16x2", "bf16", "bf16x2")
 
 
+def _check_mbarrier_sem_scope(m):
+    """`.sem` and `.scope` are one qualifier pair: both or neither (ISA 9.7.14.9)."""
+    if bool(m.get("sem", "")) != bool(m.get("scope", "")):
+        return ".sem and .scope go together: write both or neither"
+    return None
+
+
 def _check_fence_proxy(m):
     """`.proxykind = { .alias, .async, .async.global, .async.shared::{cta,cluster} }`.
 
@@ -1441,6 +1448,107 @@ _ENTRIES = [
         ),
         operands=(),
     ),
+    # ------------------------------------------------------------------
+    # mbarrier, per PTX ISA 9.7.14.5-9.7.14.12.
+    #
+    # The arrive lines come in a `state`-returning form and a sink form
+    # (`_, [addr]`); the sink is what a void helper can express, so `_` is an
+    # ISA-fixed immediate the way `st.bulk`'s initval is. That also leaves the
+    # instruction without a destination, so `pred=` works.
+    #
+    # NOT REGISTERED:
+    # - the `state, [addr]` forms: the destination is the barrier's pre-arrival
+    #   state, which nothing reads today.
+    # - the no-count arrive line. A one-operand and a two-operand entry cannot
+    #   share a mnemonic here, because the framework's positional `pred` lets
+    #   the one-operand entry swallow a count as the predicate (the collision
+    #   `bar.sync` hit). The ISA defines the omitted count as 1, so call sites
+    #   pass it explicitly.
+    # - `mbarrier.arrive.noComplete`, which has no sink form at all.
+    # - the try_wait / test_wait lines: they produce a `.pred` result.
+    #
+    # The addr slot takes no fixed space: with `.space` omitted the ISA means
+    # a generic address, which is 64-bit on sm_90+, so pinning the operand to
+    # shared would bind a 32-bit register there and ptxas rejects the 32-bit
+    # ABI. Letting `operand_space` read the modifier picks the right carrier
+    # for each variant, exactly as ld/st do.
+    InstructionEntry(  # mbarrier.init{.shared{::cta}}.b64 [addr], count;
+        name="mbarrier_init",
+        mnemonic="mbarrier",
+        slots=(
+            ModifierSlot("action", ("init",)),
+            ModifierSlot("space", ("shared", "shared::cta"), optional=True),
+            ModifierSlot("type", ("b64",)),
+        ),
+        operands=(
+            OperandSlot("addr", role="addr"),
+            OperandSlot("count", role="value", dtype="u32"),
+        ),
+    ),
+    InstructionEntry(  # mbarrier.inval{.shared{::cta}}.b64 [addr];
+        name="mbarrier_inval",
+        mnemonic="mbarrier",
+        slots=(
+            ModifierSlot("action", ("inval",)),
+            ModifierSlot("space", ("shared", "shared::cta"), optional=True),
+            ModifierSlot("type", ("b64",)),
+        ),
+        operands=(OperandSlot("addr", role="addr"),),
+    ),
+    InstructionEntry(  # mbarrier.arrive{.sem.scope}{.space}.b64 _, [addr], count;
+        name="mbarrier_arrive",
+        mnemonic="mbarrier",
+        slots=(
+            ModifierSlot("action", ("arrive",)),
+            ModifierSlot("sem", ("release", "relaxed"), optional=True),
+            ModifierSlot("scope", ("cta", "cluster"), optional=True),
+            ModifierSlot("space", ("shared", "shared::cta", "shared::cluster"), optional=True),
+            ModifierSlot("type", ("b64",)),
+        ),
+        check=_check_mbarrier_sem_scope,
+        operands=(
+            OperandSlot("state", role="imm", literal="_"),
+            OperandSlot("addr", role="addr"),
+            OperandSlot("count", role="value", dtype="u32"),
+        ),
+    ),
+    InstructionEntry(  # mbarrier.arrive.expect_tx{.sem.scope}{.space}.b64 _, [addr], txCount;
+        name="mbarrier_arrive_expect_tx",
+        mnemonic="mbarrier",
+        slots=(
+            ModifierSlot("action", ("arrive",)),
+            ModifierSlot("expect_tx", ("expect_tx",)),
+            ModifierSlot("sem", ("release", "relaxed"), optional=True),
+            ModifierSlot("scope", ("cta", "cluster"), optional=True),
+            ModifierSlot("space", ("shared", "shared::cta", "shared::cluster"), optional=True),
+            ModifierSlot("type", ("b64",)),
+        ),
+        check=_check_mbarrier_sem_scope,
+        operands=(
+            OperandSlot("state", role="imm", literal="_"),
+            OperandSlot("addr", role="addr"),
+            OperandSlot("tx_count", role="value", dtype="u32"),
+        ),
+    ),
+    *[
+        InstructionEntry(  # mbarrier.{expect_tx,complete_tx}{.sem.scope}{.space}.b64 [addr], tx;
+            name=f"mbarrier_{act}",
+            mnemonic="mbarrier",
+            slots=(
+                ModifierSlot("action", (act,)),
+                ModifierSlot("sem", ("relaxed",), optional=True),
+                ModifierSlot("scope", ("cta", "cluster"), optional=True),
+                ModifierSlot("space", ("shared", "shared::cta", "shared::cluster"), optional=True),
+                ModifierSlot("type", ("b64",)),
+            ),
+            check=_check_mbarrier_sem_scope,
+            operands=(
+                OperandSlot("addr", role="addr"),
+                OperandSlot("tx_count", role="value", dtype="u32"),
+            ),
+        )
+        for act in ("expect_tx", "complete_tx")
+    ],
 ]
 
 TABLE: dict[str, InstructionEntry] = {e.name: e for e in _ENTRIES}

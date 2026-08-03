@@ -167,7 +167,7 @@ def _make_cp_kernel(
                     T.address_of(tmem_addr), T.uint32(n_tmem_cols)
                 )
             if tid_in_wg == 0:
-                T.ptx.mbarrier.init(cp_mbar.ptr_to([0]), 1)
+                T.ptxd.mbarrier.init.shared.b64(cp_mbar.ptr_to([0]), T.uint32(1))
             T.ptxd.fence.proxy.async_.shared__cta()
             T.cuda.cta_sync()
             Tx.cta.copy(A_smem[s_full_sl], A[s_full_sl])
@@ -482,7 +482,7 @@ def _make_cp_kernel_cta2(s_full, s_shape, t_full, t_shape, dtype, cfg, W32, n_co
         tmem_addr = T.alloc_shared([1], "uint32")
         cp_mbar = T.alloc_shared([1], "uint64")
         if tid_in_wg == 0:
-            T.ptx.mbarrier.init(cp_mbar.ptr_to([0]), 1)
+            T.ptxd.mbarrier.init.shared.b64(cp_mbar.ptr_to([0]), T.uint32(1))
         if warp_id == 0:
             T.ptxd.tcgen05.alloc.cta_group__2.sync.aligned.shared__cta.b32(
                 T.address_of(tmem_addr), T.uint32(n_cols)
@@ -936,7 +936,7 @@ def _make_2d_kernel(
                     T.address_of(tmem_addr), T.uint32(n_tmem_cols_total)
                 )
             if tid_in_wg == 0:
-                T.ptx.mbarrier.init(cp_mbar.ptr_to([0]), 1)
+                T.ptxd.mbarrier.init.shared.b64(cp_mbar.ptr_to([0]), T.uint32(1))
             T.ptxd.fence.proxy.async_.shared__cta()
             T.cuda.cta_sync()
             Tx.cta.copy(A_smem[:, :], A[:, :])
@@ -1004,7 +1004,7 @@ def _make_3d_4tile_kernel(s_full, t_full, s_full_shape, t_full_shape, dtype, cta
                     T.address_of(tmem_addr), T.uint32(n_tmem_cols_total)
                 )
             if tid_in_wg == 0:
-                T.ptx.mbarrier.init(cp_mbar.ptr_to([0]), 1)
+                T.ptxd.mbarrier.init.shared.b64(cp_mbar.ptr_to([0]), T.uint32(1))
             T.ptxd.fence.proxy.async_.shared__cta()
             T.cuda.cta_sync()
             Tx.cta.copy(A_smem[:, :, :], A[:, :, :])
@@ -1187,7 +1187,7 @@ def test_align_middle_2_to_1_nvfp4_sfb():
                     T.address_of(tmem_addr), T.uint32(n_tmem_cols_total)
                 )
             if tid_in_wg == 0:
-                T.ptx.mbarrier.init(cp_mbar.ptr_to([0]), 1)
+                T.ptxd.mbarrier.init.shared.b64(cp_mbar.ptr_to([0]), T.uint32(1))
             T.ptxd.fence.proxy.async_.shared__cta()
             T.cuda.cta_sync()
             Tx.cta.copy(A_smem[:, :], A[:, :])

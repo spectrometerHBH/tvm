@@ -158,7 +158,8 @@ def test_ptx_tcgen05_cp_validation(kwargs, match):
 def test_printer_ptx_mbarrier():
     bar = tir.Var("bar", "handle")
     _assert_print(
-        cuda_op.ptx_mbarrier_init(bar, 32), "bar = T.handle()\nT.ptx.mbarrier.init(bar, 32)"
+        cuda_op.ptx_mbarrier_init(bar, 32),
+        "bar = T.handle()\nT.ptx.mbarrier.init(bar, 32)",
     )
     _assert_print(
         cuda_op.ptx_mbarrier_arrive(bar),
