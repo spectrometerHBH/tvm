@@ -689,38 +689,6 @@ device_intrinsic(
 # PTX mapa form:
 #   mapa{.space}.type d, a, b;
 #   .space = {.shared::cluster}; .type = {.u32, .u64}
-# =============================================================================
-
-
-def _ptx_mapa_parts(_addr, _rank, space, ptx_type, return_dtype):
-    space = parse_str(space)
-    ptx_type = parse_str(ptx_type)
-    return_dtype = parse_str(return_dtype)
-    if space not in ("", "shared::cluster"):
-        raise ValueError(f"Unsupported mapa space {space!r}")
-    if ptx_type not in ("u32", "u64"):
-        raise ValueError(f"Unsupported mapa type {ptx_type!r}")
-    c_type = "uint32_t" if ptx_type == "u32" else "uint64_t"
-    constraint = "r" if ptx_type == "u32" else "l"
-    name = f"tvm_builtin_ptx_mapa{('_' + _safe_attr(space)) if space else ''}_{ptx_type}"
-    body = (
-        f"    {c_type} result;\n"
-        f'    asm volatile("mapa{_dot(space)}.{ptx_type} %0, %1, %2;"\n'
-        f'                 : "={constraint}"(result) : "l"(addr), "r"(rank));\n'
-        "    return result;"
-    )
-    return name, c_type, return_dtype, body
-
-
-device_intrinsic(
-    "ptx_mapa",
-    n_attrs=3,
-    helper_name=lambda *a: _ptx_mapa_parts(*a)[0],
-    c_signature="(void* addr, uint32_t rank)",
-    return_type=lambda *a: _ptx_mapa_parts(*a)[1],
-    tvm_return_type=lambda *a: _ptx_mapa_parts(*a)[2],
-    body=lambda *a: _ptx_mapa_parts(*a)[3],
-)
 
 
 # =============================================================================

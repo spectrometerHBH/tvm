@@ -120,18 +120,6 @@ def _ptx_barrier_cluster_wait(acquire, aligned):
 # ctaid.x (via the get_first_ctaid::x form); a single uint32 is returned, with
 # 0xFFFFFFFF as the "no work stolen" sentinel (a device helper returns one scalar).
 # =============================================================================
-device_intrinsic(
-    "ptx_clc_try_cancel",
-    c_signature="(void* handle, void* mbar)",
-    body=(
-        "    unsigned int addr = (unsigned int)__cvta_generic_to_shared(handle);\n"
-        "    unsigned int bar = (unsigned int)__cvta_generic_to_shared(mbar);\n"
-        "    asm volatile(\n"
-        '        "clusterlaunchcontrol.try_cancel.async.shared::cta.mbarrier::complete_tx::bytes"\n'
-        '        ".multicast::cluster::all.b128 [%0], [%1];\\n"\n'
-        '        :: "r"(addr), "r"(bar) : "memory");'
-    ),
-)
 
 
 def _ptx_clc_query_cancel_parts(use_ld_acquire):

@@ -170,7 +170,11 @@ class MBarrier:
             raise ValueError("MBarrier.remote_view() cannot be applied to a remote view")
 
         ptr_ty = PointerType(PrimType("uint64"), "shared")
-        expr = T.reinterpret(ptr_ty, T.ptx.map_shared_rank(self.buf.ptr_to([0]), rank))
+        mapped = T.alloc_local([1], "uint64")
+        # This method body is plain Python, not TVMScript, so the call has to
+        # be handed to the frame explicitly or it is discarded.
+        T.evaluate(T.ptxd.mapa.u64(mapped[0], self.buf.ptr_to([0]), T.uint32(rank)))
+        expr = T.reinterpret(ptr_ty, mapped[0])
         ptr = TIRVar("remote_mbar_ptr", ptr_ty)
         T.Bind(expr, var=ptr)
         buf = T.decl_buffer([self.depth], "uint64", data=ptr, scope="shared")

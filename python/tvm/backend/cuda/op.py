@@ -555,7 +555,7 @@ def ptx_cp_async_bulk_shared_to_cluster(dst_ptr, src_ptr, size, mbar):
 
     mbar : Expr
         Mbarrier address in shared::cluster space for completion signaling,
-        usually produced by ``T.ptx.map_shared_rank``.
+        usually produced by ``T.ptxd.mapa``.
 
     Returns
     -------
@@ -1341,28 +1341,11 @@ def ptx_cp_async_bulk_wait_group(n=0, read=True):
     return call_intrin("", "tirx.ptx.cp_async_bulk_wait_group", n, read)
 
 
-def ptx_clc_try_cancel(handle, mbar):
-    """TVM intrinsic to call clusterlaunchcontrol.try_cancel.
-
-    Async-requests cancelling the next cluster's launch (work-stealing): writes the
-    16B response handle to smem and signals ``mbar`` (complete_tx, multicast to both
-    cluster CTAs).
-
-    Parameters
-    ----------
-    handle : Expr
-        Pointer to the 16B (uint4) smem response handle.
-
-    mbar : Expr
-        Pointer to the mbarrier signalled when the handle lands.
-    """
-    return call_intrin("", "tirx.ptx.clc_try_cancel", handle, mbar)
-
-
 def ptx_clc_query_cancel(handle, *, use_ld_acquire=True):
     """TVM intrinsic to call clusterlaunchcontrol.query_cancel.
 
-    Decodes the response handle written by :func:`ptx_clc_try_cancel`. Returns the
+    Decodes the response handle written by ``clusterlaunchcontrol.try_cancel``
+    (now ``T.ptxd``). Returns the
     cancelled cluster's first ``ctaid.x``, or ``0xFFFFFFFF`` when no work was stolen.
 
     Parameters
@@ -3710,35 +3693,6 @@ def cuda_hmax2(a, b):
 
 def cuda_fp8x4_e4m3_from_float4(x, y, z, w):
     return call_intrin("uint32", "tirx.cuda.fp8x4_e4m3_from_float4", x, y, z, w)
-
-
-def ptx_map_shared_rank(ptr, rank):
-    """TVM intrinsic to call ptx map_shared_rank instruction
-
-    Parameters
-    ----------
-    ptr: Expr
-        The generic pointer to the local shared memory, handle type
-
-    rank: int
-        The rank of the distributed shared memory.
-
-    Returns
-    -------
-    call : Expr
-        The call expression.
-    """
-
-    return ptx_mapa(ptr, rank, space="", ptx_type="u64", return_type="uint64")
-
-
-def ptx_mapa(ptr, rank, space="", ptx_type="u64", return_type="uint64"):
-    """TVM intrinsic for PTX ``mapa{.space}.type d, a, b``."""
-    if space not in ("", "shared::cluster"):
-        raise ValueError(f"Unsupported mapa space {space!r}")
-    if ptx_type not in ("u32", "u64"):
-        raise ValueError(f"Unsupported mapa type {ptx_type!r}")
-    return call_intrin(return_type, "tirx.ptx.mapa", ptr, rank, space, ptx_type, return_type)
 
 
 def cuda_atomic_cas(ptr, old_val, new_val):

@@ -65,7 +65,7 @@ def _assert_remote_mbarrier_ir(func, arrive_op_name):
             and getattr(node.data, "name", None) == "remote_mbar_ptr"
         ):
             buffers.append(node)
-        if isinstance(node, tvm.ir.Call) and node.op.name == "tirx.ptx.mapa":
+        if isinstance(node, tvm.ir.Call) and node.op.name == "tirx.ptxd.mapa":
             mapa_calls.append(node)
         if isinstance(node, tvm.ir.Call) and node.op.name == arrive_op_name:
             arrive_calls.append(node)
@@ -81,11 +81,23 @@ def _assert_remote_mbarrier_ir(func, arrive_op_name):
     assert buffers[0].data.same_as(bindings[0].var)
     assert buffers[0].data.ty.storage_scope == "shared"
     assert buffers[0].buffer.scope() == "shared"
+    # ptxd operand order is the PTX operand order: mapa writes its result into
+    # a destination the caller declared, so args are (d, a, b) and the arrive
+    # reads the mapped address back out of that destination rather than
+    # re-deriving it.
+    mapped_dst, mapped_ptr, mapped_rank = mapa_calls[0].args[:3]
+    assert isinstance(mapped_dst, tvm.tirx.BufferLoad)
+    assert mapped_ptr is not None
+
+    # mapa's rank operand is `.u32` per the ISA, so it carries a cast that the
+    # arrive's own remote operand does not; compare what they denote.
+    def rank_value(e):
+        while hasattr(e, "value") and not isinstance(getattr(e, "value", None), int | float):
+            e = e.value
+        return getattr(e, "value", e)
+
     for arrive in arrive_calls:
-        tvm.ir.assert_structural_equal(arrive.args[0], mapa_calls[0].args[0])
-        tvm.ir.assert_structural_equal(
-            arrive.args[_remote_operand_index(arrive)], mapa_calls[0].args[1]
-        )
+        assert rank_value(arrive.args[_remote_operand_index(arrive)]) == rank_value(mapped_rank)
 
 
 @pytest.mark.gpu
@@ -171,7 +183,7 @@ def test_mbarrier_remote_view_codegen():
     _assert_remote_mbarrier_ir(test_remote_view, "tirx.ptx.mbarrier_arrive")
     with tvm.target.Target("cuda"):
         src, _ = _get_source(test_remote_view)
-        assert "tvm_builtin_ptx_mapa_u64" in src
+        assert "tvm_builtin_ptxd_mapa_u64" in src
         # The emitted helper name spells out the full attribute set it was
         # specialized for: <space>_<count?>_<remote>_<pred>.
         assert "tvm_builtin_ptx_mbarrier_arrive_shared_cluster_remote_pred" in src

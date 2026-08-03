@@ -45,8 +45,11 @@ def test_ptx_cp_async_bulk_s2c_codegen():
         for i in T.serial(128):
             A_smem[i] = A[i]
                 # Use the raw PTX instruction directly
-        dst_ptr = T.ptx.map_shared_rank(A_smem.ptr_to([0]), T.int32(1))
-        mbar_ptr = T.ptx.map_shared_rank(A_smem.ptr_to([0]), T.int32(1))
+        mapped = T.alloc_local([2], "uint64")
+        T.ptxd.mapa.u64(mapped[0], A_smem.ptr_to([0]), T.uint32(1))
+        T.ptxd.mapa.u64(mapped[1], A_smem.ptr_to([0]), T.uint32(1))
+        dst_ptr = mapped[0]
+        mbar_ptr = mapped[1]
         T.ptx.cp_async.bulk.s2c(
             dst_ptr,
             A_smem.ptr_to([0]),
@@ -72,8 +75,11 @@ def test_ptx_cp_async_bulk_s2c_codegen_address_conversion():
         A_smem = T.alloc_shared([64], "float32")
         for i in T.serial(64):
             A_smem[i] = A[i]
-        dst_ptr = T.ptx.map_shared_rank(A_smem.ptr_to([0]), T.int32(0))
-        mbar_ptr = T.ptx.map_shared_rank(A_smem.ptr_to([0]), T.int32(0))
+        mapped = T.alloc_local([2], "uint64")
+        T.ptxd.mapa.u64(mapped[0], A_smem.ptr_to([0]), T.uint32(0))
+        T.ptxd.mapa.u64(mapped[1], A_smem.ptr_to([0]), T.uint32(0))
+        dst_ptr = mapped[0]
+        mbar_ptr = mapped[1]
         T.ptx.cp_async.bulk.s2c(
             dst_ptr,
             A_smem.ptr_to([0]),
@@ -98,9 +104,9 @@ def test_ptx_map_shared_rank_pointer_bind_codegen():
         cta_id = T.cta_id([1])
         tid = T.thread_id([1])
         mbar = T.alloc_shared([2], "uint64")
-        remote_ptr = T.reinterpret(
-            ptr_ty, T.ptx.map_shared_rank(mbar.ptr_to([0]), T.int32(0))
-        )
+        mapped = T.alloc_local([1], "uint64")
+        T.ptxd.mapa.u64(mapped[0], mbar.ptr_to([0]), T.uint32(0))
+        remote_ptr = T.reinterpret(ptr_ty, mapped[0])
         remote_mbar = T.decl_buffer([1], "uint64", data=remote_ptr, scope="shared")
         A[0] = remote_mbar[0]
         # fmt: on
@@ -131,7 +137,7 @@ def test_ptx_map_shared_rank_pointer_bind_codegen():
     src = _get_source(main)
     assert "uint64_t* remote_ptr" in src
     assert "A_ptr[0] = remote_ptr[0]" in src
-    assert "tvm_builtin_ptx_mapa_u64" in src
+    assert "tvm_builtin_ptxd_mapa_u64" in src
 
 
 if __name__ == "__main__":

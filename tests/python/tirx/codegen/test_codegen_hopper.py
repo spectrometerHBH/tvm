@@ -1256,12 +1256,13 @@ def test_ptx_map_shared_rank():
         cta_id = T.cta_id([2])
         tx = T.thread_id([128])
         A_smem = T.alloc_buffer([1], "uint32", scope="shared")
+        mapped = T.alloc_local([1], "uint64")
         if cbx == 0 and tx == 0:
-            T.ptx.map_shared_rank(A_smem.data, cbx)
+            T.ptxd.mapa.u64(mapped[0], A_smem.data, T.uint32(cbx))
 
     src, mod = _get_source(func)
     print(src)
-    assert "tvm_builtin_ptx_mapa_u64(A_smem" in src
+    assert "tvm_builtin_ptxd_mapa_u64(" in src
 
 
 if __name__ == "__main__":

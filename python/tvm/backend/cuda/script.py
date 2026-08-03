@@ -53,7 +53,6 @@ class PTXNamespace:
         self.stmatrix = _op_wrapper(_cuda_op.ptx_stmatrix)
         self.setmaxnreg: Callable[..., Any] = _op_wrapper(_cuda_op.ptx_setmaxnreg)
         self.elect_sync: Callable[..., Any] = _op_wrapper(_cuda_op.ptx_elect_sync)
-        self.clc_try_cancel = _op_wrapper(_cuda_op.ptx_clc_try_cancel)
         self.clc_query_cancel = _op_wrapper(_cuda_op.ptx_clc_query_cancel)
         self.fetch_register: Callable[..., Any] = _op_wrapper(_cuda_op.ptx_fetch_register)
         self.ld = _op_wrapper(_cuda_op.ptx_ld)
@@ -63,8 +62,6 @@ class PTXNamespace:
         self.cp_async_bulk_g2s_cluster = _op_wrapper(_cuda_op.ptx_cp_async_bulk_g2s_cluster)
         self.cp_async_bulk_s2g = _op_wrapper(_cuda_op.ptx_cp_async_bulk_s2g)
         self.st = _op_wrapper(_cuda_op.ptx_st)
-        self.mapa = _op_wrapper(_cuda_op.ptx_mapa)
-        self.map_shared_rank = _op_wrapper(_cuda_op.ptx_map_shared_rank)
         self.any_sync = _op_wrapper(_cuda_op.ptx_any_sync)
         # Math operations
         self.reduce3_min_f32 = _op_wrapper(_cuda_op.ptx_reduce3_min_f32)
