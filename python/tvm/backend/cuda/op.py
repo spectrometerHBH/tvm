@@ -3029,38 +3029,6 @@ def ptx_any_sync(mask, pred):
     return call_intrin("int32", "tirx.ptx.any_sync", mask, pred)
 
 
-def ptx_reduce3_max_f32(a, b, c):
-    """TVM intrinsic to call 3-input max.f32 PTX instruction (sm_100a+)
-
-    Parameters
-    ----------
-    a, b, c : Expr
-        The three float32 values to compare.
-
-    Returns
-    -------
-    call : Expr
-        The call expression returning max(a, b, c).
-    """
-    return call_intrin("float32", "tirx.ptx.reduce3_max_f32", a, b, c)
-
-
-def ptx_reduce3_min_f32(a, b, c):
-    """TVM intrinsic to call 3-input min.f32 PTX instruction (sm_100a+)
-
-    Parameters
-    ----------
-    a, b, c : Expr
-        The three float32 values to compare.
-
-    Returns
-    -------
-    call : Expr
-        The call expression returning min(a, b, c).
-    """
-    return call_intrin("float32", "tirx.ptx.reduce3_min_f32", a, b, c)
-
-
 def ptx_neg_f32(x):
     return call_intrin("float32", "tirx.ptx.neg_f32", x)
 def ptx_sub_f16x2(a, b):

@@ -270,8 +270,6 @@ const DeviceIntrinsicRegistration kDeviceIntrinsics[] = {
     TIRX_DEVICE_INTRIN_ALIAS(ptx_mma_legacy, ptx, kOpaque),
     TIRX_DEVICE_INTRIN_ALIAS(ptx_mma_sp, ptx, kOpaque),
     TIRX_DEVICE_INTRIN_ALIAS(ptx_neg_f32, ptx, kPure),
-    TIRX_DEVICE_INTRIN_ALIAS(ptx_reduce3_max_f32, ptx, kPure),
-    TIRX_DEVICE_INTRIN_ALIAS(ptx_reduce3_min_f32, ptx, kPure),
     TIRX_DEVICE_INTRIN_ALIAS(ptx_setmaxnreg, ptx, kOpaque),
     TIRX_DEVICE_INTRIN_ALIAS(ptx_st, ptx, kOpaque),
     TIRX_DEVICE_INTRIN_ALIAS(ptx_stmatrix, ptx, kOpaque),

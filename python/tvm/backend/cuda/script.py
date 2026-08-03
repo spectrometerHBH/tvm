@@ -64,8 +64,6 @@ class PTXNamespace:
         self.st = _op_wrapper(_cuda_op.ptx_st)
         self.any_sync = _op_wrapper(_cuda_op.ptx_any_sync)
         # Math operations
-        self.reduce3_min_f32 = _op_wrapper(_cuda_op.ptx_reduce3_min_f32)
-        self.reduce3_max_f32 = _op_wrapper(_cuda_op.ptx_reduce3_max_f32)
         self.cvt = _dtype_forward(_cuda_op.ptx_cvt)
         # add/sub/mul/fma DPS form: (d_addr, a, b[, c], *, rounding, ftz[, sat])
         self.neg_f32 = _op_wrapper(_cuda_op.ptx_neg_f32)

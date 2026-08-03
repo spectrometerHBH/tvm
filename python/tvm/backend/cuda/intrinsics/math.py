@@ -81,28 +81,6 @@ device_intrinsic(
 # redux/reduction-style fp32 max/min ops.
 # =============================================================================
 _ABC_SIG = "(float a, float b, float c)"
-device_intrinsic(
-    "ptx_reduce3_max_f32",
-    c_signature=_ABC_SIG,
-    return_type="float",
-    body=(
-        "    float result;\n"
-        '    asm volatile("max.f32 %0, %1, %2, %3;"\n'
-        '                 : "=f"(result) : "f"(a), "f"(b), "f"(c));\n'
-        "    return result;"
-    ),
-)
-device_intrinsic(
-    "ptx_reduce3_min_f32",
-    c_signature=_ABC_SIG,
-    return_type="float",
-    body=(
-        "    float result;\n"
-        '    asm volatile("min.f32 %0, %1, %2, %3;"\n'
-        '                 : "=f"(result) : "f"(a), "f"(b), "f"(c));\n'
-        "    return result;"
-    ),
-)
 
 
 _BINARY_F32_SIG = "(float a, float b)"
