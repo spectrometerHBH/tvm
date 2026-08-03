@@ -148,10 +148,10 @@ class _Chain_fns:
 
 class _Chain_ld:
     """`ld` — mmio∈{mmio} (opt); sem∈{weak,acquire,relaxed,volatile} (opt);
-    scope∈{cta,cluster,gpu,sys} (opt); ss∈{global,shared,shared::cta,shared::cluster,local}
-    (opt); cop∈{ca,cg,cs,lu,cv} (opt); nc∈{nc} (opt); l1ev∈{L1::evict_normal,L1::evict_uncha
-    nged,L1::evict_first,L1::evict_last,L1::no_allocate} (opt);
-    prefetch∈{L2::64B,L2::128B,L2::256B} (opt);
+    scope∈{cta,cluster,gpu,sys} (opt);
+    space∈{global,shared,shared::cta,shared::cluster,local} (opt); cop∈{ca,cg,cs,lu,cv}
+    (opt); nc∈{nc} (opt); l1ev∈{L1::evict_normal,L1::evict_unchanged,L1::evict_first,L1::evi
+    ct_last,L1::no_allocate} (opt); prefetch∈{L2::64B,L2::128B,L2::256B} (opt);
     type∈{b8,u8,s8,b16,u16,s16,b32,u32,s32,b64,u64,s64,f32,f64} — Scalar ld grammar per PTX
     ISA 9.7.9.8 (ld) and 9.7.9.9 (ld.global.nc).
     """

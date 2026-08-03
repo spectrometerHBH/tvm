@@ -234,7 +234,7 @@ def variants(entry: InstructionEntry) -> tuple:
 
 def _check_ld(m):
     """Scalar ld grammar per PTX ISA 9.7.9.8 (ld) and 9.7.9.9 (ld.global.nc)."""
-    sem, scope, ss = m["sem"], m["scope"], m["ss"]
+    sem, scope, ss = m["sem"], m["scope"], m["space"]
     mmio, cop, nc = m["mmio"], m["cop"], m["nc"]
     l1ev, prefetch = m["l1ev"], m["prefetch"]
     # "ld.relaxed.scope / ld.acquire.scope" — scope is mandatory there and
@@ -434,8 +434,13 @@ _ENTRIES = [
             ModifierSlot("mmio", ("mmio",), optional=True),
             ModifierSlot("sem", ("weak", "acquire", "relaxed", "volatile"), optional=True),
             ModifierSlot("scope", ("cta", "cluster", "gpu", "sys"), optional=True),
+            # Must be named "space": that is the slot an `addr` operand reads to
+            # choose between a 32-bit shared-window address and a generic
+            # pointer. Any other name silently leaves every shared form
+            # rendering a 64-bit generic pointer, which ptxas accepts (it
+            # truncates) but which addresses the wrong thing.
             ModifierSlot(
-                "ss",
+                "space",
                 ("global", "shared", "shared::cta", "shared::cluster", "local"),
                 optional=True,  # omitted = generic addressing
             ),
