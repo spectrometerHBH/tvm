@@ -576,19 +576,22 @@ def test_ptx_sync_and_clc_codegen():
             T.ptxd.cp.async_.mbarrier.arrive.noinc.shared__cta.b64(bar.ptr_to([0]))
             T.ptx.mbarrier.try_wait(bar.ptr_to([0]), T.int32(0))
             T.ptxd.mbarrier.complete_tx.shared.b64(bar.ptr_to([0]), T.uint32(T.uint32(16)))
-            T.ptx.mbarrier.complete_tx(
-                bar.ptr_to([1]), T.uint32(24), scope="cta", space="shared::cta"
+            T.ptxd.mbarrier.complete_tx.relaxed.cta.shared__cta.b64(bar.ptr_to([1]), T.uint32(24))
+            T.ptxd.mbarrier.complete_tx.relaxed.cta.shared__cta.b64(
+                bar.ptr_to([2]), T.uint32(28), pred=T.uint32(1)
             )
-            T.ptx.mbarrier.complete_tx(
-                bar.ptr_to([2]),
-                T.uint32(28),
-                scope="cta",
-                space="shared::cta",
-                pred=T.uint32(1),
+            # The remote form is a mapa plus a complete_tx on the mapped window
+            # address, which is what the fused legacy helper emitted inside one
+            # asm block.
+            remote_bar = T.alloc_local([1], "uint32")
+            T.ptxd.mapa.shared__cluster.u32(
+                remote_bar[0], T.cuda.cvta_generic_to_shared(bar.ptr_to([3])), T.uint32(1)
             )
-            T.ptx.mbarrier.complete_tx(bar.ptr_to([3]), T.uint32(32), remote=T.int32(1))
-            T.ptx.mbarrier.complete_tx(
-                bar.ptr_to([4]), T.uint32(40), remote=T.int32(1), pred=T.uint32(1)
+            T.ptxd.mbarrier.complete_tx.relaxed.cluster.shared__cluster.b64(
+                remote_bar[0], T.uint32(32)
+            )
+            T.ptxd.mbarrier.complete_tx.relaxed.cluster.shared__cluster.b64(
+                remote_bar[0], T.uint32(40), pred=T.uint32(1)
             )
             T.ptxd[
                 "clusterlaunchcontrol.try_cancel.async.shared::cta"
@@ -611,37 +614,20 @@ def test_ptx_sync_and_clc_codegen():
     assert "mbarrier.complete_tx.relaxed.cta.shared::cta.b64" in src
     assert "@p mbarrier.complete_tx.relaxed.cta.shared::cta.b64" in src
     assert "@p mbarrier.complete_tx.relaxed.cluster.shared::cluster.b64" in src
-    pred_only = _helper_source(
-        src,
-        "tvm_builtin_ptx_mbarrier_complete_tx_relaxed_cta_shared_cta_pred",
-    )
-    remote_only = _helper_source(
-        src,
-        "tvm_builtin_ptx_mbarrier_complete_tx_relaxed_cluster_shared_cluster_remote",
-    )
-    remote_pred = _helper_source(
-        src,
-        "tvm_builtin_ptx_mbarrier_complete_tx_relaxed_cluster_shared_cluster_remote_pred",
-    )
-    assert "@p mbarrier.complete_tx.relaxed.cta.shared::cta.b64" in pred_only
-    assert "mapa.shared::cluster.u32" not in pred_only
-    assert "mapa.shared::cluster.u32" in remote_only
-    assert "@p mbarrier.complete_tx" not in remote_only
-    assert "mapa.shared::cluster.u32" in remote_pred
-    assert "@p mbarrier.complete_tx.relaxed.cluster.shared::cluster.b64" in remote_pred
-    assert "mbarrier.complete_tx.shared::cluster.relaxed.cluster.b64" not in src
+    # A ptxd helper is exactly one instruction, so the mapping is a call of its
+    # own rather than something folded into the complete_tx helper.
     assert "mapa.shared::cluster.u32" in src
+    for helper in (
+        "tvm_builtin_ptxd_mbarrier_complete_tx_complete_tx_relaxed_cta_shared__cta_b64",
+        "tvm_builtin_ptxd_mbarrier_complete_tx_complete_tx_relaxed_cluster_shared__cluster_b64",
+    ):
+        assert "mapa" not in _helper_source(src, helper)
+    assert "mbarrier.complete_tx.shared::cluster.relaxed.cluster.b64" not in src
     assert "clusterlaunchcontrol.try_cancel.async.shared::cta" in src
     assert "ld.acquire.cta.shared.b128" in src
     assert "ld.shared.b128" in src
     assert "clusterlaunchcontrol.query_cancel.get_first_ctaid::x.b32.b128" in src
     assert "griddepcontrol.launch_dependents" in src
-
-
-def test_ptx_mbarrier_complete_tx_rejects_remote_non_cluster_space():
-    bar = tir.Var("bar", "handle")
-    with pytest.raises(ValueError, match="requires space='shared::cluster'"):
-        T.ptx.mbarrier.complete_tx(bar, T.uint32(16), space="shared::cta", remote=T.int32(0))
 
 
 def test_ptx_mbarrier_arrive_new_forms_codegen():

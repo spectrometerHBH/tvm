@@ -35,15 +35,6 @@ from tvm.tirx.operator.intrinsics._common import LDMATRIX_NUM as _LDMATRIX_NUM
 from tvm.tirx.operator.intrinsics._common import MBARRIER_ARRIVE_SCOPE as _MBARRIER_ARRIVE_SCOPE
 from tvm.tirx.operator.intrinsics._common import MBARRIER_ARRIVE_SEM as _MBARRIER_ARRIVE_SEM
 from tvm.tirx.operator.intrinsics._common import MBARRIER_ARRIVE_SPACE as _MBARRIER_ARRIVE_SPACE
-from tvm.tirx.operator.intrinsics._common import (
-    MBARRIER_COMPLETE_TX_SCOPE as _MBARRIER_COMPLETE_TX_SCOPE,
-)
-from tvm.tirx.operator.intrinsics._common import (
-    MBARRIER_COMPLETE_TX_SEM as _MBARRIER_COMPLETE_TX_SEM,
-)
-from tvm.tirx.operator.intrinsics._common import (
-    MBARRIER_COMPLETE_TX_SPACE as _MBARRIER_COMPLETE_TX_SPACE,
-)
 from tvm.tirx.operator.intrinsics._common import NVSHMEM_CMP as _NVSHMEM_CMP
 from tvm.tirx.operator.intrinsics._common import NVSHMEM_SIG_OP as _NVSHMEM_SIG_OP
 from tvm.tirx.operator.intrinsics._common import TCGEN05_CP_DECOMPRESS as _TCGEN05_CP_DECOMPRESS
@@ -565,25 +556,6 @@ def ptx_cp_async_bulk_shared_to_cluster(dst_ptr, src_ptr, size, mbar):
     return call_intrin("", "tirx.ptx.cp_async_bulk_shared_to_cluster", dst_ptr, src_ptr, size, mbar)
 
 
-def ptx_mbarrier_init(bar, thread_count):
-    """TVM intrinsic to call mbarrier.init.shared::cta.b64
-
-    Parameters
-    ----------
-    bar : Var
-        The pointer to barrier variable.
-
-    thread_count : int
-        The number of threads expected to arrive at the barrier.
-
-    Returns
-    -------
-    call : Expr
-        The call expression.
-    """
-    return call_intrin("", "tirx.ptx.mbarrier_init", bar, thread_count)
-
-
 def _validate_mbarrier_arrive_attrs(sem, scope, space, remote):
     if (sem == "") != (scope == ""):
         raise ValueError("mbarrier.arrive sem and scope must be specified together")
@@ -595,47 +567,6 @@ def _validate_mbarrier_arrive_attrs(sem, scope, space, remote):
         raise ValueError(f"invalid space={space!r}; expected one of {_MBARRIER_ARRIVE_SPACE}")
     if remote is not None and space != "shared::cluster":
         raise ValueError("remote mbarrier.arrive requires space='shared::cluster'")
-
-
-def ptx_mbarrier_complete_tx(
-    bar,
-    tx_count,
-    *,
-    sem="relaxed",
-    scope="cluster",
-    space="shared::cluster",
-    remote=None,
-    pred=None,
-):
-    """PTX ``mbarrier.complete_tx{.sem.scope}{.space}.b64 [bar], tx_count``.
-
-    ``remote`` optionally maps ``bar`` with ``mapa.shared::cluster.u32`` before
-    the complete_tx instruction. ``pred`` optionally predicates the instruction.
-    """
-    if sem not in _MBARRIER_COMPLETE_TX_SEM:
-        raise ValueError(f"invalid sem={sem!r}; expected one of {_MBARRIER_COMPLETE_TX_SEM}")
-    if scope not in _MBARRIER_COMPLETE_TX_SCOPE:
-        raise ValueError(f"invalid scope={scope!r}; expected one of {_MBARRIER_COMPLETE_TX_SCOPE}")
-    if space not in _MBARRIER_COMPLETE_TX_SPACE:
-        raise ValueError(f"invalid space={space!r}; expected one of {_MBARRIER_COMPLETE_TX_SPACE}")
-    if remote is not None and space != "shared::cluster":
-        raise ValueError("remote mbarrier.complete_tx requires space='shared::cluster'")
-
-    args = [bar, tx_count]
-    if remote is not None:
-        args.append(remote)
-    if pred is not None:
-        args.append(pred)
-    return call_intrin(
-        "",
-        "tirx.ptx.mbarrier_complete_tx",
-        *args,
-        sem,
-        scope,
-        space,
-        int(remote is not None),
-        int(pred is not None),
-    )
 
 
 def ptx_mbarrier_arrive_no_complete(bar, count, *, space="shared", pred=None, **kwargs):

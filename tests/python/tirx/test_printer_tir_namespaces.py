@@ -152,17 +152,8 @@ def test_ptx_tcgen05_cp_validation(kwargs, match):
 def test_printer_ptx_mbarrier():
     bar = tir.Var("bar", "handle")
     _assert_print(
-        cuda_op.ptx_mbarrier_init(bar, 32),
-        "bar = T.handle()\nT.ptx.mbarrier.init(bar, 32)",
-    )
-    _assert_print(
         cuda_op.ptx_mbarrier_arrive_no_complete(bar, 2),
         'bar = T.handle()\nT.ptx.mbarrier.arrive.no_complete(bar, 2, "shared", 0)',
-    )
-    _assert_print(
-        cuda_op.ptx_mbarrier_complete_tx(bar, 128),
-        'bar = T.handle()\nT.ptx.mbarrier.complete_tx(bar, 128, "relaxed", '
-        '"cluster", "shared::cluster", 0, 0)',
     )
     _assert_print(
         cuda_op.ptx_mbarrier_try_wait(bar, 1), "bar = T.handle()\nT.ptx.mbarrier.try_wait(bar, 1)"

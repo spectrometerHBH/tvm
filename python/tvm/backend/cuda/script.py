@@ -167,8 +167,6 @@ class MbarrierNamespace:
     """The Mbarrier instruction submodule."""
 
     def __init__(self):
-        self.init = _op_wrapper(_cuda_op.ptx_mbarrier_init)
-        self.complete_tx = _op_wrapper(_cuda_op.ptx_mbarrier_complete_tx)
         self.try_wait = _op_wrapper(_cuda_op.ptx_mbarrier_try_wait)
         self.try_wait_once = _op_wrapper(_cuda_op.ptx_mbarrier_try_wait_once)
         self.try_wait_acquire_cluster = _op_wrapper(_cuda_op.ptx_mbarrier_try_wait_acquire_cluster)

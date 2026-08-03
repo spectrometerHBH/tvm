@@ -35,9 +35,6 @@ CUDA-side helpers:
 
 from tvm.tirx.operator.intrinsics._common import (
     CLUSTER_BARRIER_SEM,
-    MBARRIER_COMPLETE_TX_SCOPE,
-    MBARRIER_COMPLETE_TX_SEM,
-    MBARRIER_COMPLETE_TX_SPACE,
 )
 
 from ._schema import device_intrinsic
@@ -153,92 +150,6 @@ device_intrinsic(
     return_type="uint32_t",
     tvm_return_type="uint32",
     body=lambda *args: _ptx_clc_query_cancel_parts(args[-1])[1],
-)
-
-
-# =============================================================================
-# mbarrier.init.shared.b64 [addr], count ; — 1 form.
-# =============================================================================
-device_intrinsic(
-    "ptx_mbarrier_init",
-    c_signature="(void* barrier, int thread_count)",
-    body=(
-        "    unsigned int barrier_addr = __cvta_generic_to_shared(barrier);\n"
-        '    asm volatile("mbarrier.init.shared.b64 [%0], %1;"'
-        ' : : "r"(barrier_addr), "r"(thread_count) : "memory");'
-    ),
-)
-
-
-# =============================================================================
-# mbarrier.complete_tx{.sem.scope}{.space}.b64 [addr], txCount;
-#   sem={.relaxed} scope={.cta,.cluster} space={.shared{::cta},.shared::cluster}
-def _ptx_mbarrier_complete_tx_parts(*args):
-    sem, scope, space, has_remote, has_pred = args[-5:]
-    sem = parse_str(sem)
-    scope = parse_str(scope)
-    space = parse_str(space)
-    has_remote = _as_bool(has_remote)
-    has_pred = _as_bool(has_pred)
-    if sem not in MBARRIER_COMPLETE_TX_SEM:
-        raise ValueError(f"invalid mbarrier.complete_tx sem {sem!r}")
-    if scope not in MBARRIER_COMPLETE_TX_SCOPE:
-        raise ValueError(f"invalid mbarrier.complete_tx scope {scope!r}")
-    if space not in MBARRIER_COMPLETE_TX_SPACE:
-        raise ValueError(f"invalid mbarrier.complete_tx space {space!r}")
-    if has_remote and space != "shared::cluster":
-        raise ValueError("remote mbarrier.complete_tx requires space='shared::cluster'")
-
-    name = (
-        "tvm_builtin_ptx_mbarrier_complete_tx"
-        f"_{_safe_attr(sem)}_{_safe_attr(scope)}_{_safe_attr(space)}"
-    )
-    if has_remote:
-        name += "_remote"
-    if has_pred:
-        name += "_pred"
-
-    params = ["void* barrier", "int tx_count"]
-    if has_remote:
-        params.append("int remote")
-    if has_pred:
-        params.append("int pred")
-
-    instr = f"mbarrier.complete_tx.{sem}.{scope}.{space}.b64"
-    body = "    unsigned int barrier_addr = __cvta_generic_to_shared(barrier);\n"
-    addr = "barrier_addr"
-    if has_remote:
-        body += (
-            "    unsigned int remote_addr;\n"
-            '    asm volatile("mapa.shared::cluster.u32 %0, %1, %2;"\n'
-            '                 : "=r"(remote_addr) : "r"(barrier_addr), "r"(remote));\n'
-        )
-        addr = "remote_addr"
-    if has_pred:
-        body += (
-            "    asm volatile(\n"
-            '        "{\\n"\n'
-            '        ".reg .pred p;\\n"\n'
-            '        "setp.ne.s32 p, %2, 0;\\n"\n'
-            f'        "@p {instr} [%0], %1;\\n"\n'
-            '        "}\\n"\n'
-            f'        :: "r"({addr}), "r"(tx_count), "r"(pred) : "memory");'
-        )
-    else:
-        body += (
-            f'    asm volatile("{instr} [%0], %1;"\n'
-            f'                 :: "r"({addr}), "r"(tx_count) : "memory");'
-        )
-
-    return name, f"({', '.join(params)})", body
-
-
-device_intrinsic(
-    "ptx_mbarrier_complete_tx",
-    n_attrs=5,
-    helper_name=lambda *a: _ptx_mbarrier_complete_tx_parts(*a)[0],
-    c_signature=lambda *a: _ptx_mbarrier_complete_tx_parts(*a)[1],
-    body=lambda *a: _ptx_mbarrier_complete_tx_parts(*a)[2],
 )
 
 
