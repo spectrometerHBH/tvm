@@ -25,7 +25,7 @@ from typing import Any
 class _Chain_add:
     """`add` — rnd∈{rn,rz,rm,rp} (opt); ftz∈{ftz} (opt); sat∈{sat} (opt); type∈{f32,f64,f32x2};
     srctype∈{f16,bf16} (opt) — Which qualifiers each add/sub/mul/fma syntax line allows (PTX
-    ISA 9.7.3.{2,3,4,7}, 9.7.5).      Same-precision lines:  op{.rnd}{.ftz}{.sat}.f32 |
+    ISA 9.7.3.{3,4,5,6}, 9.7.5).      Same-precision lines:  op{.rnd}{.ftz}{.sat}.f32 |
     op{.rnd}{.ftz}.f32x2 | op{.rnd}.f64     Mixed-precision lines: op{.rnd}{.sat}.f32.atype
     (.atype = .f16 | .bf16)
     """
@@ -47,9 +47,10 @@ class _Chain_atom:
     """`atom` — sem∈{relaxed,acquire,release,acq_rel} (opt); scope∈{cta,cluster,gpu,sys} (opt);
     space∈{global,shared,shared::cta,shared::cluster} (opt);
     op∈{and,or,xor,add,inc,dec,min,max}; type∈{b32,b64,u32,u64,s32,s64,f32,f64} — op x type
-    pairings for red/atom (PTX ISA 9.7.14.5 / 9.7.14.6).      The allowed type set per op is
-    exactly what ptxas enforces; the ISA prose     lists the union across ops rather than
-    the per-op pairing. Half-precision     types appear in ptxas' message but are excluded
+    pairings for atom/red (PTX ISA 9.7.14.5 / 9.7.14.6).      Normative source: ISA Table 35
+    (atom) and Table 36 (red), which give the     pairing cell by cell. The `.type = {...}`
+    line in the Syntax block is only     the union across ops, which is why it cannot be
+    transcribed directly. Half-precision     types appear in ptxas' message but are excluded
     from this entry (they need     .noftz and a half carrier type).
     """
 
@@ -122,7 +123,7 @@ class _Chain_ex2:
 class _Chain_fma:
     """`fma` — rnd∈{rn,rz,rm,rp}; ftz∈{ftz} (opt); sat∈{sat} (opt); type∈{f32,f64,f32x2};
     srctype∈{f16,bf16} (opt) — Which qualifiers each add/sub/mul/fma syntax line allows (PTX
-    ISA 9.7.3.{2,3,4,7}, 9.7.5).      Same-precision lines:  op{.rnd}{.ftz}{.sat}.f32 |
+    ISA 9.7.3.{3,4,5,6}, 9.7.5).      Same-precision lines:  op{.rnd}{.ftz}{.sat}.f32 |
     op{.rnd}{.ftz}.f32x2 | op{.rnd}.f64     Mixed-precision lines: op{.rnd}{.sat}.f32.atype
     (.atype = .f16 | .bf16)
     """
@@ -224,7 +225,7 @@ class _Chain_mov:
 
 class _Chain_mul:
     """`mul` — rnd∈{rn,rz,rm,rp} (opt); ftz∈{ftz} (opt); sat∈{sat} (opt); type∈{f32,f64,f32x2}
-    — Which qualifiers each add/sub/mul/fma syntax line allows (PTX ISA 9.7.3.{2,3,4,7},
+    — Which qualifiers each add/sub/mul/fma syntax line allows (PTX ISA 9.7.3.{3,4,5,6},
     9.7.5).      Same-precision lines:  op{.rnd}{.ftz}{.sat}.f32 | op{.rnd}{.ftz}.f32x2 |
     op{.rnd}.f64     Mixed-precision lines: op{.rnd}{.sat}.f32.atype  (.atype = .f16 |
     .bf16)
@@ -245,6 +246,10 @@ class _Chain_prefetch:
     """`prefetch` — space∈{global,local,const,param} (opt); level∈{L1,L2} (opt);
     evict∈{L2::evict_last,L2::evict_normal} (opt); tensormap∈{tensormap} (opt) — Each
     prefetch syntax line names exactly one target (PTX ISA 9.7.9.16).
+    `.level::eviction_priority` stays bound to `.global` on purpose: its syntax     line is
+    `prefetch.global.level::eviction_priority`, with `.global` written     in rather than
+    the `{.ss}` that the `ld` lines carry. Generic addressing is     not offered there, so
+    neither is it here.
     """
 
     L1: _Chain_prefetch
@@ -259,8 +264,8 @@ class _Chain_prefetch:
     def __call__(self, addr: Any, *args: Any, pred: Any = None) -> None: ...
 
 class _Chain_rcp:
-    """`rcp` — mode∈{approx,rn,rz,rm,rp}; ftz∈{ftz} (opt); type∈{f32,f64} — rcp.approx is
-    f32-only; .f64 is IEEE-rounded and takes no .ftz (PTX ISA 9.7.3.13).
+    """`rcp` — mode∈{approx,rn,rz,rm,rp}; ftz∈{ftz} (opt); type∈{f32,f64} — This entry's
+    rcp.approx is f32-only; .f64 is IEEE-rounded, no .ftz (PTX ISA 9.7.3.13).
     """
 
     approx: _Chain_rcp
@@ -277,9 +282,10 @@ class _Chain_red:
     """`red` — sem∈{relaxed,release} (opt); scope∈{cta,cluster,gpu,sys} (opt);
     space∈{global,shared,shared::cta,shared::cluster} (opt);
     op∈{and,or,xor,add,inc,dec,min,max}; type∈{b32,b64,u32,u64,s32,s64,f32,f64} — op x type
-    pairings for red/atom (PTX ISA 9.7.14.5 / 9.7.14.6).      The allowed type set per op is
-    exactly what ptxas enforces; the ISA prose     lists the union across ops rather than
-    the per-op pairing. Half-precision     types appear in ptxas' message but are excluded
+    pairings for atom/red (PTX ISA 9.7.14.5 / 9.7.14.6).      Normative source: ISA Table 35
+    (atom) and Table 36 (red), which give the     pairing cell by cell. The `.type = {...}`
+    line in the Syntax block is only     the union across ops, which is why it cannot be
+    transcribed directly. Half-precision     types appear in ptxas' message but are excluded
     from this entry (they need     .noftz and a half carrier type).
     """
 
@@ -369,7 +375,7 @@ class _Chain_st_bulk:
 class _Chain_sub:
     """`sub` — rnd∈{rn,rz,rm,rp} (opt); ftz∈{ftz} (opt); sat∈{sat} (opt); type∈{f32,f64,f32x2};
     srctype∈{f16,bf16} (opt) — Which qualifiers each add/sub/mul/fma syntax line allows (PTX
-    ISA 9.7.3.{2,3,4,7}, 9.7.5).      Same-precision lines:  op{.rnd}{.ftz}{.sat}.f32 |
+    ISA 9.7.3.{3,4,5,6}, 9.7.5).      Same-precision lines:  op{.rnd}{.ftz}{.sat}.f32 |
     op{.rnd}{.ftz}.f32x2 | op{.rnd}.f64     Mixed-precision lines: op{.rnd}{.sat}.f32.atype
     (.atype = .f16 | .bf16)
     """

@@ -370,10 +370,13 @@ def _check_st(m):
 
 
 def _check_rcp(m):
-    """rcp.approx is f32-only; .f64 is IEEE-rounded and takes no .ftz (PTX ISA 9.7.3.13)."""
+    """This entry's rcp.approx is f32-only; .f64 is IEEE-rounded, no .ftz (PTX ISA 9.7.3.13)."""
     # Syntax lines: rcp.approx{.ftz}.f32 / rcp.rnd{.ftz}.f32 / rcp.rnd.f64
     if m["mode"] == "approx" and m["type"] != "f32":
-        return "rcp.approx is only defined for .f32"
+        return (
+            "rcp.approx.f64 is a separate syntax line (PTX ISA 9.7.3.14, where .ftz is "
+            "mandatory) and is not registered here"
+        )
     if m["type"] == "f64":
         if m["mode"] == "approx":
             return "rcp.f64 requires an IEEE rounding mode (.rn/.rz/.rm/.rp)"
@@ -390,7 +393,7 @@ def _check_max(m):
 
 
 def _check_farith(m):
-    """Which qualifiers each add/sub/mul/fma syntax line allows (PTX ISA 9.7.3.{2,3,4,7}, 9.7.5).
+    """Which qualifiers each add/sub/mul/fma syntax line allows (PTX ISA 9.7.3.{3,4,5,6}, 9.7.5).
 
     Same-precision lines:  op{.rnd}{.ftz}{.sat}.f32 | op{.rnd}{.ftz}.f32x2 | op{.rnd}.f64
     Mixed-precision lines: op{.rnd}{.sat}.f32.atype  (.atype = .f16 | .bf16)
@@ -410,7 +413,13 @@ def _check_farith(m):
 
 
 def _check_prefetch(m):
-    """Each prefetch syntax line names exactly one target (PTX ISA 9.7.9.16)."""
+    """Each prefetch syntax line names exactly one target (PTX ISA 9.7.9.16).
+
+    `.level::eviction_priority` stays bound to `.global` on purpose: its syntax
+    line is `prefetch.global.level::eviction_priority`, with `.global` written
+    in rather than the `{.ss}` that the `ld` lines carry. Generic addressing is
+    not offered there, so neither is it here.
+    """
     level, evict, tmap = m["level"], m["evict"], m["tensormap"]
     space = m["space"]
     if sum(bool(x) for x in (level, evict, tmap)) != 1:
@@ -437,10 +446,11 @@ _ATOM_TYPES = ("b32", "b64", "u32", "u64", "s32", "s64", "f32", "f64")
 
 
 def _check_atomic(m):
-    """op x type pairings for red/atom (PTX ISA 9.7.14.5 / 9.7.14.6).
+    """op x type pairings for atom/red (PTX ISA 9.7.14.5 / 9.7.14.6).
 
-    The allowed type set per op is exactly what ptxas enforces; the ISA prose
-    lists the union across ops rather than the per-op pairing. Half-precision
+    Normative source: ISA Table 35 (atom) and Table 36 (red), which give the
+    pairing cell by cell. The `.type = {...}` line in the Syntax block is only
+    the union across ops, which is why it cannot be transcribed directly. Half-precision
     types appear in ptxas' message but are excluded from this entry (they need
     .noftz and a half carrier type).
     """
@@ -485,12 +495,17 @@ _ENTRIES = [
     ),
     # Complete scalar `ld` per PTX ISA 9.7.9.8 + the 9.7.9.9 ld.global.nc
     # forms. Deliberately excluded (each needs a mechanism this shape lacks):
-    # - .vec/.b128 and the DPS destination forms (multi-register results)
+    # - .vec and the multi-register destination forms
+    # - .b128: single-register and already in PTX_TYPES, but its "q" constraint
+    #   needs __int128 in the host compiler; register on demand
     # - .level::cache_hint + the cache_policy operand (optional operand)
     # - .level2::eviction_priority (vector-only per the ISA)
     # - .unified (variable-attribute addressing)
     # - .param/.const spaces (require kernel-parameter / const addresses,
     #   which cannot flow through the helper-function ABI)
+    # The ISA permits @p on this instruction; ptxd does not, because it writes a
+    # destination -- see InstructionEntry.has_dst for why that needs a "+"
+    # constraint first.
     InstructionEntry(
         name="ld",
         slots=(
@@ -588,6 +603,9 @@ _ENTRIES = [
             OperandSlot("value", role="value"),
         ),
     ),
+    # The ISA permits @p on this instruction; ptxd does not, because it writes a
+    # destination -- see InstructionEntry.has_dst for why that needs a "+"
+    # constraint first.
     InstructionEntry(
         name="atom",
         slots=(
@@ -606,7 +624,9 @@ _ENTRIES = [
     ),
     # ex2 per PTX ISA 9.7.3.21 (`ex2.approx{.ftz}.f32`). The half-precision
     # forms of 9.7.4.10 (.f16/.f16x2/.bf16/.bf16x2) are deliberately excluded:
-    # they need f16/bf16 carrier types, which PTX_TYPES does not model yet.
+    # .f16/.bf16 have carriers now, but .f16x2/.bf16x2 need a b32 carrier and
+    # .ftz is mandatory on the bf16 line while illegal on the f16 line, so they
+    # cannot share this entry's optional ftz slot.
     InstructionEntry(
         name="ex2",
         slots=(
@@ -652,7 +672,9 @@ _ENTRIES = [
     # max per PTX ISA 9.7.3.12, two-source form. Deliberately excluded:
     # {.xorsign.abs} (a paired qualifier), the three-source
     # `max{.ftz}{.NaN}{.abs}.f32 d, a, b, c` line (a different operand shape,
-    # so its own entry), and the half-precision forms of 9.7.4.8.
+    # so its own entry), the half-precision forms of 9.7.4.8, and the entire
+    # integer max family (9.7.1.14) -- ten .type tokens plus {.relu}, same
+    # d, a, b shape, so a type-slot widening whenever it is wanted.
     InstructionEntry(
         name="max",
         slots=(
@@ -669,10 +691,16 @@ _ENTRIES = [
     ),
     # st.bulk per PTX ISA 9.7.9.14:
     #   st.bulk{.weak}{.shared::cta} [a], size, initval;  // initval must be zero
+    # Unregistered: the 32-bit `size` form (ISA: "The 32-bit or 64-bit integer
+    # operand size ..."), because no modifier token distinguishes the two -- it
+    # would be an operand-shape axis, like mov's. Two ISA constraints are also
+    # unenforceable here, being properties of a value rather than of the
+    # modifier map that check() sees: "size must be a multiple of 8" and "The
+    # maximum value of size operand can be 16777216".
     InstructionEntry(
         name="st_bulk",
         mnemonic="st.bulk",
-        cert_arch="sm_100a",  # PTX ISA 8.6; ptxas: "requires .target sm_100 or higher"
+        cert_arch="sm_100",  # PTX ISA 8.6; ISA: "Requires sm_100 or higher."
         slots=(
             ModifierSlot("weak", ("weak",), optional=True),
             ModifierSlot("space", ("shared::cta",), optional=True),
@@ -683,7 +711,7 @@ _ENTRIES = [
             OperandSlot("initval", role="imm", literal="0"),
         ),
     ),
-    # Floating-point add/sub/mul (PTX ISA 9.7.3.{2,3,4}) together with their
+    # Floating-point add/sub/mul (PTX ISA 9.7.3.{3,4,5}) together with their
     # mixed-precision lines (9.7.5.{1,2}); `mul` has no mixed-precision line.
     #   add{.rnd}{.ftz}{.sat}.f32  d, a, b;   add{.rnd}{.ftz}.f32x2  d, a, b;
     #   add{.rnd}.f64              d, a, b;   add{.rnd}{.sat}.f32.atype  d, a, c;
@@ -693,7 +721,7 @@ _ENTRIES = [
     *[
         InstructionEntry(
             name=name,
-            cert_arch="sm_100a",
+            cert_arch="sm_100",
             slots=(
                 ModifierSlot("rnd", _FRND, optional=True),
                 ModifierSlot("ftz", ("ftz",), optional=True),
@@ -713,13 +741,18 @@ _ENTRIES = [
         # `mul` is the one line with no mixed-precision form (ISA 9.7.5).
         for name, mixed in (("add", True), ("sub", True), ("mul", False))
     ],
+    # Unregistered across this whole arithmetic group: the integer lines
+    # (9.7.1.{1,2,3}), extended-precision add.cc/sub.cc (9.7.2.{1,3}), and the
+    # half-precision lines (9.7.4.{1,2,3,4}), which additionally need .relu and
+    # .oob slots.
+    #
     # fma differs in shape, so it is its own entry: three sources, and .rnd is
-    # mandatory on every line (PTX ISA 9.7.3.7 / 9.7.5.3).
+    # mandatory on every line (PTX ISA 9.7.3.6 / 9.7.5.3).
     #   fma.rnd{.ftz}{.sat}.f32  d, a, b, c;   fma.rnd{.ftz}.f32x2  d, a, b, c;
     #   fma.rnd.f64              d, a, b, c;   fma.rnd{.sat}.f32.abtype  d, a, b, c;
     InstructionEntry(
         name="fma",
-        cert_arch="sm_100a",
+        cert_arch="sm_100",
         slots=(
             ModifierSlot("rnd", _FRND),
             ModifierSlot("ftz", ("ftz",), optional=True),
@@ -760,6 +793,11 @@ _ENTRIES = [
     # (nvcc emits shl/or, not the mov). Declaring `.reg .b8` inside the asm
     # block assembles but needs four cvt instructions to get the values in --
     # a multi-instruction template, which this dialect forbids.
+    #
+    # Also unregistered: the sink symbol `_` (ISA: "the sink symbol '_' may be
+    # used for one or more elements"), which does assemble from inline asm but
+    # needs an operand role for "this lane is discarded"; and scalar mov
+    # (9.7.9.3), a different instruction that shares the mnemonic.
     *[
         InstructionEntry(
             name=f"mov_{direction}_{lane_dtype}x{lanes}",
@@ -795,6 +833,12 @@ _ENTRIES = [
         )
         for direction, unpack in (("pack", False), ("unpack", True))
     ],
+    # cvta per PTX ISA 9.7.9.7. This entry exists to serve the engine's
+    # shared-address coercion, so it registers exactly the one combination that
+    # needs: 1 of the 32 legal (direction x space x size) forms. Unregistered:
+    # the whole space->generic direction, seven of the eight state spaces, and
+    # `.u32` -- the last genuinely unusable, since ptxas rejects the 32-bit ABI
+    # on sm_90 and higher.
     InstructionEntry(
         name="cvta",
         slots=(
@@ -808,6 +852,13 @@ _ENTRIES = [
         ),
         asm_volatile=False,  # legacy cvta carried no barrier
     ),
+    # cp.async.bulk per PTX ISA 9.7.9.26. One of the ISA's eight syntax lines is
+    # registered; unregistered are the .sem/.scope/.type form, .L2::cache_hint,
+    # .ignore_oob, .multicast::cluster, .cp_mask, and three of the four copy
+    # directions. `{.sem}` is additionally blocked by the toolchain: it is PTX
+    # ISA 9.3 and ptxas 13.2 assembles 9.2, the same situation _check_ld already
+    # records for ld.mmio.acquire.
+    #
     # Mixed-space operands: dst/mbar are shared::cta (u32 carriers), src is
     # global (pointer carrier), size is a plain u32 register — each operand
     # declares its own space/dtype instead of reading the entry-level slots.
