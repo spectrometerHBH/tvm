@@ -1412,6 +1412,35 @@ _ENTRIES = [
         orders_memory=True,
         operands=(OperandSlot("mbar", role="addr", space="shared::cluster"),),
     ),
+    # cp.async completion tracking, per PTX ISA 9.7.9.13 / 9.7.9.15.
+    #
+    # NOT REGISTERED: `cp.async.bulk.wait_group N` and the `cp.async` ca/cg
+    # lines -- the wait takes a caller-chosen integer that lands in the
+    # instruction text rather than in a register, and the ca/cg lines carry an
+    # optional ignore-src operand.
+    InstructionEntry(  # cp.async.mbarrier.arrive{.noinc}{.shared{::cta}}.b64 [addr];
+        name="cp_async_mbarrier_arrive",
+        mnemonic="cp",
+        slots=(
+            ModifierSlot("api", ("async",)),
+            ModifierSlot("target", ("mbarrier",)),
+            ModifierSlot("action", ("arrive",)),
+            ModifierSlot("noinc", ("noinc",), optional=True),
+            ModifierSlot("space", ("shared", "shared::cta"), optional=True),
+            ModifierSlot("type", ("b64",)),
+        ),
+        operands=(OperandSlot("addr", role="addr", space="shared::cta"),),
+    ),
+    InstructionEntry(  # cp.async.bulk.commit_group;
+        name="cp_async_bulk_commit_group",
+        mnemonic="cp",
+        slots=(
+            ModifierSlot("api", ("async",)),
+            ModifierSlot("kind", ("bulk",)),
+            ModifierSlot("action", ("commit_group",)),
+        ),
+        operands=(),
+    ),
 ]
 
 TABLE: dict[str, InstructionEntry] = {e.name: e for e in _ENTRIES}

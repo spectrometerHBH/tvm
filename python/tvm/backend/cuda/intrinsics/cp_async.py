@@ -59,45 +59,6 @@ device_intrinsic(
     body=lambda n: f'    asm volatile("cp.async.wait_group {int(n)};");',
 )
 
-_CP_ASYNC_MBARRIER_ARRIVE_SPACES = ("shared", "shared::cta")
-
-
-def _cp_async_mbarrier_arrive_parts(*args):
-    raw_address = str(args[0].ty) == "uint32"
-    noinc = _bool_attr(args[-2])
-    space = parse_str(args[-1])
-    assert space in _CP_ASYNC_MBARRIER_ARRIVE_SPACES, (
-        f"invalid cp.async.mbarrier.arrive space {space!r}, "
-        f"expected one of {_CP_ASYNC_MBARRIER_ARRIVE_SPACES}"
-    )
-    noinc_suffix = ".noinc" if noinc else ""
-    noinc_name = "_noinc" if noinc else ""
-    space_name = "_" + _safe(space)
-    address_decl = (
-        ""
-        if raw_address
-        else "    unsigned int barrier_addr = __cvta_generic_to_shared(barrier);\n"
-    )
-    barrier_addr = "barrier" if raw_address else "barrier_addr"
-    return (
-        f"tvm_builtin_ptx_cp_async_mbarrier_arrive{noinc_name}{space_name}"
-        f"{'_raw_u32' if raw_address else ''}",
-        f"({'unsigned int' if raw_address else 'void*'} barrier)",
-        address_decl
-        + f'    asm volatile("cp.async.mbarrier.arrive{noinc_suffix}.{space}.b64 [%0];"\n'
-        f'                 :: "r"({barrier_addr}) : "memory");',
-    )
-
-
-device_intrinsic(
-    "ptx_cp_async_mbarrier_arrive",
-    n_attrs=2,
-    helper_name=lambda *a: _cp_async_mbarrier_arrive_parts(*a)[0],
-    c_signature=lambda *a: _cp_async_mbarrier_arrive_parts(*a)[1],
-    body=lambda *a: _cp_async_mbarrier_arrive_parts(*a)[2],
-)
-
-
 # cp.async non-bulk copy forms:
 #   Form 1: cp.async.ca.shared.global ... [dst], [src], cp-size{, src-size}{, cache-policy}
 #   Form 2: cp.async.cg.shared.global ... [dst], [src], 16{, src-size}{, cache-policy}
@@ -906,11 +867,6 @@ def codegen_reduce(dim, src_ptr, tensormap, *args):
 # cp.async.bulk non-TMA forms from the PTX Syntax block. Each form is one
 # device_intrinsic; optional PTX modifiers are attrs, not separate fixed ops.
 # =============================================================================
-device_intrinsic(
-    "ptx_cp_async_bulk_commit_group",
-    helper_name="ptx_cp_async_bulk_tensor_commit_group",
-    body='    asm volatile("cp.async.bulk.commit_group;");',
-)
 
 
 def _ptx_cp_async_bulk_wait_group_parts(n, read):

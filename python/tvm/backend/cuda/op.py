@@ -565,43 +565,6 @@ def ptx_cp_async_bulk_shared_to_cluster(dst_ptr, src_ptr, size, mbar):
     return call_intrin("", "tirx.ptx.cp_async_bulk_shared_to_cluster", dst_ptr, src_ptr, size, mbar)
 
 
-def ptx_cp_async_mbarrier_arrive(bar, noinc=False, space="shared"):
-    """TVM intrinsic for ptx async copy barrier using cp.async.mbarrier.arrive
-    https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#parallel-synchronization-and-communication-instructions-cp-async-mbarrier-arrive
-
-    Parameters
-    ----------
-    bar : Expr
-        Pointer to the shared-memory mbarrier object.
-
-    noinc : bool
-        Whether to emit the ``.noinc`` modifier.
-
-    space : str
-        Address-space modifier, either ``"shared"`` or ``"shared::cta"``.
-
-    Returns
-    -------
-    call : Expr
-        The call expression.
-    """
-    return call_intrin("", "tirx.ptx.cp_async_mbarrier_arrive", bar, noinc, space)
-
-
-def ptx_cp_async_mbarrier_arrive_noinc(bar, space="shared::cta"):
-    """TVM intrinsic for ``cp.async.mbarrier.arrive.noinc.shared::cta.b64``.
-
-    Parameters
-    ----------
-    bar : Expr
-        Pointer to the shared-memory mbarrier object.
-
-    space : str
-        Address-space modifier, either ``"shared"`` or ``"shared::cta"``.
-    """
-    return ptx_cp_async_mbarrier_arrive(bar, True, space)
-
-
 def ptx_mbarrier_init(bar, thread_count):
     """TVM intrinsic to call mbarrier.init.shared::cta.b64
 
@@ -1309,17 +1272,6 @@ def ptx_cp_async_bulk_tensor_shared_to_global_reduce(
         red_op,
         *coords,
     )
-
-
-def ptx_cp_async_bulk_commit_group():
-    """TVM intrinsic to call cp.async.bulk.tensor.commit_group
-
-    Returns
-    -------
-    call : Expr
-        The call expression.
-    """
-    return call_intrin("", "tirx.ptx.cp_async_bulk_commit_group")
 
 
 def ptx_cp_async_bulk_wait_group(n=0, read=True):

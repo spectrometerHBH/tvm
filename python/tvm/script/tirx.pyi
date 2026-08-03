@@ -125,24 +125,22 @@ class _Chain_clusterlaunchcontrol:
     def __call__(self, addr: Any, mbar: Any, *args: Any, pred: Any = None) -> None: ...
 
 class _Chain_cp:
-    """`cp` — api∈{async}; kind∈{bulk}; dst_space∈{shared::cta}; src_space∈{global};
-    completion∈{mbarrier::complete_tx::bytes}
+    """`cp` — 3 entries sharing this mnemonic; PTX puts their difference in the operand list,
+    so the call selects one. Shapes: (dst, src, size, mbar); (addr); ()
     """
 
+    arrive: _Chain_cp
     async_: _Chain_cp
+    b64: _Chain_cp
     bulk: _Chain_cp
+    commit_group: _Chain_cp
     global_: _Chain_cp
+    mbarrier: _Chain_cp
     mbarrier__complete_tx__bytes: _Chain_cp
+    noinc: _Chain_cp
+    shared: _Chain_cp
     shared__cta: _Chain_cp
-    def __call__(
-        self,
-        dst: Any,
-        src: Any,
-        size: Any,
-        mbar: Any,
-        *args: Any,
-        pred: Any = None,
-    ) -> None: ...
+    def __call__(self, *args: Any, pred: Any = None) -> None: ...
 
 class _Chain_cvta:
     """`cvta` — dir∈{to}; space∈{shared}; type∈{u64}"""

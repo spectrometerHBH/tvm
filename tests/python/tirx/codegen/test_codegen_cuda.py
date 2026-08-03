@@ -551,7 +551,7 @@ def test_ptx_cp_async_bulk_non_tma_form_codegen():
                 smem.ptr_to([0]), A.data, T.uint32(64), smem.ptr_to([0]), cache_policy=C[0]
             )
             T.ptx.cp_async_bulk_s2g(B.data, smem.ptr_to([0]), T.uint32(64), cache_policy=C[0])
-            T.ptx.cp_async.bulk.commit_group()
+            T.ptxd.cp.async_.bulk.commit_group()
             T.ptx.cp_async.bulk.wait_group(0, read=True)
             T.ptx.cp_async.bulk.wait_group(1, read=False)
 
@@ -572,8 +572,8 @@ def test_ptx_sync_and_clc_codegen():
         if tx == 0:
             bar = T.alloc_buffer((5,), "uint64", scope="shared", align=16)
             response = T.alloc_buffer((4,), "uint32", scope="shared", align=16)
-            T.ptx.cp_async.mbarrier.arrive(bar.ptr_to([0]))
-            T.ptx.cp_async.mbarrier.arrive.noinc(bar.ptr_to([0]))
+            T.ptxd.cp.async_.mbarrier.arrive.shared.b64(bar.ptr_to([0]))
+            T.ptxd.cp.async_.mbarrier.arrive.noinc.shared__cta.b64(bar.ptr_to([0]))
             T.ptx.mbarrier.try_wait(bar.ptr_to([0]), T.int32(0))
             T.ptx.mbarrier.complete_tx(bar.ptr_to([0]), T.uint32(16))
             T.ptx.mbarrier.complete_tx(

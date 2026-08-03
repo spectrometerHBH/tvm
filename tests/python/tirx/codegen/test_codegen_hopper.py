@@ -457,7 +457,7 @@ def test_cp_async_bulk_tensor_global_to_shared_unicast(dtype, inputs):
 
                     if threadIdx == 0:
                         T.ptx.cp_async.bulk.tensor.s2g(len(shape), A_smem.access_ptr("r", offset=0), T.address_of(B_map), "", *coord)  # noqa: E501
-                        T.ptx.cp_async.bulk.commit_group()
+                        T.ptxd.cp.async_.bulk.commit_group()
                         T.ptx.cp_async.bulk.wait_group(0)
             # fmt: on
 
@@ -648,7 +648,7 @@ def test_cp_async_bulk_tensor_global_to_shared_swizzle(swizzle, dtype):
 
                     if threadIdx == 0:
                         T.ptx.cp_async.bulk.tensor.s2g(len(shape), A_smem.access_ptr("r", offset=0), T.address_of(B_map), "", *coord)  # noqa: E501
-                        T.ptx.cp_async.bulk.commit_group()
+                        T.ptxd.cp.async_.bulk.commit_group()
                         T.ptx.cp_async.bulk.wait_group(0)
             # fmt: on
 
@@ -744,7 +744,7 @@ def test_cp_async_bulk_tensor_global_to_shared_multicast1(inputs):
                         if bx == 2:
                             if tx == 0:
                                 T.ptx.cp_async.bulk.tensor.s2g(len(shape), A_smem.access_ptr("r", offset=0), T.address_of(B_map), "", *coord)  # noqa: E501
-                                T.ptx.cp_async.bulk.commit_group()
+                                T.ptxd.cp.async_.bulk.commit_group()
                                 T.ptx.cp_async.bulk.wait_group(0)
             # fmt: on
 
@@ -838,7 +838,7 @@ def test_cp_async_bulk_tensor_global_to_shared_multicast2(inputs):
                         if bx == 1:
                             if tx == 0:
                                 T.ptx.cp_async.bulk.tensor.s2g(len(shape), A_smem.access_ptr("r", offset=0), T.address_of(B_map), "", *coord0)  # noqa: E501
-                                T.ptx.cp_async.bulk.commit_group()
+                                T.ptxd.cp.async_.bulk.commit_group()
                                 T.ptx.cp_async.bulk.wait_group(0)
             # fmt: on
 
@@ -903,7 +903,7 @@ def test_cp_async_bulk_tensor_shared_to_global(inputs):
 
             if tx == 0:
                 T.ptx.cp_async.bulk.tensor.s2g(len(shape), A_smem.access_ptr("r", offset=0), T.address_of(A_map), "", *coord)  # noqa: E501
-                T.ptx.cp_async.bulk.commit_group()
+                T.ptxd.cp.async_.bulk.commit_group()
                 T.ptx.cp_async.bulk.wait_group(0)
             # fmt: on
 

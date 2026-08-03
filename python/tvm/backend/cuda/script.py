@@ -103,7 +103,6 @@ class CpAsyncNamespace:
         # the fork-native ``__call__`` form.
         self.legacy = _dtype_forward(_cuda_op.ptx_cp_async_legacy)
         self.bulk = CpAsyncBulkNamespace()
-        self.mbarrier = CpAsyncMbarrierNamespace()
 
     def __call__(self, *args, **kwds):
         # Accept the legacy 6-arg form ``(elem_dtype, dst, dst_off, src,
@@ -131,7 +130,6 @@ class CpAsyncBulkNamespace:
     """The CpAsyncBulk instruction submodule."""
 
     def __init__(self):
-        self.commit_group = _op_wrapper(_cuda_op.ptx_cp_async_bulk_commit_group)
         self.wait_group = _op_wrapper(_cuda_op.ptx_cp_async_bulk_wait_group)
         self.tensor = CpAsyncBulkTensorNamespace()
         self.s2c = _op_wrapper(_cuda_op.ptx_cp_async_bulk_shared_to_cluster)
@@ -152,27 +150,6 @@ class CpAsyncBulkTensorNamespace:
         self.s2g = _op_wrapper(_cuda_op.ptx_cp_async_bulk_tensor_shared_to_global)
         self.s2g_reduce = _op_wrapper(_cuda_op.ptx_cp_async_bulk_tensor_shared_to_global_reduce)
         self.prefetch = _op_wrapper(_cuda_op.ptx_cp_async_bulk_tensor_prefetch)
-
-
-class CpAsyncMbarrierNamespace:
-    """The CpAsyncMbarrier instruction submodule."""
-
-    def __init__(self):
-        self.arrive = CpAsyncMbarrierArriveNamespace()
-
-
-class CpAsyncMbarrierArriveNamespace:
-    """The CpAsyncMbarrier Arrive instruction submodule."""
-
-    @staticmethod
-    def noinc(*args, **kwds):
-        return _cuda_op.ptx_cp_async_mbarrier_arrive_noinc(*args, **kwds)
-
-    def __call__(self, *args, **kwds):
-        return _op_wrapper(_cuda_op.ptx_cp_async_mbarrier_arrive)(*args, **kwds)
-
-    # __call__ corresponds to ptx_cp_async_mbarrier_arrive
-    __tir_call_op_name__ = "ptx_cp_async_mbarrier_arrive"
 
 
 class WgmmaNamespace:
