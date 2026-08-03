@@ -49,12 +49,16 @@ STUB_PATH = Path(__file__).resolve().parents[3] / "script" / "tirx.pyi"
 
 def _operand_params(entry: InstructionEntry) -> list[str]:
     """One stub parameter per call argument, from the single call-layout definition."""
-    seen: dict[str, int] = {}
+    if any(callable(s.lanes) for s in entry.operands):
+        # The group length depends on the modifiers, so there is no single
+        # signature to write down.
+        return ["*__operands: Any"]
     out = []
-    for slot in entry.call_slots:
-        lane = seen.get(slot.name, 0)
-        seen[slot.name] = lane + 1
-        out.append(f"{slot.name}{lane}: Any" if slot.lanes > 1 else f"{slot.name}: Any")
+    for slot in entry.operands:
+        if slot.role == "imm" and slot.choices is None:
+            continue
+        for lane in range(slot.lanes):
+            out.append(f"{slot.name}{lane}: Any" if slot.lanes > 1 else f"{slot.name}: Any")
     return out
 
 

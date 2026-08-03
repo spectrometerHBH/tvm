@@ -1037,9 +1037,7 @@ def test_ptx_cp_async(cp_size, cache_hint, prefetch_size, predicate, fill_mode):
 @pytest.mark.skipif(not env.has_cuda(), reason="need cuda")
 @pytest.mark.parametrize("trans", [False, True])
 @pytest.mark.parametrize("num", [1, 2, 4])
-def test_ptx_ldmatrix(trans, num):
-    dtype = ".b16"
-
+def test_ptxd_ldmatrix(trans, num):
     # fmt: off
     @T.prim_func
     def main(A: T.Buffer((16, 16), "float16"), B: T.Buffer((16, 16), "float16")):
@@ -1053,30 +1051,28 @@ def test_ptx_ldmatrix(trans, num):
         T.cuda.cta_sync()
         A_local = T.alloc_local([8], "float16")
         A_local[0] = -1.0
-                # ldmatrix .x{num}.b16 writes `num` 32-bit registers; A_local
-                # is a contiguous fp16[8] buffer, so consecutive register
-                # destinations land 2 fp16 elements apart.
+        # ldmatrix .x{num}.b16 writes `num` b32 registers; A_local is a
+        # contiguous fp16[8] buffer, so the registers land through a uint32
+        # view, two fp16 elements per word.
+        A_words = A_local.view("uint32")
         if num == 1:
-            T.ptx.ldmatrix(
-                trans, num, dtype,
+            T.ptxd[f"ldmatrix.sync.aligned.m8n8.x1{'.trans' if trans else ''}.shared.b16"](
+                A_words[0],
                 A_shared.ptr_to([tx % 16, tx // 16 * 8]),
-                T.address_of(A_local[0]),
             )
         elif num == 2:
-            T.ptx.ldmatrix(
-                trans, num, dtype,
+            T.ptxd[f"ldmatrix.sync.aligned.m8n8.x2{'.trans' if trans else ''}.shared.b16"](
+                A_words[0],
+                A_words[1],
                 A_shared.ptr_to([tx % 16, tx // 16 * 8]),
-                T.address_of(A_local[0]),
-                T.address_of(A_local[2]),
             )
         else:
-            T.ptx.ldmatrix(
-                trans, num, dtype,
+            T.ptxd[f"ldmatrix.sync.aligned.m8n8.x4{'.trans' if trans else ''}.shared.b16"](
+                A_words[0],
+                A_words[1],
+                A_words[2],
+                A_words[3],
                 A_shared.ptr_to([tx % 16, tx // 16 * 8]),
-                T.address_of(A_local[0]),
-                T.address_of(A_local[2]),
-                T.address_of(A_local[4]),
-                T.address_of(A_local[6]),
             )
         for i in range(8):
             row: T.let = (i // 2) % 2 * 8

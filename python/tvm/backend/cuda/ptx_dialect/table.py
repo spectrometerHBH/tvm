@@ -127,6 +127,9 @@ class ModifierSlot:
     optional: bool = False  # optional => omitted token is simply not rendered
 
 
+LanesFn = Callable[[dict], int]  # modifier map -> registers in this operand's group
+
+
 @dataclass(frozen=True)
 class OperandSlot:
     """One operand of an instruction family, in PTX operand order.
@@ -166,7 +169,13 @@ class OperandSlot:
     # A PTX register group: `{%k, %k+1, ...}`. The operand takes `lanes` call
     # arguments and renders as one brace-enclosed vector expression. 1 = a plain
     # scalar operand, which is every operand of every other family.
-    lanes: int = 1
+    #
+    # A callable makes the group length a function of the modifier map -- the
+    # ISA states these lengths as formulas over the modifiers ("r is a register
+    # vector of length shape * num / 32b"), and the modifiers are a closed set,
+    # so every resulting length is still enumerable and certifiable. Same
+    # contract as `check`: total over every combination `variants()` generates.
+    lanes: int | LanesFn = 1
 
 
 CheckFn = Callable[[dict], str | None]
@@ -226,40 +235,9 @@ class InstructionEntry:
         return self.ptx_name.replace(".", "_")
 
     @functools.cached_property
-    def call_slots(self) -> tuple[OperandSlot, ...]:
-        """The operand slot behind each call argument, in order.
-
-        ISA-fixed immediates take no argument; a caller-chosen immediate
-        (``choices``) takes one; a register group (``lanes`` > 1) takes one
-        argument per lane, mirroring PTX's ``{%k, %k+1, ...}``.
-        """
-        return tuple(
-            s
-            for s in self.operands
-            if s.role != "imm" or s.choices is not None
-            for _ in range(s.lanes)
-        )
-
-    @functools.cached_property
     def typed_operands(self) -> tuple[OperandSlot, ...]:
         """The operands carrying a dtype, in order: a dtype tuple aligns with these."""
         return tuple(s for s in self.operands if s.role in ("value", "dst"))
-
-    @functools.cached_property
-    def operand_args(self) -> tuple[tuple[OperandSlot, int, int], ...]:
-        """``(slot, first_arg_index, lanes)`` per operand the caller supplies.
-
-        One row per *operand*, not per argument: a register group is one operand
-        occupying N registers, so its dtype and its coercion are decided once for
-        the whole group. ``call_slots`` is this list flattened to arguments.
-        """
-        rows, i = [], 0
-        for slot in self.operands:
-            if slot.role == "imm" and slot.choices is None:
-                continue
-            rows.append((slot, i, slot.lanes))
-            i += slot.lanes
-        return tuple(rows)
 
     @property
     def has_dst(self) -> bool:
@@ -276,6 +254,36 @@ class InstructionEntry:
 def mods(entry: InstructionEntry, tokens) -> dict:
     """The canonical modifier map: every slot name -> token, ``""`` = omitted."""
     return {slot.name: tok or "" for slot, tok in zip(entry.slots, tokens)}
+
+
+def lanes_of(slot: OperandSlot, mod_map: dict) -> int:
+    """How many registers this operand's group occupies under these modifiers."""
+    return slot.lanes(mod_map) if callable(slot.lanes) else slot.lanes
+
+
+def operand_layout(entry, mod_map: dict) -> tuple[tuple[OperandSlot, int, int], ...]:
+    """``(slot, first_arg_index, lanes)`` per operand the caller supplies.
+
+    One row per *operand*, not per argument: a register group is one operand
+    occupying N registers, so its dtype and its coercion are decided once for
+    the whole group. Depends on the modifiers because a group's length may --
+    the modifier set is closed, so there is one layout per token combination,
+    memoized below.
+    """
+    return _operand_layout(entry, tuple(mod_map.values()))
+
+
+@functools.cache
+def _operand_layout(entry, mod_values):
+    mod_map = dict(zip((s.name for s in entry.slots), mod_values))
+    rows, i = [], 0
+    for slot in entry.operands:
+        if slot.role == "imm" and slot.choices is None:
+            continue
+        n = lanes_of(slot, mod_map)
+        rows.append((slot, i, n))
+        i += n
+    return tuple(rows)
 
 
 def tokens_for(entry: InstructionEntry, **by_name) -> tuple[str, ...]:
@@ -682,6 +690,29 @@ _LD_TYPES = (
     "s32", "b64", "u64", "s64", "f32", "f64",
 )  # fmt: skip
 _FRND = ("rn", "rz", "rm", "rp")  # .rnd on the floating-point arithmetic lines
+
+
+def _ldmatrix_lanes(m):
+    # ISA 9.7.15.5.15: "a brace-enclosed vector expression consisting of 1, 2,
+    # or 4 32-bit registers as per the value of .num" -- and, for shape 16x16,
+    # "two destination registers r0 and r1 of type .b32 must be specified" per
+    # matrix, so .m16n16 doubles the count (ptxas: "Vector of size 2 is
+    # expected"). That doubling is also why .m16n16 caps .num at .x2.
+    return int(m["num"][1:]) * (2 if m["shape"] == "m16n16" else 1)
+
+
+def _check_ldmatrix_b8fmt(m):
+    # Line 2 (`.m8n16`) spells no `.trans`; line 3 (`.m16n16`) spells it
+    # mandatorily. "When .shape is .m16n16, only .x1 and .x2 are valid".
+    if m["shape"] == "m8n16" and m["trans"]:
+        return "the .m8n16 line takes no .trans"
+    if m["shape"] == "m16n16":
+        if not m["trans"]:
+            return "the .m16n16 decompression line requires .trans"
+        if m["num"] == "x4":
+            return "shape m16n16 supports only .x1 and .x2"
+    return None
+
 
 _ENTRIES = [
     # prefetch per PTX ISA 9.7.9.16, covering three of its four syntax lines:
@@ -1692,6 +1723,76 @@ _ENTRIES = [
         )
         for act in ("fence", "commit_group")
     ],
+    # ldmatrix per PTX ISA 9.7.15.5.15 -- warp-level matrix load. Three syntax
+    # lines; the destination is a brace-enclosed vector of 1/2/4 32-bit
+    # registers "as per the value of .num", which is what a callable `lanes`
+    # transcribes. The first line's two shapes split into two entries because
+    # their target floors differ (m8n8 is sm_75+; m16n16/.b8 are sm_100a) and
+    # `cert_arch` is per entry.
+    #
+    #   ldmatrix.sync.aligned.shape.num{.trans}{.ss}.type            r, [p];
+    #   ldmatrix.sync.aligned.m8n16.num{.ss}.dst_fmt.src_fmt        r, [p];
+    #   ldmatrix.sync.aligned.m16n16.num.trans{.ss}.dst_fmt.src_fmt r, [p];
+    #
+    # NOT REGISTERED: nothing -- every syntax line of the family is here.
+    InstructionEntry(  # line 1, .m8n8.b16: "Each matrix element holds 16-bit data"
+        name="ldmatrix",
+        slots=(
+            ModifierSlot("sync", ("sync",)),
+            ModifierSlot("aligned", ("aligned",)),
+            ModifierSlot("shape", ("m8n8",)),
+            ModifierSlot("num", ("x1", "x2", "x4")),
+            ModifierSlot("trans", ("trans",), optional=True),
+            ModifierSlot("space", ("shared", "shared::cta"), optional=True),
+            ModifierSlot("type", ("b16",)),
+        ),
+        operands=(
+            OperandSlot("r", role="dst", dtype="b32", lanes=_ldmatrix_lanes),
+            OperandSlot("p", role="addr"),
+        ),
+    ),
+    InstructionEntry(  # line 1, .m16n16.b8: "only .x1 and .x2 are valid"
+        name="ldmatrix_m16n16_b8",
+        mnemonic="ldmatrix",
+        slots=(
+            ModifierSlot("sync", ("sync",)),
+            ModifierSlot("aligned", ("aligned",)),
+            ModifierSlot("shape", ("m16n16",)),
+            ModifierSlot("num", ("x1", "x2")),
+            # The syntax line spells {.trans} optional, but ptxas requires it
+            # whenever the shape is .m16n16 ("Modifier '.trans' require for
+            # instruction ldmatrix with shape '.m16n16'") -- the 16x16 8-bit
+            # load only exists in the transposed layout.
+            ModifierSlot("trans", ("trans",)),
+            ModifierSlot("space", ("shared", "shared::cta"), optional=True),
+            ModifierSlot("type", ("b8",)),
+        ),
+        cert_arch="sm_100a",
+        operands=(
+            OperandSlot("r", role="dst", dtype="b32", lanes=_ldmatrix_lanes),
+            OperandSlot("p", role="addr"),
+        ),
+    ),
+    InstructionEntry(  # lines 2+3: the 6/4-bit decompression loads
+        name="ldmatrix_b8fmt",
+        mnemonic="ldmatrix",
+        slots=(
+            ModifierSlot("sync", ("sync",)),
+            ModifierSlot("aligned", ("aligned",)),
+            ModifierSlot("shape", ("m8n16", "m16n16")),
+            ModifierSlot("num", ("x1", "x2", "x4")),
+            ModifierSlot("trans", ("trans",), optional=True),
+            ModifierSlot("space", ("shared", "shared::cta"), optional=True),
+            ModifierSlot("dst_fmt", ("b8x16",)),
+            ModifierSlot("src_fmt", ("b6x16_p32", "b4x16_p64")),
+        ),
+        cert_arch="sm_100a",
+        check=_check_ldmatrix_b8fmt,
+        operands=(
+            OperandSlot("r", role="dst", dtype="b32", lanes=_ldmatrix_lanes),
+            OperandSlot("p", role="addr"),
+        ),
+    ),
 ]
 
 TABLE: dict[str, InstructionEntry] = {e.name: e for e in _ENTRIES}

@@ -23,7 +23,14 @@ inspect without compiling a kernel.
 
 from typing import NamedTuple
 
-from .table import InstructionEntry, canonical_dtypes, imm_slots, mods, operand_space
+from .table import (
+    InstructionEntry,
+    canonical_dtypes,
+    imm_slots,
+    lanes_of,
+    mods,
+    operand_space,
+)
 
 
 class CBinding(NamedTuple):
@@ -144,10 +151,16 @@ def render_variant(entry: InstructionEntry, tokens, predicated=False, dtypes=Non
             ptx_operands.append(slot.literal if slot.choices is None else imm_of[slot])
             continue
         regs = []
-        for lane in range(slot.lanes):
+        n_lanes = lanes_of(slot, mod_map)
+        # A group operand is one whose declared shape is a vector -- statically
+        # (`lanes > 1`) or by modifier (callable). ptxas wants the braces even
+        # when such a vector has one element ("Vector of size 1 is expected"),
+        # so vector-ness follows the declaration, not the resolved count.
+        is_group = callable(slot.lanes) or slot.lanes > 1
+        for lane in range(n_lanes):
             # One operand, `lanes` registers: PTX writes the group in the
             # operand list, so a lane is a C parameter but not an operand.
-            lname = pname if slot.lanes == 1 else f"{pname}{lane}"
+            lname = f"{pname}{lane}" if is_group else pname
             if slot.role == "dst":
                 cb = C_BINDING[dtype_of[slot]]
                 c_ty, constraint, carrier = cb.c_type, cb.constraint, cb.carrier
@@ -178,7 +191,7 @@ def render_variant(entry: InstructionEntry, tokens, predicated=False, dtypes=Non
                 inputs.append(f'"{cb.constraint}"({cb.to_carrier.format(lname)})')
             regs.append(f"[%{idx}]" if slot.role == "addr" else f"%{idx}")
             idx += 1
-        ptx_operands.append(regs[0] if slot.lanes == 1 else "{" + ", ".join(regs) + "}")
+        ptx_operands.append("{" + ", ".join(regs) + "}" if is_group else regs[0])
 
     instr = f"{opcode} {', '.join(ptx_operands)};" if ptx_operands else f"{opcode};"
     if predicated:

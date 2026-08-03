@@ -362,15 +362,25 @@ def _emit(op_call: TilePrimitiveCall, sctx: DispatchContext) -> PrimFunc:
         for mm in T.unroll(m_outer):
             smem_off = _apply_s_layout(warp_idx_in_T, laneid, mm)
             smem_ptr = _ptr_off(s_buf.ptr_to(s_zero), smem_off)
-            handles = [
-                r_local.ptr_to([
-                    r.apply(0, 0, 0, mm, i, 0, shape=apply_shape)[r_mem_axis]
-                ])
-                for i in range(num)
-            ]
             if direction == "ld":
-                T.ptx.ldmatrix(trans, num, ".b16", smem_ptr, *handles)
+                # ldmatrix's destination is num b32 registers; the fragment
+                # buffer is b16, so the registers land through a uint32 view,
+                # two elements per word (the tcgen05_ldst 16-bit pattern).
+                r_words = r_local.view("uint32")
+                dsts = [
+                    r_words[r.apply(0, 0, 0, mm, i, 0, shape=apply_shape)[r_mem_axis] // 2]
+                    for i in range(num)
+                ]
+                T.ptxd[
+                    f"ldmatrix.sync.aligned.m8n8.x{num}{'.trans' if trans else ''}.shared.b16"
+                ](*dsts, smem_ptr)
             else:
+                handles = [
+                    r_local.ptr_to([
+                        r.apply(0, 0, 0, mm, i, 0, shape=apply_shape)[r_mem_axis]
+                    ])
+                    for i in range(num)
+                ]
                 T.ptx.stmatrix(
                     trans, num, ".b16", smem_ptr, *handles,
                     shape="m8n8", space="shared",

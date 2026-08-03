@@ -271,6 +271,29 @@ class _Chain_ld:
     weak: _Chain_ld
     def __call__(self, d: Any, addr: Any, *args: Any) -> None: ...
 
+class _Chain_ldmatrix:
+    """`ldmatrix` — 3 entries sharing this mnemonic; PTX puts their difference in the operand
+    list, so the call selects one. Shapes: (*__operands)
+    """
+
+    aligned: _Chain_ldmatrix
+    b16: _Chain_ldmatrix
+    b4x16_p64: _Chain_ldmatrix
+    b6x16_p32: _Chain_ldmatrix
+    b8: _Chain_ldmatrix
+    b8x16: _Chain_ldmatrix
+    m16n16: _Chain_ldmatrix
+    m8n16: _Chain_ldmatrix
+    m8n8: _Chain_ldmatrix
+    shared: _Chain_ldmatrix
+    shared__cta: _Chain_ldmatrix
+    sync: _Chain_ldmatrix
+    trans: _Chain_ldmatrix
+    x1: _Chain_ldmatrix
+    x2: _Chain_ldmatrix
+    x4: _Chain_ldmatrix
+    def __call__(self, *args: Any) -> None: ...
+
 class _Chain_mapa:
     """`mapa` — 2 entries sharing this mnemonic; PTX puts their difference in the operand list,
     so the call selects one. Shapes: (d, a, b)
@@ -596,6 +619,7 @@ class _PTXD:
     fns: _Chain_fns
     griddepcontrol: _Chain_griddepcontrol
     ld: _Chain_ld
+    ldmatrix: _Chain_ldmatrix
     mapa: _Chain_mapa
     max: _Chain_max
     mbarrier: _Chain_mbarrier

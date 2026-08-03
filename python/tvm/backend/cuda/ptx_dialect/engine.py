@@ -52,6 +52,7 @@ from .table import (
     escape_token,
     mods,
     operand_dtypes,
+    operand_layout,
     operand_space,
     operand_type,
     unescape_token,
@@ -104,33 +105,34 @@ def arg_dtype(value) -> str:
 
 def _make_codegen(entry: InstructionEntry):
     n_slots = len(entry.slots)
-    n_operands = len(entry.call_slots)
-    # Where each typed operand's first lane sits in the argument list. Fixed by
-    # the entry, so it is resolved once here rather than regrouping the operands
-    # on every codegen call. Lanes share a dtype, so one lane speaks for a group.
-    typed_at = [i for slot, i, _ in entry.operand_args if slot.role in ("value", "dst")]
-    # Caller-chosen immediates ride the Call as IntImm args but are baked into
-    # the instruction text, so they are read here and NOT forwarded to the
-    # helper (which has no parameter for them).
-    imm_at = [i for slot, i, _ in entry.operand_args if slot.role == "imm"]
-    forwarded_at = [i for i in range(n_operands) if i not in imm_at]
 
     def codegen(*args):
-        # Layout: [operands..., pred?] [n_slots tokens] [pred marker].
+        # Layout: [operands..., pred?] [n_slots tokens] [pred marker]. The token
+        # count is fixed per entry, so the tokens are parsed first and the
+        # operand layout -- which may depend on them, a register group's length
+        # being a function of the modifiers -- is looked up from them (memoized
+        # per token combination in the table).
         predicated = parse_str(args[-1]) == "pred"
         tokens = [parse_str(a) for a in args[len(args) - n_slots - 1 : -1]]
         rest = args[: len(args) - n_slots - 1]  # operands, plus pred when present
+        layout = operand_layout(entry, mods(entry, tokens))
+        n_operands = sum(n for _, _, n in layout)
         # Which dtype each typed operand actually carries. It is already in the
         # Call -- the same channel PTX uses, where a register's type lives in its
         # .reg declaration rather than in the instruction text.
-        dtypes = tuple(arg_dtype(rest[i]) for i in typed_at)
-        imms = tuple(str(int(rest[i])) for i in imm_at)
+        dtypes = tuple(arg_dtype(rest[i]) for slot, i, _ in layout if slot.role in ("value", "dst"))
+        # Caller-chosen immediates ride the Call as IntImm args but are baked
+        # into the instruction text, so they are read here and NOT forwarded to
+        # the helper (which has no parameter for them).
+        imm_at = {i for slot, i, _ in layout if slot.role == "imm"}
+        imms = tuple(str(int(rest[i])) for i in sorted(imm_at))
         _, helper, source = render_variant(entry, tokens, predicated, dtypes, imms)
         # Every helper is void; a destination is an ordinary argument, printed
         # by the C codegen as the lvalue it binds the reference parameter to.
         # A predicate rides after the operands, so everything past n_operands
         # is forwarded as-is.
-        forwarded = [rest[i] for i in forwarded_at] + list(rest[n_operands:])
+        forwarded = [rest[i] for i in range(n_operands) if i not in imm_at]
+        forwarded += list(rest[n_operands:])
         return cuda_func_call(helper, *forwarded, source_code=source)
 
     return codegen
@@ -183,7 +185,7 @@ def _coerce_typed(entry, slot, values, mod_map):
     named = sorted({d for d in carried if d is not None})
     if len(named) > 1:
         raise ValueError(
-            f"{entry.name}: {role} '{slot.name}' is one {slot.lanes}-register group, so all "
+            f"{entry.name}: {role} '{slot.name}' is one {len(values)}-register group, so all "
             f"its lanes must have one dtype, got {', '.join(d or 'literal' for d in carried)}"
         )
     dtype = named[0] if named else allowed[0]
@@ -285,16 +287,9 @@ def _coerce_pred(entry, pred):
 
 
 def _emit(entry, filled, operands, pred=None):
-    supplied = entry.call_slots
-    if len(operands) != len(supplied):
-        names = ", ".join(
-            f"{s.name}[{s.lanes}]" if s.lanes > 1 else s.name
-            for s in entry.operands
-            if s.role != "imm"
-        )
-        raise ValueError(
-            f"{entry.name} expects {len(supplied)} operand(s) ({names}), got {len(operands)}"
-        )
+    # Modifiers resolve before the operands are looked at: the attribute chain
+    # is parsed before the call happens, and a register group's length may be a
+    # function of the modifiers, so the expected arity needs the modifier map.
     missing = [
         slot.name for slot, tok in zip(entry.slots, filled) if tok is None and not slot.optional
     ]
@@ -305,6 +300,11 @@ def _emit(entry, filled, operands, pred=None):
         error = entry.check(mod_map)
         if error:
             raise ValueError(f"{entry.name}: {error}")
+    layout = operand_layout(entry, mod_map)
+    n_args = sum(n for _, _, n in layout)
+    if len(operands) != n_args:
+        names = ", ".join(f"{slot.name}[{n}]" if n > 1 else slot.name for slot, _, n in layout)
+        raise ValueError(f"{entry.name} expects {n_args} operand(s) ({names}), got {len(operands)}")
     if pred is not None:
         if entry.has_dst:
             raise ValueError(
@@ -315,7 +315,7 @@ def _emit(entry, filled, operands, pred=None):
         pred = _coerce_pred(entry, pred)
     coerced = [
         value
-        for slot, i, lanes in entry.operand_args
+        for slot, i, lanes in layout
         for value in _coerce_operand(entry, slot, operands[i : i + lanes], mod_map)
     ]
     # Call arg layout: [operands..., pred?] [slot tokens ("" = omitted)] [marker].
