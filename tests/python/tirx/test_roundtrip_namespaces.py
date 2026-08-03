@@ -31,7 +31,7 @@ def test_roundtrip_tir_namespaces_minimal():
         A = T.match_buffer(a_ptr, (2, 2), "float16")
         T.ptxd.wgmma.commit_group.sync.aligned()
         T.cuda.cluster_sync()
-        T.ptx.cp_async.wait_group(0)
+        T.ptxd.cp.async_.wait_group(0)
         T.ptxd.fence.proxy.async_.shared__cta()
         T.cuda.printf("ok")
         T.nvshmem.quiet()

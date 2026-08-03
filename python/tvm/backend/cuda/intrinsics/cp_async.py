@@ -45,19 +45,8 @@ def _safe(s):
 # =============================================================================
 # cp.async forms from the PTX Syntax block.
 #
-# Includes commit/wait plus the non-bulk shared/global copy forms.
+# Non-bulk shared/global copy forms (commit/wait moved to ptxd).
 # =============================================================================
-device_intrinsic(
-    "ptx_cp_async_commit_group",
-    helper_name="tvm_builtin_ptx_cp_async_commit_group",
-    body='    asm volatile("cp.async.commit_group;");',
-)
-device_intrinsic(
-    "ptx_cp_async_wait_group",
-    n_attrs=1,
-    helper_name=lambda n: f"tvm_builtin_ptx_cp_async_wait_group_{int(n)}",
-    body=lambda n: f'    asm volatile("cp.async.wait_group {int(n)};");',
-)
 
 # cp.async non-bulk copy forms:
 #   Form 1: cp.async.ca.shared.global ... [dst], [src], cp-size{, src-size}{, cache-policy}
@@ -867,24 +856,6 @@ def codegen_reduce(dim, src_ptr, tensormap, *args):
 # cp.async.bulk non-TMA forms from the PTX Syntax block. Each form is one
 # device_intrinsic; optional PTX modifiers are attrs, not separate fixed ops.
 # =============================================================================
-
-
-def _ptx_cp_async_bulk_wait_group_parts(n, read):
-    n = int(n)
-    read_b = bool(int(read)) if hasattr(read, "value") else bool(read)
-    return (
-        f"ptx_cp_async_bulk_wait_group{'_read' if read_b else ''}_{n}",
-        f'    asm volatile("cp.async.bulk.wait_group{".read" if read_b else ""} {n};" '
-        '::: "memory");',
-    )
-
-
-device_intrinsic(
-    "ptx_cp_async_bulk_wait_group",
-    n_attrs=2,
-    helper_name=lambda n, read: _ptx_cp_async_bulk_wait_group_parts(n, read)[0],
-    body=lambda n, read: _ptx_cp_async_bulk_wait_group_parts(n, read)[1],
-)
 
 
 def _bool_attr(value):

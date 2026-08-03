@@ -51,7 +51,6 @@ class PTXNamespace:
         # working without rewriting their tirx code.
         self.ldmatrix_legacy = _dtype_forward(_cuda_op.ptx_ldmatrix_legacy)
         self.stmatrix = _op_wrapper(_cuda_op.ptx_stmatrix)
-        self.setmaxnreg: Callable[..., Any] = _op_wrapper(_cuda_op.ptx_setmaxnreg)
         self.elect_sync: Callable[..., Any] = _op_wrapper(_cuda_op.ptx_elect_sync)
         self.clc_query_cancel = _op_wrapper(_cuda_op.ptx_clc_query_cancel)
         self.fetch_register: Callable[..., Any] = _op_wrapper(_cuda_op.ptx_fetch_register)
@@ -94,8 +93,6 @@ class CpAsyncNamespace:
     """The CpAsync instruction submodule."""
 
     def __init__(self):
-        self.commit_group = _op_wrapper(_cuda_op.ptx_cp_async_commit_group)
-        self.wait_group = _op_wrapper(_cuda_op.ptx_cp_async_wait_group)
         # Legacy variant: takes (dst_ptr, dst_offset, src_ptr, src_offset,
         # cp_size). Offsets are folded into the pointers; coexists with
         # the fork-native ``__call__`` form.
@@ -128,7 +125,6 @@ class CpAsyncBulkNamespace:
     """The CpAsyncBulk instruction submodule."""
 
     def __init__(self):
-        self.wait_group = _op_wrapper(_cuda_op.ptx_cp_async_bulk_wait_group)
         self.tensor = CpAsyncBulkTensorNamespace()
         self.s2c = _op_wrapper(_cuda_op.ptx_cp_async_bulk_shared_to_cluster)
 
@@ -154,7 +150,6 @@ class WgmmaNamespace:
     """The WGMMA instruction submodule."""
 
     def __init__(self):
-        self.wait_group = _op_wrapper(_cuda_op.ptx_wgmma_wait_group)
         self.noop_barrier = _op_wrapper(_cuda_op.ptx_wgmma_noop_barrier)
         self.mma_async = WgmmaMmaAsyncNamespace()
         self.encode_matrix_descriptor = _op_wrapper(_cuda_op.ptx_wgmma_encode_matrix_descriptor)
@@ -207,7 +202,6 @@ class Tcgen05Namespace:
         self.st = _op_wrapper(_cuda_op.ptx_tcgen05_st)
         self.cp = _op_wrapper(_cuda_op.ptx_tcgen05_cp)
         self.shift = _op_wrapper(_cuda_op.ptx_tcgen05_shift)
-        self.commit = _op_wrapper(_cuda_op.ptx_tcgen05_commit)
         self.mma = Tcgen05MmaNamespace()
 
 

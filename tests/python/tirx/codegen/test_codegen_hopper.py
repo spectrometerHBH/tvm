@@ -63,14 +63,14 @@ def _run_tensormap_encode(shape, dtype, encode_args):
 @pytest.mark.parametrize("inc", [False, True])
 @pytest.mark.gpu
 @pytest.mark.skipif(not env.has_cuda_compute(9), reason="need cuda compute >= 9.0")
-def test_ptx_setmaxnreg(inc):
+def test_ptxd_setmaxnreg(inc):
     # fmt: off
     @T.prim_func
     def func(A: T.Buffer(1)):
         T.device_entry()
         cta_id = T.cta_id([1])
         tid = T.thread_id([128])
-        T.ptx.setmaxnreg(inc, 32)
+        T.ptxd[f"setmaxnreg.{'inc' if inc else 'dec'}.sync.aligned.u32"](32)
         # fmt: on
 
     src, mod = _get_source(func)
@@ -460,7 +460,7 @@ def test_cp_async_bulk_tensor_global_to_shared_unicast(dtype, inputs):
                     if threadIdx == 0:
                         T.ptx.cp_async.bulk.tensor.s2g(len(shape), A_smem.access_ptr("r", offset=0), T.address_of(B_map), "", *coord)  # noqa: E501
                         T.ptxd.cp.async_.bulk.commit_group()
-                        T.ptx.cp_async.bulk.wait_group(0)
+                        T.ptxd.cp.async_.bulk.wait_group(0)
             # fmt: on
 
         return main
@@ -653,7 +653,7 @@ def test_cp_async_bulk_tensor_global_to_shared_swizzle(swizzle, dtype):
                     if threadIdx == 0:
                         T.ptx.cp_async.bulk.tensor.s2g(len(shape), A_smem.access_ptr("r", offset=0), T.address_of(B_map), "", *coord)  # noqa: E501
                         T.ptxd.cp.async_.bulk.commit_group()
-                        T.ptx.cp_async.bulk.wait_group(0)
+                        T.ptxd.cp.async_.bulk.wait_group(0)
             # fmt: on
 
         return main, shape
@@ -751,7 +751,7 @@ def test_cp_async_bulk_tensor_global_to_shared_multicast1(inputs):
                             if tx == 0:
                                 T.ptx.cp_async.bulk.tensor.s2g(len(shape), A_smem.access_ptr("r", offset=0), T.address_of(B_map), "", *coord)  # noqa: E501
                                 T.ptxd.cp.async_.bulk.commit_group()
-                                T.ptx.cp_async.bulk.wait_group(0)
+                                T.ptxd.cp.async_.bulk.wait_group(0)
             # fmt: on
 
         return main
@@ -847,7 +847,7 @@ def test_cp_async_bulk_tensor_global_to_shared_multicast2(inputs):
                             if tx == 0:
                                 T.ptx.cp_async.bulk.tensor.s2g(len(shape), A_smem.access_ptr("r", offset=0), T.address_of(B_map), "", *coord0)  # noqa: E501
                                 T.ptxd.cp.async_.bulk.commit_group()
-                                T.ptx.cp_async.bulk.wait_group(0)
+                                T.ptxd.cp.async_.bulk.wait_group(0)
             # fmt: on
 
         return main
@@ -912,7 +912,7 @@ def test_cp_async_bulk_tensor_shared_to_global(inputs):
             if tx == 0:
                 T.ptx.cp_async.bulk.tensor.s2g(len(shape), A_smem.access_ptr("r", offset=0), T.address_of(A_map), "", *coord)  # noqa: E501
                 T.ptxd.cp.async_.bulk.commit_group()
-                T.ptx.cp_async.bulk.wait_group(0)
+                T.ptxd.cp.async_.bulk.wait_group(0)
             # fmt: on
 
         return main
@@ -1022,7 +1022,7 @@ def test_wgmma_ss_nt():
             T.ptx.wgmma.mma_async.ss(descA, descB, *get_accum_list(C_local, C_elems),  # noqa: F821
                                      M=M, N=N, K=K, in_dtype=in_dtype, out_dtype=out_dtype, transA=transA, transB=transB, scaleA=1.0, scaleB=1.0, scaleD=False)  # noqa: E501
             T.ptxd.wgmma.commit_group.sync.aligned()
-            T.ptx.wgmma.wait_group(0)
+            T.ptxd.wgmma.wait_group.sync.aligned(0)
 
             for i in T.serial(0, C_elems):
                 T.ptx.wgmma.noop_barrier(C_local[i])
@@ -1183,7 +1183,7 @@ def test_wgmma_rs_nt():
             T.ptx.wgmma.mma_async.rs(descB, *(get_A_list(A_local_b32, A_elems_b32) + get_accum_list(C_local, C_elems)),  # noqa: E501, F821
                                      M=M, N=N, K=K, in_dtype=in_dtype, out_dtype=out_dtype, transA=transA, transB=transB, scaleA=1.0, scaleB=1.0, scaleD=False)  # noqa: E501
             T.ptxd.wgmma.commit_group.sync.aligned()
-            T.ptx.wgmma.wait_group(0)
+            T.ptxd.wgmma.wait_group.sync.aligned(0)
 
                     # fence A_local
             for i in T.serial(0, A_elems_b32):

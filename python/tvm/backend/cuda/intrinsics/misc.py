@@ -21,7 +21,7 @@
 Catch-all for ops that don't fit the (sync / mma / cp_async / memory / math /
 nvshmem) feature buckets:
 
-* PTX register-allocation control: ``setmaxnreg`` / ``mov`` from special reg.
+* PTX register-allocation control: ``mov`` from special reg (setmaxnreg is ptxd).
 * Per-thread queries / scheduling hints: ``thread_rank`` / ``nano_sleep``.
 * Profiler timer hooks (``timer_init/start/end/finalize``).
 * Debug helpers: ``printf`` / ``trap`` on assert failure.
@@ -36,29 +36,6 @@ from tvm.backend.cuda.op import cuda_func_call
 from ._schema import device_intrinsic
 from .registry import CODEGEN_REGISTRY, register_codegen
 from .utils import parse_str
-
-# =============================================================================
-# setmaxnreg.{inc,dec}.sync.aligned.u32 — 1 PTX form (.action picks inc/dec).
-# =============================================================================
-
-
-def _ptx_setmaxnreg(inc, nreg):
-    inc = bool(int(inc)) if hasattr(inc, "value") else bool(inc)
-    nreg = int(nreg)
-    action = "inc" if inc else "dec"
-    return (
-        f"tvm_builtin_ptx_setmaxnreg_{action}_{nreg}",
-        f'    asm volatile("setmaxnreg.{action}.sync.aligned.u32 {nreg};");',
-    )
-
-
-device_intrinsic(
-    "ptx_setmaxnreg",
-    n_attrs=2,
-    helper_name=lambda inc, nreg: _ptx_setmaxnreg(inc, nreg)[0],
-    body=lambda inc, nreg: _ptx_setmaxnreg(inc, nreg)[1],
-)
-
 
 # =============================================================================
 # mov.u32/u64 from special register — 1 PTX form (Form 2 of mov.type d, sreg).

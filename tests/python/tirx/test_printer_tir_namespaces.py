@@ -41,9 +41,11 @@ def test_printer_cuda_cluster_sync():
     _assert_print(node, "T.cuda.cluster_sync()")
 
 
-def test_printer_ptx_namespace_cp_async_wait_group():
-    node = tir.Evaluate(cuda_op.ptx_cp_async_wait_group(tir.IntImm("int32", 0)))
-    _assert_print(node, "T.ptx.cp_async.wait_group(0)")
+def test_printer_ptx_namespace_mbarrier_try_wait():
+    node = tir.Evaluate(
+        cuda_op.ptx_mbarrier_try_wait(tir.IntImm("int32", 0), tir.IntImm("int32", 0))
+    )
+    _assert_print(node, "T.ptx.mbarrier.try_wait(0, 0)")
 
 
 def test_printer_nvshmem_namespace():
@@ -125,9 +127,6 @@ def test_printer_ptx_more():
     _assert_print(
         cuda_op.ptx_tcgen05_st(a, 0, shape="16x64b", num=1, row=0, col=0, unpack=False),
         'a = T.handle()\nT.ptx.tcgen05.st(a, 0, 0, "16x64b", 1, T.bool(False), 0)',
-    )
-    _assert_print(
-        cuda_op.ptx_tcgen05_commit(a, 1, 0), "a = T.handle()\nT.ptx.tcgen05.commit(a, 1, 0)"
     )
 
 

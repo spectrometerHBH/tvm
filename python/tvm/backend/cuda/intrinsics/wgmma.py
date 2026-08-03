@@ -31,14 +31,8 @@ from .types import PTXDataType
 from .utils import parse_str
 
 # =============================================================================
-# wgmma.fence / commit_group / wait_group — one PTX form each.
+# wgmma noop_barrier / descriptor encode helpers (wait_group is ptxd).
 # =============================================================================
-device_intrinsic(
-    "ptx_wgmma_wait_group",
-    n_attrs=1,
-    helper_name=lambda n: f"ptx_wgmma_wait_group_{int(n)}",
-    body=lambda n: f'    asm volatile("wgmma.wait_group.sync.aligned {int(n)};" ::: "memory");',
-)
 
 
 # =============================================================================

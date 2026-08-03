@@ -552,16 +552,16 @@ def test_ptx_cp_async_bulk_non_tma_form_codegen():
             )
             T.ptx.cp_async_bulk_s2g(B.data, smem.ptr_to([0]), T.uint32(64), cache_policy=C[0])
             T.ptxd.cp.async_.bulk.commit_group()
-            T.ptx.cp_async.bulk.wait_group(0, read=True)
-            T.ptx.cp_async.bulk.wait_group(1, read=False)
+            T.ptxd.cp.async_.bulk.wait_group.read(0)
+            T.ptxd.cp.async_.bulk.wait_group(1)
 
     src, _ = _get_source(main)
     assert "cp.async.bulk.shared::cta.global.mbarrier::complete_tx::bytes.L2::cache_hint" in src
     assert "cp.async.bulk.shared::cluster.global.mbarrier::complete_tx::bytes.L2::cache_hint" in src
     assert "cp.async.bulk.global.shared::cta.bulk_group.L2::cache_hint" in src
     assert "unsigned long long cache_policy" in src
-    assert 'asm volatile("cp.async.bulk.wait_group.read 0;" ::: "memory");' in src
-    assert 'asm volatile("cp.async.bulk.wait_group 1;" ::: "memory");' in src
+    assert 'asm volatile("cp.async.bulk.wait_group.read 0;" :  :  : "memory");' in src
+    assert 'asm volatile("cp.async.bulk.wait_group 1;" :  :  : "memory");' in src
 
 
 def test_ptx_sync_and_clc_codegen():
@@ -1057,8 +1057,8 @@ def test_ptx_cp_async(cp_size, cache_hint, prefetch_size, predicate, fill_mode):
             A_shared[i] = 5.0
         T.ptxd.fence.proxy.async_.shared__cta()
         T.ptx.cp_async(A_shared.ptr_to([0]), A.ptr_to([0]), cp_size, cache_hint=cache_hint, prefetch_size=prefetch_size, predicate=predicate, fill_mode=fill_mode)  # noqa: E501
-        T.ptx.cp_async.commit_group()
-        T.ptx.cp_async.wait_group(0)
+        T.ptxd.cp.async_.commit_group()
+        T.ptxd.cp.async_.wait_group(0)
         for i in T.serial(N):
             A[i] = A_shared[i] + 1.0
         # fmt: on

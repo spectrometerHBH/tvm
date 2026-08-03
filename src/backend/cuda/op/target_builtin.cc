@@ -247,9 +247,6 @@ const DeviceIntrinsicRegistration kDeviceIntrinsics[] = {
     TIRX_DEVICE_INTRIN_ALIAS(ptx_cp_async_bulk_tensor_prefetch, ptx, kOpaque),
     TIRX_DEVICE_INTRIN_ALIAS(ptx_cp_async_bulk_tensor_shared_to_global, ptx, kOpaque),
     TIRX_DEVICE_INTRIN_ALIAS(ptx_cp_async_bulk_tensor_shared_to_global_reduce, ptx, kOpaque),
-    TIRX_DEVICE_INTRIN_ALIAS(ptx_cp_async_bulk_wait_group, ptx, kOpaque),
-    TIRX_DEVICE_INTRIN_ALIAS(ptx_cp_async_commit_group, ptx, kOpaque),
-    TIRX_DEVICE_INTRIN_ALIAS(ptx_cp_async_wait_group, ptx, kOpaque),
     TIRX_DEVICE_INTRIN_ALIAS(ptx_cvt, ptx, kPure),
     TIRX_DEVICE_INTRIN_ALIAS(ptx_elect_sync, ptx, kOpaque),
     TIRX_DEVICE_INTRIN_ALIAS(ptx_fetch_register, ptx, kPure),
@@ -270,11 +267,9 @@ const DeviceIntrinsicRegistration kDeviceIntrinsics[] = {
     TIRX_DEVICE_INTRIN_ALIAS(ptx_mma_legacy, ptx, kOpaque),
     TIRX_DEVICE_INTRIN_ALIAS(ptx_mma_sp, ptx, kOpaque),
     TIRX_DEVICE_INTRIN_ALIAS(ptx_neg_f32, ptx, kPure),
-    TIRX_DEVICE_INTRIN_ALIAS(ptx_setmaxnreg, ptx, kOpaque),
     TIRX_DEVICE_INTRIN_ALIAS(ptx_st, ptx, kOpaque),
     TIRX_DEVICE_INTRIN_ALIAS(ptx_stmatrix, ptx, kOpaque),
     TIRX_DEVICE_INTRIN_ALIAS(ptx_sub_f16x2, ptx, kPure),
-    TIRX_DEVICE_INTRIN_ALIAS(ptx_tcgen05_commit, ptx, kOpaque),
     TIRX_DEVICE_INTRIN_ALIAS(ptx_tcgen05_cp, ptx, kOpaque),
     TIRX_DEVICE_INTRIN_ALIAS(ptx_tcgen05_encode_instr_descriptor, ptx, kOpaque),
     TIRX_DEVICE_INTRIN_ALIAS(ptx_tcgen05_encode_instr_descriptor_block_scaled, ptx, kOpaque),
@@ -288,7 +283,6 @@ const DeviceIntrinsicRegistration kDeviceIntrinsics[] = {
     TIRX_DEVICE_INTRIN_ALIAS(ptx_wgmma_mma_async_rs, ptx, kOpaque),
     TIRX_DEVICE_INTRIN_ALIAS(ptx_wgmma_mma_async_ss, ptx, kOpaque),
     TIRX_DEVICE_INTRIN_ALIAS(ptx_wgmma_noop_barrier, ptx, kOpaque),
-    TIRX_DEVICE_INTRIN_ALIAS(ptx_wgmma_wait_group, ptx, kOpaque),
 };
 
 void RegisterDeviceIntrinsicAliases() {

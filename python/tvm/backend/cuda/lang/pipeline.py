@@ -21,6 +21,26 @@ instances are automatically treated as meta values inside @T.prim_func.
 """
 
 from tvm.script import tirx as T
+from tvm.tirx import IntImm as _IntImm
+
+
+def _tcgen05_commit_is_unicast(cta_mask):
+    """Trace-time choice of the commit form, as the legacy wrapper made it.
+
+    A compile-time mask arriving at most one CTA means the mbar address
+    already names the target, so the unicast line (no mask operand) is used.
+    A runtime mask is fine -- ctaMask is a register operand -- but the choice
+    of *form* cannot depend on it, so a runtime mask always multicasts.
+
+    Lives outside the inline body on purpose: the inline evaluator neither
+    short-circuits conditional expressions nor accepts a None binding, so this
+    decision needs real Python semantics.
+    """
+    if cta_mask is None:
+        return True
+    if isinstance(cta_mask, _IntImm):
+        cta_mask = cta_mask.value
+    return isinstance(cta_mask, int) and bin(cta_mask).count("1") <= 1
 
 
 @T.meta_class
@@ -240,12 +260,27 @@ class TCGen05Bar(MBarrier):
     def arrive(self, stage, cta_group=1, cta_mask=None, pred=None):
         # NOTE: this arrive() kwarg set intentionally differs from
         # MBarrier.arrive (hardware necessity, LSP-incompatible by design).
-        if pred is not None:
-            T.ptx.tcgen05.commit(self.buf.ptr_to([stage]), cta_group=cta_group, pred=pred)
-        elif cta_mask is None and cta_group == 1:
-            T.ptx.tcgen05.commit(self.buf.ptr_to([stage]))
+        # The unicast/multicast split is decided at trace time, exactly as the
+        # legacy wrapper did: a compile-time mask arriving <= 1 CTA means the
+        # mbar address already names the target, so no mask operand. A runtime
+        # mask is fine -- ctaMask is a register operand -- but the *choice* of
+        # form cannot depend on it, so a runtime mask always multicasts.
+        # ``pred`` rides the ptxd keyword: the instruction is emitted
+        # predicated (@p) rather than branched around.
+        if _tcgen05_commit_is_unicast(cta_mask):
+            T.evaluate(
+                T.ptxd[
+                    f"tcgen05.commit.cta_group::{cta_group}"
+                    ".mbarrier::arrive::one.shared::cluster.b64"
+                ](self.buf.ptr_to([stage]), pred=pred)
+            )
         else:
-            T.ptx.tcgen05.commit(self.buf.ptr_to([stage]), cta_group=cta_group, cta_mask=cta_mask)
+            T.evaluate(
+                T.ptxd[
+                    f"tcgen05.commit.cta_group::{cta_group}"
+                    ".mbarrier::arrive::one.shared::cluster.multicast::cluster.b64"
+                ](self.buf.ptr_to([stage]), T.Cast("uint16", cta_mask), pred=pred)
+            )
 
 
 # Barrier-type tags accepted by Pipeline's ``full=`` / ``empty=`` arguments.

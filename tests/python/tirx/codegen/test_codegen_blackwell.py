@@ -433,7 +433,7 @@ def test_tcgen05_cp_ld_roundtrip():
             for k in range(dtype_bits * WIDTH // 256):
                 T.ptx.tcgen05.encode_matrix_descriptor(descA.data, A_smem.access_ptr("r", offset=A_smem.elem_offset_of([0, k * 8])), ldo=ldo, sdo=sdo, swizzle=SWIZZLE)  # noqa: E501
                 T.ptx.tcgen05.cp(tmem_addr, descA[0], shape="128x256b", cta_group=cta_group, col=k * 256 // 32)  # noqa: E501
-            T.ptx.tcgen05.commit(bar.data, cta_group)
+            T.ptxd[f"tcgen05.commit.cta_group::{cta_group}.mbarrier::arrive::one.shared::cluster.b64"](bar.data)
         T.ptx.mbarrier.try_wait(bar.data, phase[0])
         phase[0] = phase[0] ^ 1
         T.cuda.cta_sync()
@@ -551,7 +551,7 @@ def test_tcgen05_mma_ss_no_tma(swizzle):
                     T.ptx.tcgen05.mma(tmem_addr, descA[0], descB[0], descI[0], d_dtype=d_type, a_dtype=a_type, b_dtype=b_type, use_a_tmem=False, cta_group=cta_group, enable_input_d=0)  # noqa: E501
                 else:
                     T.ptx.tcgen05.mma(tmem_addr, descA[0], descB[0], descI[0], d_dtype=d_type, a_dtype=a_type, b_dtype=b_type, use_a_tmem=False, cta_group=cta_group, enable_input_d=1)  # noqa: E501
-            T.ptx.tcgen05.commit(bar.data, cta_group)
+            T.ptxd[f"tcgen05.commit.cta_group::{cta_group}.mbarrier::arrive::one.shared::cluster.b64"](bar.data)
         T.ptx.mbarrier.try_wait(bar.data, phase[0])
         phase[0] = phase[0] ^ 1
         T.cuda.cta_sync()

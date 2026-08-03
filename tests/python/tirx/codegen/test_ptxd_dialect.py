@@ -390,6 +390,44 @@ def test_ptxd_register_group_errors():
     assert "mov_pack_b32x2_b64_u64_f32" in _cuda_source(typed_literal)
 
 
+def test_ptxd_optional_operand_arity_dispatch():
+    """A no-count and a counted syntax line share a mnemonic, split by arity.
+
+    This only works because `pred` is keyword-only: the old positional-pred
+    fallback let every entry also accept arity+1 calls, so both lines matched a
+    two-operand call and dispatch was ambiguous. The pred marker in the Call
+    layout keeps the printed form exact (a predicated no-count arrive must not
+    re-parse as a counted one).
+    """
+
+    @T.prim_func
+    def kernel(a_ptr: T.handle):
+        A = T.match_buffer(a_ptr, (4,), "uint32")
+        T.device_entry()
+        T.cta_id([1])
+        tx = T.thread_id([32])
+        bar = T.alloc_buffer((2,), "uint64", scope="shared")
+        T.ptxd.bar.sync(T.uint32(0))
+        T.ptxd.bar.sync(T.uint32(0), T.uint32(64))
+        T.ptxd.mbarrier.arrive.shared.b64(bar.ptr_to([0]))
+        T.ptxd.mbarrier.arrive.shared.b64(bar.ptr_to([0]), T.uint32(2))
+        T.ptxd.mbarrier.arrive.shared.b64(bar.ptr_to([1]), pred=T.uint32(1))
+        A[tx % 4] = A[tx % 4]
+
+    src = _cuda_source(kernel)
+    assert "bar.sync %0;" in src
+    assert "bar.sync %0, %1;" in src
+    assert "mbarrier.arrive.shared.b64 _, [%0];" in src
+    assert "mbarrier.arrive.shared.b64 _, [%0], %1;" in src
+    assert "@p mbarrier.arrive.shared.b64 _, [%0];" in src
+
+    # The predicated no-count arrive survives a print/parse round trip as
+    # itself -- the pred marker is what stops the count entry from absorbing
+    # the predicate as a count.
+    reparsed = tvm.script.from_source(kernel.script())
+    tvm.ir.assert_structural_equal(kernel, reparsed)
+
+
 def test_ptxd_bit_width_axis():
     """A `.bN` operand takes any dtype of that width, each with its own helper.
 
@@ -655,7 +693,9 @@ def test_ptxd_coercion_ir_forms():
     call = T.ptxd.st.release.gpu.global_.b32(global_ptr, val)
     assert call.args[0].same_as(global_ptr)
 
-    # Modifiers ride as trailing positional string args in slot order.
+    # Modifiers ride as trailing positional string args in slot order, then
+    # the pred marker ("pred" or "") that makes the printed form re-parse
+    # exactly instead of guessing from the argument count.
     assert [str(a).strip('"') for a in call.args[2:]] == [
         "",
         "release",
@@ -664,6 +704,7 @@ def test_ptxd_coercion_ir_forms():
         "",
         "",
         "b32",
+        "",
     ]
 
     # A shared-space slot converts whatever pointer it is given: TIRx pointer
@@ -677,7 +718,7 @@ def test_ptxd_coercion_ir_forms():
     flag = tvm.tirx.Var("f", "uint32")
     call = T.ptxd.st.release.gpu.global_.b32(global_ptr, val, pred=flag)
     assert call.args[2].same_as(flag)
-    assert len(call.args) == 2 + 1 + 7  # operands + pred + slot tokens
+    assert len(call.args) == 2 + 1 + 7 + 1  # operands + pred + slot tokens + marker
     # @p on an instruction with a destination is rejected: a false predicate
     # leaves it unwritten while "=" tells nvcc its prior value is dead.
     dst = tvm.tirx.Var("d", "uint32")
@@ -693,10 +734,10 @@ _PRED_RE = re.compile(r"^\{ \.reg \.pred p; setp\.ne\.b32 p, %\d+, 0; @p (?P<ins
 
 
 def _as_render_args(rendering):
-    """`renderings` yields (tokens, dtypes, predicated); render_variant takes
-    (tokens, predicated, dtypes)."""
-    tokens, dtypes, predicated = rendering
-    return tokens, predicated, dtypes
+    """`renderings` yields (tokens, dtypes, predicated, imms); render_variant
+    takes (tokens, predicated, dtypes, imms)."""
+    tokens, dtypes, predicated, imms = rendering
+    return tokens, predicated, dtypes, imms
 
 
 def _sole_instruction(asm_text):
@@ -727,8 +768,8 @@ def test_ptxd_single_instruction_invariant():
     asm_re, sole_instruction = _ASM_RE, _sole_instruction
     checked = 0
     for entry in TABLE.values():
-        for tokens, dtypes, predicated in renderings(entry):
-            opcode, _, source = render_variant(entry, tokens, predicated, dtypes)
+        for tokens, dtypes, predicated, imms in renderings(entry):
+            opcode, _, source = render_variant(entry, tokens, predicated, dtypes, imms)
             asm_blocks = asm_re.findall(source)
             assert len(asm_blocks) == 1, f"{opcode}: {len(asm_blocks)} asm blocks, expected 1"
             instr = sole_instruction(asm_blocks[0])
@@ -780,8 +821,8 @@ def test_ptxd_all_variants_render_unique():
     total = 0
     for entry in TABLE.values():
         assert variants(entry), f"{entry.name}: check() filtered out every combination"
-        for tokens, dtypes, predicated in renderings(entry):
-            opcode, helper, source = render_variant(entry, tokens, predicated, dtypes)
+        for tokens, dtypes, predicated, imms in renderings(entry):
+            opcode, helper, source = render_variant(entry, tokens, predicated, dtypes, imms)
             assert helper not in names, f"helper name collision: {helper}"
             names.add(helper)
             if predicated:  # framework-level @p twin, guarded inside the block
@@ -789,7 +830,7 @@ def test_ptxd_all_variants_render_unique():
             else:
                 assert f'"{opcode} ' in source or f'"{opcode};"' in source
             total += not predicated  # a @p twin is not a separate variant
-    assert total == 31282  # update when the table grows
+    assert total == 31405  # update when the table grows
 
 
 def test_ptxd_stub_up_to_date():

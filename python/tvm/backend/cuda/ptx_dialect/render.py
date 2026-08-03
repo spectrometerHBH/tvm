@@ -23,7 +23,7 @@ inspect without compiling a kernel.
 
 from typing import NamedTuple
 
-from .table import InstructionEntry, canonical_dtypes, mods, operand_space
+from .table import InstructionEntry, canonical_dtypes, imm_slots, mods, operand_space
 
 
 class CBinding(NamedTuple):
@@ -80,7 +80,7 @@ C_BINDING = {
 }
 
 
-def render_variant(entry: InstructionEntry, tokens, predicated=False, dtypes=None):
+def render_variant(entry: InstructionEntry, tokens, predicated=False, dtypes=None, imms=None):
     """Render one variant: ``(opcode, helper_name, helper_source)``.
 
     Every helper is ``void`` and its C parameter list is the PTX operand list
@@ -92,6 +92,11 @@ def render_variant(entry: InstructionEntry, tokens, predicated=False, dtypes=Non
     None means the canonical choice, which is what every non-bit-typed operand
     has anyway. A non-canonical choice appends the dtypes to the helper name, so
     the names a table without bit-typed operands would produce are untouched.
+
+    ``imms`` picks one value per caller-chosen immediate (see
+    ``table.imm_slots``); the value is part of the instruction's identity, so
+    it lands in the asm text and in the helper name, and the helper has no C
+    parameter for it.
 
     ``predicated`` is a framework-level axis (never in the table): the helper
     gains a trailing ``uint32_t __pred`` operand, and the instruction is
@@ -110,7 +115,8 @@ def render_variant(entry: InstructionEntry, tokens, predicated=False, dtypes=Non
     # then names *every* typed operand, positionally, because naming only the
     # ones that changed collides whenever two operands swap which of them is
     # non-canonical (atom's d and b do exactly that).
-    isa_name = [entry.name, *written]  # table name, not mnemonic: see below
+    imm_of = dict(zip(imm_slots(entry), imms or (), strict=True))
+    isa_name = [entry.name, *written, *(imms or ())]  # table name, not mnemonic: see below
     discriminator = (
         [] if tuple(dtypes) == tuple(canonical) else [C_BINDING[d].suffix for d in dtypes]
     )
@@ -132,9 +138,10 @@ def render_variant(entry: InstructionEntry, tokens, predicated=False, dtypes=Non
     for slot in entry.operands:
         pname = f"__{slot.name}"
         if slot.role == "imm":
-            # ISA-fixed immediate: part of the instruction text, not an operand
-            # the caller supplies.
-            ptx_operands.append(slot.literal)
+            # An immediate lives in the instruction text. Either the ISA fixed
+            # its value (`literal`) or the caller chose it from a closed set
+            # (`choices`); neither is a C parameter.
+            ptx_operands.append(slot.literal if slot.choices is None else imm_of[slot])
             continue
         regs = []
         for lane in range(slot.lanes):

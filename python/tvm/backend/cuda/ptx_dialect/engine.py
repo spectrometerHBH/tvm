@@ -43,7 +43,7 @@ from tvm.backend.cuda.op import cuda_cvta_generic_to_shared, cuda_func_call
 from tvm.ir.op import register_op_attr
 from tvm.ir.type import PointerType, PrimType
 from tvm.runtime import const
-from tvm.tirx.expr import BufferLoad, CallEffectKind
+from tvm.tirx.expr import BufferLoad, CallEffectKind, IntImm
 from tvm.tirx.op import call_intrin, reinterpret
 
 from .render import render_variant
@@ -109,19 +109,29 @@ def _make_codegen(entry: InstructionEntry):
     # the entry, so it is resolved once here rather than regrouping the operands
     # on every codegen call. Lanes share a dtype, so one lane speaks for a group.
     typed_at = [i for slot, i, _ in entry.operand_args if slot.role in ("value", "dst")]
+    # Caller-chosen immediates ride the Call as IntImm args but are baked into
+    # the instruction text, so they are read here and NOT forwarded to the
+    # helper (which has no parameter for them).
+    imm_at = [i for slot, i, _ in entry.operand_args if slot.role == "imm"]
+    forwarded_at = [i for i in range(n_operands) if i not in imm_at]
 
     def codegen(*args):
-        tokens = [parse_str(a) for a in args[len(args) - n_slots :]]
-        rest = args[: len(args) - n_slots]  # operands, plus pred when present
-        predicated = len(rest) > n_operands
+        # Layout: [operands..., pred?] [n_slots tokens] [pred marker].
+        predicated = parse_str(args[-1]) == "pred"
+        tokens = [parse_str(a) for a in args[len(args) - n_slots - 1 : -1]]
+        rest = args[: len(args) - n_slots - 1]  # operands, plus pred when present
         # Which dtype each typed operand actually carries. It is already in the
         # Call -- the same channel PTX uses, where a register's type lives in its
         # .reg declaration rather than in the instruction text.
         dtypes = tuple(arg_dtype(rest[i]) for i in typed_at)
-        _, helper, source = render_variant(entry, tokens, predicated, dtypes)
+        imms = tuple(str(int(rest[i])) for i in imm_at)
+        _, helper, source = render_variant(entry, tokens, predicated, dtypes, imms)
         # Every helper is void; a destination is an ordinary argument, printed
         # by the C codegen as the lvalue it binds the reference parameter to.
-        return cuda_func_call(helper, *rest, source_code=source)
+        # A predicate rides after the operands, so everything past n_operands
+        # is forwarded as-is.
+        forwarded = [rest[i] for i in forwarded_at] + list(rest[n_operands:])
+        return cuda_func_call(helper, *forwarded, source_code=source)
 
     return codegen
 
@@ -144,6 +154,8 @@ def _coerce_operand(entry, slot, values, mod_map):
     # T.local_scalar / `x: T.float32` hand back a wrapper around the BufferLoad;
     # unwrap once here so every role sees the node itself.
     values = [getattr(v, "scalar", v) for v in values]
+    if slot.role == "imm":
+        return [_coerce_imm(entry, slot, v) for v in values]
     if slot.role in ("dst", "value"):
         return _coerce_typed(entry, slot, values, mod_map)
     return [_coerce_address(entry, slot, v, mod_map) for v in values]
@@ -239,6 +251,28 @@ def _coerce_address(entry, slot, value, mod_map):
     raise ValueError(f"{entry.name}: operand '{slot.name}' must be a pointer or uint64 handle")
 
 
+def _coerce_imm(entry, slot, value):
+    """A caller-chosen immediate: a compile-time constant from the closed set.
+
+    The value lands in the instruction *text* -- the ISA gives these operands
+    no register form -- so a runtime expression has nothing to lower to and is
+    rejected outright rather than silently materialized.
+    """
+    if isinstance(value, IntImm):
+        value = value.value
+    if not isinstance(value, int) or isinstance(value, bool):
+        raise ValueError(
+            f"{entry.name}: operand '{slot.name}' is an immediate in the instruction "
+            f"text; it needs a compile-time integer constant, got {type(value).__name__}"
+        )
+    if str(value) not in slot.choices:
+        raise ValueError(
+            f"{entry.name}: operand '{slot.name}' must be one of "
+            f"{', '.join(slot.choices)}, got {value}"
+        )
+    return const(value, "int32")
+
+
 def _coerce_pred(entry, pred):
     ty = getattr(pred, "ty", None)
     if isinstance(ty, PrimType) and ty.dtype in ("bool", "uint32", "int32"):
@@ -280,13 +314,19 @@ def _emit(entry, filled, operands, pred=None):
         for slot, i, lanes in entry.operand_args
         for value in _coerce_operand(entry, slot, operands[i : i + lanes], mod_map)
     ]
-    # Call arg layout: [operands..., pred?] [slot tokens ("" = omitted)].
+    # Call arg layout: [operands..., pred?] [slot tokens ("" = omitted)] [marker].
+    # The trailing marker ("pred" or "") states whether a predicate operand is
+    # present. Without it, a printed call would have to be re-parsed by guessing
+    # from the argument count -- and in a family whose syntax lines differ by
+    # one optional operand, a predicated short form is indistinguishable from an
+    # unpredicated long one. The marker makes the round trip exact.
     return call_intrin(
         "",  # every ptxd call is a void statement; destinations are operands
         entry.op_name,
         *coerced,
         *((pred,) if pred is not None else ()),
         *mod_map.values(),
+        "pred" if pred is not None else "",
     )
 
 
@@ -333,24 +373,37 @@ class _InstrChain:
 
     def __call__(self, *args, pred=None):
         # Also accepts the printed round-trip form: trailing modifier-token
-        # strings in slot order ("" = omitted slot) and, for @p calls, the
-        # predicate as the last expression operand.
+        # strings in slot order ("" = omitted slot) followed by the pred
+        # marker, and, when the marker says "pred", the predicate as the last
+        # expression operand. The marker is what makes this exact -- see the
+        # arg-layout note in `_emit`.
         split = len(args)
         while split > 0 and isinstance(args[split - 1], str):
             split -= 1
+        trailing = args[split:]
+        args = args[:split]
+        if trailing:  # printed form: last trailing string is the pred marker
+            *tokens, marker = trailing
+            if marker == "pred" and pred is None and args:
+                args, pred = args[:-1], args[-1]
+        else:
+            tokens = ()
         cands = self._cands
-        for token in args[split:]:
+        for token in tokens:
             if token:
                 cands = _narrow(cands, token)
-        operands = args[:split]
+        operands = args
 
         hits, errors = [], []
+        # `pred` is keyword-only. There used to be a fallback that read one
+        # extra positional argument as the predicate; it made every entry also
+        # accept arity+1 calls, so a no-count and a counted syntax line could
+        # never share a mnemonic (both matched the two-operand call). Nothing
+        # ever passed the predicate positionally, and removing the guess is
+        # what lets optional trailing operands dispatch by arity.
         for entry, filled in cands:
-            ops, p = operands, pred
-            if len(ops) == len(entry.call_slots) + 1 and p is None:
-                ops, p = ops[:-1], ops[-1]
             try:
-                hits.append(_emit(entry, filled, ops, pred=p))
+                hits.append(_emit(entry, filled, operands, pred=pred))
             except ValueError as err:
                 # Keep the exception; a lone candidate re-raises it untouched,
                 # and only the aggregate view needs entry names in front.

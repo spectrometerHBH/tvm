@@ -278,7 +278,7 @@ def test_gemm_tcgen05_cta_group_1(task):
 
         if tid_in_wg == 0:
             Tx.gemm_async(tmem[tuple(r_tmem_C)], A_smem[tuple(r_smem_A)], B_smem[tuple(r_smem_B)], dispatch="tcgen05", mma_m=128, mma_n=64)  # noqa: E501
-            T.ptx.tcgen05.commit(mma_mbar.ptr_to([0]), cta_group=1)
+            T.ptxd.tcgen05.commit.cta_group__1.mbarrier__arrive__one.shared__cluster.b64(mma_mbar.ptr_to([0]))
         T.ptx.mbarrier.try_wait(mma_mbar.ptr_to([0]), 0)
         T.cuda.cta_sync()
 
@@ -393,7 +393,7 @@ def test_gemm_tcgen05_cta_group_1_layout_f_m64():
 
         if tid_in_wg == 0:
             Tx.gemm_async(tmem[0:64, 0:N], A_smem[:, :], B_smem[:, :], dispatch="tcgen05")
-            T.ptx.tcgen05.commit(mma_mbar.ptr_to([0]), cta_group=1)
+            T.ptxd.tcgen05.commit.cta_group__1.mbarrier__arrive__one.shared__cluster.b64(mma_mbar.ptr_to([0]))
         T.ptx.mbarrier.try_wait(mma_mbar.ptr_to([0]), 0)
         T.cuda.cta_sync()
         T.ptxd.tcgen05.fence__after_thread_sync()
@@ -544,7 +544,10 @@ def test_gemm_tcgen05_cta_group_2(task):
             T.cuda.cta_sync()
             if tid_in_wg == 0:
                 Tx.gemm_async(tmem[tuple(r_tmem_C)], A_smem[tuple(r_smem_A)], B_smem[tuple(r_smem_B)], dispatch="tcgen05", cta_group=2, mma_m=256, mma_n=128)  # noqa: E501
-                T.ptx.tcgen05.commit(mma_mbar.ptr_to([0]), cta_group=2, cta_mask=3) # signal cta 1's mbarrier  # noqa: E501
+                T.ptxd[
+                    "tcgen05.commit.cta_group::2.mbarrier::arrive::one"
+                    ".shared::cluster.multicast::cluster.b64"
+                ](mma_mbar.ptr_to([0]), T.uint16(3)) # signal cta 1's mbarrier
         T.ptx.mbarrier.try_wait(mma_mbar.ptr_to([0]), 0) # both cta 0 and cta 1 have done mma
         T.ptxd.tcgen05.fence__after_thread_sync()
         T.cuda.cta_sync()
@@ -683,7 +686,10 @@ def test_gemm_tcgen05_cta_group_2_layout_b():
             T.cuda.cta_sync()
             if tid_in_wg == 0:
                 Tx.gemm_async(tmem[0:M_per_cta, 0:N_logical], A_smem[0:M_per_cta, 0:K], B_smem[0:N_half, 0:K], dispatch="tcgen05", cta_group=2, mma_m=128, mma_n=128)  # noqa: E501
-                T.ptx.tcgen05.commit(mma_mbar.ptr_to([0]), cta_group=2, cta_mask=3)
+                T.ptxd[
+                    "tcgen05.commit.cta_group::2.mbarrier::arrive::one"
+                    ".shared::cluster.multicast::cluster.b64"
+                ](mma_mbar.ptr_to([0]), T.uint16(3))
         T.ptx.mbarrier.try_wait(mma_mbar.ptr_to([0]), 0)
         T.ptxd.tcgen05.fence__after_thread_sync()
         T.cuda.cta_sync()
@@ -811,7 +817,10 @@ def test_gemm_tcgen05_cta_group_2_datapath_b_readback():
                     dispatch="tcgen05",
                     cta_group=2,
                 )
-                T.ptx.tcgen05.commit(mma_mbar.ptr_to([0]), cta_group=2, cta_mask=3)
+                T.ptxd[
+                    "tcgen05.commit.cta_group::2.mbarrier::arrive::one"
+                    ".shared::cluster.multicast::cluster.b64"
+                ](mma_mbar.ptr_to([0]), T.uint16(3))
 
         T.ptx.mbarrier.try_wait(mma_mbar.ptr_to([0]), 0)
         T.ptxd.tcgen05.fence__after_thread_sync()
@@ -1002,7 +1011,7 @@ def test_gemm_block_scaled_fp8_cta_group_1(task):
             T.ptx.tcgen05.cp(SFB_TMEM_START, descSFB[0], shape="32x128b", cta_group=1, multicast="warpx4")  # noqa: E501
 
             Tx.gemm_async(tmem[tuple(r_tmem_C)], A_smem[tuple(r_smem_A)], B_smem[tuple(r_smem_B)], SFA=sfa_tmem[0:M, 0:sf_mma_k], SFB=sfb_tmem[0:N, 0:sf_mma_k], dispatch="tcgen05")  # noqa: E501
-            T.ptx.tcgen05.commit(mma_mbar.ptr_to([0]), cta_group=1)
+            T.ptxd.tcgen05.commit.cta_group__1.mbarrier__arrive__one.shared__cluster.b64(mma_mbar.ptr_to([0]))
         T.ptx.mbarrier.try_wait(mma_mbar.ptr_to([0]), 0)
         T.cuda.cta_sync()
 
@@ -1217,7 +1226,10 @@ def test_gemm_block_scaled_fp8_cta_group_2(task):
             T.cuda.cta_sync()
             if tid_in_wg == 0:
                 Tx.gemm_async(tmem[tuple(r_tmem_C)], A_smem[tuple(r_smem_A)], B_smem[tuple(r_smem_B)], SFA=sfa_tmem[0:128, 0:sf_mma_k], SFB=sfb_tmem[0:128, 0:sf_mma_k], dispatch="tcgen05", cta_group=2)  # noqa: E501
-                T.ptx.tcgen05.commit(mma_mbar.ptr_to([0]), cta_group=2, cta_mask=3)
+                T.ptxd[
+                    "tcgen05.commit.cta_group::2.mbarrier::arrive::one"
+                    ".shared::cluster.multicast::cluster.b64"
+                ](mma_mbar.ptr_to([0]), T.uint16(3))
         T.ptx.mbarrier.try_wait(mma_mbar.ptr_to([0]), 0)
         T.ptxd.tcgen05.fence__after_thread_sync()
         T.cuda.cta_sync()
@@ -1406,7 +1418,7 @@ def test_gemm_block_scaled_nvfp4_cta_group_1():
             T.ptx.tcgen05.cp(SFB_TMEM_START, descSFB[0], shape="32x128b", cta_group=1, multicast="warpx4")  # noqa: E501
 
             Tx.gemm_async(tmem[0:128, 0:N], A_smem[:, :], B_smem[:, :], SFA=sfa_tmem[0:M, 0:sf_mma_k], SFB=sfb_tmem[0:N, 0:sf_mma_k], dispatch="tcgen05")  # noqa: E501
-            T.ptx.tcgen05.commit(mma_mbar.ptr_to([0]), cta_group=1)
+            T.ptxd.tcgen05.commit.cta_group__1.mbarrier__arrive__one.shared__cluster.b64(mma_mbar.ptr_to([0]))
         T.ptx.mbarrier.try_wait(mma_mbar.ptr_to([0]), 0)
         T.cuda.cta_sync()
 
@@ -1605,7 +1617,10 @@ def test_gemm_block_scaled_nvfp4_cta_group_2():
             T.cuda.cta_sync()
             if tid_in_wg == 0:
                 Tx.gemm_async(tmem[0:128, 0:N_total], A_smem[:, :], B_smem[:, :], SFA=sfa_tmem[0:128, 0:sf_mma_k], SFB=sfb_tmem[0:N_total, 0:sf_mma_k], dispatch="tcgen05", cta_group=2)  # noqa: E501
-                T.ptx.tcgen05.commit(mma_mbar.ptr_to([0]), cta_group=2, cta_mask=3)
+                T.ptxd[
+                    "tcgen05.commit.cta_group::2.mbarrier::arrive::one"
+                    ".shared::cluster.multicast::cluster.b64"
+                ](mma_mbar.ptr_to([0]), T.uint16(3))
         T.ptx.mbarrier.try_wait(mma_mbar.ptr_to([0]), 0)
         T.ptxd.tcgen05.fence__after_thread_sync()
         T.cuda.cta_sync()
@@ -1804,7 +1819,7 @@ def test_gemm_block_scaled_fp8_sf_id():
                     # so the schedule knows sf_id should rotate.
             Tx.gemm_async(tmem[0:128, 0:N], A_smem[0:M, 0:K], B_smem[0:N, 0:K], SFA=sfa_tmem[0:M, 0:sf_mma_k * num_ki], SFB=sfb_tmem[0:N, 0:sf_mma_k * num_ki], dispatch="tcgen05")  # noqa: E501
 
-            T.ptx.tcgen05.commit(mma_mbar.ptr_to([0]), cta_group=1)
+            T.ptxd.tcgen05.commit.cta_group__1.mbarrier__arrive__one.shared__cluster.b64(mma_mbar.ptr_to([0]))
         T.ptx.mbarrier.try_wait(mma_mbar.ptr_to([0]), 0)
         T.cuda.cta_sync()
 
@@ -2124,7 +2139,7 @@ def test_gemm_tcgen05_arbitrary_tiles(task):
 
         if tid_in_wg == 0:
             Tx.gemm_async(tmem[tuple(r_tmem_C)], A_smem[tuple(r_smem_A)], B_smem[tuple(r_smem_B)], transA=transA, transB=transB, dispatch="tcgen05", cta_group=cta_group)  # noqa: E501
-            T.ptx.tcgen05.commit(mma_mbar.ptr_to([0]), cta_group=cta_group)
+            T.ptxd[f"tcgen05.commit.cta_group::{cta_group}.mbarrier::arrive::one.shared::cluster.b64"](mma_mbar.ptr_to([0]))
         T.ptx.mbarrier.try_wait(mma_mbar.ptr_to([0]), 0)
         T.cuda.cta_sync()
 
@@ -2437,7 +2452,7 @@ def test_gemm_tcgen05_no_swizzle_col_major_a_ws_local_idesc():
         T.cuda.cta_sync()
         if tid_in_wg == 0:
             Tx.gemm_async(tmem[:, :], A_smem[:, :], B_smem[:, :], transB=True, dispatch="tcgen05", cta_group=1, weight_stationary=True)  # noqa: E501
-            T.ptx.tcgen05.commit(mma_mbar.ptr_to([0]), cta_group=1)
+            T.ptxd.tcgen05.commit.cta_group__1.mbarrier__arrive__one.shared__cluster.b64(mma_mbar.ptr_to([0]))
         T.ptx.mbarrier.try_wait(mma_mbar.ptr_to([0]), 0)
         T.cuda.cta_sync()
         T.ptxd.tcgen05.fence__after_thread_sync()
@@ -2537,7 +2552,7 @@ def test_gemm_tcgen05_contiguous_kslice_partial_k(k_lo, k_hi):
         if tid_in_wg == 0:
             # Contiguous-axis K slice [k_lo:k_hi] -> must accumulate only that K range.
             Tx.gemm_async(tmem[0:128, 0:N], A_smem[0:M, k_lo:k_hi], B_smem[0:N, k_lo:k_hi], dispatch="tcgen05")  # noqa: E501
-            T.ptx.tcgen05.commit(mma_mbar.ptr_to([0]), cta_group=1)
+            T.ptxd.tcgen05.commit.cta_group__1.mbarrier__arrive__one.shared__cluster.b64(mma_mbar.ptr_to([0]))
         T.ptx.mbarrier.try_wait(mma_mbar.ptr_to([0]), 0)
         T.cuda.cta_sync()
         T.ptxd.tcgen05.fence__after_thread_sync()
@@ -2633,7 +2648,9 @@ def _run_dense_gemm(
         T.cuda.cta_sync()
         if tid_in_wg == 0:
             Tx.gemm_async(tmem[:, :], A_smem[:, :], B_smem[:, :], **gemm_kw)
-            T.ptx.tcgen05.commit(mma_mbar.ptr_to([0]), cta_group=1)
+            T.ptxd.tcgen05.commit.cta_group__1.mbarrier__arrive__one.shared__cluster.b64(
+                mma_mbar.ptr_to([0])
+            )
         T.ptx.mbarrier.try_wait(mma_mbar.ptr_to([0]), 0)
         T.cuda.cta_sync()
         T.ptxd.tcgen05.fence__after_thread_sync()
@@ -2755,7 +2772,9 @@ def _run_dense_gemm(
         T.cuda.cta_sync()
         if tid_in_wg == 0:
             Tx.gemm_async(tmem[:, :], A_smem[:, :], B_smem[:, :], **gemm_kw)
-            T.ptx.tcgen05.commit(mma_mbar.ptr_to([0]), cta_group=1)
+            T.ptxd.tcgen05.commit.cta_group__1.mbarrier__arrive__one.shared__cluster.b64(
+                mma_mbar.ptr_to([0])
+            )
         T.ptx.mbarrier.try_wait(mma_mbar.ptr_to([0]), 0)
         T.cuda.cta_sync()
         T.ptxd.tcgen05.fence__after_thread_sync()
@@ -2860,7 +2879,7 @@ def _build_smem_desc_kernel(smem_desc, weight_stationary=False, pass_descI=False
                 Tx.gemm_async(tmem[tuple(r_tmem_C)], A_smem[tuple(r_smem_A)], B_smem[tuple(r_smem_B)], dispatch="tcgen05", smem_desc=smem_desc, weight_stationary=weight_stationary, descI=desc_i, **mma_cfg)  # noqa: E501, F821
             else:
                 Tx.gemm_async(tmem[tuple(r_tmem_C)], A_smem[tuple(r_smem_A)], B_smem[tuple(r_smem_B)], dispatch="tcgen05", smem_desc=smem_desc, weight_stationary=weight_stationary, **mma_cfg)  # noqa: E501
-            T.ptx.tcgen05.commit(mma_mbar.ptr_to([0]), cta_group=1)
+            T.ptxd.tcgen05.commit.cta_group__1.mbarrier__arrive__one.shared__cluster.b64(mma_mbar.ptr_to([0]))
         T.ptx.mbarrier.try_wait(mma_mbar.ptr_to([0]), 0)
         T.cuda.cta_sync()
         T.ptxd.tcgen05.fence__after_thread_sync()

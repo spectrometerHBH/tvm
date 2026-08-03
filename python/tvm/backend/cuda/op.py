@@ -893,35 +893,6 @@ def ptx_cp_async_legacy(*all_args):
     return ptx_cp_async(dst_ptr, src_ptr, cp_size)
 
 
-def ptx_cp_async_commit_group():
-    """TVM intrinsic for ptx async copy commit
-    https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#data-movement-and-conversion-instructions-cp-async-commit-group
-
-    Returns
-    -------
-    call : Expr
-        The call expression.
-    """
-    return call_intrin("", "tirx.ptx.cp_async_commit_group")
-
-
-def ptx_cp_async_wait_group(num=0):
-    """TVM intrinsic for ptx async copy wait
-    https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#data-movement-and-conversion-instructions-cp-async-wait-group
-
-    Parameters
-    ----------
-    num : int, optional
-        The number of the most recent uncommitted pending cp.async groups to wait.
-
-    Returns
-    -------
-    call : Expr
-        The call expression.
-    """
-    return call_intrin("", "tirx.ptx.cp_async_wait_group", num)
-
-
 _CP_ASYNC_BULK_TENSOR_LOAD_MODE = ("tile", "tile_gather4")
 
 
@@ -1272,25 +1243,6 @@ def ptx_cp_async_bulk_tensor_shared_to_global_reduce(
         red_op,
         *coords,
     )
-
-
-def ptx_cp_async_bulk_wait_group(n=0, read=True):
-    """TVM intrinsic to call cp.async.bulk.tensor.wait_group
-
-    Parameters
-    ----------
-    n : int
-        The number of the most recent uncommitted pending cp.async groups to wait.
-
-    read : bool
-        Whether the wait is for read.
-
-    Returns
-    -------
-    call : Expr
-        The call expression.
-    """
-    return call_intrin("", "tirx.ptx.cp_async_bulk_wait_group", n, read)
 
 
 def ptx_clc_query_cancel(handle, *, use_ld_acquire=True):
@@ -1964,36 +1916,6 @@ def ptx_wgmma_mma_async_rs(
     )
 
 
-def ptx_wgmma_wait_group(n):
-    """TVM intrinsic to call wgmma.wait_group.sync.aligned
-
-    Parameters
-    ----------
-    n : int
-        The number of the most recent uncommitted pending wgmma groups to wait.
-
-    Returns
-    -------
-    call : Expr
-        The call expression.
-    """
-    return call_intrin("", "tirx.ptx.wgmma_wait_group", n)
-
-
-def ptx_setmaxnreg(inc: bool, reg_count):
-    """TVM intrinsic to call setmaxnreg.action.sync.aligned.u32 imm-reg-count
-
-    Parameters
-    ----------
-    inc : bool
-        True to increase the register count, False to decrease.
-
-    reg_count : int
-        The register count.
-    """
-    return call_intrin("", "tirx.ptx.setmaxnreg", inc, reg_count)
-
-
 def ptx_tcgen05_encode_matrix_descriptor(desc, addr, ldo, sdo, swizzle):
     """TVM intrinsic to create memory descriptor for tcgen05 instructions
 
@@ -2573,38 +2495,6 @@ def ptx_tcgen05_st(dst_addr, *regs, shape, num, row=0, col=0, unpack=False):
     """
     _choice("shape", shape, _TCGEN05_LDST_SHAPES)
     return call_intrin("", "tirx.ptx.tcgen05_st", dst_addr, row, col, shape, num, unpack, *regs)
-
-
-def ptx_tcgen05_commit(bar, cta_group=1, cta_mask=0, *, pred=None):
-    """TVM intrinsic to call tcgen05.commit.cta_group
-
-    Parameters
-    ----------
-    bar : Expr
-        The pointer to mbarrier variable.
-
-    cta_group: int
-        The number of CTA groups involved in previous tcgen05 operations.
-
-    cta_mask : int
-        The mask of the CTAs in the cluster, used for multicast.
-
-    pred : Optional[Expr]
-        Runtime ``uint32`` predicate. When given, emit
-        ``@p tcgen05.commit...`` with ``p = (pred != 0)``. This preserves
-        PTX-level instruction predicate semantics (single predicated
-        instruction in SASS), distinct from a C-level ``if`` branch.
-
-    Returns
-    -------
-    call : Expr
-        The call expression.
-    """
-    _choice("cta_group", cta_group, _TCGEN05_CTA_GROUP)
-    args = [bar, cta_group, cta_mask]
-    if pred is not None:
-        args.append(pred)
-    return call_intrin("", "tirx.ptx.tcgen05_commit", *args)
 
 
 def timer_init_cuda(profiler_buffer, profiler_tag, profiler_write_offset, num_groups, group_id):

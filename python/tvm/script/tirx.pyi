@@ -85,8 +85,8 @@ class _Chain_atom:
     def __call__(self, d: Any, addr: Any, value: Any, *args: Any) -> None: ...
 
 class _Chain_bar:
-    """`bar` — 2 entries sharing this mnemonic; PTX puts their difference in the operand list,
-    so the call selects one. Shapes: (a, b)
+    """`bar` — 3 entries sharing this mnemonic; PTX puts their difference in the operand list,
+    so the call selects one. Shapes: (a); (a, b)
     """
 
     arrive: _Chain_bar
@@ -95,8 +95,8 @@ class _Chain_bar:
     def __call__(self, *args: Any, pred: Any = None) -> None: ...
 
 class _Chain_barrier:
-    """`barrier` — 4 entries sharing this mnemonic; PTX puts their difference in the operand
-    list, so the call selects one. Shapes: (a, b); ()
+    """`barrier` — 5 entries sharing this mnemonic; PTX puts their difference in the operand
+    list, so the call selects one. Shapes: (a); (a, b); ()
     """
 
     acquire: _Chain_barrier
@@ -125,8 +125,8 @@ class _Chain_clusterlaunchcontrol:
     def __call__(self, addr: Any, mbar: Any, *args: Any, pred: Any = None) -> None: ...
 
 class _Chain_cp:
-    """`cp` — 3 entries sharing this mnemonic; PTX puts their difference in the operand list,
-    so the call selects one. Shapes: (dst, src, size, mbar); (addr); ()
+    """`cp` — 6 entries sharing this mnemonic; PTX puts their difference in the operand list,
+    so the call selects one. Shapes: (dst, src, size, mbar); (addr); (); (group)
     """
 
     arrive: _Chain_cp
@@ -138,8 +138,10 @@ class _Chain_cp:
     mbarrier: _Chain_cp
     mbarrier__complete_tx__bytes: _Chain_cp
     noinc: _Chain_cp
+    read: _Chain_cp
     shared: _Chain_cp
     shared__cta: _Chain_cp
+    wait_group: _Chain_cp
     def __call__(self, *args: Any, pred: Any = None) -> None: ...
 
 class _Chain_cvta:
@@ -306,7 +308,7 @@ class _Chain_max:
     def __call__(self, *args: Any) -> None: ...
 
 class _Chain_mbarrier:
-    """`mbarrier` — 6 entries sharing this mnemonic; PTX puts their difference in the operand
+    """`mbarrier` — 7 entries sharing this mnemonic; PTX puts their difference in the operand
     list, so the call selects one. Shapes: (addr, count); (addr); (addr, tx_count)
     """
 
@@ -456,6 +458,16 @@ class _Chain_red:
     xor: _Chain_red
     def __call__(self, addr: Any, value: Any, *args: Any, pred: Any = None) -> None: ...
 
+class _Chain_setmaxnreg:
+    """`setmaxnreg` — action∈{inc,dec}; sync∈{sync}; aligned∈{aligned}; type∈{u32}"""
+
+    aligned: _Chain_setmaxnreg
+    dec: _Chain_setmaxnreg
+    inc: _Chain_setmaxnreg
+    sync: _Chain_setmaxnreg
+    u32: _Chain_setmaxnreg
+    def __call__(self, nreg: Any, *args: Any, pred: Any = None) -> None: ...
+
 class _Chain_st:
     """`st` — mmio∈{mmio} (opt); sem∈{weak,release,relaxed,volatile} (opt);
     scope∈{cta,cluster,gpu,sys} (opt);
@@ -533,8 +545,9 @@ class _Chain_sub:
     def __call__(self, d: Any, a: Any, b: Any, *args: Any) -> None: ...
 
 class _Chain_tcgen05:
-    """`tcgen05` — 6 entries sharing this mnemonic; PTX puts their difference in the operand
-    list, so the call selects one. Shapes: (dst, ncols); (taddr, ncols); (); (mbar)
+    """`tcgen05` — 7 entries sharing this mnemonic; PTX puts their difference in the operand
+    list, so the call selects one. Shapes: (dst, ncols); (taddr, ncols); (); (mbar); (mbar,
+    mask)
     """
 
     aligned: _Chain_tcgen05
@@ -548,6 +561,7 @@ class _Chain_tcgen05:
     fence__after_thread_sync: _Chain_tcgen05
     fence__before_thread_sync: _Chain_tcgen05
     mbarrier__arrive__one: _Chain_tcgen05
+    multicast__cluster: _Chain_tcgen05
     relinquish_alloc_permit: _Chain_tcgen05
     shared__cluster: _Chain_tcgen05
     shared__cta: _Chain_tcgen05
@@ -557,14 +571,15 @@ class _Chain_tcgen05:
     def __call__(self, *args: Any, pred: Any = None) -> None: ...
 
 class _Chain_wgmma:
-    """`wgmma` — 2 entries sharing this mnemonic; PTX puts their difference in the operand
-    list, so the call selects one. Shapes: ()
+    """`wgmma` — 3 entries sharing this mnemonic; PTX puts their difference in the operand
+    list, so the call selects one. Shapes: (group); ()
     """
 
     aligned: _Chain_wgmma
     commit_group: _Chain_wgmma
     fence: _Chain_wgmma
     sync: _Chain_wgmma
+    wait_group: _Chain_wgmma
     def __call__(self, *args: Any, pred: Any = None) -> None: ...
 
 class _PTXD:
@@ -590,6 +605,7 @@ class _PTXD:
     prefetch: _Chain_prefetch
     rcp: _Chain_rcp
     red: _Chain_red
+    setmaxnreg: _Chain_setmaxnreg
     st: _Chain_st
     st_bulk: _Chain_st_bulk
     sub: _Chain_sub

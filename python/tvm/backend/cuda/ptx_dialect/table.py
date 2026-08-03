@@ -140,9 +140,13 @@ class OperandSlot:
       - ``"ptr"``   raw pointer value, rendered ``%k`` (e.g. ``cvta`` input).
       - ``"value"`` register operand typed by ``dtype`` (fixed per operand)
         or else the entry's ``type`` modifier slot.
-      - ``"imm"``   an operand the ISA fixes to a single value (st.bulk's
-        initval "must be zero"). Rendered straight into the asm text; it
-        takes no C parameter and no call argument.
+      - ``"imm"``   an operand that lives in the instruction *text*, not in a
+        register. With ``literal`` the ISA fixes its value (st.bulk's initval
+        "must be zero"): no C parameter, no call argument. With ``choices``
+        the caller picks the value -- a compile-time constant, validated
+        against the closed set at trace time and baked into the text, with
+        one helper generated per value (the way `cp.async.wait_group N` or
+        `setmaxnreg`'s nreg exist only as integer literals in the ISA).
       - ``"dst"``   a destination the instruction writes, typed like
         ``"value"``. The helper takes it as a C++ reference and the caller
         passes a writable lvalue (a scalar or a buffer element), mirroring
@@ -157,7 +161,8 @@ class OperandSlot:
     role: str
     space: str | None = None
     dtype: str | None = None
-    literal: str | None = None  # role="imm" only
+    literal: str | None = None  # role="imm": ISA-fixed value
+    choices: tuple[str, ...] | None = None  # role="imm": caller-chosen value
     # A PTX register group: `{%k, %k+1, ...}`. The operand takes `lanes` call
     # arguments and renders as one brace-enclosed vector expression. 1 = a plain
     # scalar operand, which is every operand of every other family.
@@ -224,10 +229,16 @@ class InstructionEntry:
     def call_slots(self) -> tuple[OperandSlot, ...]:
         """The operand slot behind each call argument, in order.
 
-        ISA-fixed immediates take no argument; a register group (``lanes`` > 1)
-        takes one argument per lane, mirroring PTX's ``{%k, %k+1, ...}``.
+        ISA-fixed immediates take no argument; a caller-chosen immediate
+        (``choices``) takes one; a register group (``lanes`` > 1) takes one
+        argument per lane, mirroring PTX's ``{%k, %k+1, ...}``.
         """
-        return tuple(s for s in self.operands if s.role != "imm" for _ in range(s.lanes))
+        return tuple(
+            s
+            for s in self.operands
+            if s.role != "imm" or s.choices is not None
+            for _ in range(s.lanes)
+        )
 
     @functools.cached_property
     def typed_operands(self) -> tuple[OperandSlot, ...]:
@@ -244,7 +255,7 @@ class InstructionEntry:
         """
         rows, i = [], 0
         for slot in self.operands:
-            if slot.role == "imm":
+            if slot.role == "imm" and slot.choices is None:
                 continue
             rows.append((slot, i, slot.lanes))
             i += slot.lanes
@@ -354,14 +365,28 @@ def dtype_combos(entry: InstructionEntry, tokens) -> tuple[tuple[str, ...], ...]
 def renderings(entry: InstructionEntry):
     """Every ``(tokens, dtypes, predicated)`` this entry renders to.
 
-    The product of the three independent axes -- modifiers, operand dtypes,
-    predication. Defined once so a fourth axis lands in one place instead of in
-    every consumer (the certification tiers, the helper dump, the stub writer).
+    The product of the four independent axes -- modifiers, operand dtypes,
+    caller immediates, predication. Defined once so a new axis lands in one
+    place instead of in every consumer (the certification tiers, the helper
+    dump, the stub writer).
     """
     for tokens in variants(entry):
         for dtypes in dtype_combos(entry, tokens):
-            for predicated in pred_forms(entry):
-                yield tokens, dtypes, predicated
+            for imms in imm_combos(entry):
+                for predicated in pred_forms(entry):
+                    yield tokens, dtypes, predicated, imms
+
+
+def imm_slots(entry: InstructionEntry) -> tuple[OperandSlot, ...]:
+    """The caller-chosen immediates, in operand order; an imm tuple aligns with these."""
+    return tuple(s for s in entry.operands if s.role == "imm" and s.choices is not None)
+
+
+def imm_combos(entry: InstructionEntry) -> tuple[tuple[str, ...], ...]:
+    """Every caller-immediate assignment. The domains are closed on purpose:
+    that is what makes each generated helper certifiable."""
+    axes = [s.choices for s in imm_slots(entry)]
+    return tuple(itertools.product(*axes)) if axes else ((),)
 
 
 def pred_forms(entry: InstructionEntry) -> tuple[bool, ...]:
@@ -1231,16 +1256,27 @@ _ENTRIES = [
     #   barrier{.cta}.sync{.aligned}   a{, b};    bar{.cta}.sync   a{, b};
     #   barrier{.cta}.arrive{.aligned} a,  b;     bar{.cta}.arrive a,  b;
     #
-    # NOT REGISTERED, and both for mechanism reasons rather than ISA ones:
-    #
-    # - The no-count lines `bar{.cta}.sync a;` / `barrier{.cta}.sync{.aligned} a;`.
-    #   A one-operand entry and the two-operand one cannot coexist under a
-    #   shared mnemonic: the framework's positional `pred` form lets the
-    #   one-operand entry also accept a two-operand call (it reads the count as
-    #   the predicate), and both then match. Every call site in this workspace
-    #   passes the count, so only the two-operand line is registered.
-    # - The `.red.popc` / `.red.op` lines, which take a `{!}c` predicate source
-    #   and produce a `.pred` result.
+    # The optional thread count is its own syntax line, so `sync` is two
+    # entries sharing a mnemonic, told apart by arity (as `mov`'s shapes are;
+    # `pred` is keyword-only, so arity is unambiguous).
+    # NOT REGISTERED: the `.red.popc` / `.red.op` lines, which take a `{!}c`
+    # predicate source and produce a `.pred` result.
+    *[
+        InstructionEntry(  # bar{.cta}.sync a;  /  barrier{.cta}.sync{.aligned} a;
+            name=f"{mnem}_sync",
+            mnemonic=mnem,
+            slots=(
+                ModifierSlot("cta", ("cta",), optional=True),
+                ModifierSlot("action", ("sync",)),
+            )
+            + (
+                (ModifierSlot("aligned", ("aligned",), optional=True),) if mnem == "barrier" else ()
+            ),
+            orders_memory=True,
+            operands=(OperandSlot("a", role="value", dtype="u32"),),
+        )
+        for mnem in ("bar", "barrier")
+    ],
     InstructionEntry(
         name="bar_sync_count",
         mnemonic="bar",
@@ -1329,10 +1365,6 @@ _ENTRIES = [
     #   the state space starts with "shared". A tmem address is neither shared
     #   nor generic, and labelling it shared to get the right carrier would be
     #   a lie in the table; it needs a tmem address space first.
-    # - `tcgen05.commit`'s `{.multicast}{, ctaMask}` form: the optional trailing
-    #   operand would make a one-operand entry and a two-operand entry both
-    #   accept a two-operand call, because the framework's positional `pred`
-    #   consumes the difference (same collision as `bar.sync`).
     # - `tcgen05.ld` / `.st` / `.mma` / `.cp`, which need register groups whose
     #   length is a function of the modifiers.
     InstructionEntry(  # tcgen05.alloc.cta_group.sync.aligned{.shared::cta}.b32 [dst], nCols;
@@ -1419,12 +1451,37 @@ _ENTRIES = [
         orders_memory=True,
         operands=(OperandSlot("mbar", role="addr", space="shared::cluster"),),
     ),
+    # tcgen05.commit...{.shared::cluster}.multicast::cluster.b64 [mbar], ctaMask;
+    # The multicast form: `pred` is keyword-only, so the trailing mask
+    # dispatches by arity against the unicast entry. The mask is `.b16`
+    # (the legacy helper bound it "h").
+    InstructionEntry(
+        name="tcgen05_commit_multicast",
+        mnemonic="tcgen05",
+        slots=(
+            ModifierSlot("action", ("commit",)),
+            ModifierSlot("cta_group", ("cta_group::1", "cta_group::2")),
+            ModifierSlot("completion", ("mbarrier::arrive::one",)),
+            ModifierSlot("space", ("shared::cluster",), optional=True),
+            ModifierSlot("multicast", ("multicast::cluster",)),
+            ModifierSlot("type", ("b64",)),
+        ),
+        cert_arch="sm_100a",
+        orders_memory=True,
+        operands=(
+            OperandSlot("mbar", role="addr", space="shared::cluster"),
+            OperandSlot("mask", role="value", dtype="u16"),
+        ),
+    ),
     # cp.async completion tracking, per PTX ISA 9.7.9.13 / 9.7.9.15.
     #
-    # NOT REGISTERED: `cp.async.bulk.wait_group N` and the `cp.async` ca/cg
-    # lines -- the wait takes a caller-chosen integer that lands in the
-    # instruction text rather than in a register, and the ca/cg lines carry an
-    # optional ignore-src operand.
+    # The wait_group counts are caller-chosen immediates: the ISA gives N no
+    # register form, so each value is its own helper, and the closed `choices`
+    # set is what makes every one of them certifiable. 0..7 covers every call
+    # site (pipeline depths); widen the tuple if a deeper pipeline appears.
+    #
+    # NOT REGISTERED: the `cp.async` ca/cg copy lines, which carry an optional
+    # ignore-src operand.
     InstructionEntry(  # cp.async.mbarrier.arrive{.noinc}{.shared{::cta}}.b64 [addr];
         name="cp_async_mbarrier_arrive",
         mnemonic="cp",
@@ -1437,6 +1494,59 @@ _ENTRIES = [
             ModifierSlot("type", ("b64",)),
         ),
         operands=(OperandSlot("addr", role="addr", space="shared::cta"),),
+    ),
+    InstructionEntry(  # cp.async.commit_group;
+        name="cp_async_commit_group",
+        mnemonic="cp",
+        slots=(
+            ModifierSlot("api", ("async",)),
+            ModifierSlot("action", ("commit_group",)),
+        ),
+        operands=(),
+    ),
+    *[
+        InstructionEntry(  # cp.async{.bulk}.wait_group{.read} N;
+            name=f"cp_async{'_bulk' if bulk else ''}_wait_group",
+            mnemonic="cp",
+            slots=(
+                ModifierSlot("api", ("async",)),
+                *((ModifierSlot("kind", ("bulk",)),) if bulk else ()),
+                ModifierSlot("action", ("wait_group",)),
+                *((ModifierSlot("read", ("read",), optional=True),) if bulk else ()),
+            ),
+            orders_memory=True,
+            operands=(OperandSlot("group", role="imm", choices=tuple(str(n) for n in range(8))),),
+        )
+        for bulk in (False, True)
+    ],
+    # setmaxnreg per PTX ISA 9.7.17.2: the register count is an immediate the
+    # ISA bounds to [24, 256] in steps of 8 -- exactly a closed choices set.
+    InstructionEntry(
+        name="setmaxnreg",
+        slots=(
+            ModifierSlot("action", ("inc", "dec")),
+            ModifierSlot("sync", ("sync",)),
+            ModifierSlot("aligned", ("aligned",)),
+            ModifierSlot("type", ("u32",)),
+        ),
+        cert_arch="sm_90a",
+        orders_memory=True,
+        operands=(
+            OperandSlot("nreg", role="imm", choices=tuple(str(n) for n in range(24, 257, 8))),
+        ),
+    ),
+    # wgmma.wait_group per PTX ISA 9.7.15.4, same caller-immediate shape.
+    InstructionEntry(
+        name="wgmma_wait_group",
+        mnemonic="wgmma",
+        slots=(
+            ModifierSlot("action", ("wait_group",)),
+            ModifierSlot("sync", ("sync",)),
+            ModifierSlot("aligned", ("aligned",)),
+        ),
+        cert_arch="sm_90a",
+        orders_memory=True,
+        operands=(OperandSlot("group", role="imm", choices=tuple(str(n) for n in range(8))),),
     ),
     InstructionEntry(  # cp.async.bulk.commit_group;
         name="cp_async_bulk_commit_group",
@@ -1459,11 +1569,6 @@ _ENTRIES = [
     # NOT REGISTERED:
     # - the `state, [addr]` forms: the destination is the barrier's pre-arrival
     #   state, which nothing reads today.
-    # - the no-count arrive line. A one-operand and a two-operand entry cannot
-    #   share a mnemonic here, because the framework's positional `pred` lets
-    #   the one-operand entry swallow a count as the predicate (the collision
-    #   `bar.sync` hit). The ISA defines the omitted count as 1, so call sites
-    #   pass it explicitly.
     # - `mbarrier.arrive.noComplete`, which has no sink form at all.
     # - the try_wait / test_wait lines: they produce a `.pred` result.
     #
@@ -1494,6 +1599,24 @@ _ENTRIES = [
             ModifierSlot("type", ("b64",)),
         ),
         operands=(OperandSlot("addr", role="addr"),),
+    ),
+    InstructionEntry(  # mbarrier.arrive{.sem.scope}{.space}.b64 _, [addr];
+        # The `{, count}` optionality is one ISA line; here it is two entries
+        # told apart by arity, and the ISA defines the omitted count as 1.
+        name="mbarrier_arrive_nocount",
+        mnemonic="mbarrier",
+        slots=(
+            ModifierSlot("action", ("arrive",)),
+            ModifierSlot("sem", ("release", "relaxed"), optional=True),
+            ModifierSlot("scope", ("cta", "cluster"), optional=True),
+            ModifierSlot("space", ("shared", "shared::cta", "shared::cluster"), optional=True),
+            ModifierSlot("type", ("b64",)),
+        ),
+        check=_check_mbarrier_sem_scope,
+        operands=(
+            OperandSlot("state", role="imm", literal="_"),
+            OperandSlot("addr", role="addr"),
+        ),
     ),
     InstructionEntry(  # mbarrier.arrive{.sem.scope}{.space}.b64 _, [addr], count;
         name="mbarrier_arrive",
