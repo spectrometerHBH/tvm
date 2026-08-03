@@ -154,8 +154,6 @@ class WgmmaNamespace:
     """The WGMMA instruction submodule."""
 
     def __init__(self):
-        self.fence: Callable[..., Any] = _op_wrapper(_cuda_op.ptx_wgmma_fence)
-        self.commit_group = _op_wrapper(_cuda_op.ptx_wgmma_commit_group)
         self.wait_group = _op_wrapper(_cuda_op.ptx_wgmma_wait_group)
         self.noop_barrier = _op_wrapper(_cuda_op.ptx_wgmma_noop_barrier)
         self.mma_async = WgmmaMmaAsyncNamespace()

@@ -34,16 +34,6 @@ from .utils import parse_str
 # wgmma.fence / commit_group / wait_group — one PTX form each.
 # =============================================================================
 device_intrinsic(
-    "ptx_wgmma_fence",
-    helper_name="ptx_wgmma_fence",
-    body='    asm volatile("wgmma.fence.sync.aligned;" ::: "memory");',
-)
-device_intrinsic(
-    "ptx_wgmma_commit_group",
-    helper_name="ptx_wgmma_commit_group",
-    body='    asm volatile("wgmma.commit_group.sync.aligned;" ::: "memory");',
-)
-device_intrinsic(
     "ptx_wgmma_wait_group",
     n_attrs=1,
     helper_name=lambda n: f"ptx_wgmma_wait_group_{int(n)}",

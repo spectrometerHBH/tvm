@@ -1018,10 +1018,10 @@ def test_wgmma_ss_nt():
                     # do wgmma
             T.ptx.wgmma.encode_matrix_descriptor(T.address_of(descA), A_smem.data, *A_encode_args)  # noqa: F821
             T.ptx.wgmma.encode_matrix_descriptor(T.address_of(descB), B_smem.data, *B_encode_args)  # noqa: F821
-            T.ptx.wgmma.fence()
+            T.ptxd.wgmma.fence.sync.aligned()
             T.ptx.wgmma.mma_async.ss(descA, descB, *get_accum_list(C_local, C_elems),  # noqa: F821
                                      M=M, N=N, K=K, in_dtype=in_dtype, out_dtype=out_dtype, transA=transA, transB=transB, scaleA=1.0, scaleB=1.0, scaleD=False)  # noqa: E501
-            T.ptx.wgmma.commit_group()
+            T.ptxd.wgmma.commit_group.sync.aligned()
             T.ptx.wgmma.wait_group(0)
 
             for i in T.serial(0, C_elems):
@@ -1179,10 +1179,10 @@ def test_wgmma_rs_nt():
                 T.ptx.wgmma.noop_barrier(C_local[i])
                     # do wgmma
             T.ptx.wgmma.encode_matrix_descriptor(T.address_of(descB), B_smem.data, *B_encode_args)  # noqa: F821
-            T.ptx.wgmma.fence()
+            T.ptxd.wgmma.fence.sync.aligned()
             T.ptx.wgmma.mma_async.rs(descB, *(get_A_list(A_local_b32, A_elems_b32) + get_accum_list(C_local, C_elems)),  # noqa: E501, F821
                                      M=M, N=N, K=K, in_dtype=in_dtype, out_dtype=out_dtype, transA=transA, transB=transB, scaleA=1.0, scaleB=1.0, scaleD=False)  # noqa: E501
-            T.ptx.wgmma.commit_group()
+            T.ptxd.wgmma.commit_group.sync.aligned()
             T.ptx.wgmma.wait_group(0)
 
                     # fence A_local

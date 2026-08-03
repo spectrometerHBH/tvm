@@ -1549,6 +1549,26 @@ _ENTRIES = [
         )
         for act in ("expect_tx", "complete_tx")
     ],
+    # wgmma group synchronisation, per PTX ISA 9.7.15.4.
+    #
+    # NOT REGISTERED: `wgmma.wait_group.sync.aligned N`, whose group count lands
+    # in the instruction text rather than a register, and the `wgmma.mma_async`
+    # lines, whose accumulator is a register group up to 128 wide.
+    *[
+        InstructionEntry(
+            name=f"wgmma_{act}",
+            mnemonic="wgmma",
+            slots=(
+                ModifierSlot("action", (act,)),
+                ModifierSlot("sync", ("sync",)),
+                ModifierSlot("aligned", ("aligned",)),
+            ),
+            cert_arch="sm_90a",
+            orders_memory=True,
+            operands=(),
+        )
+        for act in ("fence", "commit_group")
+    ],
 ]
 
 TABLE: dict[str, InstructionEntry] = {e.name: e for e in _ENTRIES}

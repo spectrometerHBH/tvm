@@ -1964,28 +1964,6 @@ def ptx_wgmma_mma_async_rs(
     )
 
 
-def ptx_wgmma_fence():
-    """TVM intrinsic to call wgmma.fence.sync.aligned
-
-    Returns
-    -------
-    call : Expr
-        The call expression.
-    """
-    return call_intrin("", "tirx.ptx.wgmma_fence")
-
-
-def ptx_wgmma_commit_group():
-    """TVM intrinsic to call wgmma.commit_group.sync.aligned
-
-    Returns
-    -------
-    call : Expr
-        The call expression.
-    """
-    return call_intrin("", "tirx.ptx.wgmma_commit_group")
-
-
 def ptx_wgmma_wait_group(n):
     """TVM intrinsic to call wgmma.wait_group.sync.aligned
 

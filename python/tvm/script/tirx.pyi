@@ -556,6 +556,17 @@ class _Chain_tcgen05:
     wait__st: _Chain_tcgen05
     def __call__(self, *args: Any, pred: Any = None) -> None: ...
 
+class _Chain_wgmma:
+    """`wgmma` — 2 entries sharing this mnemonic; PTX puts their difference in the operand
+    list, so the call selects one. Shapes: ()
+    """
+
+    aligned: _Chain_wgmma
+    commit_group: _Chain_wgmma
+    fence: _Chain_wgmma
+    sync: _Chain_wgmma
+    def __call__(self, *args: Any, pred: Any = None) -> None: ...
+
 class _PTXD:
     add: _Chain_add
     atom: _Chain_atom
@@ -583,6 +594,7 @@ class _PTXD:
     st_bulk: _Chain_st_bulk
     sub: _Chain_sub
     tcgen05: _Chain_tcgen05
+    wgmma: _Chain_wgmma
     def __getitem__(self, text: str) -> Any: ...
 
 ptxd: _PTXD

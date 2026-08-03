@@ -36,11 +36,6 @@ def test_printer_cuda_namespace_printf():
     _assert_print(node, 'T.cuda.printf("x=%d", 1)')
 
 
-def test_printer_ptx_namespace_wgmma_commit_group():
-    node = tir.Evaluate(cuda_op.ptx_wgmma_commit_group())
-    _assert_print(node, "T.ptx.wgmma.commit_group()")
-
-
 def test_printer_cuda_cluster_sync():
     node = tir.Evaluate(cuda_op.cuda_cluster_sync())
     _assert_print(node, "T.cuda.cluster_sync()")
