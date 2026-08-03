@@ -312,26 +312,51 @@ class _Chain_red:
     def __call__(self, addr: Any, value: Any, *args: Any, pred: Any = None) -> None: ...
 
 class _Chain_st:
-    """`st` — sem∈{weak,release,relaxed,volatile} (opt); scope∈{cta,gpu,sys} (opt);
-    space∈{global,shared::cta}; type∈{b32,b64,u32,u64,s32,f32} — release/relaxed require a
-    scope; weak/volatile take none; shared::cta caps scope at cta.
+    """`st` — mmio∈{mmio} (opt); sem∈{weak,release,relaxed,volatile} (opt);
+    scope∈{cta,cluster,gpu,sys} (opt);
+    space∈{global,shared,shared::cta,shared::cluster,local} (opt); cop∈{wb,cg,cs,wt} (opt);
+    l1ev∈{L1::evict_normal,L1::evict_unchanged,L1::evict_first,L1::evict_last,L1::no_allocat
+    e} (opt); type∈{b8,u8,s8,b16,u16,s16,b32,u32,s32,b64,u64,s64,f32,f64} — Scalar st
+    grammar per PTX ISA 9.7.9.11 (the mirror of _check_ld).
     """
 
+    L1__evict_first: _Chain_st
+    L1__evict_last: _Chain_st
+    L1__evict_normal: _Chain_st
+    L1__evict_unchanged: _Chain_st
+    L1__no_allocate: _Chain_st
+    b16: _Chain_st
     b32: _Chain_st
     b64: _Chain_st
+    b8: _Chain_st
+    cg: _Chain_st
+    cluster: _Chain_st
+    cs: _Chain_st
     cta: _Chain_st
     f32: _Chain_st
+    f64: _Chain_st
     global_: _Chain_st
     gpu: _Chain_st
+    local: _Chain_st
+    mmio: _Chain_st
     relaxed: _Chain_st
     release: _Chain_st
+    s16: _Chain_st
     s32: _Chain_st
+    s64: _Chain_st
+    s8: _Chain_st
+    shared: _Chain_st
+    shared__cluster: _Chain_st
     shared__cta: _Chain_st
     sys: _Chain_st
+    u16: _Chain_st
     u32: _Chain_st
     u64: _Chain_st
+    u8: _Chain_st
     volatile: _Chain_st
+    wb: _Chain_st
     weak: _Chain_st
+    wt: _Chain_st
     def __call__(self, addr: Any, value: Any, *args: Any, pred: Any = None) -> None: ...
 
 class _Chain_st_bulk:

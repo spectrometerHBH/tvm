@@ -399,7 +399,7 @@ def test_ptxd_helper_source_golden():
         "}\n"
     )
     # Shared-space addr slot: helper takes uint32_t (post-coercion form), not void*.
-    assert render("st", ("", "", "shared::cta", "b32")) == (
+    assert render("st", ("", "", "", "shared::cta", "", "", "b32")) == (
         "__forceinline__ __device__ void tvm_builtin_ptxd_st_shared__cta_b32"
         "(uint32_t __addr, uint32_t __value) {\n"
         '  asm volatile("st.shared::cta.b32 [%0], %1;" :  : "r"(__addr), "r"(__value)'
@@ -461,7 +461,15 @@ def test_ptxd_coercion_ir_forms():
     assert call.args[0].same_as(global_ptr)
 
     # Modifiers ride as trailing positional string args in slot order.
-    assert [str(a).strip('"') for a in call.args[2:]] == ["release", "gpu", "global", "b32"]
+    assert [str(a).strip('"') for a in call.args[2:]] == [
+        "",
+        "release",
+        "gpu",
+        "global",
+        "",
+        "",
+        "b32",
+    ]
 
     # A shared-space slot converts whatever pointer it is given: TIRx pointer
     # scopes are not a reliable discriminator (a shared buffer's ptr_to()
@@ -474,7 +482,7 @@ def test_ptxd_coercion_ir_forms():
     flag = tvm.tirx.Var("f", "uint32")
     call = T.ptxd.st.release.gpu.global_.b32(global_ptr, val, pred=flag)
     assert call.args[2].same_as(flag)
-    assert len(call.args) == 2 + 1 + 4  # operands + pred + slot tokens
+    assert len(call.args) == 2 + 1 + 7  # operands + pred + slot tokens
     # @p on an instruction with a destination is rejected: a false predicate
     # leaves it unwritten while "=" tells nvcc its prior value is dead.
     dst = tvm.tirx.Var("d", "uint32")
@@ -580,7 +588,7 @@ def test_ptxd_all_variants_render_unique():
                 assert pred_helper not in names
                 names.add(pred_helper)
                 assert f"@p {opcode} " in pred_source
-    assert total == 14076  # update when the table grows
+    assert total == 16904  # update when the table grows
 
 
 def test_ptxd_stub_up_to_date():

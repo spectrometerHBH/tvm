@@ -291,13 +291,44 @@ def _check_ld(m):
 
 
 def _check_st(m):
-    """release/relaxed require a scope; weak/volatile take none; shared::cta caps scope at cta."""
-    if m["sem"] in ("release", "relaxed") and not m["scope"]:
-        return f"st.{m['sem']} requires a scope (cta/gpu/sys)"
-    if m["sem"] in ("", "weak", "volatile") and m["scope"]:
-        return "unscoped st forms (weak/volatile) take no scope"
-    if m["space"] == "shared::cta" and m["scope"] not in ("", "cta"):
-        return "st.shared::cta is CTA-local; scope must be cta or omitted"
+    """Scalar st grammar per PTX ISA 9.7.9.11 (the mirror of _check_ld)."""
+    sem, scope, ss = m["sem"], m["scope"], m["space"]
+    mmio, cop, l1ev = m["mmio"], m["cop"], m["l1ev"]
+    # "st.relaxed.scope / st.release.scope" -- scope is mandatory there and
+    # invalid on the weak/volatile forms (syntax lines).
+    if sem in ("relaxed", "release") and not scope:
+        return f"st.{sem} requires a scope (cta/cluster/gpu/sys)"
+    if sem in ("", "weak", "volatile") and scope:
+        return "only st.relaxed/st.release take a scope"
+    if mmio:
+        # "st.mmio.sem.sys{.global}": "Only .sys thread scope is valid for the
+        # st.mmio operation." .release with .mmio arrives in PTX ISA 9.3; the
+        # toolchain here assembles 9.2 and ptxas rejects it, so keep .relaxed
+        # only and widen when the toolchain catches up.
+        if sem != "relaxed":
+            return "st.mmio requires .relaxed"
+        if scope != "sys":
+            return "only the sys scope is valid for st.mmio"
+        if ss not in ("", "global"):
+            return "st.mmio may only be used with .global or generic addressing"
+        if cop or l1ev:
+            return "st.mmio takes no cache qualifiers"
+    if sem in ("relaxed", "release") and not mmio:
+        # ".relaxed and .release: May be used with .global, .shared spaces or
+        # with generic addressing... Cache operations are not allowed."
+        if ss == "local":
+            return f"st.{sem} is not valid on .local"
+        if cop:
+            return f"cache operations are not allowed with st.{sem}"
+    if sem == "volatile" and (cop or l1ev):
+        # "st.volatile{.ss}{.vec}.type" -- no cache qualifiers at all.
+        return "st.volatile takes no cache qualifiers"
+    if cop and l1ev:
+        # cop and eviction_priority appear on separate syntax lines.
+        return "cache operators and eviction priorities are mutually exclusive"
+    if l1ev and ss not in ("", "global"):
+        # ptxas: "Modifier '.evict_*' cannot be applied to '<ss>' space"
+        return "L1 eviction priorities apply only to .global or generic addressing"
     return None
 
 
@@ -392,15 +423,10 @@ def _check_atomic(m):
     return None
 
 
-_LDST_TYPES = ("b32", "b64", "u32", "u64", "s32", "f32")
-# The 14 scalar ld types (.b128 excluded). Spelled out rather than derived from
-# PTX_TYPES, which also carries the packed/mixed tokens (.f32x2, .f16, .bf16)
-# that belong to the arithmetic lines and are not ld types.
 _LD_TYPES = (
     "b8", "u8", "s8", "b16", "u16", "s16", "b32", "u32",
     "s32", "b64", "u64", "s64", "f32", "f64",
 )  # fmt: skip
-_SCOPES = ("cta", "gpu", "sys")
 _FRND = ("rn", "rz", "rm", "rp")  # .rnd on the floating-point arithmetic lines
 
 _ENTRIES = [
@@ -466,13 +492,37 @@ _ENTRIES = [
             OperandSlot("addr", role="addr"),
         ),
     ),
+    # Complete scalar `st` per PTX ISA 9.7.9.11, at parity with `ld`.
+    # Deliberately excluded (each needs a mechanism this shape lacks):
+    # - .vec/.b128 and the multi-register source forms
+    # - .level::cache_hint + its trailing cache_policy operand (optional operand)
+    # - .level2::eviction_priority (vector-only per the ISA)
+    # - .param::func (kernel-parameter addresses cannot flow through the
+    #   helper-function ABI)
     InstructionEntry(
         name="st",
         slots=(
+            ModifierSlot("mmio", ("mmio",), optional=True),
             ModifierSlot("sem", ("weak", "release", "relaxed", "volatile"), optional=True),
-            ModifierSlot("scope", _SCOPES, optional=True),
-            ModifierSlot("space", ("global", "shared::cta")),
-            ModifierSlot("type", _LDST_TYPES),
+            ModifierSlot("scope", _ATOM_SCOPES, optional=True),
+            ModifierSlot(
+                "space",
+                ("global", "shared", "shared::cta", "shared::cluster", "local"),
+                optional=True,  # omitted = generic addressing
+            ),
+            ModifierSlot("cop", ("wb", "cg", "cs", "wt"), optional=True),
+            ModifierSlot(
+                "l1ev",
+                (
+                    "L1::evict_normal",
+                    "L1::evict_unchanged",
+                    "L1::evict_first",
+                    "L1::evict_last",
+                    "L1::no_allocate",
+                ),
+                optional=True,
+            ),
+            ModifierSlot("type", _LD_TYPES),
         ),
         check=_check_st,
         operands=(
