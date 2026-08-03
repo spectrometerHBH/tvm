@@ -546,6 +546,25 @@ class _Chain_st_bulk:
     weak: _Chain_st_bulk
     def __call__(self, addr: Any, size: Any, *args: Any, pred: Any = None) -> None: ...
 
+class _Chain_stmatrix:
+    """`stmatrix` — 2 entries sharing this mnemonic; PTX puts their difference in the operand
+    list, so the call selects one. Shapes: (*__operands)
+    """
+
+    aligned: _Chain_stmatrix
+    b16: _Chain_stmatrix
+    b8: _Chain_stmatrix
+    m16n8: _Chain_stmatrix
+    m8n8: _Chain_stmatrix
+    shared: _Chain_stmatrix
+    shared__cta: _Chain_stmatrix
+    sync: _Chain_stmatrix
+    trans: _Chain_stmatrix
+    x1: _Chain_stmatrix
+    x2: _Chain_stmatrix
+    x4: _Chain_stmatrix
+    def __call__(self, *args: Any, pred: Any = None) -> None: ...
+
 class _Chain_sub:
     """`sub` — rnd∈{rn,rz,rm,rp} (opt); ftz∈{ftz} (opt); sat∈{sat} (opt); type∈{f32,f64,f32x2};
     srctype∈{f16,bf16} (opt) — Which qualifiers each add/sub/mul/fma syntax line allows (PTX
@@ -632,6 +651,7 @@ class _PTXD:
     setmaxnreg: _Chain_setmaxnreg
     st: _Chain_st
     st_bulk: _Chain_st_bulk
+    stmatrix: _Chain_stmatrix
     sub: _Chain_sub
     tcgen05: _Chain_tcgen05
     wgmma: _Chain_wgmma

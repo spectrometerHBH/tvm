@@ -1544,52 +1544,6 @@ def ptx_ldmatrix_legacy(*all_args):
     )
 
 
-def ptx_stmatrix(trans, num, dtype, smem_ptr, *src_handles, shape="m8n8", space="shared"):
-    """TVM intrinsic for ``stmatrix.sync.aligned.shape.x{num}{.trans}.space.{dtype}``.
-
-    Mirrors :func:`ptx_ldmatrix`: each source register is a separate operand.
-    Pass ``T.address_of(buf[idx])`` (or ``buf.ptr_to([idx])``) for each
-    source — the slots may be non-contiguous.
-
-    Parameters
-    ----------
-    trans : bool
-        Apply the ``.trans`` modifier (required for ``shape == "m16n8"``).
-    num : int
-        One of 1, 2, 4 — number of m8n8 fragments per warp.
-    dtype : str
-        ``".b16"`` (4 bytes per fragment register) or ``".b8"`` (2 bytes per).
-    smem_ptr : Expr
-        Destination pointer in shared memory.
-    *src_handles : Expr
-        ``num`` pointer-to-uint32 sources.
-    shape : str, keyword-only, default "m8n8"
-        ``"m8n8"`` or ``"m16n8"``.
-    space : str, keyword-only, default "shared"
-        ``"shared"`` or ``"shared::cta"``.
-
-    https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#warp-level-matrix-instructions-stmatrix
-    """
-    _choice("num", num, _LDMATRIX_NUM)
-    _choice("dtype", dtype, _LDMATRIX_DTYPE)
-    if shape not in ("m8n8", "m16n8"):
-        raise ValueError(f"Unsupported stmatrix shape {shape!r}")
-    if space not in ("shared", "shared::cta"):
-        raise ValueError(f"Unsupported stmatrix state space {space!r}")
-    if shape == "m16n8" and not trans:
-        raise ValueError("stmatrix .m16n8 requires .trans")
-    n_regs = int(num)
-    if len(src_handles) != n_regs:
-        dtype_bare = dtype.lstrip(".") if isinstance(dtype, str) else dtype
-        raise ValueError(
-            f"stmatrix .x{int(num)}.{dtype_bare} expects {n_regs} source "
-            f"handles, got {len(src_handles)}"
-        )
-    return call_intrin(
-        "", "tirx.ptx.stmatrix", trans, num, dtype, shape, space, smem_ptr, *src_handles
-    )
-
-
 def ptx_wgmma_encode_matrix_descriptor(desc, addr, ldo, sdo, swizzle):
     """TVM intrinsic to create memory descriptor for wgmma instructions
 

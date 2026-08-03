@@ -15,7 +15,7 @@
 # specific language governing permissions and limitations
 # under the License.
 # pylint: disable=redefined-builtin, invalid-name, too-many-arguments, too-many-locals, too-many-positional-arguments
-"""PTX MMA / ldmatrix / stmatrix intrinsics.
+"""PTX MMA / ldmatrix intrinsics.
 
 mma.sync.aligned has 7 form_kinds per the PTX docs (f16 / tf32 / bf16 / fp64
 / int8 / fp8 / subbyte). Each form_kind is one ``device_intrinsic`` registration;
@@ -23,7 +23,7 @@ the (shape, layouts, dtypes) modifier slots are attrs. Body computes the per-
 fragment register counts at codegen time from M*N*bits/threads/frag_size and
 hand-builds the asm constraint list.
 
-ldmatrix / stmatrix each have a single PTX form (the .m8n8 .b16/.b8 variant
+ldmatrix has a single PTX form (the .m8n8 .b16/.b8 variant
 that TIRx uses); ``num`` and ``trans`` are modifier attrs.
 """
 
@@ -349,7 +349,7 @@ def codegen_ptx_mma(
 
 
 # =============================================================================
-# ldmatrix / stmatrix — m8n8 fragment load/store. PTX docs lists 3 ldmatrix
+# ldmatrix — m8n8 fragment load. PTX docs lists 3 ldmatrix
 # forms (m8n8 + m8n16 + m16n16); TIRx uses only the m8n8 form. 1
 # device_intrinsic each. ``num`` (.x1/.x2/.x4) and ``trans`` are modifier
 # attrs; the asm body loops over per-register constraints based on
@@ -411,72 +411,5 @@ def codegen_ptx_ldmatrix(trans, num, dtype, smem_ptr, *dst_handles):
         )
     result = CODEGEN_REGISTRY["tirx._ptx_ldmatrix_impl"](
         [smem_ptr, *dst_handles, num, dtype, trans]
-    )
-    return result[0] if isinstance(result, tuple) else result
-
-
-def _stmatrix_parts(*args):
-    # args = (smem_ptr, src0, src1, ..., src{N-1}, trans, num, dtype, shape, space)
-    # The last 5 entries are codegen attrs (n_attrs=5).
-    trans_arg, num_arg, dtype_arg, shape_arg, space_arg = args[-5:]
-    n_regs = int(num_arg)
-    trans_b = bool(int(trans_arg)) if hasattr(trans_arg, "value") else bool(trans_arg)
-    dtype = parse_str(dtype_arg)
-    shape = parse_str(shape_arg)
-    space = parse_str(space_arg)
-    if dtype.startswith("."):
-        dtype = dtype[1:]
-    if n_regs not in (1, 2, 4):
-        raise ValueError(f"stmatrix .num must be one of {{1, 2, 4}}, got {n_regs}")
-    if dtype not in ("b16", "b8"):
-        raise ValueError(f"stmatrix .type must be b16 or b8, got {dtype!r}")
-    if shape not in ("m8n8", "m16n8"):
-        raise ValueError(f"stmatrix .shape must be m8n8 or m16n8, got {shape!r}")
-    if space not in ("shared", "shared::cta"):
-        raise ValueError(f"stmatrix state space must be shared or shared::cta, got {space!r}")
-    if shape == "m16n8" and not trans_b:
-        raise ValueError("stmatrix .m16n8 requires .trans")
-    trans_inst = ".trans" if trans_b else ""
-    slot_list = "{" + ", ".join(f"%{i}" for i in range(n_regs)) + "}"
-    src_loads = "\n".join(f"    uint32_t r{i} = *(uint32_t*)src{i};" for i in range(n_regs))
-    in_constraints = ", ".join(f'"r"(r{i})' for i in range(n_regs))
-    name = f"ptx_stmatrix_{shape}_{n_regs}_{1 if trans_b else 0}_{space.replace('::', '_')}_{dtype}"
-    sig = "(void* smem_ptr, " + ", ".join(f"void* src{i}" for i in range(n_regs)) + ")"
-    body = (
-        f"{src_loads}\n"
-        "    unsigned int addr = __cvta_generic_to_shared(smem_ptr);\n"
-        "    asm volatile(\n"
-        f'        "stmatrix.sync.aligned.{shape}.x{n_regs}{trans_inst}.{space}.{dtype} '
-        f'[%{n_regs}], {slot_list};"\n'
-        "        :\n"
-        f'        : {in_constraints}, "r"(addr));'
-    )
-    return name, sig, body
-
-
-device_intrinsic(
-    "_ptx_stmatrix_impl",
-    n_attrs=5,
-    c_signature=lambda *a: _stmatrix_parts(*a)[1],
-    helper_name=lambda *a: _stmatrix_parts(*a)[0],
-    body=lambda *a: _stmatrix_parts(*a)[2],
-)
-
-
-@register_codegen("ptx_stmatrix")
-def codegen_ptx_stmatrix(trans, num, dtype, shape, space, smem_ptr, *src_handles):
-    trans = bool(trans)
-    num = int(num)
-    dtype_str = parse_str(dtype)
-    if dtype_str.startswith("."):
-        dtype_str = dtype_str[1:]
-    n_regs = num
-    if len(src_handles) != n_regs:
-        raise ValueError(
-            f"stmatrix .x{num}.{dtype_str} codegen expects {n_regs} src handles, "
-            f"got {len(src_handles)}"
-        )
-    result = CODEGEN_REGISTRY["tirx._ptx_stmatrix_impl"](
-        [smem_ptr, *src_handles, trans, num, dtype, shape, space]
     )
     return result[0] if isinstance(result, tuple) else result

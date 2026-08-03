@@ -95,10 +95,12 @@ def test_stmatrix_sync_aligned(trans):
         reg = T.alloc_buffer((8,), "float16", scope="local")
         for i in range(8):
             reg[i] = tx * 8 + i
-        T.ptx.stmatrix(
-            trans, 4, ".b16",
+        # stmatrix stores 4 b32 registers; reg is fp16, so they ride a uint32
+        # view, two elements per word.
+        reg_words = reg.view("uint32")
+        T.ptxd[f"stmatrix.sync.aligned.m8n8.x4{'.trans' if trans else ''}.shared.b16"](
             A_smem.ptr_to([tx % 16, tx // 16 * 8]),
-            reg.ptr_to([0]), reg.ptr_to([2]), reg.ptr_to([4]), reg.ptr_to([6]),
+            reg_words[0], reg_words[1], reg_words[2], reg_words[3],
         )
         if tx == 0:
             for i, j in T.grid(16, 16):
@@ -149,7 +151,7 @@ def test_stmatrix_sync_aligned(trans):
 @pytest.mark.parametrize("trans", [False, True])
 @pytest.mark.parametrize("num", [1, 2, 4])
 @pytest.mark.gpu
-def test_ptx_stmatrix(trans, num):
+def test_ptxd_stmatrix(trans, num):
     # fmt: off
     @T.prim_func
     def main(A: T.Buffer((16, 16), "float16")):
@@ -164,10 +166,10 @@ def test_ptx_stmatrix(trans, num):
         A_local = T.alloc_local([8], "float16")
         for i in range(8):
             A_local[i] = (i // 2) * 64 + tx * 2 + i % 2
-        T.ptx.stmatrix(
-            trans, num, ".b16",
+        A_words = A_local.view("uint32")
+        T.ptxd[f"stmatrix.sync.aligned.m8n8.x{num}{'.trans' if trans else ''}.shared.b16"](
             A_shared.ptr_to([tx % 16, tx // 16 * 8]),
-            *[A_local.ptr_to([i * 2]) for i in range(num)],
+            *[A_words[i] for i in range(num)],
         )
         T.cuda.cta_sync()
         if tx == 0:
@@ -212,7 +214,7 @@ def test_ptx_stmatrix(trans, num):
 @pytest.mark.parametrize("num", [1, 2, 4])
 @pytest.mark.gpu
 @pytest.mark.skipif(not env.has_cuda_compute(9), reason="need cuda compute >= 9.0")
-def test_ptx_stmatrix_noncontiguous(trans, num):
+def test_ptxd_stmatrix_noncontiguous(trans, num):
     """Symmetric stmatrix API: ``num`` independent src handles.
 
     Spaces fragments by 4 fp16 (vs the natural 2 contiguous) so per-src
@@ -237,10 +239,10 @@ def test_ptx_stmatrix_noncontiguous(trans, num):
         for i in range(num):
             A_local[i * STRIDE + 0] = T.float16(i * 64 + tx * 2 + 0)
             A_local[i * STRIDE + 1] = T.float16(i * 64 + tx * 2 + 1)
-        T.ptx.stmatrix(
-            trans, num, ".b16",
+        A_words = A_local.view("uint32")
+        T.ptxd[f"stmatrix.sync.aligned.m8n8.x{num}{'.trans' if trans else ''}.shared.b16"](
             A_shared.ptr_to([tx % 16, tx // 16 * 8]),
-            *[A_local.ptr_to([i * STRIDE]) for i in range(num)],
+            *[A_words[i * STRIDE // 2] for i in range(num)],
         )
         T.cuda.cta_sync()
         if tx == 0:
@@ -254,10 +256,11 @@ def test_ptx_stmatrix_noncontiguous(trans, num):
         mod = tvm.compile(mod, target=target, tir_pipeline="tirx")
         src = mod.mod.imports[0].inspect_source()
         trans_inst = ".trans" if trans else ""
-        assert f"stmatrix.sync.aligned.m8n8.x{num}{trans_inst}.shared.b16" in src
-        # num distinct src register loads in the helper body.
+        regs = ", ".join(f"%{i + 1}" for i in range(num))
+        assert f"stmatrix.sync.aligned.m8n8.x{num}{trans_inst}.shared.b16 [%0], {{{regs}}};" in src
+        # num independent source registers, each its own helper parameter.
         for i in range(num):
-            assert f"*(uint32_t*)src{i}" in src
+            assert f"uint32_t __r{i}" in src
 
     A_np = np.zeros((16, 16), dtype="float16")
     A_ref = np.zeros((16, 16), dtype="float16")

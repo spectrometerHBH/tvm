@@ -50,7 +50,6 @@ class PTXNamespace:
         # with the fork-native version so upstream-derived tests keep
         # working without rewriting their tirx code.
         self.ldmatrix_legacy = _dtype_forward(_cuda_op.ptx_ldmatrix_legacy)
-        self.stmatrix = _op_wrapper(_cuda_op.ptx_stmatrix)
         self.elect_sync: Callable[..., Any] = _op_wrapper(_cuda_op.ptx_elect_sync)
         self.clc_query_cancel = _op_wrapper(_cuda_op.ptx_clc_query_cancel)
         self.fetch_register: Callable[..., Any] = _op_wrapper(_cuda_op.ptx_fetch_register)

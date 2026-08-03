@@ -692,6 +692,13 @@ _LD_TYPES = (
 _FRND = ("rn", "rz", "rm", "rp")  # .rnd on the floating-point arithmetic lines
 
 
+def _matrix_num_lanes(m):
+    # ISA 9.7.15.5.16 (stmatrix): "a brace-enclosed vector expression consisting
+    # of 1, 2, or 4 32-bit registers as per the value of .num" -- no shape term,
+    # unlike ldmatrix's .m16n16 doubling.
+    return int(m["num"][1:])
+
+
 def _ldmatrix_lanes(m):
     # ISA 9.7.15.5.15: "a brace-enclosed vector expression consisting of 1, 2,
     # or 4 32-bit registers as per the value of .num" -- and, for shape 16x16,
@@ -1791,6 +1798,52 @@ _ENTRIES = [
         operands=(
             OperandSlot("r", role="dst", dtype="b32", lanes=_ldmatrix_lanes),
             OperandSlot("p", role="addr"),
+        ),
+    ),
+    # stmatrix per PTX ISA 9.7.15.5.16 -- the store mirror of ldmatrix. One
+    # syntax line; the two shapes split into two entries because their type and
+    # target floors differ.
+    #
+    #   stmatrix.sync.aligned.shape.num{.trans}{.ss}.type [p], r;
+    #
+    # Note the operand order is the reverse of ldmatrix's: the address comes
+    # first, the register group second.
+    #
+    # NOT REGISTERED: nothing -- every syntax line of the family is here.
+    InstructionEntry(  # .m8n8.b16
+        name="stmatrix",
+        slots=(
+            ModifierSlot("sync", ("sync",)),
+            ModifierSlot("aligned", ("aligned",)),
+            ModifierSlot("shape", ("m8n8",)),
+            ModifierSlot("num", ("x1", "x2", "x4")),
+            ModifierSlot("trans", ("trans",), optional=True),
+            ModifierSlot("space", ("shared", "shared::cta"), optional=True),
+            ModifierSlot("type", ("b16",)),
+        ),
+        cert_arch="sm_90",  # ISA: "Requires sm_90 or higher."
+        operands=(
+            OperandSlot("p", role="addr"),
+            OperandSlot("r", role="value", dtype="b32", lanes=_matrix_num_lanes),
+        ),
+    ),
+    InstructionEntry(  # .m16n8.b8: ".m16n8 shape is valid only for .b8 type"
+        name="stmatrix_m16n8_b8",
+        mnemonic="stmatrix",
+        slots=(
+            ModifierSlot("sync", ("sync",)),
+            ModifierSlot("aligned", ("aligned",)),
+            ModifierSlot("shape", ("m16n8",)),
+            ModifierSlot("num", ("x1", "x2", "x4")),
+            # ISA: "for 16x8 matrices, .trans is mandatory".
+            ModifierSlot("trans", ("trans",)),
+            ModifierSlot("space", ("shared", "shared::cta"), optional=True),
+            ModifierSlot("type", ("b8",)),
+        ),
+        cert_arch="sm_100a",
+        operands=(
+            OperandSlot("p", role="addr"),
+            OperandSlot("r", role="value", dtype="b32", lanes=_matrix_num_lanes),
         ),
     ),
 ]
