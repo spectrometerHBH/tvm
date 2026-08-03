@@ -88,6 +88,68 @@ PTX_TYPES = {
 }
 
 
+# TVM dtype -> (C type, asm constraint, carrier, into-carrier, out-of-carrier).
+# `carrier == c_type` means the value binds its register directly. Where it does
+# not, the value rides a differently-typed register and converts at the asm
+# boundary: 8-bit values have no constraint letter of their own, and
+# __half/__nv_bfloat16 cannot bind one at all (nvcc: "more than one conversion
+# function ... applies"), so both go through a 16-bit integer register.
+#
+# Every conversion here is a bit pun, never an arithmetic cast. That distinction
+# is the whole point of the axis: handing a float to a uint32_t parameter is a
+# *numeric* conversion and emits `cvt.rzi.u32.f32`, silently changing the value.
+DTYPE_C = {
+    "uint8": ("uint8_t", "h", "uint16_t", "(uint16_t){}", "(uint8_t){}"),
+    "int8": ("int8_t", "h", "int16_t", "(int16_t){}", "(int8_t){}"),
+    "uint16": ("uint16_t", "h", "uint16_t", "{}", "{}"),
+    "int16": ("int16_t", "h", "int16_t", "{}", "{}"),
+    "float16": ("__half", "h", "uint16_t", "__half_as_ushort({})", "__ushort_as_half({})"),
+    "bfloat16": (
+        "__nv_bfloat16",
+        "h",
+        "uint16_t",
+        "__bfloat16_as_ushort({})",
+        "__ushort_as_bfloat16({})",
+    ),
+    "uint32": ("uint32_t", "r", "uint32_t", "{}", "{}"),
+    "int32": ("int32_t", "r", "int32_t", "{}", "{}"),
+    "float32": ("float", "f", "float", "{}", "{}"),
+    "uint64": ("uint64_t", "l", "uint64_t", "{}", "{}"),
+    "int64": ("int64_t", "l", "int64_t", "{}", "{}"),
+    "float64": ("double", "d", "double", "{}", "{}"),
+    "uint128": ("__uint128_t", "q", "__uint128_t", "{}", "{}"),
+    "int128": ("__int128_t", "q", "__int128_t", "{}", "{}"),
+}
+
+# A bit-size PTX type names a width, not an interpretation -- ISA 5.2: "The
+# bit-size type is compatible with any fundamental type having the same size."
+# So an operand typed `.bN` accepts every TVM dtype of that width, and each gets
+# its own helper. The canonical dtype is first: a variant that uses only
+# canonical dtypes keeps the helper name it had before this axis existed.
+#
+# Concretely typed operands (.u32/.s32/.f32/...) are NOT widened: those name an
+# interpretation, and substituting one is a semantic change rather than a
+# relabelling. `.f32x2` likewise stays fixed -- it names a packed layout whose
+# container happens to be .b64, not a bit container.
+BIT_DTYPES = {
+    "b8": ("uint8", "int8"),
+    "b16": ("uint16", "int16", "float16", "bfloat16"),
+    "b32": ("uint32", "int32", "float32"),
+    "b64": ("uint64", "int64", "float64"),
+    "b128": ("uint128", "int128"),
+}
+
+
+# Short token appended to a helper name for a non-canonical dtype choice.
+DTYPE_SUFFIX = {
+    "uint8": "u8", "int8": "s8",
+    "uint16": "u16", "int16": "s16", "float16": "f16", "bfloat16": "bf16",
+    "uint32": "u32", "int32": "s32", "float32": "f32",
+    "uint64": "u64", "int64": "s64", "float64": "f64",
+    "uint128": "u128", "int128": "s128",
+}  # fmt: skip
+
+
 def escape_token(token: str) -> str:
     """PTX token -> Python attribute name (``::`` -> ``__``, keyword -> trailing ``_``)."""
     token = token.replace("::", "__")
@@ -248,6 +310,30 @@ def call_slots(entry: InstructionEntry) -> list[OperandSlot]:
     takes one argument per lane, mirroring PTX's ``{%k, %k+1, ...}``.
     """
     return [s for s in entry.operands if s.role != "imm" for _ in range(s.lanes)]
+
+
+def typed_operands(entry: InstructionEntry) -> list[OperandSlot]:
+    """The operands that carry a dtype, in order: the dtype tuple aligns with these."""
+    return [s for s in entry.operands if s.role in ("value", "dst")]
+
+
+def operand_dtypes(slot: OperandSlot, mod_map: dict) -> tuple[str, ...]:
+    """Every TVM dtype this operand accepts; the canonical one first."""
+    token = operand_type(slot, mod_map)
+    return BIT_DTYPES.get(token, (PTX_TYPES[token][0],))
+
+
+def dtype_combos(entry: InstructionEntry, tokens) -> tuple[tuple[str, ...], ...]:
+    """Every dtype assignment for one modifier combination, canonical first.
+
+    One dtype per *operand*, never per lane: a register group is one operand
+    that occupies N registers, and ISA 6.4.3 calls a brace list "similarly typed
+    scalars". Operands multiply, so an instruction with two bit-typed operands
+    has the product of their choices.
+    """
+    mod_map = mods(entry, tokens)
+    axes = [operand_dtypes(s, mod_map) for s in typed_operands(entry)]
+    return tuple(itertools.product(*axes)) if axes else ((),)
 
 
 def pred_forms(entry: InstructionEntry) -> tuple[bool, ...]:
@@ -821,15 +907,16 @@ _ENTRIES = [
             # already clears that, so no cert_arch is needed.
             asm_volatile=False,  # a register shuffle: let nvcc common it up
         )
+        # Lane types are the bit types only: the dtype axis already lets a
+        # `.b32` lane be int32 or float32, so a separate `f32` entry would be a
+        # shape-for-shape duplicate and make the shared-mnemonic dispatch
+        # ambiguous.
         for agg, lanes, lane_dtype in (
             ("b32", 2, "b16"),
             ("b64", 2, "b32"),
-            ("b64", 2, "f32"),
             ("b64", 4, "b16"),
             ("b128", 2, "b64"),
-            ("b128", 2, "f64"),
             ("b128", 4, "b32"),
-            ("b128", 4, "f32"),
         )
         for direction, unpack in (("pack", False), ("unpack", True))
     ],

@@ -21,16 +21,29 @@ and by :mod:`.gen_helpers`, which dumps the generated helpers for humans to
 inspect without compiling a kernel.
 """
 
-from .table import PTX_TYPES, InstructionEntry, mods, operand_space, operand_type
+from .table import (
+    DTYPE_C,
+    DTYPE_SUFFIX,
+    InstructionEntry,
+    dtype_combos,
+    mods,
+    operand_space,
+    typed_operands,
+)
 
 
-def render_variant(entry: InstructionEntry, tokens, predicated=False):
+def render_variant(entry: InstructionEntry, tokens, predicated=False, dtypes=None):
     """Render one variant: ``(opcode, helper_name, helper_source)``.
 
     Every helper is ``void`` and its C parameter list is the PTX operand list
     in order, so the generated call reads like the PTX text it wraps.
     Destinations (``role="dst"``) are taken by reference; the caller passes a
     writable lvalue.
+
+    ``dtypes`` picks one TVM dtype per typed operand (see ``dtype_combos``);
+    None means the canonical choice, which is what every non-bit-typed operand
+    has anyway. A non-canonical choice appends the dtypes to the helper name, so
+    the names a table without bit-typed operands would produce are untouched.
 
     ``predicated`` is a framework-level axis (never in the table): the helper
     gains a trailing ``uint32_t __pred`` operand, and the instruction is
@@ -40,6 +53,15 @@ def render_variant(entry: InstructionEntry, tokens, predicated=False):
     mod_map = mods(entry, tokens)
     written = [tok for tok in tokens if tok]
     opcode = ".".join([entry.ptx_name, *written])
+    canonical = dtype_combos(entry, tokens)[0]
+    if dtypes is None:
+        dtypes = canonical
+    # The opcode alone no longer determines the signature once an operand may
+    # take several dtypes. A non-canonical choice names *every* typed operand,
+    # positionally: naming only the ones that changed would collide whenever two
+    # operands swap which of them is non-canonical (atom's d and b, for one).
+    if tuple(dtypes) != tuple(canonical):
+        written = written + [DTYPE_SUFFIX[d] for d in dtypes]
     # The helper name keys off the table name rather than the mnemonic. For every
     # single-shape family the two agree (st.bulk normalizes to st_bulk anyway);
     # it matters only where several entries share a mnemonic because PTX puts
@@ -52,7 +74,8 @@ def render_variant(entry: InstructionEntry, tokens, predicated=False):
         helper += "_pred"
 
     params, inputs, outputs, ptx_operands = [], [], [], []
-    pre, post = [], []  # carrier declarations / narrowing write-backs
+    pre, post = [], []  # carrier declarations / boundary conversions
+    dtype_of = dict(zip(typed_operands(entry), dtypes, strict=True))
     idx = 0
     for slot in entry.operands:
         pname = f"__{slot.name}"
@@ -67,19 +90,18 @@ def render_variant(entry: InstructionEntry, tokens, predicated=False):
             # operand list, so a lane is a C parameter but not an operand.
             lname = pname if slot.lanes == 1 else f"{pname}{lane}"
             if slot.role == "dst":
-                _, c_ty, constraint, carrier = PTX_TYPES[operand_type(slot, mod_map)]
+                c_ty, constraint, carrier, _, out_fmt = DTYPE_C[dtype_of[slot]]
                 params.append(f"{c_ty}& {lname}")
                 if carrier == c_ty:
                     outputs.append(f'"={constraint}"({lname})')
                 else:
-                    # 8-bit destinations have no asm constraint of their own and
-                    # ride a 16-bit register (ISA: "A destination register wider
-                    # than the specified type may be used"), so the asm writes a
-                    # carrier local that is then narrowed into the reference.
+                    # The value cannot bind this register class directly (8-bit
+                    # has no constraint letter; __half binds none at all), so the
+                    # asm writes a carrier local that is bit-punned back out.
                     reg = f"{lname}_reg"
                     pre.append(f"{carrier} {reg};")
                     outputs.append(f'"={constraint}"({reg})')
-                    post.append(f"{lname} = ({c_ty}){reg};")
+                    post.append(f"{lname} = {out_fmt.format(reg)};")
             elif slot.role == "addr":
                 if operand_space(slot, mod_map).startswith("shared"):
                     params.append(f"uint32_t {lname}")
@@ -91,9 +113,9 @@ def render_variant(entry: InstructionEntry, tokens, predicated=False):
                 params.append(f"const void* {lname}")
                 inputs.append(f'"l"({lname})')
             else:  # value
-                _, _, constraint, value_carrier = PTX_TYPES[operand_type(slot, mod_map)]
-                params.append(f"{value_carrier} {lname}")
-                inputs.append(f'"{constraint}"({lname})')
+                c_ty, constraint, carrier, in_fmt, _ = DTYPE_C[dtype_of[slot]]
+                params.append(f"{c_ty} {lname}")
+                inputs.append(f'"{constraint}"({in_fmt.format(lname)})')
             regs.append(f"[%{idx}]" if slot.role == "addr" else f"%{idx}")
             idx += 1
         ptx_operands.append(regs[0] if slot.lanes == 1 else "{" + ", ".join(regs) + "}")

@@ -213,7 +213,7 @@ class _Chain_max:
     def __call__(self, d: Any, a: Any, b: Any, *args: Any) -> None: ...
 
 class _Chain_mov:
-    """`mov` — 16 entries sharing this mnemonic; PTX puts their difference in the operand list,
+    """`mov` — 10 entries sharing this mnemonic; PTX puts their difference in the operand list,
     so the call selects one. Shapes: (d, a0, a1); (d0, d1, a); (d, a0, a1, a2, a3); (d0, d1,
     d2, d3, a)
     """

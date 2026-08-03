@@ -48,13 +48,14 @@ from tvm.tirx.op import call_intrin, reinterpret
 
 from .render import render_variant
 from .table import (
-    PTX_TYPES,
     InstructionEntry,
     call_slots,
     escape_token,
     mods,
+    operand_dtypes,
     operand_space,
     operand_type,
+    typed_operands,
     unescape_token,
 )
 
@@ -90,6 +91,19 @@ def register_table(table: dict[str, InstructionEntry]) -> None:
 # ---------------------------------------------------------------------------
 
 
+def _arg_dtypes(entry: InstructionEntry, args) -> tuple[str, ...]:
+    """The TVM dtype each typed operand was called with, in operand order."""
+    by_slot, i = {}, 0
+    for slot in call_slots(entry):
+        if slot.role in ("value", "dst") and slot not in by_slot:
+            arg = args[i]
+            ty = getattr(arg, "ty", None)
+            buf = getattr(arg, "buffer", None)
+            by_slot[slot] = buf.dtype if buf is not None else getattr(ty, "dtype", "")
+        i += 1
+    return tuple(by_slot[s] for s in typed_operands(entry))
+
+
 def _make_codegen(entry: InstructionEntry):
     n_slots = len(entry.slots)
     n_operands = len(call_slots(entry))
@@ -98,7 +112,11 @@ def _make_codegen(entry: InstructionEntry):
         tokens = [parse_str(a) for a in args[len(args) - n_slots :]]
         rest = args[: len(args) - n_slots]  # operands, plus pred when present
         predicated = len(rest) > n_operands
-        _, helper, source = render_variant(entry, tokens, predicated)
+        # Which dtype each typed operand actually carries. It is already in the
+        # Call -- the same channel PTX uses, where a register's type lives in its
+        # .reg declaration rather than in the instruction text.
+        dtypes = _arg_dtypes(entry, rest)
+        _, helper, source = render_variant(entry, tokens, predicated, dtypes)
         # Every helper is void; a destination is an ordinary argument, printed
         # by the C codegen as the lvalue it binds the reference parameter to.
         return cuda_func_call(helper, *rest, source_code=source)
@@ -121,31 +139,31 @@ def _coerce_operand(entry, slot, value, mod_map):
         # has to be a writable lvalue: a scalar (`x: T.float32`) or a buffer
         # element. Both are BufferLoad nodes, which the C codegen prints as the
         # lvalue bound to the helper's reference parameter.
-        want = PTX_TYPES[operand_type(slot, mod_map)][0]
+        allowed = operand_dtypes(slot, mod_map)
         if not isinstance(value, BufferLoad):
             raise ValueError(
                 f"{entry.name}: destination '{slot.name}' must be a writable scalar or "
-                f"buffer element (declare it first, e.g. `d: T.{want}`), got "
+                f"buffer element (declare it first, e.g. `d: T.{allowed[0]}`), got "
                 f"{type(value).__name__} — a T.let binding is immutable and cannot be one"
             )
         got = value.buffer.dtype
-        if got != want:
+        if got not in allowed:
             raise ValueError(
-                f"{entry.name}: destination '{slot.name}' must have dtype {want} "
-                f"(from .{operand_type(slot, mod_map)}), got {got}"
+                f"{entry.name}: destination '{slot.name}' must have dtype "
+                f"{' / '.join(allowed)} (from .{operand_type(slot, mod_map)}), got {got}"
             )
         return value
     if slot.role == "value":
         type_token = operand_type(slot, mod_map)
-        want = PTX_TYPES[type_token][0]
+        allowed = operand_dtypes(slot, mod_map)
         if isinstance(value, int | float):
-            return const(value, want)
-        if isinstance(ty, PrimType) and ty.dtype == want:
+            return const(value, allowed[0])
+        if isinstance(ty, PrimType) and ty.dtype in allowed:
             return value
         got = ty.dtype if isinstance(ty, PrimType) else type(value).__name__
         raise ValueError(
-            f"{entry.name}: operand '{slot.name}' must have dtype {want} "
-            f"(from .{type_token}), got {got}"
+            f"{entry.name}: operand '{slot.name}' must have dtype "
+            f"{' / '.join(allowed)} (from .{type_token}), got {got}"
         )
     if slot.role == "ptr":
         if isinstance(ty, PointerType):
