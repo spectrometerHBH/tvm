@@ -276,6 +276,27 @@ def mods(entry: InstructionEntry, tokens) -> dict:
     return {slot.name: tok or "" for slot, tok in zip(entry.slots, tokens)}
 
 
+def tokens_for(entry: InstructionEntry, **by_name) -> tuple[str, ...]:
+    """Modifier tokens in slot order, named instead of positional.
+
+    The inverse of :func:`mods`. A positional tuple silently shifts every token
+    when a slot is inserted -- the exact edit this table invites -- so anything
+    naming a specific variant (tests, tools) should name its slots.
+    """
+    unknown = set(by_name) - {slot.name for slot in entry.slots}
+    if unknown:
+        raise ValueError(f"{entry.name}: no modifier slot named {sorted(unknown)}")
+    out = []
+    for slot in entry.slots:
+        token = by_name.get(slot.name, "")
+        if token and token not in slot.choices:
+            raise ValueError(f"{entry.name}.{slot.name}: {token!r} not in {slot.choices}")
+        if not token and not slot.optional:
+            raise ValueError(f"{entry.name}.{slot.name} is required")
+        out.append(token)
+    return tuple(out)
+
+
 def operand_type(slot: OperandSlot, mod_map: dict) -> str:
     """The PTX type token of one operand.
 

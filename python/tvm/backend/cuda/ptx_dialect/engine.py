@@ -91,15 +91,26 @@ def register_table(table: dict[str, InstructionEntry]) -> None:
 # ---------------------------------------------------------------------------
 
 
+def _value_dtype(arg) -> str:
+    """The TVM dtype one argument carries (buffer element, or the node's type)."""
+    buf = getattr(arg, "buffer", None)
+    if buf is not None:
+        return buf.dtype
+    return getattr(getattr(arg, "ty", None), "dtype", "")
+
+
 def _arg_dtypes(entry: InstructionEntry, args) -> tuple[str, ...]:
-    """The TVM dtype each typed operand was called with, in operand order."""
+    """The TVM dtype each typed operand was called with, in operand order.
+
+    One dtype per *operand*, not per lane: a register group is one operand
+    occupying N registers, so its lanes share a dtype. Trace time already
+    enforced that (see ``_check_lane_dtypes``), so the first lane speaks for
+    the group.
+    """
     by_slot, i = {}, 0
     for slot in call_slots(entry):
         if slot.role in ("value", "dst") and slot not in by_slot:
-            arg = args[i]
-            ty = getattr(arg, "ty", None)
-            buf = getattr(arg, "buffer", None)
-            by_slot[slot] = buf.dtype if buf is not None else getattr(ty, "dtype", "")
+            by_slot[slot] = _value_dtype(args[i])
         i += 1
     return tuple(by_slot[s] for s in typed_operands(entry))
 
@@ -157,6 +168,16 @@ def _coerce_operand(entry, slot, value, mod_map):
         type_token = operand_type(slot, mod_map)
         allowed = operand_dtypes(slot, mod_map)
         if isinstance(value, int | float):
+            # A bare Python literal carries no dtype. An integer one is still
+            # unambiguous -- its bits are its bits. A float one is not: on a
+            # `.b32` operand it could mean the float's bit pattern or the
+            # number 1, and on `.u32` it silently truncates. Make it explicit.
+            if isinstance(value, float) and not allowed[0].startswith("float"):
+                raise ValueError(
+                    f"{entry.name}: operand '{slot.name}' is .{type_token}, so the float "
+                    f"literal {value!r} is ambiguous — write the constant you mean, e.g. "
+                    f"T.float32({value!r}) for its bits or T.{allowed[0]}(...) for a number"
+                )
             return const(value, allowed[0])
         if isinstance(ty, PrimType) and ty.dtype in allowed:
             return value
@@ -202,6 +223,29 @@ def _coerce_operand(entry, slot, value, mod_map):
     raise ValueError(f"{entry.name}: operand '{slot.name}' must be a pointer or uint64 handle")
 
 
+def _check_lane_dtypes(entry, supplied, coerced):
+    """Every lane of one operand carries the same dtype.
+
+    A register group is ONE PTX operand spanning N registers, and ISA 6.4.3
+    requires its elements be "similarly typed", so it has one dtype and one C
+    parameter type. Per-lane coercion cannot see this: each lane on its own is
+    a legal dtype for the operand's bit type. Left unchecked, the group would
+    be typed from its first lane and the rest bound to a parameter of another
+    type -- an implicit numeric conversion, which is the exact failure the
+    dtype axis exists to prevent.
+    """
+    by_slot = {}
+    for slot, value in zip(supplied, coerced):
+        if slot.role in ("value", "dst") and slot.lanes > 1:
+            by_slot.setdefault(slot, []).append(_value_dtype(value))
+    for slot, dtypes in by_slot.items():
+        if len(set(dtypes)) > 1:
+            raise ValueError(
+                f"{entry.name}: operand '{slot.name}' is one {slot.lanes}-register group, so "
+                f"all its lanes must have one dtype, got {', '.join(dtypes)}"
+            )
+
+
 def _coerce_pred(entry, pred):
     ty = getattr(pred, "ty", None)
     if isinstance(ty, PrimType) and ty.dtype in ("bool", "uint32", "int32"):
@@ -241,6 +285,7 @@ def _emit(entry, filled, operands, pred=None):
     coerced = [
         _coerce_operand(entry, slot, value, mod_map) for slot, value in zip(supplied, operands)
     ]
+    _check_lane_dtypes(entry, supplied, coerced)
     # Call arg layout: [operands..., pred?] [slot tokens ("" = omitted)].
     return call_intrin(
         "",  # every ptxd call is a void statement; destinations are operands

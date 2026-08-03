@@ -293,6 +293,108 @@ def test_ptxd_destination_errors():
             T.ptxd.ld.global_.b32(out[0], A.ptr_to([0]), pred=T.uint32(1))
 
 
+def test_ptxd_register_group_codegen():
+    """A `.lanes > 1` operand renders as braces in the asm, flat params in C.
+
+    `{%1, %2}` is ONE PTX operand occupying two registers (ISA 9.7.9.4), which
+    is why the lane count appears nowhere in the instruction text -- `mov.b64`
+    names the aggregate width, and the operand shape carries the rest.
+    """
+
+    @T.prim_func
+    def kernel(a_ptr: T.handle):
+        A = T.match_buffer(a_ptr, (4,), "float32")
+        T.device_entry()
+        T.cta_id([1])
+        tx = T.thread_id([32])
+        packed = T.local_scalar("uint64")
+        lo = T.local_scalar("float32")
+        hi = T.local_scalar("float32")
+        T.ptxd.mov.b64(packed, A[0], A[1])  # pack: one dst, a 2-register source
+        T.ptxd.mov.b64(lo, hi, packed)  # unpack: a 2-register dst, one source
+        A[tx % 4] = lo + hi
+
+    src = _cuda_source(kernel)
+    assert "mov.b64 %0, {%1, %2};" in src
+    assert "mov.b64 {%0, %1}, %2;" in src
+    # Both shapes share the mnemonic; the operand shape picks the entry, which
+    # is the same information ptxas resolves them by.
+    assert (
+        "tvm_builtin_ptxd_mov_pack_b32x2_b64_u64_f32(uint64_t& __d, float __a0, float __a1)" in src
+    )
+    assert (
+        "tvm_builtin_ptxd_mov_unpack_b32x2_b64_f32_u64(float& __d0, float& __d1, uint64_t __a)"
+        in src
+    )
+
+
+def test_ptxd_register_group_errors():
+    """A register group is one operand: its arity is fixed and its lanes agree."""
+    # No `mov` shape takes two operands, so nothing in the family matches.
+    with pytest.raises((ValueError, tvm.error.DiagnosticError), match=r"expects \d+ operand"):
+
+        @T.prim_func
+        def wrong_arity(a_ptr: T.handle):
+            A = T.match_buffer(a_ptr, (4,), "uint32")
+            T.device_entry()
+            packed = T.local_scalar("uint64")
+            T.ptxd.mov.b64(packed, A[0])
+            A[0] = T.uint32(0)
+
+    # Each lane of a destination group is its own register the caller declared,
+    # so each has to be an lvalue -- not just the first.
+    with pytest.raises((ValueError, tvm.error.DiagnosticError), match="writable scalar"):
+
+        @T.prim_func
+        def non_lvalue_lane(a_ptr: T.handle):
+            A = T.match_buffer(a_ptr, (4,), "uint32")
+            T.device_entry()
+            packed = T.local_scalar("uint64")
+            lo = T.local_scalar("uint32")
+            T.ptxd.mov.b64(lo, A[0] + T.uint32(1), packed)
+            A[0] = T.uint32(0)
+
+    # Lanes disagreeing on dtype: legal for each lane alone (both are 32-bit),
+    # but the group is one operand with one C parameter type, so binding the
+    # odd lane to it would be a numeric conversion.
+    with pytest.raises((ValueError, tvm.error.DiagnosticError), match="must have one dtype"):
+
+        @T.prim_func
+        def mixed_lane_dtypes(a_ptr: T.handle):
+            A = T.match_buffer(a_ptr, (4,), "uint32")
+            T.device_entry()
+            packed = T.local_scalar("uint64")
+            f = T.local_scalar("float32")
+            u = T.local_scalar("uint32")
+            T.ptxd.mov.b64(packed, f, u)
+            A[0] = T.uint32(0)
+
+    # A bare float literal names no dtype: on a .b32 lane it could be the
+    # float's bits or the number, and it used to silently become T.uint32(1).
+    with pytest.raises((ValueError, tvm.error.DiagnosticError), match="is ambiguous"):
+
+        @T.prim_func
+        def bare_float_literal(a_ptr: T.handle):
+            A = T.match_buffer(a_ptr, (4,), "uint32")
+            T.device_entry()
+            packed = T.local_scalar("uint64")
+            T.ptxd.mov.b64(packed, 1.5, 2.5)
+            A[0] = T.uint32(0)
+
+    # An explicit constant is accepted and picks the float32 helper.
+    @T.prim_func
+    def typed_literal(a_ptr: T.handle):
+        A = T.match_buffer(a_ptr, (4,), "float32")
+        T.device_entry()
+        T.cta_id([1])
+        tx = T.thread_id([32])
+        packed = T.local_scalar("uint64")
+        T.ptxd.mov.b64(packed, T.float32(1.5), T.float32(2.5))
+        A[tx % 4] = A[tx % 4]
+
+    assert "mov_pack_b32x2_b64_u64_f32" in _cuda_source(typed_literal)
+
+
 def test_ptxd_bit_width_axis():
     """A `.bN` operand takes any dtype of that width, each with its own helper.
 
@@ -409,12 +511,26 @@ def test_ptxd_printer_form():
 def test_ptxd_helper_source_golden():
     """Exact generated helper source, one per family (executable documentation)."""
     from tvm.backend.cuda.ptx_dialect.render import render_variant
-    from tvm.backend.cuda.ptx_dialect.table import TABLE
+    from tvm.backend.cuda.ptx_dialect.table import TABLE, tokens_for
 
-    def render(family, tokens, predicated=False):
-        return render_variant(TABLE[family], tokens, predicated)[2]
+    def render(name, predicated=False, dtypes=None, **by_name):
+        entry = TABLE[name]
+        return render_variant(entry, tokens_for(entry, **by_name), predicated, dtypes)[2]
 
-    assert render("prefetch", ("global", "L2")) == (
+    # tokens_for is what lets the goldens below name their modifiers. Positional
+    # tuples silently shift when a slot is inserted, which is the one edit this
+    # table invites; naming makes that a loud error instead.
+    assert tokens_for(TABLE["ld"], space="global", type="b32") == (
+        ("", "", "", "global", "", "", "", "", "b32")
+    )
+    with pytest.raises(ValueError, match="no modifier slot named"):
+        tokens_for(TABLE["ld"], storage="global", type="b32")
+    with pytest.raises(ValueError, match="not in"):
+        tokens_for(TABLE["ld"], space="tmem", type="b32")
+    with pytest.raises(ValueError, match="is required"):
+        tokens_for(TABLE["ld"], space="global")
+
+    assert render("prefetch", space="global", level="L2") == (
         "__forceinline__ __device__ void tvm_builtin_ptxd_prefetch_global_L2"
         "(const void* __addr) {\n"
         '  asm volatile("prefetch.global.L2 [%0];" :  : "l"(__addr) : "memory");\n'
@@ -422,7 +538,7 @@ def test_ptxd_helper_source_golden():
     )
     # A destination is an ordinary operand taken by reference, so the C
     # parameter list is the PTX operand list in order and the helper is void.
-    assert render("ld", ("", "acquire", "gpu", "global", "", "", "", "", "b32")) == (
+    assert render("ld", sem="acquire", scope="gpu", space="global", type="b32") == (
         "__forceinline__ __device__ void tvm_builtin_ptxd_ld_acquire_gpu_global_b32"
         "(uint32_t& __d, const void* __addr) {\n"
         '  asm volatile("ld.acquire.gpu.global.b32 %0, [%1];" : "=r"(__d) : "l"(__addr)'
@@ -432,7 +548,7 @@ def test_ptxd_helper_source_golden():
     # 8-bit destination: no asm constraint of its own, so it rides a 16-bit
     # carrier register and is narrowed into the reference afterwards. The asm
     # block still holds exactly one instruction.
-    assert render("ld", ("", "", "", "global", "", "", "", "", "b8")) == (
+    assert render("ld", space="global", type="b8") == (
         "__forceinline__ __device__ void tvm_builtin_ptxd_ld_global_b8"
         "(uint8_t& __d, const void* __addr) {\n"
         "  uint16_t __d_reg;\n"
@@ -441,7 +557,7 @@ def test_ptxd_helper_source_golden():
         "}\n"
     )
     # Shared-space addr slot: helper takes uint32_t (post-coercion form), not void*.
-    assert render("st", ("", "", "", "shared::cta", "", "", "b32")) == (
+    assert render("st", space="shared::cta", type="b32") == (
         "__forceinline__ __device__ void tvm_builtin_ptxd_st_shared__cta_b32"
         "(uint32_t __addr, uint32_t __value) {\n"
         '  asm volatile("st.shared::cta.b32 [%0], %1;" :  : "r"(__addr), "r"(__value)'
@@ -449,7 +565,7 @@ def test_ptxd_helper_source_golden():
         "}\n"
     )
     # Register-only op: plain asm (asm_volatile=False), no memory clobber.
-    assert render("cvta", ("to", "shared", "u64")) == (
+    assert render("cvta", dir="to", space="shared", type="u64") == (
         "__forceinline__ __device__ void tvm_builtin_ptxd_cvta_to_shared_u64"
         "(uint64_t& __d, const void* __ptr) {\n"
         '  asm("cvta.to.shared.u64 %0, %1;" : "=l"(__d) : "l"(__ptr));\n'
@@ -457,7 +573,9 @@ def test_ptxd_helper_source_golden():
     )
     # Predicated twin (framework-level @p): extra uint32 pred param,
     # setp + @p guard wrapping the same instruction.
-    assert render("red", ("relaxed", "gpu", "global", "add", "u32"), predicated=True) == (
+    assert render(
+        "red", predicated=True, sem="relaxed", scope="gpu", space="global", op="add", type="u32"
+    ) == (
         "__forceinline__ __device__ void tvm_builtin_ptxd_red_relaxed_gpu_global_add_u32_pred"
         "(const void* __addr, uint32_t __value, uint32_t __pred) {\n"
         '  asm volatile("{ .reg .pred p; setp.ne.b32 p, %2, 0; '
@@ -467,14 +585,53 @@ def test_ptxd_helper_source_golden():
     )
     # Mixed-space operands: per-operand space/dtype pick each carrier —
     # shared addrs are uint32, the global addr is a pointer.
-    cp_tokens = ("async", "bulk", "shared::cta", "global", "mbarrier::complete_tx::bytes")
-    assert render("cp", cp_tokens) == (
+    assert render(
+        "cp",
+        api="async",
+        kind="bulk",
+        dst_space="shared::cta",
+        src_space="global",
+        completion="mbarrier::complete_tx::bytes",
+    ) == (
         "__forceinline__ __device__ void tvm_builtin_ptxd_cp_async_bulk_shared__cta_global"
         "_mbarrier__complete_tx__bytes"
         "(uint32_t __dst, const void* __src, uint32_t __size, uint32_t __mbar) {\n"
         '  asm volatile("cp.async.bulk.shared::cta.global.mbarrier::complete_tx::bytes '
         '[%0], [%1], %2, [%3];" :  : "r"(__dst), "l"(__src), "r"(__size), "r"(__mbar)'
         ' : "memory");\n'
+        "}\n"
+    )
+
+    # Register group: `{%1, %2}` is ONE PTX operand spanning two registers, so
+    # the group is braces in the asm text and flat C parameters around it. An
+    # unpack turns that into two "=" outputs.
+    assert render("mov_pack_b32x2", type="b64") == (
+        "__forceinline__ __device__ void tvm_builtin_ptxd_mov_pack_b32x2_b64"
+        "(uint64_t& __d, uint32_t __a0, uint32_t __a1) {\n"
+        '  asm("mov.b64 %0, {%1, %2};" : "=l"(__d) : "r"(__a0), "r"(__a1));\n'
+        "}\n"
+    )
+    assert render("mov_unpack_b32x2", type="b64") == (
+        "__forceinline__ __device__ void tvm_builtin_ptxd_mov_unpack_b32x2_b64"
+        "(uint32_t& __d0, uint32_t& __d1, uint64_t __a) {\n"
+        '  asm("mov.b64 {%0, %1}, %2;" : "=r"(__d0), "=r"(__d1) : "l"(__a));\n'
+        "}\n"
+    )
+    # 128-bit destination on the "q" constraint, and asm_volatile=False: a
+    # register shuffle nvcc is free to common up.
+    assert render("mov_pack_b64x2", type="b128") == (
+        "__forceinline__ __device__ void tvm_builtin_ptxd_mov_pack_b64x2_b128"
+        "(__uint128_t& __d, uint64_t __a0, uint64_t __a1) {\n"
+        '  asm("mov.b128 %0, {%1, %2};" : "=q"(__d) : "l"(__a0), "l"(__a1));\n'
+        "}\n"
+    )
+    # Same instruction text, f32 lanes: the dtype axis renames the helper and
+    # moves the lanes to "f", and nothing else moves. This is the shape the
+    # packed-f32x2 call sites use.
+    assert render("mov_pack_b32x2", type="b64", dtypes=("uint64", "float32")) == (
+        "__forceinline__ __device__ void tvm_builtin_ptxd_mov_pack_b32x2_b64_u64_f32"
+        "(uint64_t& __d, float __a0, float __a1) {\n"
+        '  asm("mov.b64 %0, {%1, %2};" : "=l"(__d) : "f"(__a0), "f"(__a1));\n'
         "}\n"
     )
 
