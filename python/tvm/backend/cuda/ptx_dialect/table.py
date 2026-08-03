@@ -157,7 +157,7 @@ CheckFn = Callable[[dict], str | None]
 class InstructionEntry:
     """One PTX instruction family (one syntax shape)."""
 
-    name: str  # table key and attribute name, e.g. "cvta", "st_bulk"
+    name: str  # table key, e.g. "cvta", "st_bulk"; the surface name is `family`
     operands: tuple[OperandSlot, ...]
     slots: tuple[ModifierSlot, ...] = ()
     check: CheckFn | None = None  # cross-slot validation, mod_map -> error | None
@@ -172,11 +172,11 @@ class InstructionEntry:
     # `st.bulk` is one instruction whose name contains a dot, so the table key
     # (st_bulk) and the emitted mnemonic (st.bulk) have to differ.
     mnemonic: str | None = None
-    # Lowest -arch that assembles this family, when it is above the table
-    # default. Certification must use it: assembling below an instruction's
-    # floor makes ptxas report legal variants as illegal, and those verdicts
-    # would then get baked into a check() and silently delete coverage.
-    min_arch: str | None = None
+    # The -arch every variant of this family must be certified at: the maximum
+    # floor over its variants, not the minimum. Certifying below a variant's
+    # floor makes ptxas report legal forms as illegal, and those verdicts would
+    # then get baked into a check() and silently delete coverage.
+    cert_arch: str | None = None
 
     @property
     def op_name(self) -> str:
@@ -185,6 +185,17 @@ class InstructionEntry:
     @property
     def ptx_name(self) -> str:
         return self.mnemonic or self.name
+
+    @property
+    def family(self) -> str:
+        """The attribute users type: ``T.ptxd.<family>``.
+
+        The mnemonic with dots folded to underscores. Equal to ``name`` for
+        every single-shape family (``st.bulk`` -> ``st_bulk``); the shared
+        surface name where several entries differ only in operand shape, as
+        all the ``mov_*`` entries do.
+        """
+        return self.ptx_name.replace(".", "_")
 
     @property
     def has_dst(self) -> bool:
@@ -216,6 +227,32 @@ def operand_type(slot: OperandSlot, mod_map: dict) -> str:
     if key in mod_map:
         return mod_map[key] or mod_map["type"]
     return key
+
+
+def operand_space(slot: OperandSlot, mod_map: dict) -> str:
+    """The state space of one ``addr`` operand.
+
+    Fixed per operand for instructions whose operands live in different spaces
+    (cp.async.bulk), else the entry's ``space`` modifier slot. This is the one
+    definition: an address operand's C carrier (32-bit shared window vs generic
+    pointer) hangs off it, so a family whose space slot is named anything else
+    silently renders every shared form as a generic pointer.
+    """
+    return slot.space or mod_map.get("space", "")
+
+
+def call_slots(entry: InstructionEntry) -> list[OperandSlot]:
+    """The operand slot behind each call argument, in order.
+
+    ISA-fixed immediates take no argument; a register group (``lanes`` > 1)
+    takes one argument per lane, mirroring PTX's ``{%k, %k+1, ...}``.
+    """
+    return [s for s in entry.operands if s.role != "imm" for _ in range(s.lanes)]
+
+
+def pred_forms(entry: InstructionEntry) -> tuple[bool, ...]:
+    """Which ``predicated`` renderings exist: both, unless the entry has a destination."""
+    return (False,) if entry.has_dst else (False, True)
 
 
 @functools.cache
@@ -635,7 +672,7 @@ _ENTRIES = [
     InstructionEntry(
         name="st_bulk",
         mnemonic="st.bulk",
-        min_arch="sm_100a",  # PTX ISA 8.6; ptxas: "requires .target sm_100 or higher"
+        cert_arch="sm_100a",  # PTX ISA 8.6; ptxas: "requires .target sm_100 or higher"
         slots=(
             ModifierSlot("weak", ("weak",), optional=True),
             ModifierSlot("space", ("shared::cta",), optional=True),
@@ -650,36 +687,31 @@ _ENTRIES = [
     # mixed-precision lines (9.7.5.{1,2}); `mul` has no mixed-precision line.
     #   add{.rnd}{.ftz}{.sat}.f32  d, a, b;   add{.rnd}{.ftz}.f32x2  d, a, b;
     #   add{.rnd}.f64              d, a, b;   add{.rnd}{.sat}.f32.atype  d, a, c;
-    # min_arch is the family's ceiling, not its floor: .f32/.f64 assemble
+    # cert_arch is the family's ceiling, not its floor: .f32/.f64 assemble
     # everywhere, but .f32x2 and the mixed lines need sm_100, and certification
     # has to run somewhere every legal variant is legal.
     *[
         InstructionEntry(
             name=name,
-            min_arch="sm_100a",
+            cert_arch="sm_100a",
             slots=(
                 ModifierSlot("rnd", _FRND, optional=True),
                 ModifierSlot("ftz", ("ftz",), optional=True),
                 ModifierSlot("sat", ("sat",), optional=True),
                 ModifierSlot("type", ("f32", "f64", "f32x2")),
-                *(
-                    (ModifierSlot("srctype", ("f16", "bf16"), optional=True),)
-                    if name != "mul"
-                    else ()
-                ),
+                *((ModifierSlot("srctype", ("f16", "bf16"), optional=True),) if mixed else ()),
             ),
             check=_check_farith,
             operands=(
                 OperandSlot("d", role="dst"),
                 # On the mixed line `a` is the converted 16-bit source; on every
                 # other line it is just the instruction type.
-                OperandSlot("a", role="value", dtype="srctype" if name != "mul" else None),
+                OperandSlot("a", role="value", dtype="srctype" if mixed else None),
                 OperandSlot("b", role="value"),
             ),
-            # The legacy scalar and .f32x2 helpers all carried the barrier.
-            asm_volatile=True,
         )
-        for name in ("add", "sub", "mul")
+        # `mul` is the one line with no mixed-precision form (ISA 9.7.5).
+        for name, mixed in (("add", True), ("sub", True), ("mul", False))
     ],
     # fma differs in shape, so it is its own entry: three sources, and .rnd is
     # mandatory on every line (PTX ISA 9.7.3.7 / 9.7.5.3).
@@ -687,7 +719,7 @@ _ENTRIES = [
     #   fma.rnd.f64              d, a, b, c;   fma.rnd{.sat}.f32.abtype  d, a, b, c;
     InstructionEntry(
         name="fma",
-        min_arch="sm_100a",
+        cert_arch="sm_100a",
         slots=(
             ModifierSlot("rnd", _FRND),
             ModifierSlot("ftz", ("ftz",), optional=True),
@@ -703,7 +735,6 @@ _ENTRIES = [
             OperandSlot("b", role="value", dtype="srctype"),
             OperandSlot("c", role="value"),
         ),
-        asm_volatile=True,
     ),
     # ------------------------------------------------------------------
     # mov, vector pack/unpack form (PTX ISA 9.7.9.4)
@@ -749,7 +780,7 @@ _ENTRIES = [
                 ),
             ),
             # .b128 needs PTX ISA 8.3 / sm_70; the sm_90 certification default
-            # already clears that, so no min_arch is needed.
+            # already clears that, so no cert_arch is needed.
             asm_volatile=False,  # a register shuffle: let nvcc common it up
         )
         for agg, lanes, lane_dtype in (

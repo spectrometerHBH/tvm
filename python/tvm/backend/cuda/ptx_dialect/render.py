@@ -21,7 +21,7 @@ and by :mod:`.gen_helpers`, which dumps the generated helpers for humans to
 inspect without compiling a kernel.
 """
 
-from .table import PTX_TYPES, InstructionEntry, mods, operand_type
+from .table import PTX_TYPES, InstructionEntry, mods, operand_space, operand_type
 
 
 def render_variant(entry: InstructionEntry, tokens, predicated=False):
@@ -38,14 +38,15 @@ def render_variant(entry: InstructionEntry, tokens, predicated=False):
     for instructions without a destination — see ``InstructionEntry.has_dst``.
     """
     mod_map = mods(entry, tokens)
-    opcode = ".".join([entry.ptx_name] + [tok for tok in tokens if tok])
+    written = [tok for tok in tokens if tok]
+    opcode = ".".join([entry.ptx_name, *written])
     # The helper name keys off the table name rather than the mnemonic. For every
     # single-shape family the two agree (st.bulk normalizes to st_bulk anyway);
     # it matters only where several entries share a mnemonic because PTX puts
     # their difference in the operand list, as `mov`'s pack/unpack shapes do.
-    helper = "tvm_builtin_ptxd_" + "_".join([entry.name] + [tok for tok in tokens if tok]).replace(
-        "::", "__"
-    ).replace(".", "_")
+    helper = "tvm_builtin_ptxd_" + "_".join([entry.name, *written]).replace("::", "__").replace(
+        ".", "_"
+    )
     if predicated:
         assert not entry.has_dst, "@p is only supported on instructions without a destination"
         helper += "_pred"
@@ -55,68 +56,47 @@ def render_variant(entry: InstructionEntry, tokens, predicated=False):
     idx = 0
     for slot in entry.operands:
         pname = f"__{slot.name}"
-        if slot.role == "dst" and slot.lanes > 1:
-            # `{%k, %k+1, ...}` -- the group is one PTX operand but N C params.
-            _, c_ty, constraint, _ = PTX_TYPES[operand_type(slot, mod_map)]
-            lane_regs = []
-            for lane in range(slot.lanes):
-                lname = f"{pname}{lane}"
-                params.append(f"{c_ty}& {lname}")
-                outputs.append(f'"={constraint}"({lname})')
-                lane_regs.append(f"%{idx}")
-                idx += 1
-            ptx_operands.append("{" + ", ".join(lane_regs) + "}")
-            continue
-        if slot.role == "value" and slot.lanes > 1:
-            _, _, constraint, value_carrier = PTX_TYPES[operand_type(slot, mod_map)]
-            lane_regs = []
-            for lane in range(slot.lanes):
-                lname = f"{pname}{lane}"
-                params.append(f"{value_carrier} {lname}")
-                inputs.append(f'"{constraint}"({lname})')
-                lane_regs.append(f"%{idx}")
-                idx += 1
-            ptx_operands.append("{" + ", ".join(lane_regs) + "}")
-            continue
-        if slot.role == "dst":
-            _, c_ty, constraint, carrier = PTX_TYPES[operand_type(slot, mod_map)]
-            params.append(f"{c_ty}& {pname}")
-            if carrier == c_ty:
-                outputs.append(f'"={constraint}"({pname})')
-            else:
-                # 8-bit destinations have no asm constraint of their own and
-                # ride a 16-bit register (ISA: "A destination register wider
-                # than the specified type may be used"), so the asm writes a
-                # carrier local that is then narrowed into the reference.
-                reg = f"{pname}_reg"
-                pre.append(f"{carrier} {reg};")
-                outputs.append(f'"={constraint}"({reg})')
-                post.append(f"{pname} = ({c_ty}){reg};")
-            ptx_operands.append(f"%{idx}")
-        elif slot.role == "addr":
-            space = slot.space or mod_map.get("space", "")
-            if space.startswith("shared"):
-                params.append(f"uint32_t {pname}")
-                inputs.append(f'"r"({pname})')
-            else:
-                params.append(f"const void* {pname}")
-                inputs.append(f'"l"({pname})')
-            ptx_operands.append(f"[%{idx}]")
-        elif slot.role == "imm":
-            # ISA-fixed immediate: part of the instruction text, not a operand
+        if slot.role == "imm":
+            # ISA-fixed immediate: part of the instruction text, not an operand
             # the caller supplies.
             ptx_operands.append(slot.literal)
             continue
-        elif slot.role == "ptr":
-            params.append(f"const void* {pname}")
-            inputs.append(f'"l"({pname})')
-            ptx_operands.append(f"%{idx}")
-        else:  # value
-            _, _, constraint, value_carrier = PTX_TYPES[operand_type(slot, mod_map)]
-            params.append(f"{value_carrier} {pname}")
-            inputs.append(f'"{constraint}"({pname})')
-            ptx_operands.append(f"%{idx}")
-        idx += 1
+        regs = []
+        for lane in range(slot.lanes):
+            # One operand, `lanes` registers: PTX writes the group in the
+            # operand list, so a lane is a C parameter but not an operand.
+            lname = pname if slot.lanes == 1 else f"{pname}{lane}"
+            if slot.role == "dst":
+                _, c_ty, constraint, carrier = PTX_TYPES[operand_type(slot, mod_map)]
+                params.append(f"{c_ty}& {lname}")
+                if carrier == c_ty:
+                    outputs.append(f'"={constraint}"({lname})')
+                else:
+                    # 8-bit destinations have no asm constraint of their own and
+                    # ride a 16-bit register (ISA: "A destination register wider
+                    # than the specified type may be used"), so the asm writes a
+                    # carrier local that is then narrowed into the reference.
+                    reg = f"{lname}_reg"
+                    pre.append(f"{carrier} {reg};")
+                    outputs.append(f'"={constraint}"({reg})')
+                    post.append(f"{lname} = ({c_ty}){reg};")
+            elif slot.role == "addr":
+                if operand_space(slot, mod_map).startswith("shared"):
+                    params.append(f"uint32_t {lname}")
+                    inputs.append(f'"r"({lname})')
+                else:
+                    params.append(f"const void* {lname}")
+                    inputs.append(f'"l"({lname})')
+            elif slot.role == "ptr":
+                params.append(f"const void* {lname}")
+                inputs.append(f'"l"({lname})')
+            else:  # value
+                _, _, constraint, value_carrier = PTX_TYPES[operand_type(slot, mod_map)]
+                params.append(f"{value_carrier} {lname}")
+                inputs.append(f'"{constraint}"({lname})')
+            regs.append(f"[%{idx}]" if slot.role == "addr" else f"%{idx}")
+            idx += 1
+        ptx_operands.append(regs[0] if slot.lanes == 1 else "{" + ", ".join(regs) + "}")
 
     instr = f"{opcode} {', '.join(ptx_operands)};" if ptx_operands else f"{opcode};"
     if predicated:

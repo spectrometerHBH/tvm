@@ -32,7 +32,9 @@ per-instruction generated or hand-written code:
 - Modifiers travel as trailing positional string args of the traced Call
   (never ``Call.attrs`` — that would break TVMScript pretty-printing). Call
   arg layout: ``[operands..., pred?] [slot tokens ("" = omitted)]``; the
-  codegen derives predication from the arg count.
+  codegen derives predication from the arg count. Destinations are ordinary
+  leading operands, so a call is always a statement:
+  ``T.ptxd.ld.acquire.gpu.global_.b32(val, ptr)``.
 """
 
 from tvm.backend.cuda.intrinsics.registry import register_codegen
@@ -41,25 +43,26 @@ from tvm.backend.cuda.op import cuda_cvta_generic_to_shared, cuda_func_call
 from tvm.ir.op import register_op_attr
 from tvm.ir.type import PointerType, PrimType
 from tvm.runtime import const
-from tvm.tirx.expr import BufferLoad
+from tvm.tirx.expr import BufferLoad, CallEffectKind
 from tvm.tirx.op import call_intrin, reinterpret
 
 from .render import render_variant
 from .table import (
     PTX_TYPES,
     InstructionEntry,
+    call_slots,
     escape_token,
     mods,
+    operand_space,
     operand_type,
     unescape_token,
 )
 
-# tvm::tirx::CallEffectKind::kOpaque (include/tvm/tirx/op_attr_types.h). Every
-# ptxd call is a void statement, and RemoveNoOp deletes any Evaluate() whose
-# value is <= kReadState, so kOpaque is what keeps the instruction alive. It is
-# also the honest answer: "do not touch my instruction" is exactly the contract
-# a hand-written PTX call wants.
-_EFFECT_OPAQUE = 3
+# Every ptxd call is a void statement, and RemoveNoOp deletes any Evaluate()
+# whose value is <= kReadState, so kOpaque is what keeps the instruction alive.
+# It is also the honest answer: "do not touch my instruction" is exactly the
+# contract a hand-written PTX call wants.
+_EFFECT_OPAQUE = CallEffectKind.Opaque.value
 
 # ---------------------------------------------------------------------------
 # Registration (import time)
@@ -75,7 +78,7 @@ def register_table(table: dict[str, InstructionEntry]) -> None:
         # The printer name is the *surface* path a user can type, which is the
         # mnemonic (several `mov_*` entries all answer to `T.ptxd.mov`), not the
         # table key. Reparsing re-dispatches on the operand shape.
-        family = entry.ptx_name.replace(".", "_")
+        family = entry.family
         register_op_attr(entry.op_name, "TScriptPrinterName", f"ptxd.{family}", level=20)
         register_op_attr(entry.op_name, "TIRxOpCategory", "device_intrin")
         register_op_attr(entry.op_name, "TDeviceIntrinsicNamespace", "ptxd")
@@ -149,7 +152,7 @@ def _coerce_operand(entry, slot, value, mod_map):
             return value
         raise ValueError(f"{entry.name}: operand '{slot.name}' must be a pointer")
     # role == "addr"
-    space = slot.space or mod_map.get("space", "")
+    space = operand_space(slot, mod_map)
     if space.startswith("shared"):
         if isinstance(ty, PointerType):
             # Any pointer is accepted and converted, which is what the legacy
@@ -186,15 +189,6 @@ def _coerce_pred(entry, pred):
     if isinstance(ty, PrimType) and ty.dtype in ("bool", "uint32", "int32"):
         return pred
     raise ValueError(f"{entry.name}: pred must be a bool/uint32/int32 expression")
-
-
-def call_slots(entry):
-    """The operand slot behind each call argument, in order.
-
-    ISA-fixed immediates take no argument; a register group (``lanes`` > 1)
-    takes one argument per lane, mirroring PTX's ``{%k, %k+1, ...}``.
-    """
-    return [s for s in entry.operands if s.role != "imm" for _ in range(s.lanes)]
 
 
 def _emit(entry, filled, operands, pred=None):
@@ -245,23 +239,17 @@ def _emit(entry, filled, operands, pred=None):
 
 
 def _fill(entry, filled, token):
-    """Assign ``token`` to the first open modifier slot listing it. Order-free.
+    """Assign ``token`` to the first open modifier slot listing it, or None.
 
     Slot membership only; whether the final combination is legal is decided
-    once at call time by the entry's ``check`` function.
+    once at call time by the entry's ``check`` function. Returning None rather
+    than raising keeps the one error message in :func:`_narrow`, which is the
+    only caller that knows the full candidate set.
     """
     for i, slot in enumerate(entry.slots):
         if filled[i] is None and token in slot.choices:
             return (*filled[:i], token, *filled[i + 1 :])
-    open_choices = [
-        f"{slot.name}∈{{{','.join(slot.choices)}}}"
-        for i, slot in enumerate(entry.slots)
-        if filled[i] is None
-    ]
-    raise AttributeError(
-        f"'{token}' is not a valid modifier for '{entry.name}'; "
-        f"open slots: {'; '.join(open_choices) or '(none)'}"
-    )
+    return None
 
 
 class _InstrChain:
@@ -280,10 +268,6 @@ class _InstrChain:
 
     def __init__(self, cands):
         self._cands = tuple(cands)
-
-    @property
-    def _entry(self):  # single-candidate families read naturally
-        return self._cands[0][0]
 
     def __getattr__(self, name):
         if name.startswith("_"):  # keep copy/pickle/IPython dunder probes out
@@ -310,16 +294,18 @@ class _InstrChain:
                 ops, p = ops[:-1], ops[-1]
             try:
                 hits.append(_emit(entry, filled, ops, pred=p))
-            except (ValueError, TypeError) as err:
-                errors.append(f"{entry.name}: {err}")
+            except ValueError as err:
+                # Keep the exception; a lone candidate re-raises it untouched,
+                # and only the aggregate view needs entry names in front.
+                errors.append((entry, err))
         if len(hits) == 1:
             return hits[0]
         if not hits:
             if len(errors) == 1:
-                raise ValueError(errors[0].split(": ", 1)[1])
+                raise errors[0][1]
             raise ValueError(
                 "no ptxd instruction matches these operands; candidates rejected it as:\n  "
-                + "\n  ".join(errors)
+                + "\n  ".join(f"{e.name}: {err}" for e, err in errors)
             )
         raise AssertionError(  # a table bug, not a user error
             f"ambiguous ptxd table: {len(hits)} entries accept the same call "
@@ -346,7 +332,7 @@ class _InstrChain:
 
 def _narrow(cands, token):
     """Keep the candidates that can still take ``token`` in an open slot."""
-    out = [(e, _fill(e, f, token)) for e, f in cands if _accepts(e, f, token)]
+    out = [(e, filled) for e, f in cands if (filled := _fill(e, f, token)) is not None]
     if not out:
         entry, filled = cands[0]
         open_choices = [
@@ -359,10 +345,6 @@ def _narrow(cands, token):
             f"open slots: {'; '.join(open_choices) or '(none)'}"
         )
     return out
-
-
-def _accepts(entry, filled, token):
-    return any(filled[i] is None and token in slot.choices for i, slot in enumerate(entry.slots))
 
 
 class PTXDNamespace:
@@ -378,11 +360,7 @@ class PTXDNamespace:
         # identical to the table key for every single-shape family (st.bulk ->
         # st_bulk), and the shared surface name for families whose shapes are
         # separate entries (all `mov_*` entries answer to `mov`).
-        cands = [
-            (e, (None,) * len(e.slots))
-            for e in self._table.values()
-            if e.ptx_name.replace(".", "_") == token
-        ]
+        cands = [(e, (None,) * len(e.slots)) for e in self._table.values() if e.family == token]
         return _InstrChain(cands) if cands else None
 
     def __getattr__(self, name):
@@ -413,7 +391,7 @@ class PTXDNamespace:
         return chain
 
     def _family_names(self):
-        return {e.ptx_name.replace(".", "_") for e in self._table.values()}
+        return {e.family for e in self._table.values()}
 
     def __dir__(self):
         """Family names — drives tab completion."""

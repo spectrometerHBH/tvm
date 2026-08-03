@@ -39,17 +39,23 @@ checked-in stub against this generator).
 import argparse
 import sys
 import textwrap
+from pathlib import Path
 
-from .table import TABLE, InstructionEntry, escape_token
+from .table import TABLE, InstructionEntry, call_slots, escape_token
+
+# The checked-in stub this module generates.
+STUB_PATH = Path(__file__).resolve().parents[3] / "script" / "tirx.pyi"
 
 
 def _operand_params(entry: InstructionEntry) -> list[str]:
-    """One stub parameter per call argument; a register group contributes N."""
-    return [
-        f"{s.name}{i}: Any" if s.lanes > 1 else f"{s.name}: Any"
-        for s in entry.operands
-        for i in range(s.lanes)
-    ]
+    """One stub parameter per call argument, from the single call-layout definition."""
+    seen: dict[str, int] = {}
+    out = []
+    for slot in call_slots(entry):
+        lane = seen.get(slot.name, 0)
+        seen[slot.name] = lane + 1
+        out.append(f"{slot.name}{lane}: Any" if slot.lanes > 1 else f"{slot.name}: Any")
+    return out
 
 
 def _chain_class(family: str, entries: list[InstructionEntry]) -> str:
@@ -131,7 +137,7 @@ def generate() -> str:
     ]
     families: dict[str, list[InstructionEntry]] = {}
     for entry in TABLE.values():
-        families.setdefault(entry.ptx_name.replace(".", "_"), []).append(entry)
+        families.setdefault(entry.family, []).append(entry)
     for family in sorted(families):
         out.append(_chain_class(family, families[family]))
         out.append("")
@@ -159,7 +165,11 @@ def _ruff_format(text: str) -> str:
     if shutil.which("ruff") is None:
         return text
     done = subprocess.run(
-        ["ruff", "format", "--stdin-filename", "tirx.pyi", "-"],
+        # An absolute path, so ruff resolves the repo's pyproject.toml (and its
+        # line-length) from the file's own directory rather than from the
+        # caller's CWD -- pytest run from the workspace root otherwise gets
+        # ruff's 88-column default and the freshness check fails.
+        ["ruff", "format", "--stdin-filename", str(STUB_PATH), "-"],
         input=text,
         capture_output=True,
         text=True,

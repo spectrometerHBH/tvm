@@ -45,10 +45,14 @@ def generate() -> str:
             or "—"
         )
         check_doc = (e.check.__doc__ or "").strip() if e.check is not None else "—"
-        operands = ", ".join(f"{s.name}:{s.role}" for s in e.operands)
+        operands = ", ".join(
+            f"{s.name}:{s.role}[{s.lanes}]" if s.lanes > 1 else f"{s.name}:{s.role}"
+            for s in e.operands
+        )
         lines.append(f"| `{name}` | {mods} | {check_doc} | {operands} |")
     lines.append("")
-    lines.append(f"{len(TABLE)} instruction families.")
+    families = {e.family for e in TABLE.values()}
+    lines.append(f"{len(TABLE)} entries across {len(families)} instruction families.")
     return "\n".join(lines) + "\n"
 
 

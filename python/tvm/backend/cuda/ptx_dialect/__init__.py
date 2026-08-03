@@ -17,7 +17,7 @@
 """Table-driven PTX dialect prototype (``T.ptxd``).
 
 One table (:mod:`.table`), one generic engine (:mod:`.engine`), thin
-generators (:mod:`.gen_stubs`, :mod:`.gen_coverage`). Importing this package
+generators (:mod:`.gen_helpers``/``gen_stubs`, :mod:`.gen_coverage`). Importing this package
 registers every table entry as a TVM Op with a generic codegen; the
 ``T.ptxd`` namespace itself is installed by the CUDA backend's
 ``register_backend()`` via ``script_namespaces()``.

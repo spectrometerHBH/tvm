@@ -19,7 +19,6 @@
 import os
 import re
 import shutil
-from pathlib import Path
 
 import numpy as np
 import pytest
@@ -63,7 +62,7 @@ def test_ptxd_registration():
     for entry in TABLE.values():
         op = Op.get(entry.op_name)  # raises if unregistered
         assert op.get_attr("TCallEffectKind") is not None, entry.name
-        family = entry.ptx_name.replace(".", "_")  # several entries may share a mnemonic
+        family = entry.family  # several entries may share a mnemonic
         assert op.get_attr("TScriptPrinterName") == f"ptxd.{family}", entry.name
         assert entry.op_name in CODEGEN_REGISTRY, entry.name
 
@@ -517,13 +516,13 @@ def test_ptxd_single_instruction_invariant():
     appear inside a helper body.
     """
     from tvm.backend.cuda.ptx_dialect.render import render_variant
-    from tvm.backend.cuda.ptx_dialect.table import TABLE, variants
+    from tvm.backend.cuda.ptx_dialect.table import TABLE, pred_forms, variants
 
     asm_re, sole_instruction = _ASM_RE, _sole_instruction
     checked = 0
     for entry in TABLE.values():
         for tokens in variants(entry):
-            for predicated in (False,) if entry.has_dst else (False, True):
+            for predicated in pred_forms(entry):
                 opcode, _, source = render_variant(entry, tokens, predicated)
                 asm_blocks = asm_re.findall(source)
                 assert len(asm_blocks) == 1, f"{opcode}: {len(asm_blocks)} asm blocks, expected 1"
@@ -595,7 +594,7 @@ def test_ptxd_stub_up_to_date():
     """The checked-in tvm.script.tirx stub must match the generator."""
     from tvm.backend.cuda.ptx_dialect import gen_stubs
 
-    stub = Path(tvm.__file__).parent / "script" / "tirx.pyi"
+    stub = gen_stubs.STUB_PATH
     assert stub.read_text(encoding="utf-8") == gen_stubs.generate(), (
         "python/tvm/script/tirx.pyi is stale; regenerate with "
         "`python -m tvm.backend.cuda.ptx_dialect.gen_stubs -o python/tvm/script/tirx.pyi`"
@@ -616,15 +615,15 @@ def test_ptxd_sampled_helpers_assemble():
     import random
 
     from tvm.backend.cuda.ptx_dialect.render import render_variant
-    from tvm.backend.cuda.ptx_dialect.table import TABLE, variants
+    from tvm.backend.cuda.ptx_dialect.table import TABLE, pred_forms, variants
 
     rng = random.Random(20260802)
     by_arch = {}
     for entry in TABLE.values():
         combos = variants(entry)
-        arch = entry.min_arch or PTXD_ARCH
+        arch = entry.cert_arch or PTXD_ARCH
         for i in rng.sample(range(len(combos)), min(16, len(combos))):
-            for predicated in (False,) if entry.has_dst else (False, True):
+            for predicated in pred_forms(entry):
                 _, _, source = render_variant(entry, combos[i], predicated)
                 by_arch.setdefault(arch, []).append(source.replace("__forceinline__ ", ""))
     for arch, sources in by_arch.items():
@@ -655,18 +654,18 @@ def test_ptxd_all_helpers_certify(shard):
     device functions are silently dropped before ptxas ever sees them.
     """
     from tvm.backend.cuda.ptx_dialect.render import render_variant
-    from tvm.backend.cuda.ptx_dialect.table import TABLE, variants
+    from tvm.backend.cuda.ptx_dialect.table import TABLE, pred_forms, variants
 
     by_arch = {}
     covered = 0
     index = 0
     for name in sorted(TABLE):
         entry = TABLE[name]
-        arch = entry.min_arch or PTXD_ARCH
+        arch = entry.cert_arch or PTXD_ARCH
         for combo in variants(entry):
             if index % _CERT_SHARDS == shard:
                 covered += 1
-                for predicated in (False,) if entry.has_dst else (False, True):
+                for predicated in pred_forms(entry):
                     _, _, source = render_variant(entry, combo, predicated)
                     by_arch.setdefault(arch, []).append(source.replace("__forceinline__ ", ""))
             index += 1

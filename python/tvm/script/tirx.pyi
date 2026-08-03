@@ -364,9 +364,7 @@ class _Chain_st_bulk:
 
     shared__cta: _Chain_st_bulk
     weak: _Chain_st_bulk
-    def __call__(
-        self, addr: Any, size: Any, initval: Any, *args: Any, pred: Any = None
-    ) -> None: ...
+    def __call__(self, addr: Any, size: Any, *args: Any, pred: Any = None) -> None: ...
 
 class _Chain_sub:
     """`sub` — rnd∈{rn,rz,rm,rp} (opt); ftz∈{ftz} (opt); sat∈{sat} (opt); type∈{f32,f64,f32x2};
