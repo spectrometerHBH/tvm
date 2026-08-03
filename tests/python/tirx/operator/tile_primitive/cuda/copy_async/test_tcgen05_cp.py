@@ -166,7 +166,7 @@ def _make_cp_kernel(
                 T.ptx.tcgen05.alloc(T.address_of(tmem_addr), n_cols=n_tmem_cols, cta_group=1)
             if tid_in_wg == 0:
                 T.ptx.mbarrier.init(cp_mbar.ptr_to([0]), 1)
-            T.ptx.fence.proxy_async("shared::cta")
+            T.ptxd.fence.proxy.async_.shared__cta()
             T.cuda.cta_sync()
             Tx.cta.copy(A_smem[s_full_sl], A[s_full_sl])
             T.cuda.cta_sync()
@@ -484,8 +484,8 @@ def _make_cp_kernel_cta2(s_full, s_shape, t_full, t_shape, dtype, cfg, W32, n_co
         tmem = T.decl_buffer(
             t_shape, dtype, scope="tmem", allocated_addr=tmem_addr[0], layout=t_full
         )
-        T.ptx.fence.mbarrier_init()
-        T.ptx.fence.proxy_async("shared::cta")
+        T.ptxd.fence.mbarrier_init.release.cluster()
+        T.ptxd.fence.proxy.async_.shared__cta()
         T.cuda.cta_sync()
         T.cuda.cluster_sync()
         # Pre-zero both CTAs' tmem: alloc does not clear it, and the
@@ -931,7 +931,7 @@ def _make_2d_kernel(
                 )
             if tid_in_wg == 0:
                 T.ptx.mbarrier.init(cp_mbar.ptr_to([0]), 1)
-            T.ptx.fence.proxy_async("shared::cta")
+            T.ptxd.fence.proxy.async_.shared__cta()
             T.cuda.cta_sync()
             Tx.cta.copy(A_smem[:, :], A[:, :])
             T.cuda.cta_sync()
@@ -999,7 +999,7 @@ def _make_3d_4tile_kernel(s_full, t_full, s_full_shape, t_full_shape, dtype, cta
                 )
             if tid_in_wg == 0:
                 T.ptx.mbarrier.init(cp_mbar.ptr_to([0]), 1)
-            T.ptx.fence.proxy_async("shared::cta")
+            T.ptxd.fence.proxy.async_.shared__cta()
             T.cuda.cta_sync()
             Tx.cta.copy(A_smem[:, :, :], A[:, :, :])
             T.cuda.cta_sync()
@@ -1178,7 +1178,7 @@ def test_align_middle_2_to_1_nvfp4_sfb():
                 T.ptx.tcgen05.alloc(T.address_of(tmem_addr), n_cols=n_tmem_cols_total, cta_group=1)
             if tid_in_wg == 0:
                 T.ptx.mbarrier.init(cp_mbar.ptr_to([0]), 1)
-            T.ptx.fence.proxy_async("shared::cta")
+            T.ptxd.fence.proxy.async_.shared__cta()
             T.cuda.cta_sync()
             Tx.cta.copy(A_smem[:, :], A[:, :])
             T.cuda.cta_sync()

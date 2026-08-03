@@ -25,9 +25,6 @@ Adding a new modifier value requires changing exactly one place.
 """
 
 # Memory ordering / scope -----------------------------------------------------
-FENCE_SEM = ("sc", "acq_rel")
-FENCE_SCOPE = ("cta", "cluster", "gpu", "sys")
-FENCE_PROXY_ASYNC_SPACE = ("", "global", "shared::cta", "shared::cluster")
 CLUSTER_BARRIER_SEM = ("", "release", "relaxed")
 MBARRIER_COMPLETE_TX_SEM = ("relaxed",)
 MBARRIER_COMPLETE_TX_SCOPE = ("cta", "cluster")

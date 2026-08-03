@@ -35,9 +35,6 @@ CUDA-side helpers:
 
 from tvm.tirx.operator.intrinsics._common import (
     CLUSTER_BARRIER_SEM,
-    FENCE_PROXY_ASYNC_SPACE,
-    FENCE_SCOPE,
-    FENCE_SEM,
     MBARRIER_ARRIVE_SCOPE,
     MBARRIER_ARRIVE_SEM,
     MBARRIER_ARRIVE_SPACE,
@@ -65,82 +62,19 @@ def _as_bool(value) -> bool:
 # barrier.sync — unaligned named barrier. 1 form.
 #   barrier.sync a, b ;
 # =============================================================================
-device_intrinsic(
-    "ptx_bar_arrive",
-    c_signature="(int name_bar_id, int thread_count)",
-    body=(
-        '    asm volatile("bar.arrive %0, %1;" : : "r"(name_bar_id), "r"(thread_count) : "memory");'
-    ),
-)
-device_intrinsic(
-    "ptx_bar_sync",
-    c_signature="(int name_bar_id, int thread_count)",
-    body=(
-        '    asm volatile("bar.sync %0, %1;" : : "r"(name_bar_id), "r"(thread_count) : "memory");'
-    ),
-)
-device_intrinsic(
-    "ptx_barrier_sync",
-    c_signature="(int name_bar_id, int thread_count)",
-    body=(
-        '    asm volatile("barrier.sync %0, %1;" : : '
-        '"r"(name_bar_id), "r"(thread_count) : "memory");'
-    ),
-)
 
 
 # =============================================================================
 # fence{.sem}.scope — 1 form (sem/scope are modifier values).
-# =============================================================================
-def _ptx_fence(sem, scope):
-    sem, scope = parse_str(sem), parse_str(scope)
-    assert sem in FENCE_SEM, f"invalid fence sem {sem!r}, expected one of {FENCE_SEM}"
-    assert scope in FENCE_SCOPE, f"invalid fence scope {scope!r}, expected one of {FENCE_SCOPE}"
-    return (
-        f"tvm_builtin_ptx_fence_{sem}_{scope}",
-        f'    asm volatile("fence.{sem}.{scope};" ::: "memory");',
-    )
-
-
-device_intrinsic(
-    "ptx_fence",
-    n_attrs=2,
-    helper_name=lambda sem, scope: _ptx_fence(sem, scope)[0],
-    body=lambda sem, scope: _ptx_fence(sem, scope)[1],
-)
 
 
 # =============================================================================
 # fence.proxy.async{.<space>} — 1 form, optional .space modifier.
-# =============================================================================
-def _ptx_fence_proxy_async(space):
-    space = parse_str(space)
-    assert space in FENCE_PROXY_ASYNC_SPACE, (
-        f"invalid fence.proxy.async space {space!r}, expected one of {FENCE_PROXY_ASYNC_SPACE}"
-    )
-    suffix = f".{space}" if space else ""
-    name_safe = "_" + space.replace("::", "_").replace(".", "_") if space else ""
-    return (
-        f"tvm_builtin_ptx_fence_proxy_async{name_safe}",
-        f'    asm volatile("fence.proxy.async{suffix};" ::: "memory");',
-    )
-
-
-device_intrinsic(
-    "ptx_fence_proxy_async",
-    n_attrs=1,
-    helper_name=lambda space: _ptx_fence_proxy_async(space)[0],
-    body=lambda space: _ptx_fence_proxy_async(space)[1],
-)
 
 
 # =============================================================================
 # fence.mbarrier_init.release.cluster — 1 form, no operands.
 # =============================================================================
-device_intrinsic(
-    "ptx_fence_mbarrier_init",
-    body='    asm volatile("fence.mbarrier_init.release.cluster;" ::: "memory");',
-)
 
 
 # =============================================================================
@@ -162,14 +96,6 @@ def _ptx_barrier_cluster_arrive(sem, aligned):
     )
 
 
-device_intrinsic(
-    "ptx_barrier_cluster_arrive",
-    n_attrs=2,
-    helper_name=lambda sem, aligned: _ptx_barrier_cluster_arrive(sem, aligned)[0],
-    body=lambda sem, aligned: _ptx_barrier_cluster_arrive(sem, aligned)[1],
-)
-
-
 # =============================================================================
 # barrier.cluster.wait{.acquire}{.aligned} — 1 form.
 # =============================================================================
@@ -183,14 +109,6 @@ def _ptx_barrier_cluster_wait(acquire, aligned):
         f"{'_acquire' if acquire else ''}{'_aligned' if aligned else ''}",
         f'    asm volatile("barrier.cluster.wait{acq_suffix}{aligned_suffix};" ::: "memory");',
     )
-
-
-device_intrinsic(
-    "ptx_barrier_cluster_wait",
-    n_attrs=2,
-    helper_name=lambda acquire, aligned: _ptx_barrier_cluster_wait(acquire, aligned)[0],
-    body=lambda acquire, aligned: _ptx_barrier_cluster_wait(acquire, aligned)[1],
-)
 
 
 # =============================================================================
@@ -794,12 +712,3 @@ device_intrinsic(
 # Programmatic Dependent Launch (PDL) synchronization. Both carry memory
 # clobber to prevent CSE / cross-barrier reordering.
 # =============================================================================
-device_intrinsic(
-    "ptx_griddepcontrol_wait",
-    body='    asm volatile("griddepcontrol.wait;" ::: "memory");',
-)
-
-device_intrinsic(
-    "ptx_griddepcontrol_launch_dependents",
-    body='    asm volatile("griddepcontrol.launch_dependents;" ::: "memory");',
-)

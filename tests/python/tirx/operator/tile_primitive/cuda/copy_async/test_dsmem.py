@@ -186,13 +186,13 @@ def test_dsmem(shape, dtype, src_spec, dst_spec, expected):
         pool.commit()
 
         mbar.init(1)
-        T.ptx.fence.mbarrier_init()
+        T.ptxd.fence.mbarrier_init.release.cluster()
         T.cuda.cluster_sync()
 
         if tid == 0:
             if cbx == 0:
                 Tx.copy(src_smem[r], A[r])
-                T.ptx.fence.proxy_async("shared::cta")
+                T.ptxd.fence.proxy.async_.shared__cta()
 
                 Tx.copy_async(
                     dst_smem[r], src_smem[r],

@@ -160,7 +160,9 @@ def _emit_reduction_local_thread_3input_maxmin(
     reduction_len = functools.reduce(operator.mul, src_extent, 1)
 
     op_func = reduce_op_table[reduce_op]
-    reduce3_func = T.ptx.reduce3_max_f32 if reduce_op == ReduceOpType.MAX else T.ptx.reduce3_min_f32
+    # The three-source `max{.ftz}{.NaN}{.abs}.f32 d, a, b, c` line (ISA
+    # 9.7.3.12); the shared `max` mnemonic picks it by operand count.
+    reduce3_name = "max" if reduce_op == ReduceOpType.MAX else "min"
 
     src_base = src_st[0]
     num_full_chunks = reduction_len // 8
@@ -174,14 +176,15 @@ def _emit_reduction_local_thread_3input_maxmin(
         # First pass: process first 8 elements into 4 temps
         for i in T.unroll(4):
             if accum and i == 0:
-                temp[i] = reduce3_func(src[src_base + 2 * i], src[src_base + 2 * i + 1], dst[tuple(dst_st)])  # noqa: E501
+                T.ptxd[f"{reduce3_name}.f32"](temp[i], src[src_base + 2 * i], src[src_base + 2 * i + 1], dst[tuple(dst_st)])  # noqa: E501
             else:
                 temp[i] = op_func(src[src_base + 2 * i], src[src_base + 2 * i + 1])
 
         # Process remaining full chunks of 8
         for outer in T.serial(num_full_chunks - 1):
             for i in T.unroll(4):
-                temp[i] = reduce3_func(
+                T.ptxd[f"{reduce3_name}.f32"](
+                    temp[i],
                     temp[i],
                     src[src_base + 8 * (outer + 1) + 2 * i],
                     src[src_base + 8 * (outer + 1) + 2 * i + 1],
@@ -193,7 +196,7 @@ def _emit_reduction_local_thread_3input_maxmin(
 
         # Final merge: combine 4 temps into result
         dst[tuple(dst_st)] = op_func(temp[0], temp[1])
-        dst[tuple(dst_st)] = reduce3_func(dst[tuple(dst_st)], temp[2], temp[3])
+        T.ptxd[f"{reduce3_name}.f32"](dst[tuple(dst_st)], dst[tuple(dst_st)], temp[2], temp[3])
     # fmt: on
 
     return impl

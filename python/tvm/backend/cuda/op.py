@@ -24,16 +24,12 @@ from tvm.ir import Call, Op, is_prim_expr
 from tvm.ir.type import PointerType, PrimType
 from tvm.runtime import const
 from tvm.tirx.op import bitwise_and, call_intrin, tvm_access_ptr
-from tvm.tirx.operator.intrinsics._common import CLUSTER_BARRIER_SEM as _CLUSTER_BARRIER_SEM
 from tvm.tirx.operator.intrinsics._common import (
     CP_ASYNC_BULK_CACHE_HINT as _CP_ASYNC_BULK_CACHE_HINT,
 )
 from tvm.tirx.operator.intrinsics._common import CP_ASYNC_BULK_RED_OP as _CP_ASYNC_BULK_RED_OP
 from tvm.tirx.operator.intrinsics._common import CP_ASYNC_FILL_MODE as _CP_ASYNC_FILL_MODE
 from tvm.tirx.operator.intrinsics._common import CP_ASYNC_PREFETCH_SIZE as _CP_ASYNC_PREFETCH_SIZE
-from tvm.tirx.operator.intrinsics._common import FENCE_PROXY_ASYNC_SPACE as _FENCE_PROXY_ASYNC_SPACE
-from tvm.tirx.operator.intrinsics._common import FENCE_SCOPE as _FENCE_SCOPE
-from tvm.tirx.operator.intrinsics._common import FENCE_SEM as _FENCE_SEM
 from tvm.tirx.operator.intrinsics._common import LDMATRIX_DTYPE as _LDMATRIX_DTYPE
 from tvm.tirx.operator.intrinsics._common import LDMATRIX_NUM as _LDMATRIX_NUM
 from tvm.tirx.operator.intrinsics._common import MBARRIER_ARRIVE_SCOPE as _MBARRIER_ARRIVE_SCOPE
@@ -606,48 +602,6 @@ def ptx_cp_async_mbarrier_arrive_noinc(bar, space="shared::cta"):
     return ptx_cp_async_mbarrier_arrive(bar, True, space)
 
 
-def ptx_fence(sem: str, scope: str):
-    """TVM intrinsic for PTX fence instruction.
-
-    Generates: fence.{sem}.{scope};
-
-    Parameters
-    ----------
-    sem : str
-        The semantics of the fence. One of "sc", "acq_rel".
-    scope : str
-        The scope of the fence. One of "cta", "cluster", "gpu", "sys".
-
-    Returns
-    -------
-    call : Expr
-        The call expression.
-    """
-    _choice("sem", sem, _FENCE_SEM)
-    _choice("scope", scope, _FENCE_SCOPE)
-    return call_intrin("", "tirx.ptx.fence", sem, scope)
-
-
-def ptx_fence_proxy_async(space: str = ""):
-    """TVM intrinsic for PTX fence.proxy.async instruction.
-
-    Generates: fence.proxy.async[.{space}];
-
-    Parameters
-    ----------
-    space : str
-        The address space qualifier. One of "", "global", "shared::cta", "shared::cluster".
-        Empty string means no qualifier.
-
-    Returns
-    -------
-    call : Expr
-        The call expression.
-    """
-    _choice("space", space, _FENCE_PROXY_ASYNC_SPACE)
-    return call_intrin("", "tirx.ptx.fence_proxy_async", space)
-
-
 def ptx_mbarrier_init(bar, thread_count):
     """TVM intrinsic to call mbarrier.init.shared::cta.b64
 
@@ -877,67 +831,6 @@ def ptx_mbarrier_try_wait_once(bar, phase, ticks):
     :func:`ptx_mbarrier_try_wait`.
     """
     return call_intrin("uint32", "tirx.ptx.mbarrier_try_wait_once", bar, phase, ticks)
-
-
-def ptx_bar_arrive(name_bar_id, thread_count):
-    """TVM intrinsic to call bar.arrive a, b
-
-    Parameters
-    ----------
-    name_bar_id : int
-        The ID of the named barrier.
-
-    thread_count : int
-        The number of threads expected to arrive at the barrier.
-
-    Returns
-    -------
-    call : Expr
-        The call expression.
-    """
-    return call_intrin("", "tirx.ptx.bar_arrive", name_bar_id, thread_count)
-
-
-def ptx_bar_sync(name_bar_id, thread_count):
-    """TVM intrinsic to call bar.sync a, {b}
-
-    Parameters
-    ----------
-    name_bar_id : int
-        The ID of the named barrier.
-
-    thread_count : int
-        The number of threads expected to arrive at the barrier.
-
-    Returns
-    -------
-    call : Expr
-        The call expression.
-    """
-    return call_intrin("", "tirx.ptx.bar_sync", name_bar_id, thread_count)
-
-
-def ptx_barrier_sync(name_bar_id, thread_count):
-    """TVM intrinsic to call unaligned ``barrier.sync a, b``.
-
-    Unlike the aligned ``bar.sync`` alias, this spelling is valid when
-    participating lanes reach the named barrier through divergent control
-    flow or distinct static instruction sites.
-
-    Parameters
-    ----------
-    name_bar_id : int
-        The ID of the named barrier.
-
-    thread_count : int
-        The number of threads expected to arrive at the barrier.
-
-    Returns
-    -------
-    call : Expr
-        The call expression.
-    """
-    return call_intrin("", "tirx.ptx.barrier_sync", name_bar_id, thread_count)
 
 
 def ptx_cp_async(
@@ -1448,35 +1341,6 @@ def ptx_cp_async_bulk_wait_group(n=0, read=True):
     return call_intrin("", "tirx.ptx.cp_async_bulk_wait_group", n, read)
 
 
-def ptx_barrier_cluster_arrive(sem="", aligned=True):
-    """TVM intrinsic to call barrier.cluster.arrive{.sem}{.aligned}
-
-    Parameters
-    ----------
-    sem : str
-        Either release or relaxed or empty string.
-
-    aligned : bool
-        Whether all threads in the warp must execute the same instruction.
-    """
-    _choice("sem", sem, _CLUSTER_BARRIER_SEM)
-    return call_intrin("", "tirx.ptx.barrier_cluster_arrive", sem, aligned)
-
-
-def ptx_barrier_cluster_wait(acquire=False, aligned=True):
-    """TVM intrinsic to call barrier.cluster.wait{.acquire}{.aligned}
-
-    Parameters
-    ----------
-    acquire : bool
-        The memory synchronization
-
-    aligned : bool
-        Whether all threads in the warp must execute the same instruction.
-    """
-    return call_intrin("", "tirx.ptx.barrier_cluster_wait", acquire, aligned)
-
-
 def ptx_clc_try_cancel(handle, mbar):
     """TVM intrinsic to call clusterlaunchcontrol.try_cancel.
 
@@ -1516,19 +1380,6 @@ def ptx_clc_query_cancel(handle, *, use_ld_acquire=True):
 def ptx_elect_sync():
     """TVM intrinsic to call elect.sync"""
     return call_intrin("uint32", "tirx.ptx.elect_sync")
-
-
-def ptx_fence_mbarrier_init():
-    """TVM intrinsic for PTX fence.mbarrier_init.release.cluster instruction.
-
-    Generates: fence.mbarrier_init.release.cluster;
-
-    Returns
-    -------
-    call : Expr
-        The call expression.
-    """
-    return call_intrin("", "tirx.ptx.fence_mbarrier_init")
 
 
 def ptx_fetch_register(bits, reg_name):
@@ -3487,28 +3338,10 @@ def ptx_cvt(
     )
 
 
-def ptx_griddepcontrol_wait():
-    """TVM intrinsic for PTX ``griddepcontrol.wait`` (sm_90+).
-
-    Blocks the current grid until prerequisite grids signalled via
-    :func:`ptx_griddepcontrol_launch_dependents` have finished. Acts as a
-    full memory barrier.
-    """
-    return call_intrin("", "tirx.ptx.griddepcontrol_wait")
-
-
-def ptx_griddepcontrol_launch_dependents():
-    """TVM intrinsic for PTX ``griddepcontrol.launch_dependents`` (sm_90+).
-
-    Signals that the current grid has reached a point where dependent
-    grids may begin execution.
-    """
-    return call_intrin("", "tirx.ptx.griddepcontrol_launch_dependents")
-
-
 _PTX_LD_SCOPE = {"cta", "cluster", "gpu", "sys"}
+
 _PTX_LD_SPACE = {"global", "shared", "shared::cta", "shared::cluster", "local"}
-_PTX_LD_VOLATILE_SPACE = _PTX_LD_SPACE | {"const"}
+
 _PTX_SCALAR_TYPE = {
     "b8",
     "u8",
@@ -3525,10 +3358,15 @@ _PTX_SCALAR_TYPE = {
     "f32",
     "f64",
 }
+
 _PTX_LD_TYPE = set(_PTX_SCALAR_TYPE)
+
 _PTX_LD_COP = {"", "ca", "cg", "cs", "lu", "cv"}
+
 _PTX_LD_GLOBAL_NC_COP = {"", "ca", "cg", "cs"}
+
 _PTX_LD_VEC = {"", "v2", "v4", "v8"}
+
 _PTX_L1_EVICT = {
     "",
     "L1::evict_normal",
@@ -3537,15 +3375,25 @@ _PTX_L1_EVICT = {
     "L1::evict_last",
     "L1::no_allocate",
 }
+
 _PTX_L2_EVICT = {"", "L2::evict_normal", "L2::evict_first", "L2::evict_last"}
+
 _PTX_PREFETCH = {"", "L2::64B", "L2::128B", "L2::256B"}
+
 _PTX_MEM_SCOPE = {"", "cta", "cluster", "gpu", "sys"}
+
 _PTX_MEM_SPACE = {"global", "shared", "shared::cta", "shared::cluster"}
+
 _PTX_RED_OP = {"and", "or", "xor", "add", "inc", "dec", "min", "max"}
+
 _PTX_ATOM_OP = {"and", "or", "xor", "exch", "add", "inc", "dec", "min", "max"}
+
 _PTX_ST_VEC = {"", "v2", "v4", "v8"}
+
 _PTX_ST_COP = {"", "wb", "cg", "cs", "wt"}
+
 _PTX_PREFETCH_TENSORMAP_SPACE = {"", "const", "param"}
+
 _PTX_SCALAR_RETURN_TYPE = {
     "b32": "uint32",
     "u32": "uint32",
@@ -3556,6 +3404,7 @@ _PTX_SCALAR_RETURN_TYPE = {
     "f32": "float32",
     "f64": "float64",
 }
+
 _PTX_CACHE_POLICY = {
     "evict_normal": 0x1000000000000000,
     "evict_first": 0x12F0000000000000,
@@ -3740,66 +3589,6 @@ def ptx_ld_global_nc(
     )
 
 
-def ptx_ld_volatile(
-    addr,
-    return_type,
-    ptx_type,
-    *,
-    space="global",
-    vec="",
-    dst=None,
-    prefetch_size="",
-):
-    """TVM intrinsic for PTX ``ld.volatile{.ss}...`` loads."""
-    _choice("space", space, _PTX_LD_VOLATILE_SPACE)
-    _choice("ptx_type", ptx_type, _PTX_LD_TYPE)
-    _choice("vec", vec, _PTX_LD_VEC)
-    dst_args, to_dst = _normalize_ptx_ld_dst(dst, vec, "ld.volatile")
-    if to_dst:
-        return call_intrin(
-            "",
-            "tirx.ptx.ld_volatile",
-            *dst_args,
-            addr,
-            return_type,
-            space,
-            vec,
-            ptx_type,
-            to_dst,
-            prefetch_size,
-        )
-    return call_intrin(
-        return_type,
-        "tirx.ptx.ld_volatile",
-        addr,
-        return_type,
-        space,
-        vec,
-        ptx_type,
-        0,
-        prefetch_size,
-    )
-
-
-def ptx_ld_global_acquire(res, addr):
-    """TVM intrinsic to call the legacy ptx ld.global.acquire helper.
-
-    Parameters
-    ----------
-    res : Expr
-        The result of the load.
-
-    addr : Expr
-        The memory address to load.
-
-    Returns
-    -------
-    call : Expr
-        The call expression.
-    """
-    return call_intrin("", "tirx.ptx.ld_global_acquire", res, addr)
-
-
 def ptx_st(
     address,
     *values,
@@ -3920,12 +3709,6 @@ def ptx_cp_async_bulk_g2s_cluster(
         cache_policy,
         int(has_cache_policy),
         int(bool(multicast)),
-    )
-
-
-def ptx_cp_async_bulk_s2s_cluster(dst_ptr, src_ptr, num_bytes, mbarrier):
-    return call_intrin(
-        "", "tirx.ptx.cp_async_bulk_s2s_cluster", dst_ptr, src_ptr, num_bytes, mbarrier
     )
 
 

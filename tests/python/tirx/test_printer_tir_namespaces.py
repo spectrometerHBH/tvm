@@ -92,22 +92,11 @@ def test_printer_ptx_more():
         cuda_op.ptx_cp_async_mbarrier_arrive_noinc(r),
         'r = T.handle()\nT.ptx.cp_async.mbarrier.arrive(r, T.bool(True), "shared::cta")',
     )
-    _assert_print(cuda_op.ptx_fence("acq_rel", "gpu"), 'T.ptx.fence("acq_rel", "gpu")')
-    _assert_print(cuda_op.ptx_fence("sc", "cta"), 'T.ptx.fence("sc", "cta")')
-    _assert_print(
-        cuda_op.ptx_fence_proxy_async("shared::cta"), 'T.ptx.fence.proxy_async("shared::cta")'
-    )
-    _assert_print(cuda_op.ptx_fence_proxy_async("global"), 'T.ptx.fence.proxy_async("global")')
-    _assert_print(cuda_op.ptx_fence_mbarrier_init(), "T.ptx.fence.mbarrier_init()")
     _assert_print(cuda_op.ptx_elect_sync(), "T.ptx.elect_sync()")
     lane = tir.Var("lane", "int32")
     _assert_print(
         tir.op.selector(lane, cuda_op.ptx_elect_sync()),
         "lane = T.int32()\nT.selector(lane, T.ptx.elect_sync())",
-    )
-    _assert_print(
-        cuda_op.ptx_ld_global_acquire(r, s),
-        "r = T.handle()\ns = T.handle()\nT.ptx.ld_global_acquire(r, s)",
     )
     _assert_print(
         cuda_op.cuda_fdividef(1.0, 2.0),
@@ -116,9 +105,6 @@ def test_printer_ptx_more():
     _assert_print(
         cuda_op.ptx_map_shared_rank(r, 2), 'r = T.handle()\nT.ptx.mapa(r, 2, "", "u64", "uint64")'
     )
-    _assert_print(cuda_op.ptx_bar_arrive(0, 128), "T.ptx.bar.arrive(0, 128)")
-    _assert_print(cuda_op.ptx_bar_sync(0, 128), "T.ptx.bar.sync(0, 128)")
-    _assert_print(cuda_op.ptx_barrier_sync(0, 128), "T.ptx.barrier.sync(0, 128)")
     _assert_print(
         cuda_op.ptx_tcgen05_alloc(s, 64, 1), "s = T.handle()\nT.ptx.tcgen05.alloc(s, 64, 1)"
     )

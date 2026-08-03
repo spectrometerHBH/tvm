@@ -282,7 +282,7 @@ def test_fence_before_after_thread_sync():
         lane_id = T.lane_id([32])
         tid = T.thread_id([128])
         T.ptx.tcgen05.fence.before_thread_sync()
-        T.ptx.bar.sync(0, 32)
+        T.ptxd.bar.sync(0, 32)
         T.ptx.tcgen05.fence.after_thread_sync()
     # fmt: on
 
@@ -399,7 +399,7 @@ def test_tcgen05_cp_ld_roundtrip():
             T.ptx.tcgen05.alloc(T.address_of(tmem_addr), n_cols=N_COLS, cta_group=cta_group)
         T.cuda.cta_sync()
         Tx.cta.copy(A_smem[:, :], A[:, :])
-        T.ptx.fence.proxy_async("shared::cta")
+        T.ptxd.fence.proxy.async_.shared__cta()
         T.cuda.cta_sync()
         # reset RF
         for i in range(WIDTH):
@@ -511,7 +511,7 @@ def test_tcgen05_mma_ss_no_tma(swizzle):
             reg[i] = 0.0
         Tx.cta.copy(A_smem[:, :], A[:, :])
         Tx.cta.copy(B_smem[:, :], B[:, :])
-        T.ptx.fence.proxy_async("shared::cta")
+        T.ptxd.fence.proxy.async_.shared__cta()
         T.cuda.cta_sync()
         # MMA
         phase[0] = 0

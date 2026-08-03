@@ -35,7 +35,7 @@ from tvm import DataType
 from tvm.backend.cuda.op import cuda_func_call
 
 from ._schema import device_intrinsic
-from .registry import CODEGEN_REGISTRY, register_codegen
+from .registry import register_codegen
 from .utils import parse_str
 
 # __ldg — typed read-only cached load. Source is ``void*`` so callers may pass
@@ -589,55 +589,6 @@ def _register_ptx_ld(op_name, form, n_attrs):
 
 _register_ptx_ld("ptx_ld", "weak", 11)
 _register_ptx_ld("ptx_ld_global_nc", "global_nc", 9)
-_register_ptx_ld("ptx_ld_volatile", "volatile", 6)
-
-
-# =============================================================================
-# Legacy acquire-load lvalue API — compatibility wrapper over
-# ``ld.acquire.gpu.global`` / ``ld.global.cg`` forms, dispatched on dtype.
-# Wrapper picks .b32/.b64 + matching constraint by dtype.
-#
-# The body uses ``#if __CUDA_ARCH__ >= 700`` to select acquire on SM70+ and
-# fall back to .cg on older arches. This is two PTX form table entries
-# combined in one device helper for arch portability.
-# =============================================================================
-_LD_GLOBAL_ACQUIRE_DTYPES = {
-    "uint32": ("uint32_t", "b32", "r"),
-    "int32": ("int32_t", "b32", "r"),
-    "uint64": ("uint64_t", "b64", "l"),
-    "int64": ("int64_t", "b64", "l"),
-}
-
-
-def _ld_global_acquire_body(ptx_type: str, spec: str) -> str:
-    return (
-        "  #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 700\n"
-        f'  asm volatile ("ld.acquire.gpu.global.{ptx_type} %0, [%1];\\n"\n'
-        f'                : "={spec}"(res) : "l"(addr));\n'
-        "  #else\n"
-        f'  asm volatile ("ld.global.cg.{ptx_type} %0, [%1];\\n"\n'
-        f'                : "={spec}"(res) : "l"(addr));\n'
-        "  #endif"
-    )
-
-
-for _dtype, (_c_type, _ptx_type, _spec) in _LD_GLOBAL_ACQUIRE_DTYPES.items():
-    device_intrinsic(
-        f"ptx_ld_global_acquire_{_dtype}",
-        c_signature=f"({_c_type}& res, {_c_type}* addr)",
-        body=_ld_global_acquire_body(_ptx_type, _spec),
-    )
-del _dtype, _c_type, _ptx_type, _spec
-
-
-@register_codegen("ptx_ld_global_acquire")
-def codegen_ptx_ld_global_acquire(res, addr):
-    """Dispatch to the dtype-specific helper."""
-    dtype = str(res.ty)
-    if dtype not in _LD_GLOBAL_ACQUIRE_DTYPES:
-        raise ValueError(f"Unsupported data type for ld.global.acquire: {dtype}")
-    result = CODEGEN_REGISTRY[f"tirx.ptx_ld_global_acquire_{dtype}"]([res, addr])
-    return result[0] if isinstance(result, tuple) else result
 
 
 # =============================================================================

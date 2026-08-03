@@ -190,7 +190,10 @@ def render_variant(entry: InstructionEntry, tokens, predicated=False, dtypes=Non
     # memory operand cannot clobber memory, and claiming it does is a needless
     # optimization barrier around register-only instructions like ex2.
     volatile = " volatile" if entry.asm_volatile else ""
-    clobber = ' : "memory"' if any(s.role == "addr" for s in entry.operands) else ""
+    # Two ways to clobber memory: name an address, or order everyone else's
+    # accesses (a fence names nothing but must not let loads/stores move past).
+    touches_memory = any(s.role == "addr" for s in entry.operands) or entry.orders_memory
+    clobber = ' : "memory"' if touches_memory else ""
     asm_line = f'asm{volatile}("{asm_text}" : {", ".join(outputs)} : {", ".join(inputs)}{clobber});'
     body = "\n".join(f"  {line}" for line in [*pre, asm_line, *post])
     source = f"__forceinline__ __device__ void {helper}({', '.join(params)}) {{\n{body}\n}}\n"

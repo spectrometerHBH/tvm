@@ -58,12 +58,9 @@ class PTXNamespace:
         self.fetch_register: Callable[..., Any] = _op_wrapper(_cuda_op.ptx_fetch_register)
         self.ld = _op_wrapper(_cuda_op.ptx_ld)
         self.ld_global_nc = _op_wrapper(_cuda_op.ptx_ld_global_nc)
-        self.ld_volatile = _op_wrapper(_cuda_op.ptx_ld_volatile)
-        self.ld_global_acquire = _op_wrapper(_cuda_op.ptx_ld_global_acquire)
         self.mbarrier_test_wait_parity = _op_wrapper(_cuda_op.ptx_mbarrier_test_wait_parity)
         self.cp_async_bulk_g2s_cta = _op_wrapper(_cuda_op.ptx_cp_async_bulk_g2s_cta)
         self.cp_async_bulk_g2s_cluster = _op_wrapper(_cuda_op.ptx_cp_async_bulk_g2s_cluster)
-        self.cp_async_bulk_s2s_cluster = _op_wrapper(_cuda_op.ptx_cp_async_bulk_s2s_cluster)
         self.cp_async_bulk_s2g = _op_wrapper(_cuda_op.ptx_cp_async_bulk_s2g)
         self.st = _op_wrapper(_cuda_op.ptx_st)
         self.mapa = _op_wrapper(_cuda_op.ptx_mapa)
@@ -81,10 +78,6 @@ class PTXNamespace:
         self.wgmma = WgmmaNamespace()
         self.mbarrier = MbarrierNamespace()
         self.tcgen05 = Tcgen05Namespace()
-        self.bar = BarNamespace()
-        self.barrier = BarrierNamespace()
-        self.fence = FenceNamespace()
-        self.griddepcontrol = GriddepcontrolNamespace()
 
 
 class MmaNamespace:
@@ -280,51 +273,6 @@ class Tcgen05WaitNamespace:
     def __init__(self):
         self.ld = _op_wrapper(_cuda_op.ptx_tcgen05_wait_ld)
         self.st = _op_wrapper(_cuda_op.ptx_tcgen05_wait_st)
-
-
-class BarNamespace:
-    """The Bar instruction submodule."""
-
-    def __init__(self):
-        self.arrive = _op_wrapper(_cuda_op.ptx_bar_arrive)
-        self.sync = _op_wrapper(_cuda_op.ptx_bar_sync)
-
-
-class BarrierNamespace:
-    """The Barrier instruction submodule."""
-
-    def __init__(self):
-        self.sync = _op_wrapper(_cuda_op.ptx_barrier_sync)
-        self.cluster = BarrierClusterNamespace()
-
-
-class BarrierClusterNamespace:
-    """The BarrierCluster instruction submodule."""
-
-    def __init__(self):
-        self.arrive = _op_wrapper(_cuda_op.ptx_barrier_cluster_arrive)
-        self.wait = _op_wrapper(_cuda_op.ptx_barrier_cluster_wait)
-
-
-class FenceNamespace:
-    """PTX fence instruction submodule."""
-
-    def __init__(self):
-        self.proxy_async = _op_wrapper(_cuda_op.ptx_fence_proxy_async)
-        self.mbarrier_init = _op_wrapper(_cuda_op.ptx_fence_mbarrier_init)
-
-    def __call__(self, *args, **kwds):
-        return _op_wrapper(_cuda_op.ptx_fence)(*args, **kwds)
-
-    __tir_call_op_name__ = "ptx_fence"
-
-
-class GriddepcontrolNamespace:
-    """PTX griddepcontrol instruction submodule (sm_90+)."""
-
-    def __init__(self):
-        self.wait = _op_wrapper(_cuda_op.ptx_griddepcontrol_wait)
-        self.launch_dependents = _op_wrapper(_cuda_op.ptx_griddepcontrol_launch_dependents)
 
 
 class IketNamespace:

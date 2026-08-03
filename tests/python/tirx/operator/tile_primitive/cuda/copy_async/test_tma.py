@@ -1974,7 +1974,7 @@ def _build_selector_gather_gpu_kernel(dtype="float16"):
         mbar_ptr = T.meta_var(mbar.ptr_to([0]))
         if tid == 0:
             T.ptx.mbarrier.init(mbar_ptr, 1)
-        T.ptx.fence.proxy_async("shared::cta")
+        T.ptxd.fence.proxy.async_.shared__cta()
         T.cuda.cta_sync()
         if tid == 0:
             Tx.copy_async(
@@ -1987,7 +1987,7 @@ def _build_selector_gather_gpu_kernel(dtype="float16"):
             )
             T.ptx.mbarrier.arrive.expect_tx(mbar_ptr, shared_bytes)
         T.ptx.mbarrier.try_wait(mbar_ptr, 0)
-        T.ptx.fence.proxy_async("shared::cta")
+        T.ptxd.fence.proxy.async_.shared__cta()
         T.cuda.cta_sync()
         Tx.cta.copy(Out[:, :], A_smem[:, :])
         # fmt: on

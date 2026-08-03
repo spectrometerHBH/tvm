@@ -251,7 +251,7 @@ def test_gemm_tcgen05_cta_group_1(task):
         if tid_in_wg == 0:
             T.ptx.mbarrier.init(tma_mbar.ptr_to([0]), 1)
             T.ptx.mbarrier.init(mma_mbar.ptr_to([0]), 1)
-        T.ptx.fence.proxy_async("shared::cta")
+        T.ptxd.fence.proxy.async_.shared__cta()
         T.cuda.cta_sync()
 
         if warp_id == 0:
@@ -361,7 +361,7 @@ def test_gemm_tcgen05_cta_group_1_layout_f_m64():
         if tid_in_wg == 0:
             T.ptx.mbarrier.init(tma_mbar.ptr_to([0]), 1)
             T.ptx.mbarrier.init(mma_mbar.ptr_to([0]), 1)
-        T.ptx.fence.proxy_async("shared::cta")
+        T.ptxd.fence.proxy.async_.shared__cta()
         T.cuda.cta_sync()
 
         if warp_id == 0:
@@ -509,8 +509,8 @@ def test_gemm_tcgen05_cta_group_2(task):
         if warp_id == 0:
             T.ptx.tcgen05.alloc(T.address_of(tmem_addr), n_cols=cols_alloc, cta_group=2)
         tmem = T.decl_buffer((128, C_shape[1]), C_dtype, scope="tmem", allocated_addr=tmem_addr[0], layout=TileLayout(S[(128, C_shape[1]) : (1 @ TLane, 1 @ TCol)]))  # noqa: E501
-        T.ptx.fence.mbarrier_init()
-        T.ptx.fence.proxy_async("shared::cta")
+        T.ptxd.fence.mbarrier_init.release.cluster()
+        T.ptxd.fence.proxy.async_.shared__cta()
         T.cuda.cta_sync()
         T.cuda.cluster_sync()
 
@@ -643,8 +643,8 @@ def test_gemm_tcgen05_cta_group_2_layout_b():
         tmem = T.decl_buffer((M_per_cta, N_logical), C_dtype, scope="tmem", allocated_addr=tmem_addr[0], layout=TileLayout(S[(M_per_cta, 2, N_half) : (1 @ TLane, 64 @ TLane, 1 @ TCol)]))  # noqa: E501
                 # Physical TMEM view for readback: (128, N_half) standard layout
         tmem_phys = T.decl_buffer((128, N_half), C_dtype, scope="tmem", allocated_addr=tmem_addr[0], layout=TileLayout(S[(128, N_half) : (1 @ TLane, 1 @ TCol)]))  # noqa: E501
-        T.ptx.fence.mbarrier_init()
-        T.ptx.fence.proxy_async("shared::cta")
+        T.ptxd.fence.mbarrier_init.release.cluster()
+        T.ptxd.fence.proxy.async_.shared__cta()
         T.cuda.cta_sync()
         T.cuda.cluster_sync()
 
@@ -752,7 +752,7 @@ def test_gemm_tcgen05_cta_group_2_datapath_b_readback():
             T.ptx.mbarrier.init(mma_mbar.ptr_to([0]), 1)
         if warp_id == 0:
             T.ptx.tcgen05.alloc(T.address_of(tmem_addr), n_cols=n_per_cta, cta_group=2)
-        T.ptx.fence.mbarrier_init()
+        T.ptxd.fence.mbarrier_init.release.cluster()
         T.cuda.cta_sync()
 
         tmem = T.decl_buffer(
@@ -774,7 +774,7 @@ def test_gemm_tcgen05_cta_group_2_datapath_b_readback():
                 cbx * n_per_cta + (tid + i * 128) // k, (tid + i * 128) % k
             ])
         T.cuda.cta_sync()
-        T.ptx.fence.proxy_async("shared::cta")
+        T.ptxd.fence.proxy.async_.shared__cta()
         T.cuda.cluster_sync()
 
         if cbx == 0:
@@ -939,7 +939,7 @@ def test_gemm_block_scaled_fp8_cta_group_1(task):
         if tid_in_wg == 0:
             T.ptx.mbarrier.init(tma_mbar.ptr_to([0]), 1)
             T.ptx.mbarrier.init(mma_mbar.ptr_to([0]), 1)
-        T.ptx.fence.proxy_async("shared::cta")
+        T.ptxd.fence.proxy.async_.shared__cta()
         T.cuda.cta_sync()
 
         if warp_id == 0:
@@ -960,7 +960,7 @@ def test_gemm_block_scaled_fp8_cta_group_1(task):
         T.cuda.cta_sync()
         SFA_smem[tid_in_wg // 32, tid_in_wg % 32] = SFA_in[tid_in_wg]
         SFB_smem[tid_in_wg // 32, tid_in_wg % 32] = SFB_in[tid_in_wg]
-        T.ptx.fence.proxy_async("shared::cta")
+        T.ptxd.fence.proxy.async_.shared__cta()
         T.cuda.cta_sync()
 
                 # Transpose scale factors in shared memory
@@ -1150,8 +1150,8 @@ def test_gemm_block_scaled_fp8_cta_group_2(task):
         sfa_tmem = T.decl_buffer((128, sf_mma_k), SF_dtype, scope="tmem", allocated_addr=SFA_TMEM_START, layout=sf_layout)  # noqa: E501
         sfb_tmem = T.decl_buffer((128, sf_mma_k), SF_dtype, scope="tmem", allocated_addr=SFB_TMEM_START, layout=sf_layout)  # noqa: E501
 
-        T.ptx.fence.mbarrier_init()
-        T.ptx.fence.proxy_async("shared::cta")
+        T.ptxd.fence.mbarrier_init.release.cluster()
+        T.ptxd.fence.proxy.async_.shared__cta()
         T.cuda.cta_sync()
         T.cuda.cluster_sync()
 
@@ -1164,7 +1164,7 @@ def test_gemm_block_scaled_fp8_cta_group_2(task):
                 T.ptx.mbarrier.arrive.expect_tx(tma_mbar.ptr_to([0]), total_bytes)
         SFA_smem[tid_in_wg // 32, tid_in_wg % 32] = SFA_in[cbx * 128 + tid_in_wg]
         SFB_smem[tid_in_wg // 32, tid_in_wg % 32] = SFB_in[tid_in_wg]
-        T.ptx.fence.proxy_async("shared::cta")
+        T.ptxd.fence.proxy.async_.shared__cta()
         T.cuda.cta_sync()
 
                 # Transpose scale factors (both CTAs)
@@ -1337,7 +1337,7 @@ def test_gemm_block_scaled_nvfp4_cta_group_1():
         if tid_in_wg == 0:
             T.ptx.mbarrier.init(tma_mbar.ptr_to([0]), 1)
             T.ptx.mbarrier.init(mma_mbar.ptr_to([0]), 1)
-        T.ptx.fence.proxy_async("shared::cta")
+        T.ptxd.fence.proxy.async_.shared__cta()
         T.cuda.cta_sync()
 
         if warp_id == 0:
@@ -1358,7 +1358,7 @@ def test_gemm_block_scaled_nvfp4_cta_group_1():
         T.cuda.cta_sync()
         SFA_smem[tid_in_wg // 32, tid_in_wg % 32] = SFA_in[tid_in_wg]
         SFB_smem[tid_in_wg // 32, tid_in_wg % 32] = SFB_in[tid_in_wg]
-        T.ptx.fence.proxy_async("shared::cta")
+        T.ptxd.fence.proxy.async_.shared__cta()
         T.cuda.cta_sync()
 
                 # Transpose scale factors in shared memory
@@ -1532,8 +1532,8 @@ def test_gemm_block_scaled_nvfp4_cta_group_2():
         sfa_tmem = T.decl_buffer((M_per_cta, sf_mma_k), SF_dtype, scope="tmem", allocated_addr=SFA_TMEM_START, layout=sfa_layout)  # noqa: E501
         sfb_tmem = T.decl_buffer((N_total, sf_mma_k), SF_dtype, scope="tmem", allocated_addr=SFB_TMEM_START, layout=sfb_layout)  # noqa: E501
 
-        T.ptx.fence.mbarrier_init()
-        T.ptx.fence.proxy_async("shared::cta")
+        T.ptxd.fence.mbarrier_init.release.cluster()
+        T.ptxd.fence.proxy.async_.shared__cta()
         T.cuda.cta_sync()
         T.cuda.cluster_sync()
 
@@ -1546,7 +1546,7 @@ def test_gemm_block_scaled_nvfp4_cta_group_2():
                 T.ptx.mbarrier.arrive.expect_tx(tma_mbar.ptr_to([0]), total_bytes)
         SFA_smem[tid_in_wg // 32, tid_in_wg % 32] = SFA_in[cbx * M_per_cta + tid_in_wg]
         SFB_smem[tid_in_wg // 32, tid_in_wg % 32] = SFB_in[tid_in_wg]
-        T.ptx.fence.proxy_async("shared::cta")
+        T.ptxd.fence.proxy.async_.shared__cta()
         T.cuda.cta_sync()
 
                 # Transpose scale factors
@@ -1724,7 +1724,7 @@ def test_gemm_block_scaled_fp8_sf_id():
         if tid_in_wg == 0:
             T.ptx.mbarrier.init(tma_mbar.ptr_to([0]), 1)
             T.ptx.mbarrier.init(mma_mbar.ptr_to([0]), 1)
-        T.ptx.fence.proxy_async("shared::cta")
+        T.ptxd.fence.proxy.async_.shared__cta()
         T.cuda.cta_sync()
 
         if warp_id == 0:
@@ -1745,7 +1745,7 @@ def test_gemm_block_scaled_fp8_sf_id():
         T.cuda.cta_sync()
         SFA_smem[tid_in_wg // 32, tid_in_wg % 32] = SFA_in[tid_in_wg]
         SFB_smem[tid_in_wg // 32, tid_in_wg % 32] = SFB_in[tid_in_wg]
-        T.ptx.fence.proxy_async("shared::cta")
+        T.ptxd.fence.proxy.async_.shared__cta()
         T.cuda.cta_sync()
 
                 # Transpose scale factors in shared memory
@@ -2067,7 +2067,7 @@ def test_gemm_tcgen05_arbitrary_tiles(task):
         if tid_in_wg == 0:
             T.ptx.mbarrier.init(tma_mbar.ptr_to([0]), 1)
             T.ptx.mbarrier.init(mma_mbar.ptr_to([0]), 1)
-        T.ptx.fence.proxy_async("shared::cta")
+        T.ptxd.fence.proxy.async_.shared__cta()
         T.cuda.cta_sync()
 
         if warp_id == 0:
@@ -2386,7 +2386,7 @@ def test_gemm_tcgen05_no_swizzle_col_major_a_ws_local_idesc():
         for i in range(K * N // 128):
             b_idx = i * 128 + tid_in_wg
             B_smem[b_idx // N, b_idx % N] = B[b_idx // N, b_idx % N]
-        T.ptx.fence.proxy_async("shared::cta")
+        T.ptxd.fence.proxy.async_.shared__cta()
         T.cuda.cta_sync()
         if tid_in_wg == 0:
             Tx.gemm_async(tmem[:, :], A_smem[:, :], B_smem[:, :], transB=True, dispatch="tcgen05", cta_group=1, weight_stationary=True)  # noqa: E501
@@ -2472,7 +2472,7 @@ def test_gemm_tcgen05_contiguous_kslice_partial_k(k_lo, k_hi):
         if tid_in_wg == 0:
             T.ptx.mbarrier.init(tma_mbar.ptr_to([0]), 1)
             T.ptx.mbarrier.init(mma_mbar.ptr_to([0]), 1)
-        T.ptx.fence.proxy_async("shared::cta")
+        T.ptxd.fence.proxy.async_.shared__cta()
         T.cuda.cta_sync()
         if warp_id == 0:
             T.ptx.tcgen05.alloc(T.address_of(tmem_addr), n_cols=128, cta_group=1)
@@ -2562,7 +2562,7 @@ def _run_dense_gemm(
         if tid_in_wg == 0:
             T.ptx.mbarrier.init(tma_mbar.ptr_to([0]), 1)
             T.ptx.mbarrier.init(mma_mbar.ptr_to([0]), 1)
-        T.ptx.fence.proxy_async("shared::cta")
+        T.ptxd.fence.proxy.async_.shared__cta()
         T.cuda.cta_sync()
         if warp_id == 0:
             T.ptx.tcgen05.alloc(T.address_of(tmem_addr), n_cols=cols_alloc, cta_group=1)
@@ -2682,7 +2682,7 @@ def _run_dense_gemm(
         if tid_in_wg == 0:
             T.ptx.mbarrier.init(tma_mbar.ptr_to([0]), 1)
             T.ptx.mbarrier.init(mma_mbar.ptr_to([0]), 1)
-        T.ptx.fence.proxy_async("shared::cta")
+        T.ptxd.fence.proxy.async_.shared__cta()
         T.cuda.cta_sync()
         if warp_id == 0:
             T.ptx.tcgen05.alloc(T.address_of(tmem_addr), n_cols=cols_alloc, cta_group=1)
@@ -2774,7 +2774,7 @@ def _build_smem_desc_kernel(smem_desc, weight_stationary=False, pass_descI=False
         if tid_in_wg == 0:
             T.ptx.mbarrier.init(tma_mbar.ptr_to([0]), 1)
             T.ptx.mbarrier.init(mma_mbar.ptr_to([0]), 1)
-        T.ptx.fence.proxy_async("shared::cta")
+        T.ptxd.fence.proxy.async_.shared__cta()
         T.cuda.cta_sync()
         if warp_id == 0:
             T.ptx.tcgen05.alloc(T.address_of(tmem_addr), n_cols=128, cta_group=1)

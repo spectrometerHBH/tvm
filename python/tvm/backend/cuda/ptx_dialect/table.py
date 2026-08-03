@@ -91,6 +91,14 @@ PTX_TYPE_DTYPES = {
     # example declares them `.reg .b16`.
     "f16": ("uint16",),
     "bf16": ("uint16",),
+    # Packed SIMD types, same reasoning as `.f32x2`: the token names a layout,
+    # its container is one ordinary register of the matching width.
+    "u16x2": ("uint32",),
+    "s16x2": ("uint32",),
+    "u8x4": ("uint32",),
+    "s8x4": ("uint32",),
+    "f16x2": ("uint32",),
+    "bf16x2": ("uint32",),
 }
 
 
@@ -161,7 +169,15 @@ CheckFn = Callable[[dict], str | None]
 
 @dataclass(frozen=True)
 class InstructionEntry:
-    """One PTX instruction family (one syntax shape)."""
+    """One PTX instruction family (one syntax shape).
+    ``orders_memory`` marks an instruction that constrains the order of *other*
+    threads' memory accesses without naming any address itself -- fences,
+    barriers, async-group waits. The ``"memory"`` clobber is otherwise derived
+    from "does this entry have an ``addr`` operand", which is the right rule for
+    instructions that touch memory but cannot see a fence: ``asm volatile``
+    alone only pins the asm block, it does not stop the compiler moving ordinary
+    loads and stores across it.
+    """
 
     name: str  # table key, e.g. "cvta", "st_bulk"; the surface name is `family`
     operands: tuple[OperandSlot, ...]
@@ -174,6 +190,7 @@ class InstructionEntry:
     # so the IR shares nothing either way; this flag exists only to preserve
     # each instruction's established barrier byte-for-byte across migration.
     asm_volatile: bool = True
+    orders_memory: bool = False
     # The PTX mnemonic, when it is not spellable as a Python identifier.
     # `st.bulk` is one instruction whose name contains a dot, so the table key
     # (st_bulk) and the emitted mnemonic (st.bulk) have to differ.
@@ -482,10 +499,71 @@ def _check_rcp(m):
     return None
 
 
-def _check_max(m):
-    """`max.f64` is the bare form; .ftz/.NaN belong to the .f32 line (PTX ISA 9.7.3.12)."""
-    if m["type"] == "f64" and (m["ftz"] or m["nan"]):
-        return "max.f64 takes no .ftz or .NaN"
+# The .type tokens of the integer min/max lines (PTX ISA 9.7.1.13/9.7.1.14).
+# `.relu` is only on the signed line (type2); the unsigned/other line takes none.
+# NOT REGISTERED: `.u8x4` and `{.relu}.s8x4`, which the ISA supports only on
+# "sm_120f or higher in the same family" -- outside the architectures this
+# dialect certifies, and ptxas rejects them at sm_100.
+_MINMAX_INT_PLAIN = ("u16", "u32", "u64", "u16x2", "s16", "s64")
+_MINMAX_INT_RELU = ("s16x2", "s32")
+# The floating-point and half-precision lines (9.7.3.12/9.7.3.13, 9.7.4.8/9.7.4.9).
+_MINMAX_FP = ("f32", "f64", "f16", "f16x2", "bf16", "bf16x2")
+
+
+def _check_fence_proxy(m):
+    """`.proxykind = { .alias, .async, .async.global, .async.shared::{cta,cluster} }`.
+
+    Modelled as proxykind + an optional space so the surface can walk it one
+    attribute at a time; only `.async` carries a state space (ISA 9.7.14.4).
+    """
+    if m["space"] and m["proxykind"] != "async":
+        return f"fence.proxy.{m['proxykind']} takes no state space"
+    return None
+
+
+def _check_minmax(m):
+    """Which qualifiers each min/max syntax line allows.
+
+    Integer lines (9.7.1.13/14):  op.type1 d,a,b   |  op{.relu}.type2 d,a,b
+    Floating lines (9.7.3.12/13): op{.ftz}{.NaN}{.xorsign.abs}.f32 d,a,b
+                                  op.f64 d,a,b
+    Half lines (9.7.4.8/9):       op{.ftz}{.NaN}{.xorsign.abs}.f16{x2} d,a,b
+                                  op{.NaN}{.xorsign.abs}.bf16{x2} d,a,b
+    `.xorsign` and `.abs` are one paired qualifier `{.xorsign.abs}` -- two slots
+    only because the surface reaches them one attribute at a time.
+    """
+    ty = m["type"]
+    ftz, nan, xorsign, abs_, relu = (
+        m.get("ftz", ""),
+        m.get("nan", ""),
+        m.get("xorsign", ""),
+        m.get("abs", ""),
+        m.get("relu", ""),
+    )
+    is_int = ty in _MINMAX_INT_PLAIN or ty in _MINMAX_INT_RELU
+    if is_int:
+        if ftz or nan or xorsign or abs_:
+            return f".{ty} is an integer line and takes no .ftz/.NaN/.xorsign.abs"
+        if relu and ty not in _MINMAX_INT_RELU:
+            return f".relu is only on {'/'.join(_MINMAX_INT_RELU)}, not .{ty}"
+        return None
+    if relu:
+        return f".relu is an integer-line qualifier, not valid on .{ty}"
+    if ty == "f64" and (ftz or nan or xorsign or abs_):
+        return "the .f64 line is the bare form: no .ftz/.NaN/.xorsign.abs"
+    if ty.startswith("bf16") and ftz:
+        return f".{ty} takes no .ftz"
+    if bool(xorsign) != bool(abs_):
+        return ".xorsign and .abs are one paired qualifier: write both or neither"
+    return None
+
+
+def _check_minmax3(m):
+    """The three-source line: `op{.ftz}{.NaN}{.abs}.f32 d, a, b, c` (9.7.3.12).
+
+    `.abs` here is standalone -- unlike the two-source line, which pairs it with
+    `.xorsign`.
+    """
     return None
 
 
@@ -766,26 +844,6 @@ _ENTRIES = [
         ),
         asm_volatile=False,  # legacy fns carried no barrier
     ),
-    # max per PTX ISA 9.7.3.12, two-source form. Deliberately excluded:
-    # {.xorsign.abs} (a paired qualifier), the three-source
-    # `max{.ftz}{.NaN}{.abs}.f32 d, a, b, c` line (a different operand shape,
-    # so its own entry), the half-precision forms of 9.7.4.8, and the entire
-    # integer max family (9.7.1.14) -- ten .type tokens plus {.relu}, same
-    # d, a, b shape, so a type-slot widening whenever it is wanted.
-    InstructionEntry(
-        name="max",
-        slots=(
-            ModifierSlot("ftz", ("ftz",), optional=True),
-            ModifierSlot("nan", ("NaN",), optional=True),
-            ModifierSlot("type", ("f32", "f64")),
-        ),
-        check=_check_max,
-        operands=(
-            OperandSlot("d", role="dst"),
-            OperandSlot("a", role="value"),
-            OperandSlot("b", role="value"),
-        ),
-    ),
     # st.bulk per PTX ISA 9.7.9.14:
     #   st.bulk{.weak}{.shared::cta} [a], size, initval;  // initval must be zero
     # Unregistered: the 32-bit `size` form (ISA: "The 32-bit or 64-bit integer
@@ -808,6 +866,55 @@ _ENTRIES = [
             OperandSlot("initval", role="imm", literal="0"),
         ),
     ),
+    # min / max, complete per PTX ISA 9.7.1.13, 9.7.1.14 (integer),
+    # 9.7.3.12, 9.7.3.13 (single/double), 9.7.4.8, 9.7.4.9 (half).
+    # Each mnemonic gets two entries because the ISA gives it two operand
+    # shapes: the usual `d, a, b` and the three-source `d, a, b, c` line.
+    # NOT REGISTERED: nothing -- every syntax line of both families is here.
+    *[
+        InstructionEntry(
+            name=name,
+            slots=(
+                ModifierSlot("ftz", ("ftz",), optional=True),
+                ModifierSlot("nan", ("NaN",), optional=True),
+                ModifierSlot("xorsign", ("xorsign",), optional=True),
+                ModifierSlot("abs", ("abs",), optional=True),
+                ModifierSlot("relu", ("relu",), optional=True),
+                ModifierSlot("type", (*_MINMAX_FP, *_MINMAX_INT_PLAIN, *_MINMAX_INT_RELU)),
+            ),
+            check=_check_minmax,
+            # `.u16x2`, `{.relu}.s16x2` and `.relu.s32` need sm_90 (ISA Target
+            # Notes); cert_arch is the max over the entry's variants.
+            cert_arch="sm_90",
+            operands=(
+                OperandSlot("d", role="dst"),
+                OperandSlot("a", role="value"),
+                OperandSlot("b", role="value"),
+            ),
+        )
+        for name in ("max", "min")
+    ],
+    *[
+        InstructionEntry(
+            name=f"{name}3",
+            mnemonic=name,
+            slots=(
+                ModifierSlot("ftz", ("ftz",), optional=True),
+                ModifierSlot("nan", ("NaN",), optional=True),
+                ModifierSlot("abs", ("abs",), optional=True),
+                ModifierSlot("type", ("f32",)),
+            ),
+            check=_check_minmax3,
+            cert_arch="sm_100",  # "max.f32 with 3 input operands" requires sm_100
+            operands=(
+                OperandSlot("d", role="dst"),
+                OperandSlot("a", role="value"),
+                OperandSlot("b", role="value"),
+                OperandSlot("c", role="value"),
+            ),
+        )
+        for name in ("max", "min")
+    ],
     # Floating-point add/sub/mul (PTX ISA 9.7.3.{3,4,5}) together with their
     # mixed-precision lines (9.7.5.{1,2}); `mul` has no mixed-precision line.
     #   add{.rnd}{.ftz}{.sat}.f32  d, a, b;   add{.rnd}{.ftz}.f32x2  d, a, b;
@@ -976,6 +1083,233 @@ _ENTRIES = [
             OperandSlot("mbar", role="addr", space="shared::cta"),
         ),
     ),
+    # mapa per PTX ISA 9.7.9.6: map a shared address into another CTA of the
+    # cluster. All four syntax lines differ only in how `a` is spelled at the
+    # PTX level (register / variable / variable+imm); through a C helper the
+    # operand is always a register, so they collapse to one entry.
+    # `.type` fixes the width of BOTH d and a, so the two type tokens are two
+    # entries: `.u64` maps a generic address (a pointer), `.u32` maps a 32-bit
+    # shared-window address (a plain register, not bracketed).
+    InstructionEntry(
+        name="mapa",
+        slots=(
+            ModifierSlot("space", ("shared::cluster",), optional=True),
+            ModifierSlot("type", ("u64",)),
+        ),
+        asm_volatile=False,  # a pure address computation
+        operands=(
+            OperandSlot("d", role="dst"),
+            OperandSlot("a", role="ptr"),
+            OperandSlot("b", role="value", dtype="u32"),
+        ),
+    ),
+    InstructionEntry(
+        name="mapa_u32",
+        mnemonic="mapa",
+        slots=(
+            ModifierSlot("space", ("shared::cluster",), optional=True),
+            ModifierSlot("type", ("u32",)),
+        ),
+        asm_volatile=False,
+        operands=(
+            OperandSlot("d", role="dst"),
+            OperandSlot("a", role="value", dtype="u32"),
+            OperandSlot("b", role="value", dtype="u32"),
+        ),
+    ),
+    # clusterlaunchcontrol.try_cancel per PTX ISA 9.7.14.15.
+    # NOT REGISTERED: the `query_cancel` lines (9.7.14.16) -- they decode the
+    # b128 response into a `.pred` or a `.v4.b32` group, which needs both a
+    # predicate result and a variable register group.
+    InstructionEntry(
+        name="clusterlaunchcontrol_try_cancel",
+        mnemonic="clusterlaunchcontrol",
+        slots=(
+            ModifierSlot("action", ("try_cancel",)),
+            ModifierSlot("async_", ("async",)),
+            ModifierSlot("space", ("shared::cta",), optional=True),
+            ModifierSlot("completion", ("mbarrier::complete_tx::bytes",)),
+            ModifierSlot("multicast", ("multicast::cluster::all",), optional=True),
+            ModifierSlot("type", ("b128",)),
+        ),
+        # The instruction itself needs sm_100, but `.multicast::cluster::all`
+        # is only on the arch-specific targets (ISA: sm_100a / sm_101a / sm_120a).
+        cert_arch="sm_100a",
+        operands=(
+            OperandSlot("addr", role="addr", space="shared::cta"),
+            OperandSlot("mbar", role="addr", space="shared::cta"),
+        ),
+    ),
+    # ------------------------------------------------------------------
+    # fence / membar per PTX ISA 9.7.14.4, griddepcontrol per 9.7.14.14.
+    #
+    # These name no address yet constrain everyone else's memory order, so they
+    # set `orders_memory=True` -- see InstructionEntry for why `asm volatile`
+    # alone is not enough. Each syntax line whose token sequence differs is its
+    # own entry, all sharing the `fence` mnemonic, so the surface stays
+    # `T.ptxd.fence...` and the chain narrows on the tokens themselves.
+    # NOT REGISTERED: the `.sync_restrict` lines and the fabric-proxy line
+    # (fixed token sequences with no users yet), and the deprecated `membar`
+    # spellings, which the ISA itself marks as the old style for `fence`.
+    InstructionEntry(  # fence{.sem}.scope;
+        name="fence",
+        slots=(
+            ModifierSlot("sem", ("sc", "acq_rel", "acquire", "release"), optional=True),
+            ModifierSlot("scope", ("cta", "cluster", "gpu", "sys")),
+        ),
+        orders_memory=True,
+        operands=(),
+    ),
+    InstructionEntry(  # fence.mbarrier_init.release.cluster;
+        name="fence_mbarrier_init",
+        mnemonic="fence",
+        slots=(
+            ModifierSlot("op_restrict", ("mbarrier_init",)),
+            ModifierSlot("sem", ("release",)),
+            ModifierSlot("scope", ("cluster",)),
+        ),
+        orders_memory=True,
+        operands=(),
+    ),
+    InstructionEntry(  # fence.proxy.proxykind;
+        name="fence_proxy",
+        mnemonic="fence",
+        slots=(
+            ModifierSlot("proxy", ("proxy",)),
+            ModifierSlot("proxykind", ("alias", "async")),
+            ModifierSlot("space", ("global", "shared::cta", "shared::cluster"), optional=True),
+        ),
+        check=_check_fence_proxy,
+        orders_memory=True,
+        operands=(),
+    ),
+    InstructionEntry(  # fence.proxy.tensormap::generic.release.scope;
+        name="fence_proxy_tensormap_release",
+        mnemonic="fence",
+        slots=(
+            ModifierSlot("proxy", ("proxy",)),
+            ModifierSlot("proxykind", ("tensormap::generic",)),
+            ModifierSlot("sem", ("release",)),
+            ModifierSlot("scope", ("cta", "cluster", "gpu", "sys")),
+        ),
+        orders_memory=True,
+        operands=(),
+    ),
+    InstructionEntry(  # fence.proxy.tensormap::generic.acquire.scope [addr], 128;
+        name="fence_proxy_tensormap_acquire",
+        mnemonic="fence",
+        slots=(
+            ModifierSlot("proxy", ("proxy",)),
+            ModifierSlot("proxykind", ("tensormap::generic",)),
+            ModifierSlot("sem", ("acquire",)),
+            ModifierSlot("scope", ("cta", "cluster", "gpu", "sys")),
+        ),
+        orders_memory=True,
+        operands=(
+            OperandSlot("addr", role="addr"),
+            # "The only supported value for the size operand is 128, which must
+            # be a constant integer literal" -- ISA 9.7.14.4.
+            OperandSlot("size", role="imm", literal="128"),
+        ),
+    ),
+    InstructionEntry(  # griddepcontrol.action;
+        name="griddepcontrol",
+        slots=(ModifierSlot("action", ("launch_dependents", "wait")),),
+        orders_memory=True,
+        operands=(),
+    ),
+    # ------------------------------------------------------------------
+    # bar / barrier per PTX ISA 9.7.14.1, barrier.cluster per 9.7.14.2.
+    #
+    #   barrier{.cta}.sync{.aligned}   a{, b};    bar{.cta}.sync   a{, b};
+    #   barrier{.cta}.arrive{.aligned} a,  b;     bar{.cta}.arrive a,  b;
+    #
+    # NOT REGISTERED, and both for mechanism reasons rather than ISA ones:
+    #
+    # - The no-count lines `bar{.cta}.sync a;` / `barrier{.cta}.sync{.aligned} a;`.
+    #   A one-operand entry and the two-operand one cannot coexist under a
+    #   shared mnemonic: the framework's positional `pred` form lets the
+    #   one-operand entry also accept a two-operand call (it reads the count as
+    #   the predicate), and both then match. Every call site in this workspace
+    #   passes the count, so only the two-operand line is registered.
+    # - The `.red.popc` / `.red.op` lines, which take a `{!}c` predicate source
+    #   and produce a `.pred` result.
+    InstructionEntry(
+        name="bar_sync_count",
+        mnemonic="bar",
+        slots=(
+            ModifierSlot("cta", ("cta",), optional=True),
+            ModifierSlot("action", ("sync",)),
+        ),
+        orders_memory=True,
+        operands=(
+            OperandSlot("a", role="value", dtype="u32"),
+            OperandSlot("b", role="value", dtype="u32"),
+        ),
+    ),
+    InstructionEntry(
+        name="bar_arrive",
+        mnemonic="bar",
+        slots=(
+            ModifierSlot("cta", ("cta",), optional=True),
+            ModifierSlot("action", ("arrive",)),
+        ),
+        orders_memory=True,
+        operands=(
+            OperandSlot("a", role="value", dtype="u32"),
+            OperandSlot("b", role="value", dtype="u32"),
+        ),
+    ),
+    InstructionEntry(
+        name="barrier_sync_count",
+        mnemonic="barrier",
+        slots=(
+            ModifierSlot("cta", ("cta",), optional=True),
+            ModifierSlot("action", ("sync",)),
+            ModifierSlot("aligned", ("aligned",), optional=True),
+        ),
+        orders_memory=True,
+        operands=(
+            OperandSlot("a", role="value", dtype="u32"),
+            OperandSlot("b", role="value", dtype="u32"),
+        ),
+    ),
+    InstructionEntry(
+        name="barrier_arrive",
+        mnemonic="barrier",
+        slots=(
+            ModifierSlot("cta", ("cta",), optional=True),
+            ModifierSlot("action", ("arrive",)),
+            ModifierSlot("aligned", ("aligned",), optional=True),
+        ),
+        orders_memory=True,
+        operands=(
+            OperandSlot("a", role="value", dtype="u32"),
+            OperandSlot("b", role="value", dtype="u32"),
+        ),
+    ),
+    *[
+        InstructionEntry(  # barrier.cluster.arrive{.sem}{.aligned} / .wait{.acquire}{.aligned}
+            name=f"barrier_cluster_{act}",
+            # Shares the `barrier` mnemonic with 9.7.14.1 so the surface reads
+            # `T.ptxd.barrier.cluster.arrive(...)`; `cluster` is the token that
+            # tells the two ISA sections apart.
+            mnemonic="barrier",
+            slots=(
+                ModifierSlot("cluster", ("cluster",)),
+                ModifierSlot("action", (act,)),
+                ModifierSlot(
+                    "sem",
+                    ("release", "relaxed") if act == "arrive" else ("acquire",),
+                    optional=True,
+                ),
+                ModifierSlot("aligned", ("aligned",), optional=True),
+            ),
+            orders_memory=True,
+            operands=(),
+        )
+        for act in ("arrive", "wait")
+    ],
 ]
 
 TABLE: dict[str, InstructionEntry] = {e.name: e for e in _ENTRIES}

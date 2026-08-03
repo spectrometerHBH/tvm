@@ -84,6 +84,46 @@ class _Chain_atom:
     xor: _Chain_atom
     def __call__(self, d: Any, addr: Any, value: Any, *args: Any) -> None: ...
 
+class _Chain_bar:
+    """`bar` — 2 entries sharing this mnemonic; PTX puts their difference in the operand list,
+    so the call selects one. Shapes: (a, b)
+    """
+
+    arrive: _Chain_bar
+    cta: _Chain_bar
+    sync: _Chain_bar
+    def __call__(self, *args: Any, pred: Any = None) -> None: ...
+
+class _Chain_barrier:
+    """`barrier` — 4 entries sharing this mnemonic; PTX puts their difference in the operand
+    list, so the call selects one. Shapes: (a, b); ()
+    """
+
+    acquire: _Chain_barrier
+    aligned: _Chain_barrier
+    arrive: _Chain_barrier
+    cluster: _Chain_barrier
+    cta: _Chain_barrier
+    relaxed: _Chain_barrier
+    release: _Chain_barrier
+    sync: _Chain_barrier
+    wait: _Chain_barrier
+    def __call__(self, *args: Any, pred: Any = None) -> None: ...
+
+class _Chain_clusterlaunchcontrol:
+    """`clusterlaunchcontrol` — action∈{try_cancel}; async_∈{async}; space∈{shared::cta} (opt);
+    completion∈{mbarrier::complete_tx::bytes}; multicast∈{multicast::cluster::all} (opt);
+    type∈{b128}
+    """
+
+    async_: _Chain_clusterlaunchcontrol
+    b128: _Chain_clusterlaunchcontrol
+    mbarrier__complete_tx__bytes: _Chain_clusterlaunchcontrol
+    multicast__cluster__all: _Chain_clusterlaunchcontrol
+    shared__cta: _Chain_clusterlaunchcontrol
+    try_cancel: _Chain_clusterlaunchcontrol
+    def __call__(self, addr: Any, mbar: Any, *args: Any, pred: Any = None) -> None: ...
+
 class _Chain_cp:
     """`cp` — api∈{async}; kind∈{bulk}; dst_space∈{shared::cta}; src_space∈{global};
     completion∈{mbarrier::complete_tx::bytes}
@@ -120,6 +160,29 @@ class _Chain_ex2:
     ftz: _Chain_ex2
     def __call__(self, d: Any, value: Any, *args: Any) -> None: ...
 
+class _Chain_fence:
+    """`fence` — 5 entries sharing this mnemonic; PTX puts their difference in the operand
+    list, so the call selects one. Shapes: (); (addr)
+    """
+
+    acq_rel: _Chain_fence
+    acquire: _Chain_fence
+    alias: _Chain_fence
+    async_: _Chain_fence
+    cluster: _Chain_fence
+    cta: _Chain_fence
+    global_: _Chain_fence
+    gpu: _Chain_fence
+    mbarrier_init: _Chain_fence
+    proxy: _Chain_fence
+    release: _Chain_fence
+    sc: _Chain_fence
+    shared__cluster: _Chain_fence
+    shared__cta: _Chain_fence
+    sys: _Chain_fence
+    tensormap__generic: _Chain_fence
+    def __call__(self, *args: Any, pred: Any = None) -> None: ...
+
 class _Chain_fma:
     """`fma` — rnd∈{rn,rz,rm,rp}; ftz∈{ftz} (opt); sat∈{sat} (opt); type∈{f32,f64,f32x2};
     srctype∈{f16,bf16} (opt) — Which qualifiers each add/sub/mul/fma syntax line allows (PTX
@@ -146,6 +209,13 @@ class _Chain_fns:
 
     b32: _Chain_fns
     def __call__(self, d: Any, mask: Any, base: Any, offset: Any, *args: Any) -> None: ...
+
+class _Chain_griddepcontrol:
+    """`griddepcontrol` — action∈{launch_dependents,wait}"""
+
+    launch_dependents: _Chain_griddepcontrol
+    wait: _Chain_griddepcontrol
+    def __call__(self, *args: Any, pred: Any = None) -> None: ...
 
 class _Chain_ld:
     """`ld` — mmio∈{mmio} (opt); sem∈{weak,acquire,relaxed,volatile} (opt);
@@ -201,16 +271,67 @@ class _Chain_ld:
     weak: _Chain_ld
     def __call__(self, d: Any, addr: Any, *args: Any) -> None: ...
 
+class _Chain_mapa:
+    """`mapa` — 2 entries sharing this mnemonic; PTX puts their difference in the operand list,
+    so the call selects one. Shapes: (d, a, b)
+    """
+
+    shared__cluster: _Chain_mapa
+    u32: _Chain_mapa
+    u64: _Chain_mapa
+    def __call__(self, *args: Any) -> None: ...
+
 class _Chain_max:
-    """`max` — ftz∈{ftz} (opt); nan∈{NaN} (opt); type∈{f32,f64} — `max.f64` is the bare form;
-    .ftz/.NaN belong to the .f32 line (PTX ISA 9.7.3.12).
+    """`max` — 2 entries sharing this mnemonic; PTX puts their difference in the operand list,
+    so the call selects one. Shapes: (d, a, b); (d, a, b, c)
     """
 
     NaN: _Chain_max
+    abs: _Chain_max
+    bf16: _Chain_max
+    bf16x2: _Chain_max
+    f16: _Chain_max
+    f16x2: _Chain_max
     f32: _Chain_max
     f64: _Chain_max
     ftz: _Chain_max
-    def __call__(self, d: Any, a: Any, b: Any, *args: Any) -> None: ...
+    relu: _Chain_max
+    s16: _Chain_max
+    s16x2: _Chain_max
+    s32: _Chain_max
+    s64: _Chain_max
+    u16: _Chain_max
+    u16x2: _Chain_max
+    u32: _Chain_max
+    u64: _Chain_max
+    xorsign: _Chain_max
+    def __call__(self, *args: Any) -> None: ...
+
+class _Chain_min:
+    """`min` — 2 entries sharing this mnemonic; PTX puts their difference in the operand list,
+    so the call selects one. Shapes: (d, a, b); (d, a, b, c)
+    """
+
+    NaN: _Chain_min
+    abs: _Chain_min
+    bf16: _Chain_min
+    bf16x2: _Chain_min
+    f16: _Chain_min
+    f16x2: _Chain_min
+    f32: _Chain_min
+    f64: _Chain_min
+    ftz: _Chain_min
+    relu: _Chain_min
+    s16: _Chain_min
+    s16x2: _Chain_min
+    s32: _Chain_min
+    s64: _Chain_min
+    u16: _Chain_min
+    u16x2: _Chain_min
+    u32: _Chain_min
+    u64: _Chain_min
+    xorsign: _Chain_min
+    def __call__(self, *args: Any) -> None: ...
 
 class _Chain_mov:
     """`mov` — 10 entries sharing this mnemonic; PTX puts their difference in the operand list,
@@ -396,13 +517,20 @@ class _Chain_sub:
 class _PTXD:
     add: _Chain_add
     atom: _Chain_atom
+    bar: _Chain_bar
+    barrier: _Chain_barrier
+    clusterlaunchcontrol: _Chain_clusterlaunchcontrol
     cp: _Chain_cp
     cvta: _Chain_cvta
     ex2: _Chain_ex2
+    fence: _Chain_fence
     fma: _Chain_fma
     fns: _Chain_fns
+    griddepcontrol: _Chain_griddepcontrol
     ld: _Chain_ld
+    mapa: _Chain_mapa
     max: _Chain_max
+    min: _Chain_min
     mov: _Chain_mov
     mul: _Chain_mul
     prefetch: _Chain_prefetch

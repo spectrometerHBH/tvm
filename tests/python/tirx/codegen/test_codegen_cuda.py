@@ -323,15 +323,14 @@ def test_ptx_ld_acquire_and_volatile_codegen():
             T.ptxd.ld.acquire.gpu.global_.u64(A[0], A.data)
             T.ptxd.ld.acquire.sys.global_.s32(B[0], B.data)
             T.ptxd.ld.acquire.gpu.global_.b32(C[0], C.data)
-            T.ptx.ld_global_acquire(B[0], B.data)
-            A[0] = T.ptx.ld_volatile(A.data, "uint64", "u64", space="global")
+            T.ptxd.ld.acquire.gpu.global_.b32(B[0], B.data)
+            T.ptxd.ld.volatile.global_.u64(A[0], A.data)
 
     src, _ = _get_source(main)
     assert "ld.acquire.gpu.global.u64" in src
     assert "ld.acquire.sys.global.s32" in src
     assert "ld.acquire.gpu.global.b32" in src
-    assert "ptx_ld_global_acquire_int32" in src
-    assert "ptx_ld_global_acquire_b32" not in src
+    assert "tvm_builtin_ptxd_ld_acquire_gpu_global_b32_s32" in src
     assert "ld.volatile.global.u64" in src
 
 
@@ -591,10 +590,13 @@ def test_ptx_sync_and_clc_codegen():
             T.ptx.mbarrier.complete_tx(
                 bar.ptr_to([4]), T.uint32(40), remote=T.int32(1), pred=T.uint32(1)
             )
-            T.ptx.clc_try_cancel(response.ptr_to([0]), bar.ptr_to([0]))
+            T.ptxd[
+                "clusterlaunchcontrol.try_cancel.async.shared::cta"
+                ".mbarrier::complete_tx::bytes.multicast::cluster::all.b128"
+            ](response.ptr_to([0]), bar.ptr_to([0]))
             A[0] = T.ptx.clc_query_cancel(response.ptr_to([0]))
             A[0] = T.ptx.clc_query_cancel(response.ptr_to([0]), use_ld_acquire=False)
-            T.ptx.griddepcontrol.launch_dependents()
+            T.ptxd.griddepcontrol.launch_dependents()
 
     target = tvm.target.Target({"kind": "cuda", "arch": "sm_100a"})
     with target:
@@ -1053,7 +1055,7 @@ def test_ptx_cp_async(cp_size, cache_hint, prefetch_size, predicate, fill_mode):
         A_shared = T.alloc_shared([N], "float16")
         for i in T.vectorized(N):
             A_shared[i] = 5.0
-        T.ptx.fence.proxy_async("shared::cta")
+        T.ptxd.fence.proxy.async_.shared__cta()
         T.ptx.cp_async(A_shared.ptr_to([0]), A.ptr_to([0]), cp_size, cache_hint=cache_hint, prefetch_size=prefetch_size, predicate=predicate, fill_mode=fill_mode)  # noqa: E501
         T.ptx.cp_async.commit_group()
         T.ptx.cp_async.wait_group(0)
