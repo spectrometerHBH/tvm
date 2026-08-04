@@ -58,8 +58,8 @@ from ..copy._common import (
     align_layouts_gs,
 )
 from ..copy._swizzle_iter import (
-    emit_init,
-    emit_iter_offset,
+    emit_base,
+    emit_xor_offset_var,
     get_swizzle,
     try_recognize,
 )
@@ -255,7 +255,6 @@ def _emit_ldgsts(op_call: TilePrimitiveCall, sctx: DispatchContext) -> PrimFunc:
 
     class _SwizzleState:
         def __init__(self):
-            self.signed_strides = None
             self.base_off = None
 
     state = _SwizzleState()
@@ -274,20 +273,12 @@ def _emit_ldgsts(op_call: TilePrimitiveCall, sctx: DispatchContext) -> PrimFunc:
             _IntImm("int32", 0),
             shape=apply_shape,
         )["m"]
-        state.signed_strides, state.base_off = emit_init(
-            swizzle_pattern,
-            s_off_resolved,
-        )
+        state.base_off = emit_base(swizzle, s_off_resolved)
 
     if swizzle_pattern is not None:
 
         def _s_off(f, s_lin):
-            return emit_iter_offset(
-                swizzle_pattern,
-                state.signed_strides,
-                state.base_off,
-                f,
-            )
+            return emit_xor_offset_var(swizzle_pattern, state.base_off, f)
     elif swizzle is not None:
         _sw = swizzle
 

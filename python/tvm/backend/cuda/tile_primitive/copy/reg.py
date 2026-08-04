@@ -42,9 +42,9 @@ from tvm.tirx.tile_primitive import TilePrimitiveCall
 from ..layout_utils import strip_swizzle_to_tile
 from ._common import _alignment_ok, copy_ptx_form, copy_ptx_ld_return_type
 from ._swizzle_iter import (
+    emit_base,
     emit_fallback_offset,
-    emit_init,
-    emit_iter_offset,
+    emit_xor_offset_var,
     get_swizzle,
     try_recognize,
 )
@@ -519,7 +519,6 @@ def _emit_reg(op_call: TilePrimitiveCall, sctx: DispatchContext) -> PrimFunc:
 
     class _SwizzleState:
         def __init__(self):
-            self.signed_strides = None
             self.base_off = None
 
     state = _SwizzleState()
@@ -527,11 +526,11 @@ def _emit_reg(op_call: TilePrimitiveCall, sctx: DispatchContext) -> PrimFunc:
     def _setup_swizzle(s_off):
         if swizzle_pattern is None:
             return
-        state.signed_strides, state.base_off = emit_init(swizzle_pattern, s_off)
+        state.base_off = emit_base(swizzle, s_off)
 
     def _s_iter_off(f, ds, s_off):
         if swizzle_pattern is not None:
-            return emit_iter_offset(swizzle_pattern, state.signed_strides, state.base_off, f)
+            return emit_xor_offset_var(swizzle_pattern, state.base_off, f)
         if swizzle is not None:
             return emit_fallback_offset(swizzle, s_off, ds)
         return s_off + ds

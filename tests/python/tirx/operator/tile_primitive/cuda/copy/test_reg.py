@@ -401,8 +401,8 @@ def test_vec_auto_reg_honors_cache_nc():
 def test_reg_copy_wg_local_to_swizzled_shared_uses_swizzle_fastpath():
     """Regression: R→S copy where R has a ``wg_local_layout`` (thread iter
     ``1 @ tid_in_wg``) must pick the widest vec PTX ``st.shared.v4`` AND use the
-    swizzle fast path (precomputed ``signed_strides`` + per-iter
-    bit-select), not the per-iter ``swizzle.apply()`` fallback.
+    swizzle fast path (base apply computed once + per-iter XOR with
+    compile-time constants), not the per-iter ``swizzle.apply()`` fallback.
 
     Two distinct bugs this test guards against:
 
@@ -463,18 +463,23 @@ def test_reg_copy_wg_local_to_swizzled_shared_uses_swizzle_fastpath():
     assert "tvm_builtin_copy_" not in src, (
         "copy_xxb helpers appeared — reg dispatch should use PTX ld/st only"
     )
-    # (2) Swizzle fast path fingerprint:
-    #   * emit_init allocates a size-N int buffer of "signed strides".
-    #   * emit_iter_offset uses bit-select * signed-stride: ``(bit) * v[i]``
-    #     where ``bit = (f >> M) & 1``.
+    # (2) Swizzle fast path fingerprint (XOR form):
+    #   * the swizzle apply is computed once into a base value;
+    #   * per-iter offsets are XOR-ed with iter-dependent constants:
+    #     ``^ ((f ...) * CONST)`` (backend may strength-reduce the bit
+    #     extraction into shifts).
     # The fallback (per-iter ``swizzle.apply(s_off + ds_per_iter)``) has no
-    # such bit-select * signed-stride pattern.
+    # such base-once + XOR-constant pattern.
     import re
 
-    bitsel_pattern = re.findall(r"& 1\) \* \w+\[", src)
-    assert bitsel_pattern, (
-        "fast-path bit-select pattern '& 1) * v_<n>[' not found; "
-        "looks like emit_iter_offset's fast path didn't fire."
+    xor_pattern = re.findall(r"\^ \(\(f ", src)
+    assert xor_pattern, (
+        "fast-path XOR-constant pattern '^ ((f ...' not found; "
+        "looks like the swizzle fast path didn't fire."
+    )
+    assert not re.findall(r"& 1\) \* \w+\[", src), (
+        "found additive signed_strides bit-select '(bit & 1) * v_<n>[' "
+        "— the additive path should be gone"
     )
 
 

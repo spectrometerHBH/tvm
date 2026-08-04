@@ -17,49 +17,33 @@
 
 """Generic swizzle-aware iter pattern for CUDA copy dispatches.
 
-When the per-thread outer-iter loop satisfies (C1)+(C2) below for a
+The swizzle map σ(q) = q ^ ((q>>at) & (2^sw − 1)) of a
 ``ComposeLayout(per_element=p, swizzle_len=sw, atom_len=at,
-swizzle_inner=True)`` on the SMEM side, the swizzled physical address
-at unrolled iter ``k`` reduces to
+swizzle_inner=True)`` is GF(2)-linear and additive over high bits
+(>= 2^(at+sw) chunks), so the swizzled physical address at iter ``k``
+reduces to
 
-    addr(k) = base_off + sum_{j : bit_j(k)=1} signed_strides[j]
+    addr(k) = (base_off + D_high) ^ σ(D_low)         [element units]
 
-where ``base_off`` and the ``signed_strides[j]`` are per-thread runtime
-constants set once at thread setup. Per-iter cost is then ``popcount(k)``
-register adds instead of a full ``swizzle.apply(...)`` per iter.
+where ``base_off = swizzle.apply(s_off)`` is computed once per thread and
+σ(D_low) is a compile-time constant — one XOR per iter instead of a full
+``swizzle.apply(...)``. Verified bitwise for the whole swizzle family
+(128B/64B/32B/NONE; sw = 3/2/1/0).
 
 Notation. Each binary outer iter has element-stride ``2^(bj + p)`` for
 some chunk bit position ``bj >= 0`` (so ``stride / C = 2^bj`` where
-``C = 1 << p``). The chunk index ``q(M0) = M0 // C`` partitions into
-four bit ranges by where ``bj`` lands:
+``C = 1 << p``). Conditions for the fast path:
 
-  * ``[0, sw)``        — "inner" (Case 1.A in the proof)
-  * ``[sw, at)``       — "mid"   (Case 1.B)
-  * ``[at, at + sw)``  — "outer" (Case 1.C; the bit overlaps the swizzle
-                         outer mask, so its addition produces a
-                         secondary contribution at ``bj - at``)
-  * ``[at + sw, ∞)``   — "above" (Case 1.D)
-
-Conditions for the linear-combination fast path:
-
-  (C1) bit-clear no-carry: ``bit_bj(q(M0)) = 0`` for every binary iter.
-  (C2) support disjointness: no inner-outer pair ``(bj_A, bj_C)`` with
-       ``bj_C in [at, at+sw)`` and ``bj_A = bj_C - at`` both present.
+  (C1) bit-clear no-carry: ``bit_bj(q(M0)) = 0`` for every binary iter —
+       the enumeration from the per-thread base must be carry-free (XOR
+       and ADD coincide) at every bit any iter flips.
 
   (distinctness) The ``bj`` values across all binary iters must be
        distinct — two iters at the same ``bj`` collapse into bit
-       ``bj + 1`` whose case behavior may differ.
+       ``bj + 1`` whose behavior may differ.
 
-Under (C1)+(C2)+(distinctness), for each binary iter at position ``bj``:
-
-    T(bj)        = 2^(bj + p)            # element stride
-    sigma_b(M0)  = 1 - 2 * bit_b(q(M0))  # ∈ {+1, -1}
-
-    signed_strides[j] = sigma_(at + bj)(M0) * T(bj)        bj in [0, sw)
-                     = T(bj)                               bj in [sw, at)
-                     = T(bj) + sigma_(bj - at)(M0) * T(bj - at)
-                                                           bj in [at, at + sw)
-                     = T(bj)                               bj >= at + sw
+GF(2)-linearity absorbs inner-outer iter pairs exactly, so no
+support-disjointness condition is needed.
 
 The ``swizzle_inner=False`` mode swaps the inner/outer roles and is not
 yet covered; ``try_recognize`` gates on this.
@@ -69,7 +53,6 @@ from dataclasses import dataclass
 
 import tvm
 from tvm import arith
-from tvm.script import tirx as T
 from tvm.tirx.expr import IntImm as _IntImm
 from tvm.tirx.layout import ComposeLayout, S, TileLayout
 
@@ -79,9 +62,9 @@ class _BitIter:
     """Pow2-extent outer iter, binary-split into ``n_bits`` chunk-bit flips.
 
     ``slot_start..slot_start + n_bits`` is this iter's range in the global
-    ``bit_positions`` / ``iter_strides_elems`` / ``signed_strides`` arrays.
-    Slot ``slot_start + b`` corresponds to bit position ``n_bits - 1 - b``
-    of this iter's per-iter coord (outermost binary bit first).
+    ``bit_positions`` / ``iter_strides_elems`` arrays. Slot
+    ``slot_start + b`` corresponds to bit position ``n_bits - 1 - b`` of
+    this iter's per-iter coord (outermost binary bit first).
     """
 
     ext: int
@@ -109,9 +92,9 @@ class SwizzlePattern:
     ``bit_positions[j]`` and ``iter_strides_elems[j]`` collect the binary
     sub-iters from every BitIter in outer-iter order (outermost first).
     ``outer_iters`` lists every outer iter (BitIter or LinearIter) in
-    outermost-first order; ``emit_iter_offset`` walks this list to
-    decompose ``mm`` per-iter. Empty lists = trivially recognized
-    degenerate case (no outer iter, just base_off).
+    outermost-first order; the emit functions walk this list to decompose
+    the per-iter coord. Empty lists = trivially recognized degenerate case
+    (no outer iter, just base_off).
     """
 
     swizzle: ComposeLayout
@@ -152,7 +135,7 @@ def _recognize_common(
     s_off_template,
     var_bounds: dict | None = None,
 ):
-    """Recognition core shared by ``try_recognize`` and ``try_recognize_xor``.
+    """Recognition core of ``try_recognize``.
 
     Checks: swizzle_inner, per-iter stride validity, pow2 binary split,
     distinctness of chunk-bit positions, and (C1) bit-clear no-carry on the
@@ -209,7 +192,7 @@ def _recognize_common(
             if not _is_pow2(dq):
                 return None
             bj = dq.bit_length() - 1
-            # All bj >= 0 accepted; case branching happens in emit_init.
+            # All bj >= 0 accepted; case branching happens in xor_delta.
             bit_positions.append(bj)
             iter_strides_elems.append(substride)
         outer_iters.append(_BitIter(ext=ext, n_bits=k, slot_start=slot_start))
@@ -261,7 +244,7 @@ def try_recognize(
     s_off_template,
     var_bounds: dict | None = None,
 ) -> SwizzlePattern | None:
-    """Return a ``SwizzlePattern`` if (C1)+(C2)+(distinctness) hold, else ``None``.
+    """Return a ``SwizzlePattern`` if (C1)+(distinctness) hold, else ``None``.
 
     ``iter_extents`` / ``iter_strides``: the outer-iter list on the S side
     (excluding T iter and vec iter), in outermost-first order matching
@@ -277,7 +260,7 @@ def try_recognize(
     ``s_off_template`` is the per-thread linear base offset expression
     (with a placeholder var for the thread-id contribution). It is used
     only to check condition (C1) symbolically via ``arith.Analyzer``;
-    ``emit_init`` takes the resolved form separately.
+    ``emit_base`` takes the resolved form separately.
 
     ``var_bounds`` is an optional ``{Var: tvm.ir.Range}`` map of placeholder
     bounds to ``analyzer.bind`` before the (C1) check. Without bounds,
@@ -286,172 +269,15 @@ def try_recognize(
     bit is in fact always 0 but the analyzer can't conclude it universally.
     Pass ``{lane_ph: Range(0, 32), warp_ph: Range(0, n_warps)}`` (or the
     scope's equivalents) to let the (C1) check fire on these templates.
-    """
-    core = _recognize_common(swizzle, iter_extents, iter_strides, s_off_template, var_bounds)
-    if core is None:
-        return None
-    bit_positions, _, _ = core
 
-    at = swizzle.atom_len
-    sw = swizzle.swizzle_len
-    bj_set = set(bit_positions)
-    # (C2) support disjointness: the only possible collision is between a
-    # Case-1.A iter at bj_A and a Case-1.C iter at bj_A + at. Checking the
-    # 1.C direction alone is symmetric and complete. Required by the
-    # *additive* signed-strides encoding (see emit_init); the XOR encoding
-    # (try_recognize_xor) absorbs these pairs exactly and does not need C2.
-    for bj in bj_set:
-        if at <= bj < at + sw and (bj - at) in bj_set:
-            return None  # inner-outer pair collision
-
-    return _mk_pattern(swizzle, core)
-
-
-def try_recognize_xor(
-    swizzle: ComposeLayout,
-    iter_extents: list[int],
-    iter_strides: list[int],
-    s_off_template,
-    var_bounds: dict | None = None,
-) -> SwizzlePattern | None:
-    """``try_recognize`` variant for the XOR emit path: (C1)+(distinctness)
-    only — no (C2).
-
-    Rationale: σ(q) = q ^ ((q>>at) & (2^sw − 1)) is GF(2)-linear, so
-    σ(q ^ Δ) = σ(q) ^ σ(Δ) holds exactly, and inner-outer iter pairs
-    (``bj_A`` + ``bj_A + at``) cancel correctly inside σ(Δ) with no
-    double-counting. The additive signed-strides encoding cannot represent
-    that cancellation without runtime signs, which is why it needs (C2).
+    No support-disjointness condition is needed: σ is GF(2)-linear, so
+    inner-outer iter pairs (``bj_A`` + ``bj_A + at``) cancel exactly inside
+    σ(Δ).
     """
     core = _recognize_common(swizzle, iter_extents, iter_strides, s_off_template, var_bounds)
     if core is None:
         return None
     return _mk_pattern(swizzle, core)
-
-
-def emit_init(pattern: SwizzlePattern, s_off_resolved):
-    """Emit at thread setup (call from inside the @T.prim_func body):
-
-      1. ``base_off = swizzle.apply(s_off_resolved)`` — runtime, per-thread,
-         computed once.
-      2. ``signed_strides[j]`` for each binary iter j, written into a local
-         buffer using the sigma formula above.
-
-    Returns ``(signed_strides_buffer_or_None, base_off_primexpr)``. The
-    buffer is ``None`` when ``pattern.n_binary_iters == 0`` (no outer
-    iter, no signed_strides needed).
-
-    ``s_off_resolved`` is the per-thread offset with the real tid Var
-    substituted in (not the placeholder).
-    """
-    swizzle = pattern.swizzle
-    p = swizzle.per_element
-    sw = swizzle.swizzle_len
-    at = swizzle.atom_len
-    C = 1 << p
-
-    base_off = swizzle.apply(s_off_resolved)["m"]
-
-    n = pattern.n_binary_iters
-    if n == 0:
-        return None, base_off
-
-    signed_strides = T.alloc_buffer([n], "int32", scope="local")
-    q = tvm.tirx.floordiv(s_off_resolved, C)
-
-    def _sigma_bit(bit_pos: int):
-        # 1 - 2 * bit_(bit_pos)(q); ∈ {+1, -1}.
-        row_bit = tvm.tirx.bitwise_and(
-            tvm.tirx.shift_right(q, _IntImm("int32", bit_pos)),
-            _IntImm("int32", 1),
-        )
-        return _IntImm("int32", 1) - row_bit * _IntImm("int32", 2)
-
-    for j, (bj, stride) in enumerate(zip(pattern.bit_positions, pattern.iter_strides_elems)):
-        stride_pow = stride  # = 2^(bj + p) elements
-        if 0 <= bj < sw:
-            # Case 1.A (inner): signed_stride = sigma_(at + bj) · T.
-            value = _sigma_bit(at + bj) * _IntImm("int32", stride_pow)
-        elif sw <= bj < at:
-            # Case 1.B (mid): signed_stride = +T.
-            value = _IntImm("int32", stride_pow)
-        elif at <= bj < at + sw:
-            # Case 1.C (outer): signed_stride = T + sigma_(bj - at) · T_sec.
-            # Invariant: bj >= at, so T_sec = T >> at = 2^(bj - at + p)
-            # = T(bj - at) is well-defined (no underflow).
-            stride_sec = stride_pow >> at
-            value = _IntImm("int32", stride_pow) + _sigma_bit(bj - at) * _IntImm(
-                "int32", stride_sec
-            )
-        else:  # bj >= at + sw, Case 1.D (above)
-            # No swizzle effect at this bit; signed_stride = +T.
-            value = _IntImm("int32", stride_pow)
-        # NB: Buffer.__setitem__ syntax (``signed_strides[j] = value``) is
-        # intercepted by the TIRx script parser but not by raw Python when
-        # this function is called from outside an @T.inline body. Use the
-        # low-level buffer_store builder instead.
-        T.buffer_store(signed_strides, value, [_IntImm("int32", j)])
-
-    return signed_strides, base_off
-
-
-def emit_iter_offset(pattern: SwizzlePattern, signed_strides, base_off, k):
-    """Compute the per-mm physical S offset = ``base_off`` + sum of per-iter
-    contributions.
-
-    ``k`` is the flat outer iter index ∈ ``[0, prod(it.ext for it in outer_iters))``.
-    Decomposed innermost-first across ``pattern.outer_iters`` into per-iter
-    coords ``c_i``. Each iter contributes:
-
-      * ``_BitIter``: ``sum_b bit_(n_bits-1-b)(c_i) * signed_strides[slot_start + b]``,
-        i.e. each binary bit of ``c_i`` selects its precomputed sigma-stride.
-        The slot order (outermost-first within the iter) means the highest
-        bit of ``c_i`` indexes the slot at ``slot_start``.
-      * ``_LinearIter``: ``c_i * stride`` (no bit decomposition; used when
-        ``stride`` is a multiple of ``2^(p + at + sw)`` so swizzle has no
-        XOR effect and ``ext`` need not be pow2).
-
-    Two paths per iter:
-      * Python int ``k`` — coords and bits known at parse time; emits only
-        the necessary adds, no runtime shift/mask.
-      * TIRx Var ``k`` — emits floormod/floordiv + bit-and/shift; relies on
-        downstream unroll + constant-fold.
-    """
-    if not pattern.outer_iters:
-        return base_off
-
-    off = base_off
-    remaining = k
-    is_const = isinstance(k, int)
-    for it in reversed(pattern.outer_iters):  # innermost first
-        ext = it.ext
-        if is_const:
-            c = remaining % ext
-            remaining = remaining // ext
-        else:
-            c = tvm.tirx.floormod(remaining, _IntImm("int32", ext))
-            remaining = tvm.tirx.floordiv(remaining, _IntImm("int32", ext))
-        if isinstance(it, _LinearIter):
-            if is_const:
-                if c != 0:
-                    off = off + c * it.stride
-            else:
-                off = off + c * _IntImm("int32", it.stride)
-            continue
-        # _BitIter
-        for b in range(it.n_bits):
-            bit_pos = it.n_bits - 1 - b
-            slot = it.slot_start + b
-            if is_const:
-                if (c >> bit_pos) & 1:
-                    off = off + signed_strides[slot]
-            else:
-                bit = tvm.tirx.bitwise_and(
-                    tvm.tirx.shift_right(c, _IntImm("int32", bit_pos)),
-                    _IntImm("int32", 1),
-                )
-                off = off + bit * signed_strides[slot]
-    return off
 
 
 def emit_fallback_offset(swizzle: ComposeLayout, s_off_resolved, ds_k):
@@ -464,21 +290,6 @@ def emit_fallback_offset(swizzle: ComposeLayout, s_off_resolved, ds_k):
     base linear offset with the real tid Var substituted.
     """
     return swizzle.apply(s_off_resolved + ds_k)["m"]
-
-
-# ============================================================================
-# XOR emit path (GF(2)-linear form)
-#
-# σ(q) = q ^ ((q>>at) & (2^sw − 1)) is GF(2)-linear and additive over high
-# bits (>= 2^(at+sw) chunks), so for a compile-time chunk delta D:
-#
-#     addr = (base + D_high) ^ σ(D_low)         [element units]
-#
-# with σ(D_low) a compile-time constant — one XOR per iter, no signed_strides
-# buffer, no runtime signs, and no (C2) requirement (inner-outer iter pairs
-# cancel inside σ exactly). Verified bitwise in swizzle_gf2.py for the whole
-# swizzle family (128B/64B/32B/NONE; sw = 3/2/1/0).
-# ============================================================================
 
 
 def xor_delta(swizzle: ComposeLayout, delta_chunks: int) -> tuple[int, int]:
@@ -499,17 +310,16 @@ def xor_delta(swizzle: ComposeLayout, delta_chunks: int) -> tuple[int, int]:
 
 def emit_base(swizzle: ComposeLayout, s_off_resolved):
     """``base_off = swizzle.apply(s_off_resolved)`` — runtime, per-thread,
-    computed once. XOR-path counterpart of ``emit_init`` (no signed_strides)."""
+    computed once."""
     return swizzle.apply(s_off_resolved)["m"]
 
 
 def emit_xor_offset(pattern: SwizzlePattern, base_off, k: int):
     """Per-iter physical S offset = ``(base_off + D_high) ^ xor_const``.
 
-    ``k`` must be a Python int (parse-time unrolled iter). For a TIR-expr
-    iter, fall back to the additive ``emit_iter_offset`` instead. Returns a
-    PrimExpr; folds to ``base_off`` unchanged when the iter contributes no
-    delta.
+    ``k`` must be a Python int (parse-time unrolled iter); for a TIR-expr
+    iter use ``emit_xor_offset_var`` instead. Returns a PrimExpr; folds to
+    ``base_off`` unchanged when the iter contributes no delta.
     """
     assert isinstance(k, int), "emit_xor_offset requires a compile-time iter index"
     if not pattern.outer_iters:
@@ -518,8 +328,8 @@ def emit_xor_offset(pattern: SwizzlePattern, base_off, k: int):
     swizzle = pattern.swizzle
     p = int(swizzle.per_element)
 
-    # Decompose k innermost-first across outer_iters (same convention as
-    # emit_iter_offset) and accumulate the element-domain delta.
+    # Decompose k innermost-first across outer_iters and accumulate the
+    # element-domain delta.
     delta_elems = 0
     remaining = k
     for it in reversed(pattern.outer_iters):
@@ -543,4 +353,50 @@ def emit_xor_offset(pattern: SwizzlePattern, base_off, k: int):
         off = off + _IntImm("int32", high << p)
     if low:
         off = off ^ _IntImm("int32", low << p)
+    return off
+
+
+def emit_xor_offset_var(pattern: SwizzlePattern, base_off, k):
+    """Var-k counterpart of ``emit_xor_offset`` (TIR-expr iter index).
+
+    Decomposes ``k`` across ``pattern.outer_iters`` with floordiv/floormod
+    and emits, for each binary iter j with chunk stride ``stride_j``:
+
+        off ^= bit_j(k) * σ(stride_j)        (XOR part, σ compile-time)
+
+    GF(2)-linearity makes ``σ(Σ_j bit_j(k)·stride_j) = XOR_j σ(stride_j)``
+    exact, so each set bit selects its compile-time σ constant — ~2
+    instructions per bit.
+    ``_LinearIter`` contributes ``c * stride`` additively as usual.
+    """
+    if not pattern.outer_iters:
+        return base_off
+
+    swizzle = pattern.swizzle
+    p = int(swizzle.per_element)
+
+    off = base_off
+    remaining = k
+    for it in reversed(pattern.outer_iters):  # innermost first
+        ext = it.ext
+        c = tvm.tirx.floormod(remaining, _IntImm("int32", ext))
+        remaining = tvm.tirx.floordiv(remaining, _IntImm("int32", ext))
+        if isinstance(it, _LinearIter):
+            off = off + c * _IntImm("int32", it.stride)
+            continue
+        for b in range(it.n_bits):
+            bit_pos = it.n_bits - 1 - b
+            slot = it.slot_start + b
+            low, high = xor_delta(swizzle, pattern.iter_strides_elems[slot] >> p)
+            # bit = bit_pos-th bit of c, via floordiv/floormod (real tirx
+            # nodes that the analyzer and downstream constant-folding can
+            # fold after unrolling — the shift/and Call forms stay opaque).
+            bit = tvm.tirx.floormod(
+                tvm.tirx.floordiv(c, _IntImm("int32", 1 << bit_pos)),
+                _IntImm("int32", 2),
+            )
+            if high:
+                off = off + bit * _IntImm("int32", high << p)
+            if low:
+                off = off ^ (bit * _IntImm("int32", low << p))
     return off

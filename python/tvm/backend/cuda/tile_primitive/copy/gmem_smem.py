@@ -46,8 +46,8 @@ from ._common import (
     copy_ptx_ld_return_type,
 )
 from ._swizzle_iter import (
-    emit_init,
-    emit_iter_offset,
+    emit_base,
+    emit_xor_offset_var,
     get_swizzle,
     try_recognize,
 )
@@ -171,7 +171,7 @@ def _emit_gmem_smem(op_call: TilePrimitiveCall, sctx: DispatchContext) -> PrimFu
     # the T region exactly (∏ext == thread_cnt). The iters consumed are T
     # iters; the leading prefix is the outer iter list — handed to
     # ``try_recognize`` so the swizzle fast path can decide whether the
-    # outer iter strides match a pattern it can lower to signed_strides.
+    # outer iter strides match a pattern it can lower to XOR-delta offsets.
     if thread_cnt > 1:
         acc, _i = 1, len(s_p.shard) - 2
         while _i >= 0 and acc < thread_cnt:
@@ -220,7 +220,6 @@ def _emit_gmem_smem(op_call: TilePrimitiveCall, sctx: DispatchContext) -> PrimFu
 
     class _SwizzleState:
         def __init__(self):
-            self.signed_strides = None
             self.base_off = None
 
     state = _SwizzleState()
@@ -239,20 +238,12 @@ def _emit_gmem_smem(op_call: TilePrimitiveCall, sctx: DispatchContext) -> PrimFu
             _IntImm("int32", 0),
             shape=apply_shape,
         )["m"]
-        state.signed_strides, state.base_off = emit_init(
-            swizzle_pattern,
-            s_off_resolved,
-        )
+        state.base_off = emit_base(swizzle, s_off_resolved)
 
     if swizzle_pattern is not None:
 
         def _s_off(f, s_lin):
-            return emit_iter_offset(
-                swizzle_pattern,
-                state.signed_strides,
-                state.base_off,
-                f,
-            )
+            return emit_xor_offset_var(swizzle_pattern, state.base_off, f)
     elif swizzle is not None:
         _sw = swizzle
 

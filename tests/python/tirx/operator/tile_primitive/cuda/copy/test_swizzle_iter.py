@@ -16,18 +16,19 @@
 # under the License.
 
 """Tests for the generic swizzle-aware iter pattern in
-``cuda/copy/_swizzle_iter.py``.
+``cuda/copy/_swizzle_iter.py`` (XOR emit form).
 
 Two layers:
 
 * **Recognizer tests** check that ``try_recognize`` returns the expected
-  ``SwizzlePattern`` (or rejects) for each of conditions (a)+(b)+(c).
-* **Numeric correctness tests** verify the proof empirically: for many
-  ``(M0, k)`` samples, the formula
-  ``apply(M0) + sum_{j : bit_j(k)=1} signed_strides[j]``
-  equals ``apply(M0 + ds_k)`` computed by the layout's own Apply formula.
-  Plus a per-thread-sign-matters test that would fail for a constant-sign
-  implementation, ensuring the test isn't trivially satisfied.
+  ``SwizzlePattern`` (or rejects) under (C1)+(distinctness).
+* **Numeric correctness tests** verify the XOR formula empirically: for
+  many ``(M0, k)`` samples,
+  ``(apply(M0) + D_high) ^ σ(D_low)``
+  equals ``apply(M0 + ds_k)`` computed by the layout's own Apply formula —
+  including bases whose mask-source bits toggle per thread (the case the
+  old additive signed-strides needed runtime signs for; the GF(2)-linear
+  XOR form absorbs them exactly).
 
 All algorithm-level (no GPU needed). End-to-end emit is tested in
 ``test_gmem_smem.py::test_swizzled_smem_emit_must_be_swizzle_aware``.
@@ -36,17 +37,24 @@ All algorithm-level (no GPU needed). End-to-end emit is tested in
 import pytest
 
 import tvm
+from tvm import arith
 from tvm.tirx import Var as _TirVar
 from tvm.tirx.cuda.tile_primitive.copy._swizzle_iter import (
+    SwizzlePattern,
+    _BitIter,
+    _LinearIter,
+    emit_xor_offset,
+    emit_xor_offset_var,
     get_swizzle,
     try_recognize,
 )
 from tvm.tirx.expr import IntImm as _IntImm
 from tvm.tirx.layout import ComposeLayout, S, TileLayout
+from tvm.tirx.stmt_functor import substitute as _substitute
 
 # ----------------------------------------------------------------------------
-# Pure-Python reference: the bare-swizzle ComposeLayout's Apply, plus the proof's formula.
-# Used as ground truth — both must agree for the proof to hold.
+# Pure-Python reference: the bare-swizzle ComposeLayout's Apply, plus the XOR
+# formula. Used as ground truth — both must agree for the math to hold.
 # ----------------------------------------------------------------------------
 
 
@@ -62,35 +70,16 @@ def py_swizzle_apply(M: int, p: int, sw: int, at: int) -> int:
     return swz_q * C + (M % C)
 
 
-def py_signed_strides(
-    M0: int, p: int, sw: int, at: int, bit_positions: list[int], iter_strides_elems: list[int]
-) -> list[int]:
-    """Pure-Python reimplementation of emit_init's formula. Mirrors:
-    if bj >= sw: sigma_bj = +1                              (mid_bits)
-    else       : sigma_bj = 1 - 2 * bit_(at+bj)(M0/C)        (chunk_bits)
-    signed_strides[j] = sigma_bj * iter_strides_elems[j]
-    """
+def py_xor_offset(base_off: int, delta_elems: int, p: int, sw: int, at: int) -> int:
+    """The XOR formula: (base_off + D_high) ^ σ(D_low), element units."""
     C = 1 << p
-    q = M0 // C
-    out: list[int] = []
-    for bj, stride in zip(bit_positions, iter_strides_elems):
-        if bj >= sw:
-            out.append(stride)
-        else:
-            row_bit = (q >> (at + bj)) & 1
-            sigma = 1 - 2 * row_bit
-            out.append(sigma * stride)
-    return out
-
-
-def py_iter_offset(base_off: int, k: int, signed_strides: list[int]) -> int:
-    """Formula sum: base_off + sum_{j : bit_(n-1-j)(k)=1} signed_strides[j]."""
-    n = len(signed_strides)
-    off = base_off
-    for j in range(n):
-        if (k >> (n - 1 - j)) & 1:
-            off += signed_strides[j]
-    return off
+    assert delta_elems % C == 0
+    d_chunks = delta_elems // C
+    thr = 1 << (at + sw)
+    low = d_chunks % thr
+    high = d_chunks - low
+    low = low ^ ((low >> at) & ((1 << sw) - 1))
+    return (base_off + high * C) ^ (low * C)
 
 
 def py_outer_ds(k: int, iter_extents: list[int], iter_strides: list[int]) -> int:
@@ -106,7 +95,8 @@ def py_outer_ds(k: int, iter_extents: list[int], iter_strides: list[int]) -> int
 
 
 # ----------------------------------------------------------------------------
-# Recognizer tests — verify try_recognize accepts / rejects under (a)+(b)+(c).
+# Recognizer tests — verify try_recognize accepts / rejects under
+# (C1)+(distinctness).
 # ----------------------------------------------------------------------------
 
 
@@ -158,17 +148,11 @@ def test_recognize_binary_split():
 
 
 def test_recognize_mid_bits():
-    """swizzle(p=4, sw=2, at=4): chunk bits [0,2), mid bits [2,4),
-    row bits [4,6). An iter at bj=2 lives in mid_bits → sigma is always +1
-    (i.e., the recognizer accepts and the sign formula won't read row bits)."""
-    sw = ComposeLayout(4, 2, 4, TileLayout(S[(1024,)]))  # C=16, mid_bits cover bits 2..3
+    """swizzle(p=4, sw=2, at=4): an iter at bj=2 lives in the mid range
+    [sw, at) — accepted; its delta is swizzle-invariant (σ = identity)."""
+    sw = ComposeLayout(4, 2, 4, TileLayout(S[(1024,)]))  # C=16, mid covers bits 2..3
     tid = _TirVar("tid", "int32")
-    # M0/C must have bit 2 == 0. Pick row_stride = 64 (= 4*C) so M0/C = tid*4
-    # which has zeros at bit 0,1, and bit 2 is bit 0 of tid... hmm that varies.
-    # Use row_stride = 128 (= 8*C, contributes 4 to M0/C per tid → bit 2 of M0/C
-    # depends on whether tid is even/odd — not zero. Instead use row_stride such
-    # that M0/C is provably 0 mod 8 = 0 at bits 0..2: row_stride = 256 (= 16*C)
-    # → M0/C = tid*16 → bits 0..3 all 0. iter_mask = bit 2, divisor = C*4 = 64.
+    # row_stride = 256 (= 16*C) → M0/C = tid*16 → bits 0..3 all 0.
     M0 = tid * _IntImm("int32", 256)
     pat = try_recognize(sw, [2], [64], M0)  # stride 64 = C * 2^2 → bj=2 (mid)
     assert pat is not None
@@ -177,7 +161,7 @@ def test_recognize_mid_bits():
 
 
 def test_reject_not_chunk_aligned():
-    """Condition (a): stride must be a multiple of C."""
+    """Stride must be a multiple of C."""
     sw = ComposeLayout(3, 3, 3, TileLayout(S[(512,)]))  # C=8
     tid = _TirVar("tid", "int32")
     M0 = tid * _IntImm("int32", 64)
@@ -185,23 +169,20 @@ def test_reject_not_chunk_aligned():
     assert try_recognize(sw, [2], [4], M0) is None
 
 
-def test_reject_carries_into_row_bits():
-    """Condition (b): bj < at. A binary iter with stride C * 2^at lands at
-    bj=at, which would change the row bits → reject."""
-    sw = ComposeLayout(3, 3, 3, TileLayout(S[(512,)]))  # at=3, so max bj = 2
+def test_reject_carry_into_masked_bit():
+    """(C1): a binary iter at bj=3 needs bit 3 of M0/C == 0 universally.
+    M0 = tid*64 → M0/C = tid*8 → bit 3 = bit 0 of tid — not provably 0."""
+    sw = ComposeLayout(3, 3, 3, TileLayout(S[(512,)]))
     tid = _TirVar("tid", "int32")
     M0 = tid * _IntImm("int32", 64)
-    # Strides 8,16,32 OK (bj=0,1,2); 64 → bj=3 → reject.
     assert try_recognize(sw, [2, 2, 2, 2], [8, 16, 32, 64], M0) is None
 
 
 def test_reject_chunk_overlap():
-    """Condition (c): (M0/C) must have 0 bits at all iter-bit positions per
-    thread. If M0 = tid * 8 (so M0/C = tid), then bit 0 of M0/C is bit 0 of
-    tid — analyzer can't prove this is 0 across all threads, so reject."""
+    """(C1): (M0/C) must have 0 bits at all iter-bit positions per thread.
+    M0 = tid * 8 → M0/C = tid → bit 0 NOT provably zero → reject."""
     sw = ComposeLayout(3, 3, 3, TileLayout(S[(512,)]))  # C=8
     tid = _TirVar("tid", "int32")
-    # M0 = tid * C = tid * 8 → M0/C = tid → bit 0 NOT provably zero.
     M0 = tid * _IntImm("int32", 8)
     assert try_recognize(sw, [2], [8], M0) is None
 
@@ -217,9 +198,22 @@ def test_recognize_no_outer_iters():
     assert pat.n_binary_iters == 0
 
 
+def test_recognize_inner_outer_pair_accepted():
+    """Inner-outer iter pair (bj_A in [0,at) and bj_A + at in [at,at+sw)):
+    the GF(2)-linear XOR form absorbs the pair's secondary contribution
+    exactly, so the recognizer must ACCEPT (the old additive signed-strides
+    encoding had to reject these to avoid double-counting)."""
+    sw = ComposeLayout(3, 3, 3, TileLayout(S[(512,)]))
+    # bj=0 (stride 8) and bj=3 (stride 64): pair (0, 0+3).
+    # (C1): bits {0, 3} of M0/C must be 0 ⇒ M0 multiple of 128.
+    pat = try_recognize(sw, [2, 2], [8, 64], _IntImm("int32", 128))
+    assert pat is not None
+    assert pat.bit_positions == [0, 3]
+
+
 # ----------------------------------------------------------------------------
-# Numeric correctness — the PROOF. The formula must equal apply(M0 + ds_k)
-# for all sampled (M0, k) and for non-trivial M0 values per thread.
+# Numeric correctness — the XOR formula must equal apply(M0 + ds_k) for all
+# sampled (M0, k), including bases with toggling mask-source bits.
 # ----------------------------------------------------------------------------
 
 
@@ -235,14 +229,9 @@ def test_recognize_no_outer_iters():
         # mid_bits region
         (4, 2, 4, [2], [64], 256),
         # mix: one chunk_bit + one mid_bit
-        (
-            3,
-            2,
-            4,
-            [2, 2],
-            [8, 32],
-            256,
-        ),  # C=8, sw=2, at=4 → bj_max=3 for stride 64 → use 32 (bj=2 in mid)
+        (3, 2, 4, [2, 2], [8, 32], 256),
+        # inner-outer pair (accepted only by the XOR form)
+        (3, 3, 3, [2, 2], [8, 64], 128),
     ],
 )
 def test_formula_matches_apply_under_conditions(
@@ -253,9 +242,10 @@ def test_formula_matches_apply_under_conditions(
     iter_strides,
     row_stride,
 ):
-    """For every (M0, k) sample, the signed-strides formula must equal
-    py_swizzle_apply(M0 + ds_k). Sweeps multiple per-thread M0 values to
-    catch any per-thread-sign bug (a constant-sign impl would fail here)."""
+    """For every (M0, k) sample, the XOR formula must equal
+    py_swizzle_apply(M0 + ds_k). Sweeps multiple per-thread M0 values so
+    mask-source bits toggle — a formula that only worked for zero mask
+    bits would fail here."""
     swizzle = ComposeLayout(p, sw, at, TileLayout(S[(1 << (p + sw + at),)]))
     tid = _TirVar("tid", "int32")
     M0_template = tid * _IntImm("int32", row_stride)
@@ -269,52 +259,147 @@ def test_formula_matches_apply_under_conditions(
     for ext in iter_extents:
         total_iters *= ext
 
-    # Per-thread sweep: pick concrete tid values that span a few rows of the
-    # swizzle atom. Tid = 0 alone would hide the sign issue (M0/C row bits all
-    # 0 → all signs +1); larger tids exercise the sign-flip branches.
     for tid_val in [0, 1, 3, 5, 7, 13, 21]:
         M0 = tid_val * row_stride
         base_off = py_swizzle_apply(M0, p, sw, at)
-        ss = py_signed_strides(
-            M0,
-            p,
-            sw,
-            at,
-            pat.bit_positions,
-            pat.iter_strides_elems,
-        )
         for k in range(total_iters):
             ds_k = py_outer_ds(k, iter_extents, iter_strides)
             ground_truth = py_swizzle_apply(M0 + ds_k, p, sw, at)
-            formula = py_iter_offset(base_off, k, ss)
+            formula = py_xor_offset(base_off, ds_k, p, sw, at)
             assert formula == ground_truth, (
                 f"formula mismatch: p={p},sw={sw},at={at} "
                 f"iter_extents={iter_extents} iter_strides={iter_strides} "
                 f"tid={tid_val} M0={M0} k={k} ds_k={ds_k} "
-                f"apply(M0+ds_k)={ground_truth} formula={formula} "
-                f"signed_strides={ss}"
+                f"apply(M0+ds_k)={ground_truth} formula={formula}"
             )
 
 
-def test_per_thread_sign_actually_varies():
-    """Guard against a 'constant +1 stride' bug: for the nvfp4-like case,
-    different tids MUST produce different signed_strides[0] (since the
-    formula is sigma_0 = 1 - 2 * bit_(at)(M0/C) and that bit toggles with
-    tid). If a buggy impl always returned +stride, this test would catch it."""
+def test_mask_source_bit_toggle_needs_no_sign():
+    """The case the old additive form needed a runtime ±1 sign for: an inner
+    iter whose mask-source bit (at + bj) toggles with tid. The XOR form uses
+    one compile-time σ for every base and is still exactly right."""
     p, sw, at = 3, 3, 3
-    row_stride = 64  # M0/C = tid * 8 → bit (at=3) = bit 0 of tid
-    # tid=0 → M0/C bit 3 = 0 → sigma = +1; tid=1 → bit 3 = 1 → sigma = -1
-    ss_even = py_signed_strides(0 * row_stride, p, sw, at, [0], [8])
-    ss_odd = py_signed_strides(1 * row_stride, p, sw, at, [0], [8])
-    assert ss_even != ss_odd, "per-thread sign formula degenerated to constant — proof / impl bug"
-    assert ss_even == [8]
-    assert ss_odd == [-8]
+    row_stride = 64  # M0/C = tid * 8 → mask-source bit (at + 0) = bit 0 of tid
+    swizzle = ComposeLayout(p, sw, at, TileLayout(S[(1 << (p + sw + at),)]))
+    iter_extents, iter_strides = [2], [8]
+    results = []
+    for tid_val in (0, 1):
+        M0 = tid_val * row_stride
+        base_off = py_swizzle_apply(M0, p, sw, at)
+        for k in range(2):
+            ds_k = py_outer_ds(k, iter_extents, iter_strides)
+            truth = py_swizzle_apply(M0 + ds_k, p, sw, at)
+            formula = py_xor_offset(base_off, ds_k, p, sw, at)
+            assert formula == truth
+            results.append((tid_val, k, formula))
+    # The toggle is real: the two tids' offsets actually differ in the low bits.
+    assert (results[0][2] ^ results[2][2]) != 0
 
 
 # ----------------------------------------------------------------------------
-# Fallback path — when recognizer rejects, per-iter swizzle.apply gives the
-# right answer. This is trivial (we delegate to layout.apply) but documents
-# the contract.
+# TIR-level emit: emit_base + emit_xor_offset (int k) + emit_xor_offset_var
+# (Var k) must evaluate to the ground truth after substitution.
+# ----------------------------------------------------------------------------
+
+
+def _eval(e, env):
+    """Tiny recursive evaluator for the emitted offset exprs. The analyzer
+    can't fold ``tirx.bitwise_*`` Call forms, so we evaluate directly."""
+    t = type(e).__name__
+    if t == "IntImm":
+        return int(e.value)
+    if t == "Var":
+        return env[e]
+    if t in ("Add", "Sub", "Mul", "FloorDiv", "FloorMod"):
+        a, b = _eval(e.a, env), _eval(e.b, env)
+        if t == "Add":
+            return a + b
+        if t == "Sub":
+            return a - b
+        if t == "Mul":
+            return a * b
+        if t == "FloorDiv":
+            return a // b
+        return a % b
+    if t == "Cast":
+        return _eval(e.value, env)
+    if t == "Call":
+        args = [_eval(a, env) for a in e.args]
+        name = str(e.op.name)
+        if name == "tirx.bitwise_xor":
+            return args[0] ^ args[1]
+        if name == "tirx.bitwise_and":
+            return args[0] & args[1]
+        if name == "tirx.shift_right":
+            return args[0] >> args[1]
+        if name == "tirx.shift_left":
+            return args[0] << args[1]
+        if name in ("tirx.add", "tirx.Add"):
+            return args[0] + args[1]
+        if name in ("tirx.multiply", "tirx.Mul"):
+            return args[0] * args[1]
+        raise AssertionError(f"cannot eval Call op {name}")
+    raise AssertionError(f"cannot eval node type {t}")
+
+
+def _make_pattern(p, sw, at):
+    swizzle = ComposeLayout(p, sw, at, TileLayout(S[(1 << (p + sw + at + 4),)]))
+    period = 1 << (p + at + sw)
+    return (
+        swizzle,
+        SwizzlePattern(
+            swizzle=swizzle,
+            bit_positions=[2, 1],
+            iter_strides_elems=[32, 16],
+            outer_iters=[
+                _LinearIter(ext=3, stride=period),
+                _BitIter(ext=4, n_bits=2, slot_start=0),
+            ],
+        ),
+        period,
+    )
+
+
+@pytest.mark.parametrize("p,sw,at", [(3, 3, 3), (3, 2, 3), (3, 1, 3), (3, 0, 3)])
+def test_emit_xor_offset_int_k(p, sw, at):
+    """emit_xor_offset with a Python-int k must fold to the ground truth."""
+    swizzle, pat, period = _make_pattern(p, sw, at)
+    an = arith.Analyzer()
+    C = 1 << p
+    for base in range(0, 2048, 64):
+        if base % 4:
+            continue  # LOW delta bits {1,2} must be clear in base chunks
+        swz_base = py_swizzle_apply(base, p, sw, at)
+        for k in range(12):
+            lin, bits = divmod(k, 4)
+            delta = lin * period + bits * 16
+            truth = py_swizzle_apply(base + delta, p, sw, at)
+            got = an.simplify(emit_xor_offset(pat, swz_base, k))
+            assert hasattr(got, "value") and int(got.value) == truth, (
+                f"p={p},sw={sw},at={at} base={base} k={k} truth={truth} got={got}"
+            )
+
+
+@pytest.mark.parametrize("p,sw,at", [(3, 3, 3), (3, 2, 3), (3, 1, 3)])
+def test_emit_xor_offset_var_k(p, sw, at):
+    """emit_xor_offset_var with a TIR-Var k must evaluate to the ground
+    truth for every concrete k after substitution."""
+    swizzle, pat, period = _make_pattern(p, sw, at)
+    k_var = _TirVar("k", "int32")
+    for base in range(0, 2048, 64):
+        if base % 4:
+            continue
+        swz_base = py_swizzle_apply(base, p, sw, at)
+        expr = emit_xor_offset_var(pat, swz_base, k_var)
+        for k in range(12):
+            got = _eval(_substitute(expr, {k_var: _IntImm("int32", k)}), {})
+            lin, bits = divmod(k, 4)
+            truth = py_swizzle_apply(base + lin * period + bits * 16, p, sw, at)
+            assert got == truth, f"p={p},sw={sw},at={at} base={base} k={k} truth={truth} got={got}"
+
+
+# ----------------------------------------------------------------------------
+# Recognizer structure — LinearIter (pure Case 1.D) and its rejection.
 # ----------------------------------------------------------------------------
 
 
@@ -323,11 +408,6 @@ def test_recognize_linear_iter_pure_case_1d():
     of the swizzle period 2^(p+at+sw) (pure Case 1.D, swizzle has no XOR
     effect). The iter is stored as a LinearIter (no bit decomposition).
     """
-    from tvm.tirx.cuda.tile_primitive.copy._swizzle_iter import (
-        _BitIter,
-        _LinearIter,
-    )
-
     p, sw, at = 3, 3, 3
     swizzle = ComposeLayout(p, sw, at, TileLayout(S[(1 << (p + sw + at),)]))
     period = 1 << (p + at + sw)  # 512
@@ -352,8 +432,8 @@ def test_recognize_linear_iter_pure_case_1d():
 
 def test_reject_non_pow2_ext_not_case_1d():
     """Non-pow2 ext where stride is NOT in pure Case 1.D regime — reject.
-    stride=64 = 2^(p+at) = one atom row, which is Case 1.C (in [at, at+sw))
-    territory and the XOR depends on M0, so the linear path is unsafe."""
+    stride=64 = 2^(p+at) = one atom row, which is in [at, at+sw) territory
+    and interacts with the XOR mask, so the linear path is unsafe."""
     swizzle = ComposeLayout(3, 3, 3, TileLayout(S[(512,)]))
     pat = try_recognize(swizzle, [3], [64], _IntImm("int32", 0))
     assert pat is None
@@ -361,12 +441,8 @@ def test_reject_non_pow2_ext_not_case_1d():
 
 def test_emit_mixed_linear_bit_correctness():
     """Brute-force: for a mixed (LinearIter outer, BitIter inner) pattern,
-    emit_iter_offset's prediction must equal the actual swizzle output for
-    every (tid, k) — including the non-pow2 outer extent's coord 2."""
-    from tvm.tirx.cuda.tile_primitive.copy._swizzle_iter import (
-        _LinearIter,
-    )
-
+    the XOR formula must equal the actual swizzle output for every (tid, k)
+    — including the non-pow2 outer extent's coord 2."""
     p, sw, at = 3, 3, 3
     swizzle = ComposeLayout(p, sw, at, TileLayout(S[(1 << (p + sw + at),)]))
     period = 1 << (p + at + sw)  # 512
@@ -378,62 +454,37 @@ def test_emit_mixed_linear_bit_correctness():
     pat = try_recognize(swizzle, iter_extents, iter_strides, M0_template)
     assert pat is not None
 
-    def py_emit(pattern, signed_strides, base_off, k):
-        off = base_off
-        remaining = k
-        for it in reversed(pattern.outer_iters):
-            c = remaining % it.ext
-            remaining = remaining // it.ext
-            if isinstance(it, _LinearIter):
-                off += c * it.stride
-            else:
-                for b in range(it.n_bits):
-                    bit_pos = it.n_bits - 1 - b
-                    slot = it.slot_start + b
-                    if (c >> bit_pos) & 1:
-                        off += signed_strides[slot]
-        return off
-
     total_k = iter_extents[0] * iter_extents[1]
     for tid_val in [0, 1, 5, 7, 13]:
         M0 = tid_val * 16
         base_off = py_swizzle_apply(M0, p, sw, at)
-        ss = py_signed_strides(
-            M0,
-            p,
-            sw,
-            at,
-            pat.bit_positions,
-            pat.iter_strides_elems,
-        )
         for k in range(total_k):
             ds_k = py_outer_ds(k, iter_extents, iter_strides)
             ground_truth = py_swizzle_apply(M0 + ds_k, p, sw, at)
-            formula = py_emit(pat, ss, base_off, k)
+            formula = py_xor_offset(base_off, ds_k, p, sw, at)
             assert formula == ground_truth, (
                 f"mixed mismatch: tid={tid_val} M0={M0} k={k} ds_k={ds_k} "
-                f"truth={ground_truth} formula={formula} ss={ss}"
+                f"truth={ground_truth} formula={formula}"
             )
 
 
 def test_fallback_path_when_recognizer_rejects():
-    """The recognizer should reject when (c) fails, and the resulting
+    """The recognizer should reject when (C1) fails, and the resulting
     fallback emit (swizzle.apply per iter) is the correct path. This test
     proves the rejection and demonstrates that the swizzled offset really
     differs from the linear offset for the rejected case — so a buggy
-    `linear-offset-without-XOR` emit (the pre-fix behavior) would give the
-    wrong answer on at least one (tid, k) sample. The fallback emit, by
-    construction, delegates to swizzle.apply and is thus correct."""
+    `linear-offset-without-XOR` emit would give the wrong answer on at
+    least one (tid, k) sample. The fallback emit, by construction,
+    delegates to swizzle.apply and is thus correct."""
     p, sw, at = 3, 3, 3
     swizzle = ComposeLayout(p, sw, at, TileLayout(S[(1 << (p + sw + at),)]))
     tid = _TirVar("tid", "int32")
-    M0_template = tid * _IntImm("int32", 8)  # (c) fails: bit 0 of M0/C = bit 0 of tid
+    M0_template = tid * _IntImm("int32", 8)  # (C1) fails: bit 0 of M0/C = bit 0 of tid
     pat = try_recognize(swizzle, [2], [8], M0_template)
-    assert pat is None, "recognizer must reject when (c) fails"
+    assert pat is None, "recognizer must reject when (C1) fails"
 
     # Demonstrate the swizzled offset differs from linear for at least one
-    # (tid, k) — proves the swizzle is actually non-trivial here and the
-    # broken linear-offset emit would give the wrong physical address.
+    # (tid, k) — proves the swizzle is actually non-trivial here.
     iter_extents, iter_strides = [2], [8]
     diverging_samples = 0
     for tid_val in range(16):

@@ -41,11 +41,10 @@ from ._common import (  # noqa: F401  (_carve_tail reserved for future variants)
 )
 from ._swizzle_iter import (
     emit_base,
-    emit_init,
-    emit_iter_offset,
     emit_xor_offset,
+    emit_xor_offset_var,
     get_swizzle,
-    try_recognize_xor,
+    try_recognize,
     xor_delta,
 )
 from .utils import _is_valid_copy, _scope_allowed
@@ -346,9 +345,8 @@ def _emit(op_call: TilePrimitiveCall, sctx: DispatchContext) -> PrimFunc:
     # Swizzle fast-path setup. When S is swizzled, the per-mm `tile_off +
     # row_off` is a logical offset; the physical SMEM address is
     # `swizzle.apply(logical)`. The slow path computes that per iter; the
-    # fast path (§2.E of the swizzle-iter plan) reduces it to
-    # `base_off + sum_j bit_j(mm) · signed_strides[j]` where base_off and
-    # signed_strides are per-thread constants set once. We try to
+    # fast path reduces it to `(base_off + D_high) ^ σ(D_low)` with
+    # compile-time constants, base_off computed once per thread. We try to
     # recognize the m_outer iter list as such a pattern; if it fails (e.g.
     # the analyzer can't discharge condition C1 over the lane/warp
     # placeholders) we silently fall through to the slow path.
@@ -382,7 +380,7 @@ def _emit(op_call: TilePrimitiveCall, sctx: DispatchContext) -> PrimFunc:
         var_bounds = {lane_ph: tvm.ir.Range.from_min_extent(0, 32)}
         if warp_ph is not None:
             var_bounds[warp_ph] = tvm.ir.Range.from_min_extent(0, t_total // 32)
-        swizzle_pattern = try_recognize_xor(
+        swizzle_pattern = try_recognize(
             s_swizzle,
             iter_extents,
             iter_strides,
@@ -392,7 +390,6 @@ def _emit(op_call: TilePrimitiveCall, sctx: DispatchContext) -> PrimFunc:
 
     class _SwizzleState:
         def __init__(self):
-            self.signed_strides = None
             self.base_off = None
             self.s_off_resolved = None
 
@@ -552,23 +549,14 @@ def _emit(op_call: TilePrimitiveCall, sctx: DispatchContext) -> PrimFunc:
     def _smem_off(mm_idx, logical_off):
         # Three paths:
         #   * pattern matched + compile-time mm: physical off =
-        #     (base_off + D_high) ^ σ(D_low) — one XOR, no signed_strides.
-        #   * pattern matched + runtime mm: additive signed-strides (lazy).
+        #     (base_off + D_high) ^ σ(D_low) — one XOR immediate.
+        #   * pattern matched + runtime mm: per-bit XOR with compile-time σ.
         #   * swizzle present, pattern missed: per-iter swizzle.apply(logical).
         #   * no swizzle: identity.
         if swizzle_pattern is not None and isinstance(mm_idx, int):
             return _apply_split(emit_xor_offset(swizzle_pattern, state.base_off, mm_idx))
         if swizzle_pattern is not None:
-            if state.signed_strides is None:
-                state.signed_strides, _ = emit_init(swizzle_pattern, state.s_off_resolved)
-            return _apply_split(
-                emit_iter_offset(
-                    swizzle_pattern,
-                    state.signed_strides,
-                    state.base_off,
-                    mm_idx,
-                )
-            )
+            return _apply_split(emit_xor_offset_var(swizzle_pattern, state.base_off, mm_idx))
         if s_swizzle is not None:
             return s_swizzle.apply(logical_off)["m"]
         return logical_off

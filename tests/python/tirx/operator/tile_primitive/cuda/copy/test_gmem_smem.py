@@ -387,18 +387,11 @@ def test_swizzled_smem_emit_must_be_swizzle_aware():
     #      to a ``^`` (XOR) somewhere in the S-offset computation
     #      (typically on a separate ``s_off_ptr[0] = ...`` line, not on
     #      the ``tvm_builtin_pointer_offset`` line itself).
-    #   2. fast path precomputes a ``signed_strides[N]`` register array
-    #      (one per binary outer iter), so each per-iter offset is a
-    #      sum of those strides — fingerprintable by the ``1 - 2 *``
-    #      sign-computation idiom emit_init writes.
-    # XOR-less code paired with no signed_strides init means swizzle
-    # was silently dropped.
-    has_xor = "^" in src
-    has_signed_strides_init = "1 - 2 *" in src or "(1 - 2 *" in src
-    assert has_xor or has_signed_strides_init, (
-        "emitted s_ptr address shows no swizzle handling — no XOR (fallback "
-        "path) and no signed_strides init (fast path)"
-    )
+    #   2. fast path computes the swizzled base once and XORs compile-time
+    #      constants per iter — also containing a ``^`` somewhere in the
+    #      S-offset computation.
+    # XOR-less code means swizzle was silently dropped.
+    assert "^" in src, "emitted s_ptr address shows no swizzle handling — no XOR anywhere"
 
 
 def test_layout_permute_copy_preserves_smem_strides():
@@ -514,15 +507,16 @@ def test_layout_permute_copy_preserves_smem_strides():
 # Case 1.D, signed_stride = +T). The (C1) analyzer check
 # ``bit_bj(s_off // C) == 0`` needs the placeholder var bounded to
 # laneid ∈ [0, 32); the dispatch passes ``var_bounds`` so it can discharge,
-# recognizer accepts, and emit lowers to the
-# ``base_off + sum_j bit_j(f) · signed_strides[j]`` precomputed form.
+# recognizer accepts, and emit lowers to the base-once + XOR-constant form.
 # ----------------------------------------------------------------------------
 @pytest.mark.gpu
 @pytest.mark.skipif(not env.has_cuda_compute(9), reason="need cuda compute >= 9.0")
 def test_gmem_smem_swizzle_fast_path_fires_with_var_bounds():
     """Warp-scope 32x64 fp16 G2S/S2G with 128b swizzled SMEM. Fast path
-    must fire: a 3-slot ``v_<n>[]`` signed_strides buffer + bit-select adds
-    per outer iter, no per-iter ``swizzle.apply`` XOR splice in the hot path."""
+    must fire in XOR form: per-thread swizzled base computed once, per-iter
+    bit-select terms with compile-time constants
+    (``((f >> M) & 1) * CONST``), no per-iter ``swizzle.apply`` XOR splice
+    in the hot path."""
     import re
 
     swizzle = ComposeLayout(3, 3, 3, TileLayout(S[(512,)]))
@@ -555,16 +549,21 @@ def test_gmem_smem_swizzle_fast_path_fires_with_var_bounds():
         ex = tvm.compile(mod, target=target, tir_pipeline="tirx")
         src = ex.mod.imports[0].inspect_source()
 
-    bitsel = re.findall(r"& 1\) \* \w+\[", src)
-    v_decls = re.findall(r"alignas\(\d+\) int \w+\[(\d+)\]", src)
+    # XOR-form fingerprint: bit-select * compile-time constant (not a
+    # signed_strides buffer load), with the swizzled per-thread base
+    # computed once.
+    bitsel = re.findall(r"& 1\) \* \d+\)", src)
     assert bitsel, (
-        "expected fast-path ``(bit & 1) * v_<n>[i]`` adds; if missing, "
+        "expected fast-path ``(bit & 1) * CONST`` terms; if missing, "
         "var_bounds wiring may have regressed"
     )
-    assert "3" in v_decls, (
-        f"expected at least one 3-slot signed_strides buffer for bjs "
-        f"[7, 6, 5]; got decl sizes {v_decls}"
+    assert not re.findall(r"& 1\) \* \w+\[", src), (
+        "found signed_strides-style buffer bit-select ``(bit & 1) * v_<n>[i]`` "
+        "— the additive path should be gone"
     )
+    assert "(threadIdx.x) ^ (((((int)threadIdx.x) & 56) >> 3)" in src or (
+        "(int)threadIdx.x) & 56) >> 3" in src
+    ), "expected the per-thread swizzled base to be computed once"
 
     # Round-trip correctness.
     A_np = np.arange(32 * 64, dtype="float16").reshape(shape)
