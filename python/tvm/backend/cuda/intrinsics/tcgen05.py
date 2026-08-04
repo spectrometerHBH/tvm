@@ -37,7 +37,7 @@ def _safe(s):
 # tcgen05 SMEM / instr descriptor encoders — pure-C bitfield struct fills.
 # =============================================================================
 device_intrinsic(
-    "ptx_tcgen05_encode_matrix_descriptor",
+    "cuda_tcgen05_encode_matrix_descriptor",
     helper_name="tvm_builtin_ptx_tcgen05_encode_matrix_descriptor",
     c_signature="(uint64_t* desc, void* addr, int ldo, int sdo, int swizzle)",
     body=(
@@ -243,7 +243,7 @@ def _check_tcgen05_mma_matrix_shape(kind, cta_group, m, n, k, is_sparse):
 
 # tcgen05 instr-descriptor (dense) encoder.
 device_intrinsic(
-    "_ptx_tcgen05_encode_instr_descriptor_impl",
+    "_cuda_tcgen05_encode_instr_descriptor_impl",
     helper_name="ptx_tcgen05_encode_instr_descriptor",
     c_signature=(
         "(uint32_t* desc, int M, int N, int d_format, int a_format, int b_format, "
@@ -277,8 +277,8 @@ device_intrinsic(
 )
 
 
-@register_codegen("ptx_tcgen05_encode_instr_descriptor")
-def codegen_ptx_tcgen05_encode_instr_descriptor(
+@register_codegen("cuda_tcgen05_encode_instr_descriptor")
+def codegen_cuda_tcgen05_encode_instr_descriptor(
     desc,
     d_dtype,
     a_dtype,
@@ -349,14 +349,14 @@ def codegen_ptx_tcgen05_encode_instr_descriptor(
     if sat_d and kind != "i8":
         raise ValueError(f"Invalid kind for saturate: {kind}")
 
-    return CODEGEN_REGISTRY["tirx._ptx_tcgen05_encode_instr_descriptor_impl"](
+    return CODEGEN_REGISTRY["tirx._cuda_tcgen05_encode_instr_descriptor_impl"](
         [desc, M, N, d_format, a_format, b_format, trans_a, trans_b, neg_a, neg_b, sat_d, is_sparse]
     )
 
 
 # tcgen05 instr-descriptor (block-scaled) encoder.
 device_intrinsic(
-    "_ptx_tcgen05_encode_instr_descriptor_block_scaled_impl",
+    "_cuda_tcgen05_encode_instr_descriptor_block_scaled_impl",
     helper_name="ptx_tcgen05_encode_instr_descriptor_block_scaled",
     c_signature=(
         "(uint32_t* desc, int M, int N, int a_format, int b_format, int s_format, "
@@ -391,8 +391,8 @@ device_intrinsic(
 )
 
 
-@register_codegen("ptx_tcgen05_encode_instr_descriptor_block_scaled")
-def codegen_ptx_tcgen05_encode_instr_descriptor_block_scaled(
+@register_codegen("cuda_tcgen05_encode_instr_descriptor_block_scaled")
+def codegen_cuda_tcgen05_encode_instr_descriptor_block_scaled(
     desc,
     d_dtype,
     a_dtype,
@@ -472,7 +472,7 @@ def codegen_ptx_tcgen05_encode_instr_descriptor_block_scaled(
     if trans_b and btype_enum not in valid_dtypes_for_trans:
         raise ValueError(f"Invalid b_dtype for transpose: {b_dtype}")
 
-    return CODEGEN_REGISTRY["tirx._ptx_tcgen05_encode_instr_descriptor_block_scaled_impl"](
+    return CODEGEN_REGISTRY["tirx._cuda_tcgen05_encode_instr_descriptor_block_scaled_impl"](
         [desc, M, N, a_format, b_format, s_format, trans_a, trans_b, neg_a, neg_b, is_sparse]
     )
 

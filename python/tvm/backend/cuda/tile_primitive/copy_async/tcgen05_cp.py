@@ -676,7 +676,7 @@ def _get_or_create_desc(sctx, s_buf, ldo, sdo, swizzle):
         return cached
 
     desc_buf = tvm.tirx.decl_buffer((1,), "uint64", name="cp_desc", scope="local")
-    encode_call = T.ptx.tcgen05.encode_matrix_descriptor(
+    encode_call = T.cuda.tcgen05.encode_matrix_descriptor(
         desc_buf.data, T.reinterpret("handle", T.uint64(0)), ldo, sdo, swizzle
     )
     wrap = SeqStmt([AllocBuffer(desc_buf), Evaluate(encode_call)])

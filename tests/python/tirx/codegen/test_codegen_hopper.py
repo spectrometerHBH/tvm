@@ -454,7 +454,7 @@ def test_cp_async_bulk_tensor_global_to_shared_unicast(dtype, inputs):
                         T.ptxd.mbarrier.arrive.expect_tx.shared.b64(
                             T.address_of(bar), T.uint32(total_bytes)
                         )
-                    T.ptx.mbarrier.try_wait(T.address_of(bar), phase)
+                    T.cuda.mbarrier_wait(T.address_of(bar), phase)
                     phase = phase ^ 1
 
                     T.cuda.cta_sync()
@@ -647,7 +647,7 @@ def test_cp_async_bulk_tensor_global_to_shared_swizzle(swizzle, dtype):
                         T.ptxd.mbarrier.arrive.expect_tx.shared.b64(
                             T.address_of(bar), T.uint32(total_bytes)
                         )
-                        T.ptx.mbarrier.try_wait(T.address_of(bar), phase)
+                        T.cuda.mbarrier_wait(T.address_of(bar), phase)
                     phase = phase ^ 1
 
                     T.cuda.cta_sync()
@@ -745,7 +745,7 @@ def test_cp_async_bulk_tensor_global_to_shared_multicast1(inputs):
                                         # only the first CTA in the cluster does the copy, and then multicast  # noqa: E501
                                 T.ptxd[f"cp.async.bulk.tensor.{len(shape)}d.shared::cluster.global.mbarrier::complete_tx::bytes.multicast::cluster"](A_smem.data, T.address_of(A_map), *coord, T.address_of(bar), int("1111", 2))  # noqa: E501
                                 # wait for the copy to finish
-                        T.ptx.mbarrier.try_wait(T.address_of(bar), phase)
+                        T.cuda.mbarrier_wait(T.address_of(bar), phase)
                         phase = phase ^ 1
                         T.cuda.cta_sync()
                         T.ptxd.fence.proxy.async_.shared__cta()
@@ -842,7 +842,7 @@ def test_cp_async_bulk_tensor_global_to_shared_multicast2(inputs):
                                 T.ptxd[f"cp.async.bulk.tensor.{len(shape)}d.shared::cluster.global.mbarrier::complete_tx::bytes.multicast::cluster"](A_smem.access_ptr(BufferAccessKind.WRITE, offset=A_smem.elem_offset_of(coord3[::-1])),  # noqa: E501
                                                                T.address_of(A_map), *coord3, T.address_of(bar), int("1111", 2))  # noqa: E501
                                 # wait for the copy to finish
-                        T.ptx.mbarrier.try_wait(T.address_of(bar), phase)
+                        T.cuda.mbarrier_wait(T.address_of(bar), phase)
                         phase = phase ^ 1
                         T.cuda.cta_sync()
 
@@ -1013,18 +1013,18 @@ def test_wgmma_ss_nt():
                 T.ptxd.mbarrier.arrive.expect_tx.shared.b64(
                     T.address_of(bar), T.uint32(A_bytes + B_bytes)
                 )
-            T.ptx.mbarrier.try_wait(T.address_of(bar), phase)
+            T.cuda.mbarrier_wait(T.address_of(bar), phase)
             phase = phase ^ 1
             T.cuda.cta_sync()
 
                     # init C_local
             for i in T.serial(0, C_elems):
                 C_local[i] = T.Cast(out_dtype, get_init_value(out_dtype))
-                T.ptx.wgmma.noop_barrier(C_local[i])
+                T.cuda.wgmma.noop_barrier(C_local[i])
 
                     # do wgmma
-            T.ptx.wgmma.encode_matrix_descriptor(T.address_of(descA), A_smem.data, *A_encode_args)  # noqa: F821
-            T.ptx.wgmma.encode_matrix_descriptor(T.address_of(descB), B_smem.data, *B_encode_args)  # noqa: F821
+            T.cuda.wgmma.encode_matrix_descriptor(T.address_of(descA), A_smem.data, *A_encode_args)  # noqa: F821
+            T.cuda.wgmma.encode_matrix_descriptor(T.address_of(descB), B_smem.data, *B_encode_args)  # noqa: F821
             T.ptxd.wgmma.fence.sync.aligned()
             T.ptxd[mma_chain](*get_accum_list(C_local, C_elems), descA, descB,  # noqa: F821
                               0, 1, 1, int(transA), int(transB))
@@ -1032,7 +1032,7 @@ def test_wgmma_ss_nt():
             T.ptxd.wgmma.wait_group.sync.aligned(0)
 
             for i in T.serial(0, C_elems):
-                T.ptx.wgmma.noop_barrier(C_local[i])
+                T.cuda.wgmma.noop_barrier(C_local[i])
 
                     # store C_local to C
             for i in T.serial(0, C_elems // 4):
@@ -1176,7 +1176,7 @@ def test_wgmma_rs_nt():
             if tx == 0:
                 T.ptxd[f"cp.async.bulk.tensor.{len(shapeB)}d.shared::cluster.global.mbarrier::complete_tx::bytes"](B_smem.data, T.address_of(B_map), *coordB, T.address_of(bar))  # noqa: E501
                 T.ptxd.mbarrier.arrive.expect_tx.shared.b64(T.address_of(bar), T.uint32(B_bytes))
-            T.ptx.mbarrier.try_wait(T.address_of(bar), 0)
+            T.cuda.mbarrier_wait(T.address_of(bar), 0)
             T.cuda.cta_sync()
 
                     # init C_local
@@ -1185,11 +1185,11 @@ def test_wgmma_rs_nt():
 
                     # fence A_local and C_local
             for i in T.serial(0, A_elems_b32):
-                T.ptx.wgmma.noop_barrier(A_local_b32[i])
+                T.cuda.wgmma.noop_barrier(A_local_b32[i])
             for i in T.serial(0, C_elems):
-                T.ptx.wgmma.noop_barrier(C_local[i])
+                T.cuda.wgmma.noop_barrier(C_local[i])
                     # do wgmma
-            T.ptx.wgmma.encode_matrix_descriptor(T.address_of(descB), B_smem.data, *B_encode_args)  # noqa: F821
+            T.cuda.wgmma.encode_matrix_descriptor(T.address_of(descB), B_smem.data, *B_encode_args)  # noqa: F821
             T.ptxd.wgmma.fence.sync.aligned()
             T.ptxd[mma_chain](*get_accum_list(C_local, C_elems), *get_A_list(A_local_b32, A_elems_b32),  # noqa: E501
                               descB, 0, 1, 1, int(transB))  # noqa: F821
@@ -1198,10 +1198,10 @@ def test_wgmma_rs_nt():
 
                     # fence A_local
             for i in T.serial(0, A_elems_b32):
-                T.ptx.wgmma.noop_barrier(A_local_b32[i])
+                T.cuda.wgmma.noop_barrier(A_local_b32[i])
                     # fence C_local
             for i in T.serial(0, C_elems):
-                T.ptx.wgmma.noop_barrier(C_local[i])
+                T.cuda.wgmma.noop_barrier(C_local[i])
 
                     # store C_local to C
             for i in T.serial(0, C_elems // 4):

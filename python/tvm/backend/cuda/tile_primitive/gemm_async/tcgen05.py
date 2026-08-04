@@ -116,7 +116,7 @@ def _encode_instr_descriptor_dense_uint32(
     block that ptxas cannot hoist out of the i_kv loop body).
 
     Mirrors the runtime encoder's validation
-    (``codegen_ptx_tcgen05_encode_instr_descriptor``): the compile-time fold
+    (``codegen_cuda_tcgen05_encode_instr_descriptor``): the compile-time fold
     must not accept kind/shape/trans combinations the runtime encoder would
     reject — e.g. cta_group=1 M=128 requires N % 16 == 0, which the tile
     chooser alone does not guarantee (it only enforces N % 8).
@@ -1190,7 +1190,7 @@ def gemm_async_tcgen05_impl(op_call: TilePrimitiveCall, sctx: DispatchContext) -
         desc_buf = tvm.tirx.decl_buffer((1,), "uint64", name=name, scope="local")
         encode_call = tvm.tirx.call_intrin(
             "",
-            "tirx.ptx.tcgen05_encode_matrix_descriptor",
+            "tirx.cuda.tcgen05_encode_matrix_descriptor",
             tvm.tirx.address_of(desc_buf[0]),
             smem_buf.ptr_to([0] * len(smem_buf.shape)),
             ldo,
@@ -1225,7 +1225,7 @@ def gemm_async_tcgen05_impl(op_call: TilePrimitiveCall, sctx: DispatchContext) -
     def _encoded_desc_val(smem_buf, off16, ldo, sdo, swizzle):
         desc = T.alloc_local((1,), "uint64")
         T.evaluate(
-            T.ptx.tcgen05.encode_matrix_descriptor(
+            T.cuda.tcgen05.encode_matrix_descriptor(
                 T.address_of(desc[0]),
                 _desc_ptr(smem_buf, off16),
                 ldo=ldo,
@@ -1495,7 +1495,7 @@ def gemm_async_tcgen05_impl(op_call: TilePrimitiveCall, sctx: DispatchContext) -
     def call_main(descI_arg):
         if local_hoist:
             descB_local = T.alloc_local((1,), "uint64")
-            T.ptx.tcgen05.encode_matrix_descriptor(
+            T.cuda.tcgen05.encode_matrix_descriptor(
                 T.address_of(descB_local[0]),
                 B_buffer.ptr_to([0] * len(B_buffer.shape)),
                 ldo=B_ldo,
@@ -1506,7 +1506,7 @@ def gemm_async_tcgen05_impl(op_call: TilePrimitiveCall, sctx: DispatchContext) -
             # descriptor is consumed by the same thread and needs no warp shuffle.
             if A_use_add:
                 descA_local = T.alloc_local((1,), "uint64")
-                T.ptx.tcgen05.encode_matrix_descriptor(
+                T.cuda.tcgen05.encode_matrix_descriptor(
                     T.address_of(descA_local[0]),
                     A_buffer.ptr_to([0] * len(A_buffer.shape)),
                     ldo=A_ldo,
@@ -1535,7 +1535,7 @@ def gemm_async_tcgen05_impl(op_call: TilePrimitiveCall, sctx: DispatchContext) -
         @T.prim_func(check_well_formed=False)
         def impl():
             descI_local: T.uint32
-            T.ptx.tcgen05.encode_instr_descriptor_block_scaled(T.address_of(descI_local), d_dtype=C_type, a_dtype=A_type, b_dtype=B_type, sfa_dtype=SFA_type, sfb_dtype=SFB_type,  # noqa: E501, F821
+            T.cuda.tcgen05.encode_instr_descriptor_block_scaled(T.address_of(descI_local), d_dtype=C_type, a_dtype=A_type, b_dtype=B_type, sfa_dtype=SFA_type, sfb_dtype=SFB_type,  # noqa: E501, F821
                                                                sfa_tmem_addr=SFA_init_addr, sfb_tmem_addr=SFB_init_addr,  # noqa: E501
                                                                M=M_mma * cta_group, N=N_mma, K=MMA_K, trans_a=a_mn_major, trans_b=b_mn_major, n_cta_groups=cta_group)  # noqa: E501
             call_main(descI_local)  # noqa: F821
@@ -1577,7 +1577,7 @@ def gemm_async_tcgen05_impl(op_call: TilePrimitiveCall, sctx: DispatchContext) -
 #
 # After (encodes instruction descriptor + calls tcgen05.mma):
 #     descI_local: uint32
-#     T.ptx.tcgen05.encode_instr_descriptor(
+#     T.cuda.tcgen05.encode_instr_descriptor(
 #         &descI_local, C_type="f32", A_type="f16", B_type="f16",
 #         M=64, N=256, MMA_K=64, transA=False, transB=True, cta_group=1)
 #     T.ptxd[mma_chain](..., descA_buf[0], descB_buf[0], descI_local, ...)

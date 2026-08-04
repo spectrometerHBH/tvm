@@ -490,7 +490,7 @@ def _validate_mbarrier_arrive_attrs(sem, scope, space, remote):
         raise ValueError("remote mbarrier.arrive requires space='shared::cluster'")
 
 
-def ptx_mbarrier_try_wait(bar, phase):
+def cuda_mbarrier_wait(bar, phase):
     """TVM intrinsic to call mbarrier.try_wait.parity repeatedly until it returns true
 
     Parameters
@@ -506,10 +506,10 @@ def ptx_mbarrier_try_wait(bar, phase):
     call : Expr
         The call expression.
     """
-    return call_intrin("", "tirx.ptx.mbarrier_try_wait", bar, phase)
+    return call_intrin("", "tirx.cuda.mbarrier_wait", bar, phase)
 
 
-def ptx_mbarrier_try_wait_acquire_cluster(bar, phase):
+def cuda_mbarrier_wait_acquire_cluster(bar, phase):
     """``mbarrier.try_wait.parity.acquire.cluster`` retry loop.
 
     Cluster-scope acquire wait — used to wait on a barrier that a remote CTA in
@@ -523,7 +523,7 @@ def ptx_mbarrier_try_wait_acquire_cluster(bar, phase):
     phase : int
         The phase of the barrier.
     """
-    return call_intrin("", "tirx.ptx.mbarrier_try_wait_acquire_cluster", bar, phase)
+    return call_intrin("", "tirx.cuda.mbarrier_wait_acquire_cluster", bar, phase)
 
 
 def ptx_cp_async_legacy(*all_args):
@@ -1025,7 +1025,7 @@ def ptx_ldmatrix_legacy(*all_args):
     )
 
 
-def ptx_wgmma_encode_matrix_descriptor(desc, addr, ldo, sdo, swizzle):
+def cuda_wgmma_encode_matrix_descriptor(desc, addr, ldo, sdo, swizzle):
     """TVM intrinsic to create memory descriptor for wgmma instructions
 
     Parameters
@@ -1045,10 +1045,12 @@ def ptx_wgmma_encode_matrix_descriptor(desc, addr, ldo, sdo, swizzle):
     swizzle : int
         The swizzle value (CUtensorMapSwizzle_enum).
     """
-    return call_intrin("", "tirx.ptx.wgmma_encode_matrix_descriptor", desc, addr, ldo, sdo, swizzle)
+    return call_intrin(
+        "", "tirx.cuda.wgmma_encode_matrix_descriptor", desc, addr, ldo, sdo, swizzle
+    )
 
 
-def ptx_wgmma_noop_barrier(reg):
+def cuda_wgmma_noop_barrier(reg):
     """TVM intrinsic to call "" : "+{format}"(reg)::"memory"
 
     Parameters
@@ -1061,10 +1063,10 @@ def ptx_wgmma_noop_barrier(reg):
     call : Expr
         The call expression.
     """
-    return call_intrin("", "tirx.ptx.wgmma_noop_barrier", reg)
+    return call_intrin("", "tirx.cuda.wgmma_noop_barrier", reg)
 
 
-def ptx_tcgen05_encode_matrix_descriptor(desc, addr, ldo, sdo, swizzle):
+def cuda_tcgen05_encode_matrix_descriptor(desc, addr, ldo, sdo, swizzle):
     """TVM intrinsic to create memory descriptor for tcgen05 instructions
 
     Parameters
@@ -1085,11 +1087,11 @@ def ptx_tcgen05_encode_matrix_descriptor(desc, addr, ldo, sdo, swizzle):
         The swizzle value (CUtensorMapSwizzle_enum).
     """
     return call_intrin(
-        "", "tirx.ptx.tcgen05_encode_matrix_descriptor", desc, addr, ldo, sdo, swizzle
+        "", "tirx.cuda.tcgen05_encode_matrix_descriptor", desc, addr, ldo, sdo, swizzle
     )
 
 
-def ptx_tcgen05_encode_instr_descriptor(
+def cuda_tcgen05_encode_instr_descriptor(
     desc,
     *,
     d_dtype,
@@ -1157,7 +1159,7 @@ def ptx_tcgen05_encode_instr_descriptor(
     _choice("n_cta_groups", n_cta_groups, _TCGEN05_CTA_GROUP)
     return call_intrin(
         "",
-        "tirx.ptx.tcgen05_encode_instr_descriptor",
+        "tirx.cuda.tcgen05_encode_instr_descriptor",
         desc,
         d_dtype,
         a_dtype,
@@ -1175,7 +1177,7 @@ def ptx_tcgen05_encode_instr_descriptor(
     )
 
 
-def ptx_tcgen05_encode_instr_descriptor_block_scaled(
+def cuda_tcgen05_encode_instr_descriptor_block_scaled(
     desc,
     *,
     d_dtype,
@@ -1255,7 +1257,7 @@ def ptx_tcgen05_encode_instr_descriptor_block_scaled(
     _choice("n_cta_groups", n_cta_groups, _TCGEN05_CTA_GROUP)
     return call_intrin(
         "",
-        "tirx.ptx.tcgen05_encode_instr_descriptor_block_scaled",
+        "tirx.cuda.tcgen05_encode_instr_descriptor_block_scaled",
         desc,
         d_dtype,
         a_dtype,
@@ -1763,7 +1765,7 @@ def cuda_sm100_2sm_leader_smem_addr(ptr):
     return bitwise_and(cuda_cvta_generic_to_shared(ptr), const(0xFEFFFFFF, dtype="uint32"))
 
 
-def ptx_any_sync(mask, pred):
+def cuda_any_sync(mask, pred):
     """TVM intrinsic for PTX warp-wide any predicate (__any_sync)
 
     Parameters
@@ -1778,7 +1780,7 @@ def ptx_any_sync(mask, pred):
     call : Expr
         The call expression returning 1 if any thread in mask has pred != 0.
     """
-    return call_intrin("int32", "tirx.ptx.any_sync", mask, pred)
+    return call_intrin("int32", "tirx.cuda.any_sync", mask, pred)
 
 
 def ptx_neg_f32(x):

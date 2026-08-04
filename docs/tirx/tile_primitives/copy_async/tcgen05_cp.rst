@@ -131,7 +131,7 @@ dealloc tail elided):
     if tid_in_wg == 0:
         Tx.copy_async(tmem[0:32, 0:16], A_smem[0:32, 0:16], cta_group=1)   # smem -> tmem
         T.ptx.tcgen05.commit(cp_mbar.ptr_to([0]), cta_group=1)             # caller signals
-    T.ptx.mbarrier.try_wait(cp_mbar.ptr_to([0]), 0)
+    T.cuda.mbarrier_wait(cp_mbar.ptr_to([0]), 0)
     # ... readback via tcgen05.ld, then tcgen05.dealloc ...
 
 Algorithm

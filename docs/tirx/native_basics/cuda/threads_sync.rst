@@ -36,8 +36,8 @@ synchronization, mbarriers, reductions, and the PTX data-movement / MMA families
     T.cuda.cta_sum(val, num_warps, scratch.ptr_to([0]))   # block-level reduction
 
     bar = T.alloc_shared((1,), "uint64")
-    T.ptx.mbarrier.init(bar.data, 1)     # mbarrier for async completion
-    T.ptx.mbarrier.try_wait(bar.data, phase)
+    T.ptxd.mbarrier.init.shared.b64(bar.data, T.uint32(1))  # mbarrier for async completion
+    T.cuda.mbarrier_wait(bar.data, phase)
 
 A complete, runnable example — a warp all-reduce via ``T.tvm_warp_shuffle_xor``:
 

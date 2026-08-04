@@ -149,39 +149,30 @@ device_intrinsic(
 # label loop (TIRx convention; the magic ``ticks = 0x989680`` is the timeout
 # hint in ns).
 # =============================================================================
-def _ptx_mbarrier_try_wait_parts(*args):
-    barrier_type, address_decl, barrier_addr, raw_suffix = _mbarrier_address_parts(args[0])
-    body = (
-        address_decl + "    asm volatile(\n"
+device_intrinsic(
+    "cuda_mbarrier_wait",
+    c_signature="(void* barrier, int phase)",
+    body=(
+        "    unsigned int barrier_addr_int = __cvta_generic_to_shared(barrier);\n"
+        "    unsigned int ticks = 0x989680;\n"
+        "    asm volatile(\n"
         '        "{\\n"\n'
         '        ".reg .pred                P1;\\n"\n'
         '        "LAB_WAIT:\\n"\n'
-        '        "mbarrier.try_wait.parity.shared::cta.b64 P1, [%0], %1, 10000000;\\n"\n'
+        '        "mbarrier.try_wait.parity.shared::cta.b64 P1, [%0], %1, %2;\\n"\n'
         '        "@P1                       bra.uni DONE;\\n"\n'
         '        "bra.uni                   LAB_WAIT;\\n"\n'
         '        "DONE:\\n"\n'
         '        "}\\n"\n'
-        f'        :: "r"({barrier_addr}), "r"(phase) : "memory");'
-    )
-    return (
-        f"tvm_builtin_ptx_mbarrier_try_wait{raw_suffix}",
-        f"({barrier_type} barrier, int phase)",
-        body,
-    )
-
-
-device_intrinsic(
-    "ptx_mbarrier_try_wait",
-    helper_name=lambda *a: _ptx_mbarrier_try_wait_parts(*a)[0],
-    c_signature=lambda *a: _ptx_mbarrier_try_wait_parts(*a)[1],
-    body=lambda *a: _ptx_mbarrier_try_wait_parts(*a)[2],
+        '        :: "r"(barrier_addr_int), "r"(phase), "r"(ticks) : "memory");'
+    ),
 )
 
 
 # mbarrier.try_wait.parity.acquire.cluster — cluster-scope acquire wait used for
 # cross-CTA barrier handshakes (e.g. the tmem-finished handoff).
 device_intrinsic(
-    "ptx_mbarrier_try_wait_acquire_cluster",
+    "cuda_mbarrier_wait_acquire_cluster",
     c_signature="(void* barrier, int phase)",
     body=(
         "    unsigned int barrier_addr_int = __cvta_generic_to_shared(barrier);\n"
@@ -216,7 +207,7 @@ device_intrinsic(
 # __any_sync — warp-vote (pure CUDA helper).
 # =============================================================================
 device_intrinsic(
-    "ptx_any_sync",
+    "cuda_any_sync",
     c_signature="(unsigned mask, int pred)",
     body="    return __any_sync(mask, pred);",
     return_type="int",

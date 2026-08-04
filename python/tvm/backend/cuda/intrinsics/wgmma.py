@@ -35,7 +35,7 @@ from .types import PTXDataType
 # wgmma_encode_matrix_descriptor — pure-C bitfield struct fill (no asm).
 # =============================================================================
 device_intrinsic(
-    "ptx_wgmma_encode_matrix_descriptor",
+    "cuda_wgmma_encode_matrix_descriptor",
     helper_name="ptx_wgmma_encode_matrix_descriptor",
     c_signature="(uint64_t* desc, void* addr, int ldo, int sdo, int swizzle)",
     body=(
@@ -69,27 +69,27 @@ device_intrinsic(
 # based on the operand's runtime dtype.
 # =============================================================================
 device_intrinsic(
-    "ptx_wgmma_noop_barrier_uint32",
+    "cuda_wgmma_noop_barrier_uint32",
     helper_name="ptx_wgmma_fence_uint32_t",
     c_signature="(uint32_t reg)",
     body='    asm volatile("" : "+r"(reg) :: "memory");',
 )
 device_intrinsic(
-    "ptx_wgmma_noop_barrier_float32",
+    "cuda_wgmma_noop_barrier_float32",
     helper_name="ptx_wgmma_fence_float",
     c_signature="(float reg)",
     body='    asm volatile("" : "+f"(reg) :: "memory");',
 )
 
 
-@register_codegen("ptx_wgmma_noop_barrier")
-def codegen_ptx_wgmma_noop_barrier(reg):
+@register_codegen("cuda_wgmma_noop_barrier")
+def codegen_cuda_wgmma_noop_barrier(reg):
     dtype = str(reg.dtype)
     dtype_enum = PTXDataType.from_string(dtype)
     if dtype_enum == PTXDataType.UINT32:
-        op_name = "tirx.ptx_wgmma_noop_barrier_uint32"
+        op_name = "tirx.cuda_wgmma_noop_barrier_uint32"
     elif dtype_enum == PTXDataType.FLOAT32:
-        op_name = "tirx.ptx_wgmma_noop_barrier_float32"
+        op_name = "tirx.cuda_wgmma_noop_barrier_float32"
     else:
         raise ValueError(f"Only support uint32/float32 for wgmma_fence, but got {dtype}.")
     result = CODEGEN_REGISTRY[op_name]([reg])

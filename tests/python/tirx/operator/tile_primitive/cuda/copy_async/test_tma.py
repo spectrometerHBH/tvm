@@ -2024,7 +2024,7 @@ def _build_selector_gather_gpu_kernel(dtype="float16"):
                 src_selector=[(flag != 0, B)],
             )
             T.ptxd.mbarrier.arrive.expect_tx.shared.b64(mbar_ptr, T.uint32(shared_bytes))
-        T.ptx.mbarrier.try_wait(mbar_ptr, 0)
+        T.cuda.mbarrier_wait(mbar_ptr, 0)
         T.ptxd.fence.proxy.async_.shared__cta()
         T.cuda.cta_sync()
         Tx.cta.copy(Out[:, :], A_smem[:, :])

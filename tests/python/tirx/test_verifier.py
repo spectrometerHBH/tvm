@@ -216,7 +216,7 @@ def test_host():
                     T.ptxd.fence.proxy.async_.shared__cta()
                     T.ptxd["cp.async.bulk.tensor.2d.shared::cluster.global.mbarrier::complete_tx::bytes"](A_smem.data, T.address_of(A_map), 0, 0, bar.data)  # noqa: E501
                     T.ptxd.mbarrier.arrive.expect_tx.shared.b64(bar.data, T.uint32(16*16*4))
-                T.ptx.mbarrier.try_wait(bar.data, phase[0])
+                T.cuda.mbarrier_wait(bar.data, phase[0])
                 phase[0] = phase[0] ^ 1
                 T.print_buffer(A_smem.data, "float32", False, False, 2, 16*16)
         # fmt: on

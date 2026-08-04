@@ -53,7 +53,6 @@ class PTXNamespace:
         self.elect_sync: Callable[..., Any] = _op_wrapper(_cuda_op.ptx_elect_sync)
         self.clc_query_cancel = _op_wrapper(_cuda_op.ptx_clc_query_cancel)
         self.fetch_register: Callable[..., Any] = _op_wrapper(_cuda_op.ptx_fetch_register)
-        self.any_sync = _op_wrapper(_cuda_op.ptx_any_sync)
         # Math operations
         self.cvt = _dtype_forward(_cuda_op.ptx_cvt)
         # add/sub/mul/fma DPS form: (d_addr, a, b[, c], *, rounding, ftz[, sat])
@@ -61,8 +60,6 @@ class PTXNamespace:
         self.sub_f16x2 = _op_wrapper(_cuda_op.ptx_sub_f16x2)
         self.mma = MmaNamespace()
         self.cp_async = CpAsyncNamespace()
-        self.wgmma = WgmmaNamespace()
-        self.mbarrier = MbarrierNamespace()
         self.tcgen05 = Tcgen05Namespace()
 
 
@@ -111,32 +108,30 @@ class CpAsyncNamespace:
         )
 
 
-class WgmmaNamespace:
-    """The WGMMA instruction submodule."""
-
-    def __init__(self):
-        self.noop_barrier = _op_wrapper(_cuda_op.ptx_wgmma_noop_barrier)
-        self.encode_matrix_descriptor = _op_wrapper(_cuda_op.ptx_wgmma_encode_matrix_descriptor)
-
-
-class MbarrierNamespace:
-    """The Mbarrier instruction submodule."""
-
-    def __init__(self):
-        self.try_wait = _op_wrapper(_cuda_op.ptx_mbarrier_try_wait)
-        self.try_wait_acquire_cluster = _op_wrapper(_cuda_op.ptx_mbarrier_try_wait_acquire_cluster)
-
-
 class Tcgen05Namespace:
     """The Tcgen05 instruction submodule."""
 
     def __init__(self):
-        self.encode_matrix_descriptor = _op_wrapper(_cuda_op.ptx_tcgen05_encode_matrix_descriptor)
-        self.encode_instr_descriptor = _op_wrapper(_cuda_op.ptx_tcgen05_encode_instr_descriptor)
-        self.encode_instr_descriptor_block_scaled = _op_wrapper(
-            _cuda_op.ptx_tcgen05_encode_instr_descriptor_block_scaled
-        )
         self.cp = _op_wrapper(_cuda_op.ptx_tcgen05_cp)
+
+
+class CudaWgmmaNamespace:
+    """WGMMA companions that are not PTX instructions (pure-C / empty-asm helpers)."""
+
+    def __init__(self):
+        self.noop_barrier = _op_wrapper(_cuda_op.cuda_wgmma_noop_barrier)
+        self.encode_matrix_descriptor = _op_wrapper(_cuda_op.cuda_wgmma_encode_matrix_descriptor)
+
+
+class CudaTcgen05Namespace:
+    """tcgen05 companions that are not PTX instructions (pure-C descriptor packers)."""
+
+    def __init__(self):
+        self.encode_matrix_descriptor = _op_wrapper(_cuda_op.cuda_tcgen05_encode_matrix_descriptor)
+        self.encode_instr_descriptor = _op_wrapper(_cuda_op.cuda_tcgen05_encode_instr_descriptor)
+        self.encode_instr_descriptor_block_scaled = _op_wrapper(
+            _cuda_op.cuda_tcgen05_encode_instr_descriptor_block_scaled
+        )
 
 
 class IketNamespace:
@@ -157,6 +152,15 @@ class CUDANamespace:
 
     def __init__(self):
         self.iket = IketNamespace()
+        self.wgmma = CudaWgmmaNamespace()
+        self.tcgen05 = CudaTcgen05Namespace()
+        self.any_sync = _op_wrapper(_cuda_op.cuda_any_sync)
+        # Spin-until-ready mbarrier waits: label-loop asm blocks, not single
+        # PTX instructions -- which is why they live here and not in T.ptxd.
+        self.mbarrier_wait = _op_wrapper(_cuda_op.cuda_mbarrier_wait)
+        self.mbarrier_wait_acquire_cluster = _op_wrapper(
+            _cuda_op.cuda_mbarrier_wait_acquire_cluster
+        )
         self.atomic_add = _op_wrapper(_cuda_op.cuda_atomic_add)
         self.thread_fence = _op_wrapper(_cuda_op.cuda_thread_fence)
         self.warpgroup_sync = _op_wrapper(_cuda_op.cuda_warpgroup_sync)

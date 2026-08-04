@@ -195,7 +195,7 @@ class MBarrier:
     def _wait(self, stage, phase):
         # Blocks: ``mbarrier.try_wait`` loops internally until the phase flips,
         # so this returns only once the barrier has completed.
-        T.ptx.mbarrier.try_wait(self.buf.ptr_to([stage]), phase ^ self.phase_offset)
+        T.cuda.mbarrier_wait(self.buf.ptr_to([stage]), phase ^ self.phase_offset)
 
     def arrive(self, stage, remote=None, pred=None, count=None):
         if self._remote_cta_id is not None:

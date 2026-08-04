@@ -41,11 +41,9 @@ def test_printer_cuda_cluster_sync():
     _assert_print(node, "T.cuda.cluster_sync()")
 
 
-def test_printer_ptx_namespace_mbarrier_try_wait():
-    node = tir.Evaluate(
-        cuda_op.ptx_mbarrier_try_wait(tir.IntImm("int32", 0), tir.IntImm("int32", 0))
-    )
-    _assert_print(node, "T.ptx.mbarrier.try_wait(0, 0)")
+def test_printer_cuda_namespace_mbarrier_wait():
+    node = tir.Evaluate(cuda_op.cuda_mbarrier_wait(tir.IntImm("int32", 0), tir.IntImm("int32", 0)))
+    _assert_print(node, "T.cuda.mbarrier_wait(0, 0)")
 
 
 def test_printer_nvshmem_namespace():
@@ -60,11 +58,11 @@ def test_printer_ptx_more():
     a = tir.Var("a", "handle")
     b = tir.Var("b", "handle")
     _assert_print(
-        cuda_op.ptx_tcgen05_encode_matrix_descriptor(d, a, 1, 2, 0),
-        "d = T.handle()\na = T.handle()\nT.ptx.tcgen05.encode_matrix_descriptor(d, a, 1, 2, 0)",
+        cuda_op.cuda_tcgen05_encode_matrix_descriptor(d, a, 1, 2, 0),
+        "d = T.handle()\na = T.handle()\nT.cuda.tcgen05.encode_matrix_descriptor(d, a, 1, 2, 0)",
     )
     _assert_print(
-        cuda_op.ptx_tcgen05_encode_instr_descriptor(
+        cuda_op.cuda_tcgen05_encode_instr_descriptor(
             d,
             d_dtype="f16",
             a_dtype="f16",
@@ -80,10 +78,10 @@ def test_printer_ptx_more():
             sat_d=False,
             is_sparse=False,
         ),
-        'd = T.handle()\nT.ptx.tcgen05.encode_instr_descriptor(d, "f16", "f16", "f16", 16, 16, 16, T.bool(True), T.bool(False), 1, T.bool(False), T.bool(False), T.bool(False), T.bool(False))',  # noqa: E501
+        'd = T.handle()\nT.cuda.tcgen05.encode_instr_descriptor(d, "f16", "f16", "f16", 16, 16, 16, T.bool(True), T.bool(False), 1, T.bool(False), T.bool(False), T.bool(False), T.bool(False))',  # noqa: E501
     )
     _assert_print(
-        cuda_op.ptx_tcgen05_encode_instr_descriptor_block_scaled(
+        cuda_op.cuda_tcgen05_encode_instr_descriptor_block_scaled(
             d,
             d_dtype="f16",
             a_dtype="f16",
@@ -105,7 +103,7 @@ def test_printer_ptx_more():
         "d = T.handle()\n"
         "a = T.handle()\n"
         "b = T.handle()\n"
-        'T.ptx.tcgen05.encode_instr_descriptor_block_scaled(d, "f16", "f16", "f16", "f16", "f16", a, b, 16, 16, 16, T.bool(True), T.bool(False), 1, T.bool(False), T.bool(False), T.bool(True))',  # noqa: E501
+        'T.cuda.tcgen05.encode_instr_descriptor_block_scaled(d, "f16", "f16", "f16", "f16", "f16", a, b, 16, 16, 16, T.bool(True), T.bool(False), 1, T.bool(False), T.bool(False), T.bool(True))',  # noqa: E501
     )
     _assert_print(
         cuda_op.ptx_tcgen05_cp(a, d, shape="64x128b", cta_group=1, multicast="warpx2::02_13"),
@@ -140,10 +138,10 @@ def test_ptx_tcgen05_cp_validation(kwargs, match):
         cuda_op.ptx_tcgen05_cp(a, d, cta_group=1, **kwargs)
 
 
-def test_printer_ptx_mbarrier():
+def test_printer_cuda_mbarrier_wait_var():
     bar = tir.Var("bar", "handle")
     _assert_print(
-        cuda_op.ptx_mbarrier_try_wait(bar, 1), "bar = T.handle()\nT.ptx.mbarrier.try_wait(bar, 1)"
+        cuda_op.cuda_mbarrier_wait(bar, 1), "bar = T.handle()\nT.cuda.mbarrier_wait(bar, 1)"
     )
     _assert_print(cuda_op.cuda_cluster_sync(), "T.cuda.cluster_sync()")
 
@@ -348,9 +346,7 @@ def test_printer_ptx_mma_and_wgmma():
         'r = T.handle()\nT.ptx.mma("m8n8k4", "row", "row", "fp16", "fp16", "fp16", "fp16", 1, 1, 1, 0, T.bool(True), r, r, r, T.bool(False))',  # noqa: E501
     )
     _assert_print(
-        cuda_op.ptx_wgmma_encode_matrix_descriptor(d, a, 1, 1, 0),
-        "d = T.handle()\na = T.handle()\nT.ptx.wgmma.encode_matrix_descriptor(d, a, 1, 1, 0)",
+        cuda_op.cuda_wgmma_encode_matrix_descriptor(d, a, 1, 1, 0),
+        "d = T.handle()\na = T.handle()\nT.cuda.wgmma.encode_matrix_descriptor(d, a, 1, 1, 0)",
     )
-    _assert_print(cuda_op.ptx_wgmma_noop_barrier(0), "T.ptx.wgmma.noop_barrier(0)")
-
-
+    _assert_print(cuda_op.cuda_wgmma_noop_barrier(0), "T.cuda.wgmma.noop_barrier(0)")

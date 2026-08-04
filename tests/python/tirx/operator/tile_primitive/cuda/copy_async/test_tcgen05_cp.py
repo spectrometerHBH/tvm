@@ -191,7 +191,7 @@ def _make_cp_kernel(
                 T.ptxd.tcgen05.commit.cta_group__1.mbarrier__arrive__one.shared__cluster.b64(
                     cp_mbar.ptr_to([0])
                 )
-            T.ptx.mbarrier.try_wait(cp_mbar.ptr_to([0]), 0)
+            T.cuda.mbarrier_wait(cp_mbar.ptr_to([0]), 0)
             T.cuda.cta_sync()
             T.ptxd.tcgen05.fence__after_thread_sync()
             # Each of the 4 warps reads its own 32-lane slab (taddr lane 0 is
@@ -519,7 +519,7 @@ def _make_cp_kernel_cta2(s_full, s_shape, t_full, t_shape, dtype, cfg, W32, n_co
                 T.ptxd.tcgen05.commit.cta_group__2.mbarrier__arrive__one.shared__cluster.multicast__cluster.b64(
                     cp_mbar.ptr_to([0]), T.uint16(3)
                 )
-        T.ptx.mbarrier.try_wait(cp_mbar.ptr_to([0]), 0)
+        T.cuda.mbarrier_wait(cp_mbar.ptr_to([0]), 0)
         T.cuda.cta_sync()
         T.ptxd.tcgen05.fence__after_thread_sync()
         reg = T.alloc_buffer((W32,), "uint32", scope="local")
@@ -969,7 +969,7 @@ def _make_2d_kernel(
                 T.ptxd[
                     f"tcgen05.commit.cta_group::{cta_group}.mbarrier::arrive::one.shared::cluster.b64"
                 ](cp_mbar.ptr_to([0]))
-            T.ptx.mbarrier.try_wait(cp_mbar.ptr_to([0]), 0)
+            T.cuda.mbarrier_wait(cp_mbar.ptr_to([0]), 0)
             T.cuda.cta_sync()
             T.ptxd.tcgen05.fence__after_thread_sync()
             if warp_id == 0:
@@ -1034,7 +1034,7 @@ def _make_3d_4tile_kernel(s_full, t_full, s_full_shape, t_full_shape, dtype, cta
                 T.ptxd[
                     f"tcgen05.commit.cta_group::{cta_group}.mbarrier::arrive::one.shared::cluster.b64"
                 ](cp_mbar.ptr_to([0]))
-            T.ptx.mbarrier.try_wait(cp_mbar.ptr_to([0]), 0)
+            T.cuda.mbarrier_wait(cp_mbar.ptr_to([0]), 0)
             T.cuda.cta_sync()
             T.ptxd.tcgen05.fence__after_thread_sync()
             if warp_id == 0:
@@ -1210,7 +1210,7 @@ def test_align_middle_2_to_1_nvfp4_sfb():
                 T.ptxd.tcgen05.commit.cta_group__1.mbarrier__arrive__one.shared__cluster.b64(
                     cp_mbar.ptr_to([0])
                 )
-            T.ptx.mbarrier.try_wait(cp_mbar.ptr_to([0]), 0)
+            T.cuda.mbarrier_wait(cp_mbar.ptr_to([0]), 0)
             T.cuda.cta_sync()
             T.ptxd.tcgen05.fence__after_thread_sync()
             if warp_id == 0:
