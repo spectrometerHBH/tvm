@@ -27,8 +27,6 @@ from tvm.tirx.op import bitwise_and, call_intrin, tvm_access_ptr
 from tvm.tirx.operator.intrinsics._common import (
     CP_ASYNC_BULK_CACHE_HINT as _CP_ASYNC_BULK_CACHE_HINT,
 )
-from tvm.tirx.operator.intrinsics._common import CP_ASYNC_FILL_MODE as _CP_ASYNC_FILL_MODE
-from tvm.tirx.operator.intrinsics._common import CP_ASYNC_PREFETCH_SIZE as _CP_ASYNC_PREFETCH_SIZE
 from tvm.tirx.operator.intrinsics._common import LDMATRIX_DTYPE as _LDMATRIX_DTYPE
 from tvm.tirx.operator.intrinsics._common import LDMATRIX_NUM as _LDMATRIX_NUM
 from tvm.tirx.operator.intrinsics._common import MBARRIER_ARRIVE_SCOPE as _MBARRIER_ARRIVE_SCOPE
@@ -479,81 +477,6 @@ def ptx_mma_sp(
     )
 
 
-def ptx_cp_async_bulk(
-    dtype, shared_ptr, shared_offset, global_ptr, global_offset, bytes, barrier_id
-):
-    """TVM intrinsic for ptx async copy from global to shared memory using cp.async.bulk
-    https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#data-movement-and-conversion-instructions-cp-async-bulk
-
-    Parameters
-    ----------
-    dtype : str
-       The data type of the result.
-
-    shared_ptr : Var
-        The shared memory pointer variable.
-
-    shared_offset : Expr
-        The offset of shared memory pointer.
-
-    global_ptr : Var
-        The global memory pointer variable.
-
-    global_offset : Expr
-        The offset of global memory pointer.
-
-    bytes : int
-        The data size to copy.
-
-    barrier_id : int
-        The ID of the barrier shared memory pointer.
-
-    Returns
-    -------
-    call : Expr
-        The call expression.
-    """
-    return call_intrin(
-        dtype,
-        "tirx.ptx.cp_async_bulk",
-        shared_ptr,
-        shared_offset,
-        global_ptr,
-        global_offset,
-        bytes,
-        barrier_id,
-    )
-
-
-def ptx_cp_async_bulk_shared_to_cluster(dst_ptr, src_ptr, size, mbar):
-    """PTX cp.async.bulk.shared::cluster.shared::cta.mbarrier::complete_tx::bytes
-
-    Asynchronous bulk copy from executing CTA's shared memory to a remote
-    CTA's shared memory within the same cluster.
-
-    Parameters
-    ----------
-    dst_ptr : Expr
-        Destination pointer in shared::cluster address space (remote CTA).
-
-    src_ptr : Expr
-        Source pointer in shared::cta address space (local CTA).
-
-    size : Expr
-        Number of bytes to copy (must be multiple of 16).
-
-    mbar : Expr
-        Mbarrier address in shared::cluster space for completion signaling,
-        usually produced by ``T.ptxd.mapa``.
-
-    Returns
-    -------
-    call : Expr
-        The call expression.
-    """
-    return call_intrin("", "tirx.ptx.cp_async_bulk_shared_to_cluster", dst_ptr, src_ptr, size, mbar)
-
-
 def _validate_mbarrier_arrive_attrs(sem, scope, space, remote):
     if (sem == "") != (scope == ""):
         raise ValueError("mbarrier.arrive sem and scope must be specified together")
@@ -603,79 +526,12 @@ def ptx_mbarrier_try_wait_acquire_cluster(bar, phase):
     return call_intrin("", "tirx.ptx.mbarrier_try_wait_acquire_cluster", bar, phase)
 
 
-def ptx_cp_async(
-    dst_ptr,
-    src_ptr,
-    cp_size,
-    *,
-    cache_hint="",
-    cache_policy=None,
-    prefetch_size=-1,
-    predicate=-1,
-    fill_mode="",
-):
-    """TVM intrinsic for ptx async copy from global to shared memory using cp.async
-    https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#data-movement-and-conversion-instructions-cp-async
-
-    Dispatches to one of three PTX-form-aligned ops:
-
-    * ``ptx_cp_async_src_size`` for ``fill_mode == "zero"`` (zero-fill via
-      ``src_size = pred ? cp_size : 0``).
-    * ``ptx_cp_async_ignore_src`` for a non-empty ``predicate`` with no
-      fill_mode (``setp+@p`` guards the asm).
-    * ``ptx_cp_async_plain`` for the no-predicate / no-fill_mode case.
-
-    Parameters
-    ----------
-    shared_ptr : Expr
-        The pointer to the shared memory.
-
-    global_ptr : Expr
-        The pointer to the global memory.
-
-    cp_size : int
-        The data size to copy.
-
-    cache_hint : str["evict_last", "evict_first", "evict_normal", ""]
-        The cache hint.
-
-    prefetch_size : int[-1, 64, 128, 256]
-        The prefetch size.
-
-    predicate : Expr
-        The predicate to guard the operation.
-
-    fill_mode : str["zero", ""]
-        The fill mode.
-
-    Returns
-    -------
-    call : Expr
-        The call expression.
-    """
-    cache_policy, has_cache_policy = _resolve_cache_policy(cache_hint, cache_policy)
-    _choice("prefetch_size", prefetch_size, _CP_ASYNC_PREFETCH_SIZE)
-    _choice("fill_mode", fill_mode, _CP_ASYNC_FILL_MODE)
-    return call_intrin(
-        "",
-        "tirx.ptx.cp_async",
-        dst_ptr,
-        src_ptr,
-        cp_size,
-        cache_policy,
-        int(has_cache_policy),
-        prefetch_size,
-        predicate,
-        fill_mode,
-    )
-
-
 def ptx_cp_async_legacy(*all_args):
     """Legacy ``ptx_cp_async`` API taking explicit src/dst offsets.
 
     Signature: ``(dst_ptr, dst_offset, src_ptr, src_offset, cp_size)``.
-    Offsets are folded into the pointers via ``tvm_access_ptr`` then
-    dispatched to fork-native :func:`ptx_cp_async`.
+    Offsets are folded into the pointers via ``tvm_access_ptr`` and the call
+    lowers through the raw ``tirx.ptx.cp_async_raw`` op.
 
     ``T.ptx.cp_async_legacy`` runs through ``_dtype_forward`` which
     prepends a ``dtype=`` kwarg as a leading positional. The dtype names
@@ -697,7 +553,8 @@ def ptx_cp_async_legacy(*all_args):
     dst_ptr, dst_offset, src_ptr, src_offset, cp_size = args
     dst_ptr = _wrap_or_fold_access_ptr(dst_ptr, dst_offset, elem_dtype)
     src_ptr = _wrap_or_fold_access_ptr(src_ptr, src_offset, elem_dtype)
-    return ptx_cp_async(dst_ptr, src_ptr, cp_size)
+    # The raw 5-arg Call InjectPTXAsyncCopy emits; offsets are already folded.
+    return call_intrin(elem_dtype, "tirx.ptx.cp_async_raw", dst_ptr, 0, src_ptr, 0, cp_size)
 
 
 def _is_static_unicast_cta_mask(cta_mask):
@@ -2168,77 +2025,6 @@ def _validate_ptx_address(addr, space, op_name):
                 f"{op_name} integer address must be uint32 in shared state space, "
                 f"got {addr_ty.dtype}"
             )
-
-
-def ptx_cp_async_bulk_g2s_cta(
-    dst_ptr,
-    src_ptr,
-    num_bytes,
-    mbarrier_ptr,
-    *,
-    cache_hint="",
-    cache_policy=None,
-    ignore_oob=False,
-    ignore_bytes_left=0,
-    ignore_bytes_right=0,
-):
-    cache_policy, has_cache_policy = _resolve_cache_policy(cache_hint, cache_policy)
-    return call_intrin(
-        "",
-        "tirx.ptx.cp_async_bulk_g2s_cta",
-        dst_ptr,
-        src_ptr,
-        num_bytes,
-        ignore_bytes_left,
-        ignore_bytes_right,
-        mbarrier_ptr,
-        cache_policy,
-        int(has_cache_policy),
-        int(bool(ignore_oob)),
-    )
-
-
-def ptx_cp_async_bulk_g2s_cluster(
-    dst_ptr,
-    src_ptr,
-    num_bytes,
-    mbarrier_ptr,
-    *,
-    cache_hint="",
-    cache_policy=None,
-    multicast=False,
-    cta_mask=0,
-):
-    cache_policy, has_cache_policy = _resolve_cache_policy(cache_hint, cache_policy)
-    return call_intrin(
-        "",
-        "tirx.ptx.cp_async_bulk_g2s_cluster",
-        dst_ptr,
-        src_ptr,
-        num_bytes,
-        mbarrier_ptr,
-        cta_mask,
-        cache_policy,
-        int(has_cache_policy),
-        int(bool(multicast)),
-    )
-
-
-def ptx_cp_async_bulk_s2g(
-    dst_ptr, src_ptr, num_bytes, *, cache_hint="", cache_policy=None, cp_mask=False, byte_mask=0
-):
-    cache_policy, has_cache_policy = _resolve_cache_policy(cache_hint, cache_policy)
-    return call_intrin(
-        "",
-        "tirx.ptx.cp_async_bulk_s2g",
-        dst_ptr,
-        src_ptr,
-        num_bytes,
-        byte_mask,
-        cache_policy,
-        int(has_cache_policy),
-        int(bool(cp_mask)),
-    )
 
 
 def cuda_uint_as_float(bits):

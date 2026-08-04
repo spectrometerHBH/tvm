@@ -145,7 +145,8 @@ def test_copy_ldgsts_predicate_zero_fill_codegen():
         mod = tvm.compile(tvm.IRModule({"main": copy_async}), target=target, tir_pipeline="tirx")
     src = mod.mod.imports[0].inspect_source()
     assert "cp.async.cg.shared.global.L2::128B" in src
-    assert "with_src_size" in src
+    # the src-size arity: four operands, the last the zero-fill boundary
+    assert "cp.async.cg.shared.global.L2::128B [%0], [%1], 16, %2;" in src
     assert "condval" in src
     assert "s_ptr_ptr" not in src
     assert "g_ptr_ptr" not in src

@@ -691,31 +691,5 @@ std::string PrintMMAAssembly(const std::string& shape, const std::string& A_layo
   return asm_code;
 }
 
-std::string PrintCpAsyncBulkAsm(const std::string& shared_ptr,
-                                const std::string& shared_elem_offset,
-                                const std::string& global_ptr,
-                                const std::string& global_elem_offset, const std::string& bytes,
-                                const std::string& barrier) {
-  std::string asm_code = R"(
-  {
-    unsigned int smem_addr_int = __cvta_generic_to_shared({smem_addr});
-    unsigned int barrier_addr_int = __cvta_generic_to_shared({barrier});
-    __asm__ __volatile__(
-      "cp.async.bulk.shared::cluster.global.mbarrier::complete_tx::bytes [%0], [%1], %2, [%3];"
-      :: "r"(smem_addr_int), "l"({global_ptr}), "r"({bytes}), "r"(barrier_addr_int)
-      : "memory"
-    );
-  }
-)";
-
-  Replacer replacer;
-  replacer.register_rule("{smem_addr}", shared_ptr + " + " + shared_elem_offset);
-  replacer.register_rule("{global_ptr}", global_ptr + " + " + global_elem_offset);
-  replacer.register_rule("{bytes}", bytes);
-  replacer.register_rule("{barrier}", "&" + barrier);
-  asm_code = replacer.rewrite(asm_code);
-  return asm_code;
-}
-
 }  // namespace codegen
 }  // namespace tvm

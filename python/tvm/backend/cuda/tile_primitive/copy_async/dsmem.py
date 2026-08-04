@@ -163,7 +163,10 @@ def copy_dsmem_impl(op_call: TilePrimitiveCall, sctx: DispatchContext) -> PrimFu
             src_ptr = src_buf.ptr_to(src_st)
             T.ptxd.mapa.u64(mapped[1], dst_buf.ptr_to(dst_st), T.uint32(remote_cta_id))
             cluster_dst = mapped[1]
-            T.ptx.cp_async.bulk.s2c(cluster_dst, src_ptr, chunk_bytes, remote_mbar)
+            T.ptxd["cp.async.bulk.shared::cluster.shared::cta.mbarrier::complete_tx::bytes"](
+                    T.cast(cluster_dst, "uint32"), src_ptr, T.cast(chunk_bytes, "uint32"),
+                    T.cast(remote_mbar, "uint32"),
+                )
         else:
             for loop_vars in T.grid(*outer_extents):
                 src_elem_offset, dst_elem_offset = T.meta_var(compute_offsets(loop_vars))
@@ -184,7 +187,10 @@ def copy_dsmem_impl(op_call: TilePrimitiveCall, sctx: DispatchContext) -> PrimFu
                 src_ptr = src_buf_w.ptr_to(src_st)
                 T.ptxd.mapa.u64(mapped[1], dst_buf_w.ptr_to(dst_st), T.uint32(remote_cta_id))
                 cluster_dst = mapped[1]
-                T.ptx.cp_async.bulk.s2c(cluster_dst, src_ptr, chunk_bytes, remote_mbar)
+                T.ptxd["cp.async.bulk.shared::cluster.shared::cta.mbarrier::complete_tx::bytes"](
+                    T.cast(cluster_dst, "uint32"), src_ptr, T.cast(chunk_bytes, "uint32"),
+                    T.cast(remote_mbar, "uint32"),
+                )
     # fmt: on
 
     return impl

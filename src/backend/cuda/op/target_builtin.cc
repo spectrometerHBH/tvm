@@ -95,7 +95,7 @@ OpRegEntry::RegisterOrGet("tirx.ptx.fetch_register")
 
 // Raw legacy cp.async form emitted by InjectPTXAsyncCopy (and round-tripped by
 // the T.ptx.cp_async 6-arg surface). It carries the element dtype in Call.dtype
-// and prints it dtype-first; the fork-native tirx.ptx.cp_async form does not.
+// and prints it dtype-first; user-issued copies go through T.ptxd instead.
 OpRegEntry::RegisterOrGet("tirx.ptx.cp_async_raw")
     .set_name()
     .set_attr<TCallEffectKind>("TCallEffectKind", static_cast<int64_t>(CallEffectKind::kOpaque))
@@ -236,12 +236,6 @@ const DeviceIntrinsicRegistration kDeviceIntrinsics[] = {
     TIRX_DEVICE_INTRIN_ALIAS(nvshmem_wait_until, nvshmem, kOpaque),
     TIRX_DEVICE_INTRIN_ALIAS(ptx_any_sync, ptx, kPure),
     TIRX_DEVICE_INTRIN_ALIAS(ptx_clc_query_cancel, ptx, kOpaque),
-    TIRX_DEVICE_INTRIN_ALIAS(ptx_cp_async, ptx, kOpaque),
-    TIRX_DEVICE_INTRIN_ALIAS(ptx_cp_async_bulk, ptx, kOpaque),
-    TIRX_DEVICE_INTRIN_ALIAS(ptx_cp_async_bulk_g2s_cluster, ptx, kOpaque),
-    TIRX_DEVICE_INTRIN_ALIAS(ptx_cp_async_bulk_g2s_cta, ptx, kOpaque),
-    TIRX_DEVICE_INTRIN_ALIAS(ptx_cp_async_bulk_s2g, ptx, kOpaque),
-    TIRX_DEVICE_INTRIN_ALIAS(ptx_cp_async_bulk_shared_to_cluster, ptx, kOpaque),
     TIRX_DEVICE_INTRIN_ALIAS(ptx_cvt, ptx, kPure),
     TIRX_DEVICE_INTRIN_ALIAS(ptx_elect_sync, ptx, kOpaque),
     TIRX_DEVICE_INTRIN_ALIAS(ptx_fetch_register, ptx, kPure),

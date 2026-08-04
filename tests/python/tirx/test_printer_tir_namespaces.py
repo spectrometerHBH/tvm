@@ -354,12 +354,3 @@ def test_printer_ptx_mma_and_wgmma():
     _assert_print(cuda_op.ptx_wgmma_noop_barrier(0), "T.ptx.wgmma.noop_barrier(0)")
 
 
-def test_printer_ptx_cp_async_call():
-    sh = tir.Var("sh", "handle")
-    gl = tir.Var("gl", "handle")
-    _assert_print(
-        cuda_op.ptx_cp_async(
-            sh, gl, 16, cache_hint="", prefetch_size=-1, predicate=-1, fill_mode=""
-        ),
-        'sh = T.handle()\ngl = T.handle()\nT.ptx.cp_async(sh, gl, 16, T.uint64(0), 0, -1, -1, "")',
-    )

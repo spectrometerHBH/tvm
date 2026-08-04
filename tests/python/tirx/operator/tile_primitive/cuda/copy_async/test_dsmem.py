@@ -71,7 +71,7 @@ class _S2CCounter(StmtExprVisitor):
 
     def visit_evaluate_(self, op):
         if isinstance(op.value, tvm.ir.Call):
-            if op.value.op.name == "tirx.ptx.cp_async_bulk_shared_to_cluster":
+            if op.value.op.name == "tirx.ptxd.cp_async_bulk_s2c":
                 n = 1
                 for e in self._loop_extents:
                     n *= e

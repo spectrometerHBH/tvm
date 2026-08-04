@@ -53,9 +53,6 @@ class PTXNamespace:
         self.elect_sync: Callable[..., Any] = _op_wrapper(_cuda_op.ptx_elect_sync)
         self.clc_query_cancel = _op_wrapper(_cuda_op.ptx_clc_query_cancel)
         self.fetch_register: Callable[..., Any] = _op_wrapper(_cuda_op.ptx_fetch_register)
-        self.cp_async_bulk_g2s_cta = _op_wrapper(_cuda_op.ptx_cp_async_bulk_g2s_cta)
-        self.cp_async_bulk_g2s_cluster = _op_wrapper(_cuda_op.ptx_cp_async_bulk_g2s_cluster)
-        self.cp_async_bulk_s2g = _op_wrapper(_cuda_op.ptx_cp_async_bulk_s2g)
         self.any_sync = _op_wrapper(_cuda_op.ptx_any_sync)
         # Math operations
         self.cvt = _dtype_forward(_cuda_op.ptx_cvt)
@@ -85,21 +82,19 @@ class MmaNamespace:
 
 
 class CpAsyncNamespace:
-    """The CpAsync instruction submodule."""
+    """The CpAsync instruction submodule (the raw op's printer surface)."""
 
     def __init__(self):
         # Legacy variant: takes (dst_ptr, dst_offset, src_ptr, src_offset,
-        # cp_size). Offsets are folded into the pointers; coexists with
-        # the fork-native ``__call__`` form.
+        # cp_size). Offsets are folded into the pointers; lowers through the
+        # raw op below.
         self.legacy = _dtype_forward(_cuda_op.ptx_cp_async_legacy)
-        self.bulk = CpAsyncBulkNamespace()
 
     def __call__(self, *args, **kwds):
-        # Accept the legacy 6-arg form ``(elem_dtype, dst, dst_off, src,
-        # src_off, cp_size)`` that the printer round-trips for the raw
-        # ``tirx.ptx.cp_async`` Call emitted by
-        # ``tvm.backend.cuda.transform.InjectPTXAsyncCopy``. The pass-emitted
-        # Call has 5 args (no ``tvm_access_ptr`` fold) and a
+        # The 6-arg form ``(elem_dtype, dst, dst_off, src, src_off, cp_size)``
+        # the printer round-trips for the raw ``tirx.ptx.cp_async_raw`` Call
+        # emitted by ``tvm.backend.cuda.transform.InjectPTXAsyncCopy``. The
+        # pass-emitted Call has 5 args (no ``tvm_access_ptr`` fold) and a
         # per-element-dtype Call.dtype, so build it directly.
         if len(args) == 6 and isinstance(args[0], str) and "dtype" not in kwds:
             import tvm
@@ -110,23 +105,10 @@ class CpAsyncNamespace:
                 [dst, dst_off, src, src_off, cp_size],
                 ret_ty=tvm.ir.PrimType(elem_dtype),
             )
-        return _dtype_forward(_cuda_op.ptx_cp_async)(*args, **kwds)
-
-    # __call__ corresponds to ptx_cp_async
-    __tir_call_op_name__ = "ptx_cp_async"
-
-
-class CpAsyncBulkNamespace:
-    """The CpAsyncBulk instruction submodule."""
-
-    def __init__(self):
-        self.s2c = _op_wrapper(_cuda_op.ptx_cp_async_bulk_shared_to_cluster)
-
-    def __call__(self, *args, **kwds):
-        return _dtype_forward(_cuda_op.ptx_cp_async_bulk)(*args, **kwds)
-
-    # __call__ corresponds to ptx_cp_async_bulk
-    __tir_call_op_name__ = "ptx_cp_async_bulk"
+        raise TypeError(
+            "T.ptx.cp_async now only accepts the printed 6-arg raw form; "
+            'issue new copies through T.ptxd["cp.async..."]'
+        )
 
 
 class WgmmaNamespace:

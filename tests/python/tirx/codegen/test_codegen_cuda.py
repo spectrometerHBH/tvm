@@ -526,13 +526,15 @@ def test_ptx_cp_async_bulk_non_tma_form_codegen():
         tx = T.thread_id([32])
         if tx == 0:
             smem = T.alloc_shared([128], "float32")
-            T.ptx.cp_async_bulk_g2s_cta(
-                smem.ptr_to([0]), A.data, T.uint32(64), smem.ptr_to([0]), cache_policy=C[0]
+            T.ptxd["cp.async.bulk.shared::cta.global.mbarrier::complete_tx::bytes.L2::cache_hint"](
+                smem.ptr_to([0]), A.data, T.uint32(64), smem.ptr_to([0]), C[0]
             )
-            T.ptx.cp_async_bulk_g2s_cluster(
-                smem.ptr_to([0]), A.data, T.uint32(64), smem.ptr_to([0]), cache_policy=C[0]
+            T.ptxd[
+                "cp.async.bulk.shared::cluster.global.mbarrier::complete_tx::bytes.L2::cache_hint"
+            ](smem.ptr_to([0]), A.data, T.uint32(64), smem.ptr_to([0]), C[0])
+            T.ptxd["cp.async.bulk.global.shared::cta.bulk_group.L2::cache_hint"](
+                B.data, smem.ptr_to([0]), T.uint32(64), C[0]
             )
-            T.ptx.cp_async_bulk_s2g(B.data, smem.ptr_to([0]), T.uint32(64), cache_policy=C[0])
             T.ptxd.cp.async_.bulk.commit_group()
             T.ptxd.cp.async_.bulk.wait_group.read(0)
             T.ptxd.cp.async_.bulk.wait_group(1)
@@ -541,7 +543,7 @@ def test_ptx_cp_async_bulk_non_tma_form_codegen():
     assert "cp.async.bulk.shared::cta.global.mbarrier::complete_tx::bytes.L2::cache_hint" in src
     assert "cp.async.bulk.shared::cluster.global.mbarrier::complete_tx::bytes.L2::cache_hint" in src
     assert "cp.async.bulk.global.shared::cta.bulk_group.L2::cache_hint" in src
-    assert "unsigned long long cache_policy" in src
+    assert "uint64_t __cache_policy" in src
     assert 'asm volatile("cp.async.bulk.wait_group.read 0;" :  :  : "memory");' in src
     assert 'asm volatile("cp.async.bulk.wait_group 1;" :  :  : "memory");' in src
 
@@ -913,6 +915,18 @@ def test_ptx_cp_async(cp_size, cache_hint, prefetch_size, predicate, fill_mode):
 
     N = cp_size // 2
 
+    cop = "cg" if cp_size == 16 else "ca"
+    cache_tok = ".L2::cache_hint" if cache_hint else ""
+    pref_tok = "" if prefetch_size == -1 else f".L2::{prefetch_size}B"
+    chain = f"cp.async.{cop}.shared.global{cache_tok}{pref_tok}"
+    cache_args = (T.uint64(0x14F0000000000000),) if cache_hint else ()
+    has_pred = not (isinstance(predicate, int) and predicate == -1)
+    src_size = None
+    if fill_mode == "zero":
+        from tvm.tirx.op import if_then_else
+
+        src_size = T.cast(if_then_else(predicate != 0, cp_size, 0), "uint32")
+
     # fmt: off
     @T.prim_func
     def main(A: T.Buffer((N), "float16")):
@@ -923,7 +937,12 @@ def test_ptx_cp_async(cp_size, cache_hint, prefetch_size, predicate, fill_mode):
         for i in T.vectorized(N):
             A_shared[i] = 5.0
         T.ptxd.fence.proxy.async_.shared__cta()
-        T.ptx.cp_async(A_shared.ptr_to([0]), A.ptr_to([0]), cp_size, cache_hint=cache_hint, prefetch_size=prefetch_size, predicate=predicate, fill_mode=fill_mode)  # noqa: E501
+        if fill_mode == "zero":
+            T.ptxd[chain](A_shared.ptr_to([0]), A.ptr_to([0]), cp_size, src_size, *cache_args)
+        elif has_pred:
+            T.ptxd[chain](A_shared.ptr_to([0]), A.ptr_to([0]), cp_size, *cache_args, pred=predicate)
+        else:
+            T.ptxd[chain](A_shared.ptr_to([0]), A.ptr_to([0]), cp_size, *cache_args)
         T.ptxd.cp.async_.commit_group()
         T.ptxd.cp.async_.wait_group(0)
         for i in T.serial(N):

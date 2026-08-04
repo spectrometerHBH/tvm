@@ -1025,6 +1025,19 @@ def _check_tcgen05_mma_block_scale(m):
     return None
 
 
+def _check_cp_async_bulk_s2g(m):
+    """ptxas: .cp_mask without .L2::cache_hint is rejected (the legacy helper
+    raised on the same pairing)."""
+    if m["cp_mask"] and not m["cache"]:
+        return ".cp_mask requires .L2::cache_hint"
+    return None
+
+
+def _cp_mask_lanes(m):
+    # `{, byteMask}` exists exactly when `.cp_mask` is written.
+    return 1 if m["cp_mask"] else 0
+
+
 _ENTRIES = [
     # prefetch per PTX ISA 9.7.9.16, covering three of its four syntax lines:
     #   prefetch{.space}.level [a]
@@ -1969,6 +1982,145 @@ _ENTRIES = [
             ModifierSlot("action", ("commit_group",)),
         ),
         operands=(),
+    ),
+    # cp.async per PTX ISA 9.7.9.26.3.1: the non-bulk asynchronous copy.
+    # cp-size is an integer constant the ISA closes to {4, 8, 16} (and to 16
+    # alone under .cg) -- a choices immediate. The src-size arity zero-fills
+    # the destination tail; it is a separate entry told apart by arity, the
+    # mbarrier.arrive precedent.
+    #
+    # NOT REGISTERED: the `{, ignore-src}` lines. No call site ever used
+    # them (the legacy intrinsics for those forms were unreachable from the
+    # dispatcher), and their arity collides with the src-size lines -- the
+    # operand-shape dispatch could not tell a src-size u32 from an
+    # ignore-src predicate.
+    *[
+        InstructionEntry(
+            name=f"cp_async_{cop}{'_src_size' if src_size else ''}",
+            mnemonic="cp",
+            slots=(
+                ModifierSlot("api", ("async",)),
+                ModifierSlot("cop", (cop,)),
+                ModifierSlot("dst", ("shared", "shared::cta")),
+                ModifierSlot("src", ("global",)),
+                ModifierSlot("cache", ("L2::cache_hint",), optional=True),
+                ModifierSlot("prefetch", ("L2::64B", "L2::128B", "L2::256B"), optional=True),
+            ),
+            cert_arch="sm_90",
+            operands=(
+                OperandSlot("dst_mem", role="addr", space="shared"),
+                OperandSlot("src_mem", role="addr", space="global"),
+                OperandSlot(
+                    "cp_size", role="imm", choices=("4", "8", "16") if cop == "ca" else ("16",)
+                ),
+                *((OperandSlot("src_size", role="value", dtype="u32"),) if src_size else ()),
+                OperandSlot(
+                    "cache_policy", role="value", dtype="u64", lanes=_tma_cache_lanes, vector=False
+                ),
+            ),
+        )
+        for cop in ("ca", "cg")
+        for src_size in (False, True)
+    ],
+    # cp.async.bulk (non-tensor), per PTX ISA 9.7.9.26.4.1: four directions.
+    #
+    # NOT REGISTERED:
+    # - the `.sem.scope`/`.type` lines and `.ignore_oob` with its
+    #   `{, ignoreBytesLeft, ignoreBytesRight}` operands: PTX ISA 9.2 in this
+    #   toolchain cannot assemble them, and no call site uses them.
+    InstructionEntry(  # global -> shared::cta
+        name="cp_async_bulk_g2s_cta",
+        mnemonic="cp",
+        slots=(
+            ModifierSlot("api", ("async",)),
+            ModifierSlot("kind", ("bulk",)),
+            ModifierSlot("dst", ("shared::cta",)),
+            ModifierSlot("src", ("global",)),
+            ModifierSlot("completion", ("mbarrier::complete_tx::bytes",)),
+            ModifierSlot("cache", ("L2::cache_hint",), optional=True),
+        ),
+        cert_arch="sm_90",
+        operands=(
+            OperandSlot("dst_mem", role="addr", space="shared::cta"),
+            OperandSlot("src_mem", role="addr", space="global"),
+            OperandSlot("size", role="value", dtype="u32"),
+            OperandSlot("mbar", role="addr", space="shared"),
+            OperandSlot(
+                "cache_policy", role="value", dtype="u64", lanes=_tma_cache_lanes, vector=False
+            ),
+        ),
+    ),
+    InstructionEntry(  # global -> shared::cluster
+        name="cp_async_bulk_g2s_cluster",
+        mnemonic="cp",
+        slots=(
+            ModifierSlot("api", ("async",)),
+            ModifierSlot("kind", ("bulk",)),
+            ModifierSlot("dst", ("shared::cluster",)),
+            ModifierSlot("src", ("global",)),
+            ModifierSlot("completion", ("mbarrier::complete_tx::bytes",)),
+            ModifierSlot("multicast", ("multicast::cluster",), optional=True),
+            ModifierSlot("cache", ("L2::cache_hint",), optional=True),
+        ),
+        cert_arch="sm_90",
+        operands=(
+            OperandSlot("dst_mem", role="addr", space="shared::cluster"),
+            OperandSlot("src_mem", role="addr", space="global"),
+            OperandSlot("size", role="value", dtype="u32"),
+            OperandSlot("mbar", role="addr", space="shared"),
+            OperandSlot("cta_mask", role="value", dtype="u16", lanes=_tma_mask_lanes, vector=False),
+            OperandSlot(
+                "cache_policy", role="value", dtype="u64", lanes=_tma_cache_lanes, vector=False
+            ),
+        ),
+    ),
+    InstructionEntry(  # shared::cta -> shared::cluster (peer-CTA push)
+        name="cp_async_bulk_s2c",
+        mnemonic="cp",
+        slots=(
+            ModifierSlot("api", ("async",)),
+            ModifierSlot("kind", ("bulk",)),
+            ModifierSlot("dst", ("shared::cluster",)),
+            ModifierSlot("src", ("shared::cta",)),
+            ModifierSlot("completion", ("mbarrier::complete_tx::bytes",)),
+        ),
+        cert_arch="sm_90",
+        operands=(
+            OperandSlot("dst_mem", role="addr", space="shared::cluster"),
+            OperandSlot("src_mem", role="addr", space="shared::cta"),
+            OperandSlot("size", role="value", dtype="u32"),
+            OperandSlot("mbar", role="addr", space="shared"),
+        ),
+    ),
+    InstructionEntry(  # shared::cta -> global
+        name="cp_async_bulk_s2g",
+        mnemonic="cp",
+        slots=(
+            ModifierSlot("api", ("async",)),
+            ModifierSlot("kind", ("bulk",)),
+            ModifierSlot("dst", ("global",)),
+            ModifierSlot("src", ("shared::cta",)),
+            ModifierSlot("completion", ("bulk_group",)),
+            ModifierSlot("cache", ("L2::cache_hint",), optional=True),
+            # .cp_mask (sm_100) masks bytes within each 16-byte word; ptxas
+            # requires it to ride with .L2::cache_hint, which the legacy
+            # helper enforced too.
+            ModifierSlot("cp_mask", ("cp_mask",), optional=True),
+        ),
+        cert_arch="sm_100a",
+        check=_check_cp_async_bulk_s2g,
+        operands=(
+            OperandSlot("dst_mem", role="addr", space="global"),
+            OperandSlot("src_mem", role="addr", space="shared::cta"),
+            OperandSlot("size", role="value", dtype="u32"),
+            OperandSlot(
+                "cache_policy", role="value", dtype="u64", lanes=_tma_cache_lanes, vector=False
+            ),
+            # "the 16-bit wide byteMask operand" -- the legacy helper bound it
+            # "r", but that form was unreachable and ptxas rejects the 32-bit
+            # register here.
+            OperandSlot("byte_mask", role="value", dtype="u16", lanes=_cp_mask_lanes, vector=False),
+        ),
     ),
     # cp.async.bulk.tensor (TMA), per ISA 9.7.9.26.5.2-4. The tensor address
     # is the composite `[tensorMap, tensorCoords]` -- one PTX operand holding

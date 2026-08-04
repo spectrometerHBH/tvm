@@ -125,12 +125,15 @@ class _Chain_clusterlaunchcontrol:
     def __call__(self, addr: Any, mbar: Any, *args: Any, pred: Any = None) -> None: ...
 
 class _Chain_cp:
-    """`cp` — 11 entries sharing this mnemonic; PTX puts their difference in the operand list,
+    """`cp` — 19 entries sharing this mnemonic; PTX puts their difference in the operand list,
     so the call selects one. Shapes: (dst, src, size, mbar); (addr); (); (group);
-    (*__operands)
+    (*__operands); (dst_mem, src_mem, size, mbar)
     """
 
     L2: _Chain_cp
+    L2__128B: _Chain_cp
+    L2__256B: _Chain_cp
+    L2__64B: _Chain_cp
     L2__cache_hint: _Chain_cp
     add: _Chain_cp
     and_: _Chain_cp
@@ -139,7 +142,10 @@ class _Chain_cp:
     b64: _Chain_cp
     bulk: _Chain_cp
     bulk_group: _Chain_cp
+    ca: _Chain_cp
+    cg: _Chain_cp
     commit_group: _Chain_cp
+    cp_mask: _Chain_cp
     cta_group__1: _Chain_cp
     cta_group__2: _Chain_cp
     dec: _Chain_cp

@@ -76,21 +76,6 @@ std::string PrintMMAAssembly(const std::string& shape, const std::string& A_layo
                              const std::string& sparsity_selector, const std::string& bit_op,
                              bool sparse, bool saturate);
 
-/*!
- * \brief Print ptx async copy from global to shared memory using cp.async.bulk
- * \param shared_ptr: The pointer to the destination shared memory.
- * \param shared_elem_offset: The offset into the shared memory.
- * \param global_ptr: The pointer to the global memory.
- * \param global_elem_offset: The offset into the global memory.
- * \param bytes: The number of bytes to copy.
- * \param barrier: The name of the barrier in shared memory.
- */
-std::string PrintCpAsyncBulkAsm(const std::string& shared_ptr,
-                                const std::string& shared_elem_offset,
-                                const std::string& global_ptr,
-                                const std::string& global_elem_offset, const std::string& bytes,
-                                const std::string& barrier);
-
 }  // namespace codegen
 }  // namespace tvm
 
