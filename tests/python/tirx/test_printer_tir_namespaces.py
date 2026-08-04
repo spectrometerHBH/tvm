@@ -143,10 +143,6 @@ def test_ptx_tcgen05_cp_validation(kwargs, match):
 def test_printer_ptx_mbarrier():
     bar = tir.Var("bar", "handle")
     _assert_print(
-        cuda_op.ptx_mbarrier_arrive_no_complete(bar, 2),
-        'bar = T.handle()\nT.ptx.mbarrier.arrive.no_complete(bar, 2, "shared", 0)',
-    )
-    _assert_print(
         cuda_op.ptx_mbarrier_try_wait(bar, 1), "bar = T.handle()\nT.ptx.mbarrier.try_wait(bar, 1)"
     )
     _assert_print(cuda_op.cuda_cluster_sync(), "T.cuda.cluster_sync()")
@@ -356,43 +352,6 @@ def test_printer_ptx_mma_and_wgmma():
         "d = T.handle()\na = T.handle()\nT.ptx.wgmma.encode_matrix_descriptor(d, a, 1, 1, 0)",
     )
     _assert_print(cuda_op.ptx_wgmma_noop_barrier(0), "T.ptx.wgmma.noop_barrier(0)")
-    _assert_print(
-        cuda_op.ptx_wgmma_mma_async_ss(
-            d,
-            d,
-            0,
-            0,
-            M=16,
-            N=16,
-            K=16,
-            in_dtype="f16",
-            out_dtype="f16",
-            transA=True,
-            transB=False,
-            scaleA=1.0,
-            scaleB=1.0,
-            scaleD=True,
-        ),
-        'd = T.handle()\nT.ptx.wgmma.mma_async.ss(16, 16, 16, "f16", "f16", T.bool(True), T.bool(False), T.float32(1.0), T.float32(1.0), T.bool(True), d, d, 0, 0)',  # noqa: E501
-    )
-    _assert_print(
-        cuda_op.ptx_wgmma_mma_async_rs(
-            d,
-            0,
-            0,
-            M=16,
-            N=16,
-            K=16,
-            in_dtype="f16",
-            out_dtype="f16",
-            transA=True,
-            transB=False,
-            scaleA=1.0,
-            scaleB=1.0,
-            scaleD=True,
-        ),
-        'd = T.handle()\nT.ptx.wgmma.mma_async.rs(16, 16, 16, "f16", "f16", T.bool(True), T.bool(False), T.float32(1.0), T.float32(1.0), T.bool(True), d, 0, 0)',  # noqa: E501
-    )
 
 
 def test_printer_ptx_cp_async_tensor():

@@ -22,7 +22,7 @@ PTX side:
 * ``barrier.sync`` — unaligned named barrier for divergent control flow
 * ``fence{.sem}.scope`` / ``fence.proxy.async`` / ``fence.mbarrier_init``
 * ``barrier.cluster.arrive`` / ``barrier.cluster.wait``
-* ``mbarrier.init`` / ``mbarrier.arrive.noComplete`` / ``mbarrier.try_wait``
+* ``mbarrier.try_wait``
 * ``elect.sync``  — warp leader election
 * warp-vote ``__any_sync``
 
@@ -39,15 +39,6 @@ from tvm.tirx.operator.intrinsics._common import (
 
 from ._schema import device_intrinsic
 from .utils import parse_str
-
-
-def _safe_attr(value):
-    return parse_str(value).replace("::", "_").replace(".", "_")
-
-
-def _as_bool(value) -> bool:
-    return bool(int(value)) if hasattr(value, "value") else bool(value)
-
 
 # =============================================================================
 # bar.arrive / bar.sync — aligned named-barrier aliases. 1 form each.
@@ -150,47 +141,6 @@ device_intrinsic(
     return_type="uint32_t",
     tvm_return_type="uint32",
     body=lambda *args: _ptx_clc_query_cancel_parts(args[-1])[1],
-)
-
-
-def _ptx_mbarrier_arrive_no_complete_parts(*args):
-    space, has_pred = args[-2:]
-    space = parse_str(space)
-    has_pred = _as_bool(has_pred)
-    if space not in ("shared", "shared::cta"):
-        raise ValueError("mbarrier.arrive.noComplete space must be 'shared' or 'shared::cta'")
-
-    name = f"tvm_builtin_ptx_mbarrier_arrive_no_complete_{_safe_attr(space)}"
-    if has_pred:
-        name += "_pred"
-
-    params = ["void* barrier", "int count"]
-    if has_pred:
-        params.append("int pred")
-    instr = f"mbarrier.arrive.noComplete.release.cta.{space}.b64"
-    body = "    unsigned int barrier_addr = __cvta_generic_to_shared(barrier);\n"
-    if has_pred:
-        body += (
-            "    asm volatile(\n"
-            '        "{\\n"\n'
-            '        ".reg .pred p;\\n"\n'
-            '        "setp.ne.s32 p, %2, 0;\\n"\n'
-            f'        "@p {instr} _, [%0], %1;\\n"\n'
-            '        "}\\n"\n'
-            '        :: "r"(barrier_addr), "r"(count), "r"(pred) : "memory");'
-        )
-    else:
-        body += f'    asm volatile("{instr} _, [%0], %1;"\n'
-        body += '                 :: "r"(barrier_addr), "r"(count) : "memory");'
-    return name, f"({', '.join(params)})", body
-
-
-device_intrinsic(
-    "ptx_mbarrier_arrive_no_complete",
-    n_attrs=2,
-    helper_name=lambda *a: _ptx_mbarrier_arrive_no_complete_parts(*a)[0],
-    c_signature=lambda *a: _ptx_mbarrier_arrive_no_complete_parts(*a)[1],
-    body=lambda *a: _ptx_mbarrier_arrive_no_complete_parts(*a)[2],
 )
 
 

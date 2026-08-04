@@ -155,6 +155,10 @@ class OperandSlot:
         ``"value"``. The helper takes it as a C++ reference and the caller
         passes a writable lvalue (a scalar or a buffer element), mirroring
         PTX's own "declare the register, then name it as an operand".
+      - ``"acc"``   a register the instruction reads AND writes -- an in-place
+        accumulator, bound "+" where a dst binds "=". Takes an lvalue like a
+        dst; unlike a dst it does not block ``@p``, because "+" keeps the old
+        value live under a false predicate.
 
     ``lanes`` > 1 makes the operand a brace-enclosed register group. PTX writes
     the group in the operand list (``mov.b64 d, {lo, hi}``), so the group is
@@ -243,7 +247,7 @@ class InstructionEntry:
     @functools.cached_property
     def typed_operands(self) -> tuple[OperandSlot, ...]:
         """The operands carrying a dtype, in order: a dtype tuple aligns with these."""
-        return tuple(s for s in self.operands if s.role in ("value", "dst"))
+        return tuple(s for s in self.operands if s.role in ("value", "dst", "acc"))
 
     @property
     def has_dst(self) -> bool:
@@ -251,8 +255,9 @@ class InstructionEntry:
 
         Gates ``@p``: a false predicate leaves destinations unwritten, and the
         ``"="`` output constraint tells nvcc the prior value is dead, so a
-        predicated destination silently loses it. Lifting this needs a
-        read-modify-write ("+") constraint, which no entry declares yet.
+        predicated destination silently loses it. An accumulator (``role="acc"``)
+        binds "+" instead, which keeps the old value live -- so it does not
+        count here and @p remains available on it.
         """
         return any(slot.role == "dst" for slot in self.operands)
 
@@ -932,6 +937,28 @@ def _check_mma_int(m):
         if not m["popc"]:
             return "the single-bit line spells .popc"
     return None
+
+
+# wgmma.mma_async register fragments, per ISA 9.7.16.4 (Warpgroup matrix
+# fragments): across the 128-thread warpgroup the accumulator D holds
+# M*N/128 = N/2 registers per thread (.f32 and .s32), and M*N/256 = N/4
+# when .dtype is .f16 (two halves per register). The A fragment of the rs
+# form works out to M*K/128/(32/bits) = 4 registers for every (K, type)
+# pairing the ISA defines, so it is a plain `lanes=4`, not a function.
+#
+# The N domains, straight from each syntax line's `.shape =` set: the
+# floating-point and fp8 lines take every multiple of 8 up to 256; the
+# s8/u8 line drops 40, 56, ... (the odd multiples of 8 above 32) and stops
+# at 224; the single-bit line adds 240 and 256 back.
+_WGMMA_N_FULL = tuple(str(8 * i) for i in range(1, 33))
+_WGMMA_N_S8 = ("8", "16", "24", "32", "48", "64", "80", "96", "112", "128",
+               "144", "160", "176", "192", "208", "224")  # fmt: skip
+_WGMMA_N_B1 = (*_WGMMA_N_S8, "240", "256")
+
+
+def _wgmma_acc_lanes(m):
+    n = int(m["shape"].split("n")[1].split("k")[0])
+    return n // 4 if m["dtype"] == "f16" else n // 2
 
 
 _ENTRIES = [
@@ -1889,8 +1916,8 @@ _ENTRIES = [
     #
     # NOT REGISTERED:
     # - the `state, [addr]` forms: the destination is the barrier's pre-arrival
-    #   state, which nothing reads today.
-    # - `mbarrier.arrive.noComplete`, which has no sink form at all.
+    #   state, which nothing reads today. (`arrive.noComplete` has no sink form
+    #   at all, so it is registered below with a real state result.)
     # - the try_wait / test_wait lines: they produce a `.pred` result.
     #
     # The addr slot takes no fixed space: with `.space` omitted the ISA means
@@ -1974,6 +2001,33 @@ _ENTRIES = [
             OperandSlot("tx_count", role="value", dtype="u32"),
         ),
     ),
+    # mbarrier.arrive.noComplete{.release.cta}{.shared{::cta}}.b64 state, [addr], count;
+    InstructionEntry(
+        # This line has no sink form, so `state` is a real register result.
+        # It rides role="acc" rather than dst: "+" keeps the old value live
+        # under a false predicate, which is what lets `pred=` remain legal on
+        # an instruction that writes a register. Its qualifier pair is fixed
+        # (.release.cta only) and the space domain has no ::cluster.
+        name="mbarrier_arrive_no_complete",
+        mnemonic="mbarrier",
+        slots=(
+            ModifierSlot("action", ("arrive",)),
+            ModifierSlot("nocomplete", ("noComplete",)),
+            ModifierSlot("sem", ("release",), optional=True),
+            ModifierSlot("scope", ("cta",), optional=True),
+            ModifierSlot("space", ("shared", "shared::cta"), optional=True),
+            ModifierSlot("type", ("b64",)),
+        ),
+        check=_check_mbarrier_sem_scope,
+        operands=(
+            # Pinned u64, not b64: the bit-type dtype axis would offer an f64
+            # carrier, and ptxas rejects an .f64 register as the state operand
+            # ("Arguments mismatch for instruction 'mbarrier.arrive'").
+            OperandSlot("state", role="acc", dtype="u64"),
+            OperandSlot("addr", role="addr"),
+            OperandSlot("count", role="value", dtype="u32"),
+        ),
+    ),
     *[
         InstructionEntry(  # mbarrier.{expect_tx,complete_tx}{.sem.scope}{.space}.b64 [addr], tx;
             name=f"mbarrier_{act}",
@@ -1993,11 +2047,9 @@ _ENTRIES = [
         )
         for act in ("expect_tx", "complete_tx")
     ],
-    # wgmma group synchronisation, per PTX ISA 9.7.15.4.
-    #
-    # NOT REGISTERED: `wgmma.wait_group.sync.aligned N`, whose group count lands
-    # in the instruction text rather than a register, and the `wgmma.mma_async`
-    # lines, whose accumulator is a register group up to 128 wide.
+    # wgmma group synchronisation, per PTX ISA 9.7.15.4. (wait_group's textual
+    # group count is the `choices` immediate registered above; the mma_async
+    # lines are the acc-role entries further down.)
     *[
         InstructionEntry(
             name=f"wgmma_{act}",
@@ -2303,6 +2355,281 @@ _ENTRIES = [
             OperandSlot("c", role="value", dtype="f64", lanes=_mma_lanes("c")),
         ),
     ),
+    # wgmma.mma_async per PTX ISA 9.7.16.5.2 (sm_90a). Six type groups, each
+    # with an ss line (both A and B from shared memory, named by 64-bit matrix
+    # descriptors) and an rs line (A from registers -- always four .b32, see
+    # the fragment note above -- which also drops imm-trans-a). Like mma, one
+    # entry per accumulator register type so every operand dtype is pinned.
+    #
+    # The accumulator is read and written in place: D = A*B + D, so `d` is
+    # role="acc", the "+" constraint. The trailing arguments all live in the
+    # instruction text as caller immediates:
+    #   - scale-d: "the operation of the form D = A*B is issued when the input
+    #     predicate argument scale-d is false". The syntax calls it a
+    #     predicate, but ptxas accepts the literals 0 and 1 in that position
+    #     (certified), and every call site passes a compile-time constant --
+    #     so it is a choices immediate, not a runtime operand. (The legacy
+    #     helper burned a setp + predicate register on it per call.)
+    #   - imm-scale-a/b: "the valid values ... are -1 and 1". The legacy
+    #     helper emitted 0 for "no negate", outside the ISA's domain; ptxd
+    #     transcribes the documented set.
+    #   - imm-trans-a/b: {0, 1}, f16/bf16 lines only (k-major inputs cannot
+    #     be transposed); the rs line has no imm-trans-a.
+    #
+    # NOT REGISTERED: `wgmma.mma_async.sp` (sparse A, a separate instruction
+    # with a metadata operand) and the `wgmma.fence`/`commit_group`/
+    # `wait_group` companions (registered above).
+    *[
+        InstructionEntry(  # .f16 inputs, .f32 accumulator
+            name=f"wgmma_f16_{form}",
+            mnemonic="wgmma",
+            slots=(
+                ModifierSlot("action", ("mma_async",)),
+                ModifierSlot("sync", ("sync",)),
+                ModifierSlot("aligned", ("aligned",)),
+                ModifierSlot("shape", tuple(f"m64n{n}k16" for n in _WGMMA_N_FULL)),
+                ModifierSlot("dtype", ("f32",)),
+                ModifierSlot("atype", ("f16",)),
+                ModifierSlot("btype", ("f16",)),
+            ),
+            cert_arch="sm_90a",
+            operands=(
+                OperandSlot("d", role="acc", dtype="f32", lanes=_wgmma_acc_lanes),
+                *(
+                    (OperandSlot("a_desc", role="value", dtype="u64"),)
+                    if form == "ss"
+                    else (OperandSlot("a", role="value", dtype="u32", lanes=4),)
+                ),
+                OperandSlot("b_desc", role="value", dtype="u64"),
+                OperandSlot("scale_d", role="imm", choices=("0", "1")),
+                OperandSlot("scale_a", role="imm", choices=("-1", "1")),
+                OperandSlot("scale_b", role="imm", choices=("-1", "1")),
+                *(
+                    (OperandSlot("trans_a", role="imm", choices=("0", "1")),)
+                    if form == "ss"
+                    else ()
+                ),
+                OperandSlot("trans_b", role="imm", choices=("0", "1")),
+            ),
+        )
+        for form in ("ss", "rs")
+    ],
+    *[
+        InstructionEntry(  # the same lines with an .f16 accumulator (f16x2 pairs)
+            name=f"wgmma_f16_f16acc_{form}",
+            mnemonic="wgmma",
+            slots=(
+                ModifierSlot("action", ("mma_async",)),
+                ModifierSlot("sync", ("sync",)),
+                ModifierSlot("aligned", ("aligned",)),
+                ModifierSlot("shape", tuple(f"m64n{n}k16" for n in _WGMMA_N_FULL)),
+                ModifierSlot("dtype", ("f16",)),
+                ModifierSlot("atype", ("f16",)),
+                ModifierSlot("btype", ("f16",)),
+            ),
+            cert_arch="sm_90a",
+            operands=(
+                OperandSlot("d", role="acc", dtype="u32", lanes=_wgmma_acc_lanes),
+                *(
+                    (OperandSlot("a_desc", role="value", dtype="u64"),)
+                    if form == "ss"
+                    else (OperandSlot("a", role="value", dtype="u32", lanes=4),)
+                ),
+                OperandSlot("b_desc", role="value", dtype="u64"),
+                OperandSlot("scale_d", role="imm", choices=("0", "1")),
+                OperandSlot("scale_a", role="imm", choices=("-1", "1")),
+                OperandSlot("scale_b", role="imm", choices=("-1", "1")),
+                *(
+                    (OperandSlot("trans_a", role="imm", choices=("0", "1")),)
+                    if form == "ss"
+                    else ()
+                ),
+                OperandSlot("trans_b", role="imm", choices=("0", "1")),
+            ),
+        )
+        for form in ("ss", "rs")
+    ],
+    *[
+        InstructionEntry(  # .bf16 inputs (.f32 accumulator only)
+            name=f"wgmma_bf16_{form}",
+            mnemonic="wgmma",
+            slots=(
+                ModifierSlot("action", ("mma_async",)),
+                ModifierSlot("sync", ("sync",)),
+                ModifierSlot("aligned", ("aligned",)),
+                ModifierSlot("shape", tuple(f"m64n{n}k16" for n in _WGMMA_N_FULL)),
+                ModifierSlot("dtype", ("f32",)),
+                ModifierSlot("atype", ("bf16",)),
+                ModifierSlot("btype", ("bf16",)),
+            ),
+            cert_arch="sm_90a",
+            operands=(
+                OperandSlot("d", role="acc", dtype="f32", lanes=_wgmma_acc_lanes),
+                *(
+                    (OperandSlot("a_desc", role="value", dtype="u64"),)
+                    if form == "ss"
+                    else (OperandSlot("a", role="value", dtype="u32", lanes=4),)
+                ),
+                OperandSlot("b_desc", role="value", dtype="u64"),
+                OperandSlot("scale_d", role="imm", choices=("0", "1")),
+                OperandSlot("scale_a", role="imm", choices=("-1", "1")),
+                OperandSlot("scale_b", role="imm", choices=("-1", "1")),
+                *(
+                    (OperandSlot("trans_a", role="imm", choices=("0", "1")),)
+                    if form == "ss"
+                    else ()
+                ),
+                OperandSlot("trans_b", role="imm", choices=("0", "1")),
+            ),
+        )
+        for form in ("ss", "rs")
+    ],
+    *[
+        InstructionEntry(  # .tf32 inputs: k8, no transpose immediates
+            name=f"wgmma_tf32_{form}",
+            mnemonic="wgmma",
+            slots=(
+                ModifierSlot("action", ("mma_async",)),
+                ModifierSlot("sync", ("sync",)),
+                ModifierSlot("aligned", ("aligned",)),
+                ModifierSlot("shape", tuple(f"m64n{n}k8" for n in _WGMMA_N_FULL)),
+                ModifierSlot("dtype", ("f32",)),
+                ModifierSlot("atype", ("tf32",)),
+                ModifierSlot("btype", ("tf32",)),
+            ),
+            cert_arch="sm_90a",
+            operands=(
+                OperandSlot("d", role="acc", dtype="f32", lanes=_wgmma_acc_lanes),
+                *(
+                    (OperandSlot("a_desc", role="value", dtype="u64"),)
+                    if form == "ss"
+                    else (OperandSlot("a", role="value", dtype="u32", lanes=4),)
+                ),
+                OperandSlot("b_desc", role="value", dtype="u64"),
+                OperandSlot("scale_d", role="imm", choices=("0", "1")),
+                OperandSlot("scale_a", role="imm", choices=("-1", "1")),
+                OperandSlot("scale_b", role="imm", choices=("-1", "1")),
+            ),
+        )
+        for form in ("ss", "rs")
+    ],
+    *[
+        InstructionEntry(  # fp8 inputs, all four e4m3/e5m2 pairings, .f32 acc
+            name=f"wgmma_fp8_{form}",
+            mnemonic="wgmma",
+            slots=(
+                ModifierSlot("action", ("mma_async",)),
+                ModifierSlot("sync", ("sync",)),
+                ModifierSlot("aligned", ("aligned",)),
+                ModifierSlot("shape", tuple(f"m64n{n}k32" for n in _WGMMA_N_FULL)),
+                ModifierSlot("dtype", ("f32",)),
+                ModifierSlot("atype", ("e4m3", "e5m2")),
+                ModifierSlot("btype", ("e4m3", "e5m2")),
+            ),
+            cert_arch="sm_90a",
+            operands=(
+                OperandSlot("d", role="acc", dtype="f32", lanes=_wgmma_acc_lanes),
+                *(
+                    (OperandSlot("a_desc", role="value", dtype="u64"),)
+                    if form == "ss"
+                    else (OperandSlot("a", role="value", dtype="u32", lanes=4),)
+                ),
+                OperandSlot("b_desc", role="value", dtype="u64"),
+                OperandSlot("scale_d", role="imm", choices=("0", "1")),
+                OperandSlot("scale_a", role="imm", choices=("-1", "1")),
+                OperandSlot("scale_b", role="imm", choices=("-1", "1")),
+            ),
+        )
+        for form in ("ss", "rs")
+    ],
+    *[
+        InstructionEntry(  # fp8 inputs with an .f16 accumulator
+            name=f"wgmma_fp8_f16acc_{form}",
+            mnemonic="wgmma",
+            slots=(
+                ModifierSlot("action", ("mma_async",)),
+                ModifierSlot("sync", ("sync",)),
+                ModifierSlot("aligned", ("aligned",)),
+                ModifierSlot("shape", tuple(f"m64n{n}k32" for n in _WGMMA_N_FULL)),
+                ModifierSlot("dtype", ("f16",)),
+                ModifierSlot("atype", ("e4m3", "e5m2")),
+                ModifierSlot("btype", ("e4m3", "e5m2")),
+            ),
+            cert_arch="sm_90a",
+            operands=(
+                OperandSlot("d", role="acc", dtype="u32", lanes=_wgmma_acc_lanes),
+                *(
+                    (OperandSlot("a_desc", role="value", dtype="u64"),)
+                    if form == "ss"
+                    else (OperandSlot("a", role="value", dtype="u32", lanes=4),)
+                ),
+                OperandSlot("b_desc", role="value", dtype="u64"),
+                OperandSlot("scale_d", role="imm", choices=("0", "1")),
+                OperandSlot("scale_a", role="imm", choices=("-1", "1")),
+                OperandSlot("scale_b", role="imm", choices=("-1", "1")),
+            ),
+        )
+        for form in ("ss", "rs")
+    ],
+    *[
+        InstructionEntry(  # s8/u8 inputs: {.satfinite}, no scale-a/b
+            name=f"wgmma_int_{form}",
+            mnemonic="wgmma",
+            slots=(
+                ModifierSlot("action", ("mma_async",)),
+                ModifierSlot("sync", ("sync",)),
+                ModifierSlot("aligned", ("aligned",)),
+                ModifierSlot("shape", tuple(f"m64n{n}k32" for n in _WGMMA_N_S8)),
+                ModifierSlot("satfinite", ("satfinite",), optional=True),
+                ModifierSlot("dtype", ("s32",)),
+                ModifierSlot("atype", ("s8", "u8")),
+                ModifierSlot("btype", ("s8", "u8")),
+            ),
+            cert_arch="sm_90a",
+            operands=(
+                # An .s32 accumulator rides a u32 carrier register, the same
+                # bit-identical pinning as mma_int's d/c operands.
+                OperandSlot("d", role="acc", dtype="u32", lanes=_wgmma_acc_lanes),
+                *(
+                    (OperandSlot("a_desc", role="value", dtype="u64"),)
+                    if form == "ss"
+                    else (OperandSlot("a", role="value", dtype="u32", lanes=4),)
+                ),
+                OperandSlot("b_desc", role="value", dtype="u64"),
+                OperandSlot("scale_d", role="imm", choices=("0", "1")),
+            ),
+        )
+        for form in ("ss", "rs")
+    ],
+    *[
+        InstructionEntry(  # single-bit inputs: .op = {.and}, .popc accumulate
+            name=f"wgmma_b1_{form}",
+            mnemonic="wgmma",
+            slots=(
+                ModifierSlot("action", ("mma_async",)),
+                ModifierSlot("sync", ("sync",)),
+                ModifierSlot("aligned", ("aligned",)),
+                ModifierSlot("shape", tuple(f"m64n{n}k256" for n in _WGMMA_N_B1)),
+                ModifierSlot("dtype", ("s32",)),
+                ModifierSlot("atype", ("b1",)),
+                ModifierSlot("btype", ("b1",)),
+                ModifierSlot("bitop", ("and",)),
+                ModifierSlot("popc", ("popc",)),
+            ),
+            cert_arch="sm_90a",
+            operands=(
+                OperandSlot("d", role="acc", dtype="u32", lanes=_wgmma_acc_lanes),
+                *(
+                    (OperandSlot("a_desc", role="value", dtype="u64"),)
+                    if form == "ss"
+                    else (OperandSlot("a", role="value", dtype="u32", lanes=4),)
+                ),
+                OperandSlot("b_desc", role="value", dtype="u64"),
+                OperandSlot("scale_d", role="imm", choices=("0", "1")),
+            ),
+        )
+        for form in ("ss", "rs")
+    ],
 ]
 
 TABLE: dict[str, InstructionEntry] = {e.name: e for e in _ENTRIES}

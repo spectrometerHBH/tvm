@@ -120,7 +120,9 @@ def _make_codegen(entry: InstructionEntry):
         # Which dtype each typed operand actually carries. It is already in the
         # Call -- the same channel PTX uses, where a register's type lives in its
         # .reg declaration rather than in the instruction text.
-        dtypes = tuple(arg_dtype(rest[i]) for slot, i, _ in layout if slot.role in ("value", "dst"))
+        dtypes = tuple(
+            arg_dtype(rest[i]) for slot, i, _ in layout if slot.role in ("value", "dst", "acc")
+        )
         # Caller-chosen immediates ride the Call as IntImm args but are baked
         # into the instruction text, so they are read here and NOT forwarded to
         # the helper (which has no parameter for them).
@@ -158,7 +160,7 @@ def _coerce_operand(entry, slot, values, mod_map):
     values = [getattr(v, "scalar", v) for v in values]
     if slot.role == "imm":
         return [_coerce_imm(entry, slot, v) for v in values]
-    if slot.role in ("dst", "value"):
+    if slot.role in ("dst", "value", "acc"):
         return _coerce_typed(entry, slot, values, mod_map)
     return [_coerce_address(entry, slot, v, mod_map) for v in values]
 
@@ -167,7 +169,7 @@ def _coerce_typed(entry, slot, values, mod_map):
     """Coerce a dtype-carrying operand (``role`` dst or value)."""
     allowed = operand_dtypes(slot, mod_map)
     token = operand_type(slot, mod_map)
-    if slot.role == "dst":
+    if slot.role in ("dst", "acc"):
         # A PTX destination is a register the caller declared, so every lane has
         # to be a writable lvalue: a scalar (`x: T.float32`) or a buffer element.
         # Both are BufferLoad nodes, which the C codegen prints as the lvalue
@@ -179,7 +181,7 @@ def _coerce_typed(entry, slot, values, mod_map):
                     f"buffer element (declare it first, e.g. `d: T.{allowed[0]}`), got "
                     f"{type(value).__name__} — a T.let binding is immutable and cannot be one"
                 )
-    role = "destination" if slot.role == "dst" else "operand"
+    role = "destination" if slot.role in ("dst", "acc") else "operand"
     # A bare Python literal names no dtype, so it does not get a vote.
     carried = [None if isinstance(v, int | float) else arg_dtype(v) for v in values]
     named = sorted({d for d in carried if d is not None})

@@ -92,7 +92,8 @@ def render_variant(entry: InstructionEntry, tokens, predicated=False, dtypes=Non
 
     Every helper is ``void`` and its C parameter list is the PTX operand list
     in order, so the generated call reads like the PTX text it wraps.
-    Destinations (``role="dst"``) are taken by reference; the caller passes a
+    Destinations (``role="dst"``) and accumulators (``role="acc"``, read and
+    written in place via a "+" constraint) are taken by reference; the caller passes a
     writable lvalue.
 
     ``dtypes`` picks one TVM dtype per typed operand (see ``table.dtype_combos``);
@@ -131,9 +132,11 @@ def render_variant(entry: InstructionEntry, tokens, predicated=False, dtypes=Non
     # single-shape family the two agree (st.bulk normalizes to st_bulk anyway);
     # it matters only where several entries share a mnemonic because PTX puts
     # their difference in the operand list, as `mov`'s pack/unpack shapes do.
+    # "m" for minus: wgmma's imm-scale-a/b take the value -1, and "-" cannot
+    # appear in a C identifier.
     helper = "tvm_builtin_ptxd_" + "_".join([*isa_name, *discriminator]).replace(
         "::", "__"
-    ).replace(".", "_")
+    ).replace(".", "_").replace("-", "m")
     if predicated:
         assert not entry.has_dst, "@p is only supported on instructions without a destination"
         helper += "_pred"
@@ -169,7 +172,23 @@ def render_variant(entry: InstructionEntry, tokens, predicated=False, dtypes=Non
             # One operand, `lanes` registers: PTX writes the group in the
             # operand list, so a lane is a C parameter but not an operand.
             lname = f"{pname}{lane}" if is_group else pname
-            if slot.role == "dst":
+            if slot.role == "acc":
+                # A register the instruction both reads and writes -- an
+                # in-place accumulator. "+" tells the compiler the prior value
+                # is live, which "=" would declare dead; it is also what makes
+                # @p safe here (a false predicate leaves the old value intact).
+                cb = C_BINDING[dtype_of[slot]]
+                if cb.carrier != cb.c_type:
+                    # A carrier round-trips through a differently-typed local,
+                    # which has no coherent read-modify-write story; the dtypes
+                    # that need one are refused rather than half-supported.
+                    raise ValueError(
+                        f"{entry.name}: accumulator '{slot.name}' cannot take dtype "
+                        f"{dtype_of[slot]} (it binds through a carrier)"
+                    )
+                params.append(f"{cb.c_type}& {lname}")
+                outputs.append(f'"+{cb.constraint}"({lname})')
+            elif slot.role == "dst":
                 cb = C_BINDING[dtype_of[slot]]
                 c_ty, constraint, carrier = cb.c_type, cb.constraint, cb.carrier
                 params.append(f"{c_ty}& {lname}")

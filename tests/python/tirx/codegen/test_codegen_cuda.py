@@ -22,7 +22,6 @@ import pytest
 
 import tvm
 import tvm.testing
-from tvm import tirx as tir
 from tvm.script import tirx as T
 from tvm.testing import env
 
@@ -620,15 +619,20 @@ def test_ptx_mbarrier_arrive_new_forms_codegen():
         tx = T.thread_id([32])
         if tx == 0:
             bar = T.alloc_buffer((6,), "uint64", scope="shared", align=16)
+            state = T.local_scalar("uint64")
             T.ptxd.mbarrier.arrive.relaxed.cta.shared__cta.b64(bar.ptr_to([0]))
             T.ptxd.mbarrier.arrive.relaxed.cluster.shared__cluster.b64(bar.ptr_to([1]))
             T.ptxd.mbarrier.arrive.release.cta.shared.b64(bar.ptr_to([2]), pred=Pred[0])
             T.ptxd.mbarrier.arrive.expect_tx.relaxed.cluster.shared__cluster.b64(
                 bar.ptr_to([3]), T.uint32(128)
             )
-            T.ptx.mbarrier.arrive.no_complete(bar.ptr_to([4]), T.int32(2))
-            T.ptx.mbarrier.arrive.no_complete(
-                bar.ptr_to([5]), T.int32(3), space="shared::cta", pred=Pred[0]
+            T.ptxd.mbarrier.arrive.noComplete.release.cta.shared.b64(
+                state, bar.ptr_to([4]), T.uint32(2)
+            )
+            # noComplete writes a real state result, yet pred= stays legal:
+            # the accumulator binds "+", so a false predicate leaves it intact.
+            T.ptxd.mbarrier.arrive.noComplete.release.cta.shared__cta.b64(
+                state, bar.ptr_to([5]), T.uint32(3), pred=Pred[0]
             )
 
     target = tvm.target.Target({"kind": "cuda", "arch": "sm_100a"})
@@ -639,16 +643,8 @@ def test_ptx_mbarrier_arrive_new_forms_codegen():
     assert "mbarrier.arrive.relaxed.cluster.shared::cluster.b64 _, [%0];" in src
     assert "@p mbarrier.arrive.release.cta.shared.b64 _, [%0];" in src
     assert "mbarrier.arrive.expect_tx.relaxed.cluster.shared::cluster.b64 _, [%0], %1;" in src
-    assert "mbarrier.arrive.noComplete.release.cta.shared.b64 _, [%0], %1;" in src
-    assert "@p mbarrier.arrive.noComplete.release.cta.shared::cta.b64 _, [%0], %1;" in src
-
-
-def test_ptx_mbarrier_arrive_no_complete_rejects_invalid_forms():
-    bar = tir.Var("bar", "handle")
-    with pytest.raises(ValueError, match="does not support remote"):
-        T.ptx.mbarrier.arrive.no_complete(bar, T.int32(1), remote=T.int32(0))
-    with pytest.raises(ValueError, match="space must"):
-        T.ptx.mbarrier.arrive.no_complete(bar, T.int32(1), space="shared::cluster")
+    assert "mbarrier.arrive.noComplete.release.cta.shared.b64 %0, [%1], %2;" in src
+    assert "@p mbarrier.arrive.noComplete.release.cta.shared::cta.b64 %0, [%1], %2;" in src
 
 
 def test_cuda_ldg_vector_scatter_codegen():

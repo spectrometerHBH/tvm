@@ -333,8 +333,9 @@ class _Chain_max:
     def __call__(self, *args: Any) -> None: ...
 
 class _Chain_mbarrier:
-    """`mbarrier` — 7 entries sharing this mnemonic; PTX puts their difference in the operand
-    list, so the call selects one. Shapes: (addr, count); (addr); (addr, tx_count)
+    """`mbarrier` — 8 entries sharing this mnemonic; PTX puts their difference in the operand
+    list, so the call selects one. Shapes: (addr, count); (addr); (addr, tx_count); (state,
+    addr, count)
     """
 
     arrive: _Chain_mbarrier
@@ -345,6 +346,7 @@ class _Chain_mbarrier:
     expect_tx: _Chain_mbarrier
     init: _Chain_mbarrier
     inval: _Chain_mbarrier
+    noComplete: _Chain_mbarrier
     relaxed: _Chain_mbarrier
     release: _Chain_mbarrier
     shared: _Chain_mbarrier
@@ -669,14 +671,142 @@ class _Chain_tcgen05:
     def __call__(self, *args: Any) -> None: ...
 
 class _Chain_wgmma:
-    """`wgmma` — 3 entries sharing this mnemonic; PTX puts their difference in the operand
-    list, so the call selects one. Shapes: (group); ()
+    """`wgmma` — 19 entries sharing this mnemonic; PTX puts their difference in the operand
+    list, so the call selects one. Shapes: (group); (); (*__operands)
     """
 
     aligned: _Chain_wgmma
+    and_: _Chain_wgmma
+    b1: _Chain_wgmma
+    bf16: _Chain_wgmma
     commit_group: _Chain_wgmma
+    e4m3: _Chain_wgmma
+    e5m2: _Chain_wgmma
+    f16: _Chain_wgmma
+    f32: _Chain_wgmma
     fence: _Chain_wgmma
+    m64n104k16: _Chain_wgmma
+    m64n104k32: _Chain_wgmma
+    m64n104k8: _Chain_wgmma
+    m64n112k16: _Chain_wgmma
+    m64n112k256: _Chain_wgmma
+    m64n112k32: _Chain_wgmma
+    m64n112k8: _Chain_wgmma
+    m64n120k16: _Chain_wgmma
+    m64n120k32: _Chain_wgmma
+    m64n120k8: _Chain_wgmma
+    m64n128k16: _Chain_wgmma
+    m64n128k256: _Chain_wgmma
+    m64n128k32: _Chain_wgmma
+    m64n128k8: _Chain_wgmma
+    m64n136k16: _Chain_wgmma
+    m64n136k32: _Chain_wgmma
+    m64n136k8: _Chain_wgmma
+    m64n144k16: _Chain_wgmma
+    m64n144k256: _Chain_wgmma
+    m64n144k32: _Chain_wgmma
+    m64n144k8: _Chain_wgmma
+    m64n152k16: _Chain_wgmma
+    m64n152k32: _Chain_wgmma
+    m64n152k8: _Chain_wgmma
+    m64n160k16: _Chain_wgmma
+    m64n160k256: _Chain_wgmma
+    m64n160k32: _Chain_wgmma
+    m64n160k8: _Chain_wgmma
+    m64n168k16: _Chain_wgmma
+    m64n168k32: _Chain_wgmma
+    m64n168k8: _Chain_wgmma
+    m64n16k16: _Chain_wgmma
+    m64n16k256: _Chain_wgmma
+    m64n16k32: _Chain_wgmma
+    m64n16k8: _Chain_wgmma
+    m64n176k16: _Chain_wgmma
+    m64n176k256: _Chain_wgmma
+    m64n176k32: _Chain_wgmma
+    m64n176k8: _Chain_wgmma
+    m64n184k16: _Chain_wgmma
+    m64n184k32: _Chain_wgmma
+    m64n184k8: _Chain_wgmma
+    m64n192k16: _Chain_wgmma
+    m64n192k256: _Chain_wgmma
+    m64n192k32: _Chain_wgmma
+    m64n192k8: _Chain_wgmma
+    m64n200k16: _Chain_wgmma
+    m64n200k32: _Chain_wgmma
+    m64n200k8: _Chain_wgmma
+    m64n208k16: _Chain_wgmma
+    m64n208k256: _Chain_wgmma
+    m64n208k32: _Chain_wgmma
+    m64n208k8: _Chain_wgmma
+    m64n216k16: _Chain_wgmma
+    m64n216k32: _Chain_wgmma
+    m64n216k8: _Chain_wgmma
+    m64n224k16: _Chain_wgmma
+    m64n224k256: _Chain_wgmma
+    m64n224k32: _Chain_wgmma
+    m64n224k8: _Chain_wgmma
+    m64n232k16: _Chain_wgmma
+    m64n232k32: _Chain_wgmma
+    m64n232k8: _Chain_wgmma
+    m64n240k16: _Chain_wgmma
+    m64n240k256: _Chain_wgmma
+    m64n240k32: _Chain_wgmma
+    m64n240k8: _Chain_wgmma
+    m64n248k16: _Chain_wgmma
+    m64n248k32: _Chain_wgmma
+    m64n248k8: _Chain_wgmma
+    m64n24k16: _Chain_wgmma
+    m64n24k256: _Chain_wgmma
+    m64n24k32: _Chain_wgmma
+    m64n24k8: _Chain_wgmma
+    m64n256k16: _Chain_wgmma
+    m64n256k256: _Chain_wgmma
+    m64n256k32: _Chain_wgmma
+    m64n256k8: _Chain_wgmma
+    m64n32k16: _Chain_wgmma
+    m64n32k256: _Chain_wgmma
+    m64n32k32: _Chain_wgmma
+    m64n32k8: _Chain_wgmma
+    m64n40k16: _Chain_wgmma
+    m64n40k32: _Chain_wgmma
+    m64n40k8: _Chain_wgmma
+    m64n48k16: _Chain_wgmma
+    m64n48k256: _Chain_wgmma
+    m64n48k32: _Chain_wgmma
+    m64n48k8: _Chain_wgmma
+    m64n56k16: _Chain_wgmma
+    m64n56k32: _Chain_wgmma
+    m64n56k8: _Chain_wgmma
+    m64n64k16: _Chain_wgmma
+    m64n64k256: _Chain_wgmma
+    m64n64k32: _Chain_wgmma
+    m64n64k8: _Chain_wgmma
+    m64n72k16: _Chain_wgmma
+    m64n72k32: _Chain_wgmma
+    m64n72k8: _Chain_wgmma
+    m64n80k16: _Chain_wgmma
+    m64n80k256: _Chain_wgmma
+    m64n80k32: _Chain_wgmma
+    m64n80k8: _Chain_wgmma
+    m64n88k16: _Chain_wgmma
+    m64n88k32: _Chain_wgmma
+    m64n88k8: _Chain_wgmma
+    m64n8k16: _Chain_wgmma
+    m64n8k256: _Chain_wgmma
+    m64n8k32: _Chain_wgmma
+    m64n8k8: _Chain_wgmma
+    m64n96k16: _Chain_wgmma
+    m64n96k256: _Chain_wgmma
+    m64n96k32: _Chain_wgmma
+    m64n96k8: _Chain_wgmma
+    mma_async: _Chain_wgmma
+    popc: _Chain_wgmma
+    s32: _Chain_wgmma
+    s8: _Chain_wgmma
+    satfinite: _Chain_wgmma
     sync: _Chain_wgmma
+    tf32: _Chain_wgmma
+    u8: _Chain_wgmma
     wait_group: _Chain_wgmma
     def __call__(self, *args: Any, pred: Any = None) -> None: ...
 

@@ -971,6 +971,10 @@ def test_wgmma_ss_nt():
         def get_accum_list(C, C_elems):
             return [C[i] for i in range(C_elems)]
 
+        ptx_ab = {"float16": "f16", "bfloat16": "bf16"}[in_dtype]
+        ptx_d = {"float32": "f32", "float16": "f16"}[out_dtype]
+        mma_chain = f"wgmma.mma_async.sync.aligned.m{M}n{N}k{K}.{ptx_d}.{ptx_ab}.{ptx_ab}"
+
         # fmt: off
         @T.prim_func
         def main(A_ptr: T.handle, B_ptr: T.handle, C_ptr: T.handle):
@@ -1022,8 +1026,8 @@ def test_wgmma_ss_nt():
             T.ptx.wgmma.encode_matrix_descriptor(T.address_of(descA), A_smem.data, *A_encode_args)  # noqa: F821
             T.ptx.wgmma.encode_matrix_descriptor(T.address_of(descB), B_smem.data, *B_encode_args)  # noqa: F821
             T.ptxd.wgmma.fence.sync.aligned()
-            T.ptx.wgmma.mma_async.ss(descA, descB, *get_accum_list(C_local, C_elems),  # noqa: F821
-                                     M=M, N=N, K=K, in_dtype=in_dtype, out_dtype=out_dtype, transA=transA, transB=transB, scaleA=1.0, scaleB=1.0, scaleD=False)  # noqa: E501
+            T.ptxd[mma_chain](*get_accum_list(C_local, C_elems), descA, descB,  # noqa: F821
+                              0, 1, 1, int(transA), int(transB))
             T.ptxd.wgmma.commit_group.sync.aligned()
             T.ptxd.wgmma.wait_group.sync.aligned(0)
 
@@ -1125,6 +1129,10 @@ def test_wgmma_rs_nt():
         def get_accum_list(C, C_elems):
             return [C[i] for i in range(C_elems)]
 
+        ptx_ab = {"float16": "f16", "bfloat16": "bf16"}[in_dtype]
+        ptx_d = {"float32": "f32", "float16": "f16"}[out_dtype]
+        mma_chain = f"wgmma.mma_async.sync.aligned.m{M}n{N}k{K}.{ptx_d}.{ptx_ab}.{ptx_ab}"
+
         # fmt: off
         @T.prim_func
         def main(A_ptr: T.handle, B_ptr: T.handle, C_ptr: T.handle):
@@ -1183,8 +1191,8 @@ def test_wgmma_rs_nt():
                     # do wgmma
             T.ptx.wgmma.encode_matrix_descriptor(T.address_of(descB), B_smem.data, *B_encode_args)  # noqa: F821
             T.ptxd.wgmma.fence.sync.aligned()
-            T.ptx.wgmma.mma_async.rs(descB, *(get_A_list(A_local_b32, A_elems_b32) + get_accum_list(C_local, C_elems)),  # noqa: E501, F821
-                                     M=M, N=N, K=K, in_dtype=in_dtype, out_dtype=out_dtype, transA=transA, transB=transB, scaleA=1.0, scaleB=1.0, scaleD=False)  # noqa: E501
+            T.ptxd[mma_chain](*get_accum_list(C_local, C_elems), *get_A_list(A_local_b32, A_elems_b32),  # noqa: E501
+                              descB, 0, 1, 1, int(transB))  # noqa: F821
             T.ptxd.wgmma.commit_group.sync.aligned()
             T.ptxd.wgmma.wait_group.sync.aligned(0)
 

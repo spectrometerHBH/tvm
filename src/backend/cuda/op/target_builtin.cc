@@ -252,7 +252,6 @@ const DeviceIntrinsicRegistration kDeviceIntrinsics[] = {
     TIRX_DEVICE_INTRIN_ALIAS(ptx_fetch_register, ptx, kPure),
     TIRX_DEVICE_INTRIN_ALIAS(ptx_ldmatrix, ptx, kOpaque),
     TIRX_DEVICE_INTRIN_ALIAS(ptx_ldmatrix_legacy, ptx, kOpaque),
-    TIRX_DEVICE_INTRIN_ALIAS(ptx_mbarrier_arrive_no_complete, ptx, kOpaque),
     TIRX_DEVICE_INTRIN_ALIAS(ptx_mbarrier_test_wait_parity, ptx, kOpaque),
     TIRX_DEVICE_INTRIN_ALIAS(ptx_mbarrier_try_wait, ptx, kOpaque),
     TIRX_DEVICE_INTRIN_ALIAS(ptx_mbarrier_try_wait_acquire_cluster, ptx, kOpaque),
@@ -269,8 +268,6 @@ const DeviceIntrinsicRegistration kDeviceIntrinsics[] = {
     TIRX_DEVICE_INTRIN_ALIAS(ptx_tcgen05_mma, ptx, kOpaque),
     TIRX_DEVICE_INTRIN_ALIAS(ptx_tcgen05_mma_block_scale, ptx, kOpaque),
     TIRX_DEVICE_INTRIN_ALIAS(ptx_wgmma_encode_matrix_descriptor, ptx, kOpaque),
-    TIRX_DEVICE_INTRIN_ALIAS(ptx_wgmma_mma_async_rs, ptx, kOpaque),
-    TIRX_DEVICE_INTRIN_ALIAS(ptx_wgmma_mma_async_ss, ptx, kOpaque),
     TIRX_DEVICE_INTRIN_ALIAS(ptx_wgmma_noop_barrier, ptx, kOpaque),
 };
 

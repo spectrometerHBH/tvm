@@ -147,16 +147,7 @@ class WgmmaNamespace:
 
     def __init__(self):
         self.noop_barrier = _op_wrapper(_cuda_op.ptx_wgmma_noop_barrier)
-        self.mma_async = WgmmaMmaAsyncNamespace()
         self.encode_matrix_descriptor = _op_wrapper(_cuda_op.ptx_wgmma_encode_matrix_descriptor)
-
-
-class WgmmaMmaAsyncNamespace:
-    """The WGMMA MMAAsync instruction submodule."""
-
-    def __init__(self):
-        self.ss = _op_wrapper(_cuda_op.ptx_wgmma_mma_async_ss)
-        self.rs = _op_wrapper(_cuda_op.ptx_wgmma_mma_async_rs)
 
 
 class MbarrierNamespace:
@@ -166,14 +157,6 @@ class MbarrierNamespace:
         self.try_wait = _op_wrapper(_cuda_op.ptx_mbarrier_try_wait)
         self.try_wait_once = _op_wrapper(_cuda_op.ptx_mbarrier_try_wait_once)
         self.try_wait_acquire_cluster = _op_wrapper(_cuda_op.ptx_mbarrier_try_wait_acquire_cluster)
-        self.arrive = MbarrierArriveNamespace()
-
-
-class MbarrierArriveNamespace:
-    """The Mbarrier Arrive instruction submodule."""
-
-    def __init__(self):
-        self.no_complete = _op_wrapper(_cuda_op.ptx_mbarrier_arrive_no_complete)
 
 
 class Tcgen05Namespace:
