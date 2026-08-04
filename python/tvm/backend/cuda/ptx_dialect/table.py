@@ -177,6 +177,11 @@ class OperandSlot:
     # so every resulting length is still enumerable and certifiable. Same
     # contract as `check`: total over every combination `variants()` generates.
     lanes: int | LanesFn = 1
+    # Whether PTX writes this operand as a brace-enclosed vector. Defaults to
+    # "it has more than one register", which a length function cannot answer
+    # ahead of time -- an operand whose length varies between 0 and 1 is a
+    # bracketed-optional scalar, not a vector.
+    vector: bool | None = None
 
 
 CheckFn = Callable[[dict], str | None]

@@ -152,11 +152,19 @@ def render_variant(entry: InstructionEntry, tokens, predicated=False, dtypes=Non
             continue
         regs = []
         n_lanes = lanes_of(slot, mod_map)
-        # A group operand is one whose declared shape is a vector -- statically
-        # (`lanes > 1`) or by modifier (callable). ptxas wants the braces even
-        # when such a vector has one element ("Vector of size 1 is expected"),
-        # so vector-ness follows the declaration, not the resolved count.
-        is_group = callable(slot.lanes) or slot.lanes > 1
+        if n_lanes == 0:
+            # A length function may return zero: that is how an operand the
+            # syntax line brackets as optional disappears when its modifier is
+            # absent. It takes no argument and leaves no text behind.
+            continue
+        # ptxas wants the braces even when a vector resolves to one element
+        # ("Vector of size 1 is expected"), so vector-ness is declared, not
+        # derived from the resolved count. A length function defaults to
+        # vector, which is what every register group wants; an optional scalar
+        # says otherwise.
+        is_group = (
+            slot.vector if slot.vector is not None else (callable(slot.lanes) or slot.lanes > 1)
+        )
         for lane in range(n_lanes):
             # One operand, `lanes` registers: PTX writes the group in the
             # operand list, so a lane is a C parameter but not an operand.
