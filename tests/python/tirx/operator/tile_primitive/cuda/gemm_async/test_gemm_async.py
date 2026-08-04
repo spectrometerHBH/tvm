@@ -2322,7 +2322,7 @@ def test_gemm_tcgen05_cta_group_2_accepts_replicated_tmem_a_codegen():
     src = mod.mod.imports[0].inspect_source()
     assert "tcgen05.mma.cta_group::2" in src
     assert "tcgen05.mma.ws" not in src
-    assert "_TS" in src
+    assert "tvm_builtin_ptxd_tcgen05_mma_ts_" in src
 
 
 def test_gemm_tcgen05_cta_group_2_rejects_flat_tmem_a_codegen():
@@ -2970,12 +2970,15 @@ def _compile_cuda_source(func):
 
 
 def _dense_mma_call_lines(src):
-    helper = "ptx_tcgen05_mma_cta_1_kind_f16_SS("
+    helper = "tvm_builtin_ptxd_tcgen05_mma_ss_mma_cta_group__1_kind__f16("
     return [line for line in src.splitlines() if line.lstrip().startswith(helper)]
 
 
 def _mma_descriptor_values(lines):
-    return [int(re.search(r", \(uint\)(\d+), \(bool\)", line).group(1)) for line in lines]
+    # descI is the argument right before the all-zero disable-output-lane vector.
+    return [
+        int(re.search(r", \(uint\)(\d+), \(uint\)0, \(uint\)0", line).group(1)) for line in lines
+    ]
 
 
 def test_gemm_tcgen05_explicit_mma_tile_changes_physical_instructions():
@@ -3003,7 +3006,7 @@ def test_gemm_tcgen05_explicit_mma_tile_changes_physical_instructions():
 def test_gemm_tcgen05_explicit_mma_m_is_cluster_total_for_cta_group_2(M_per_cta, mma_m):
     src = _compile_cuda_source(_build_explicit_cta2_dense_kernel(M_per_cta, mma_m))
     assert "tcgen05.mma.cta_group::2.kind::f16" in src
-    helper = "ptx_tcgen05_mma_cta_2_kind_f16_SS("
+    helper = "tvm_builtin_ptxd_tcgen05_mma_ss_mma_cta_group__2_kind__f16("
     calls = [line for line in src.splitlines() if line.lstrip().startswith(helper)]
     assert len(calls) == 1
     assert {(desc >> 24) & 0x1F for desc in _mma_descriptor_values(calls)} == {mma_m // 16}
@@ -3011,7 +3014,7 @@ def test_gemm_tcgen05_explicit_mma_m_is_cluster_total_for_cta_group_2(M_per_cta,
 
 def test_gemm_tcgen05_block_scaled_explicit_mma_tile_splits_n():
     src = _compile_cuda_source(_build_explicit_block_scaled_split_n_kernel())
-    helper = "ptx_tcgen05_mma_block_scaled_cta_2_kind_mxf8f6f4"
+    helper = "tvm_builtin_ptxd_tcgen05_mma_block_scale_ss_mma_cta_group__2_kind__mxf8f6f4"
     calls = [line for line in src.splitlines() if line.lstrip().startswith(helper)]
     assert len(calls) == 2
 
@@ -3217,7 +3220,7 @@ def test_gemm_tcgen05_cta1_m64_accepts_packed_c_layout_ws():
 
     src = mod.mod.imports[0].inspect_source()
     assert "tcgen05.mma.ws.cta_group::1.kind::f16" in src
-    assert "ptx_tcgen05_mma_cta_1_kind_f16_TS_ws(400," in src
+    assert "tvm_builtin_ptxd_tcgen05_mma_ws_ts_mma_ws_cta_group__1_kind__f16((uint)400," in src
     assert "get_tmem_addr(400, 0, 0)" not in src
     assert "get_tmem_addr(400, 0, 64)" not in src
 
@@ -3229,7 +3232,7 @@ def test_gemm_tcgen05_explicit_mma_tile_preserves_inferred_ws_datapath():
         )
     )
     assert "tcgen05.mma.ws.cta_group::1.kind::f16" in src
-    helper = "ptx_tcgen05_mma_cta_1_kind_f16_TS_ws("
+    helper = "tvm_builtin_ptxd_tcgen05_mma_ws_ts_mma_ws_cta_group__1_kind__f16("
     calls = [line for line in src.splitlines() if line.lstrip().startswith(helper)]
     assert len(calls) == 2
 

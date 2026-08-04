@@ -168,6 +168,32 @@ def _coerce_operand(entry, slot, values, mod_map):
         return [_coerce_imm(entry, slot, v) for v in values]
     if slot.role in ("dst", "value", "acc"):
         return _coerce_typed(entry, slot, values, mod_map)
+    if slot.role == "pred_dst":
+        # The 0/1 materialization of a .pred result: a "=r" uint32 the caller
+        # receives through a reference parameter, so it needs a writable
+        # uint32 lvalue exactly like a dst.
+        (value,) = values
+        if not isinstance(value, BufferLoad) or arg_dtype(value) != "uint32":
+            raise ValueError(
+                f"{entry.name}: operand '{slot.name}' is a .pred result and must be "
+                f"a writable uint32 scalar or buffer element (declare it first, "
+                f'e.g. `ok = T.local_scalar("uint32")`)'
+            )
+        return values
+    if slot.role == "pred_src":
+        # A .pred argument arrives as any 0/1-valued integer expression; the
+        # helper converts it with setp, the same way pred= does. A bare
+        # Python literal is unambiguous and gets typed here.
+        (value,) = values
+        if isinstance(value, bool | int):
+            return [const(int(value), "uint32")]
+        ty = getattr(value, "ty", None)
+        if isinstance(ty, PrimType) and ty.dtype in ("bool", "uint32", "int32"):
+            return values
+        raise ValueError(
+            f"{entry.name}: operand '{slot.name}' is a .pred argument and must be "
+            f"a bool/uint32/int32 expression"
+        )
     return [_coerce_address(entry, slot, v, mod_map) for v in values]
 
 

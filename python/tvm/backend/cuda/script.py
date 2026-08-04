@@ -53,7 +53,6 @@ class PTXNamespace:
         self.elect_sync: Callable[..., Any] = _op_wrapper(_cuda_op.ptx_elect_sync)
         self.clc_query_cancel = _op_wrapper(_cuda_op.ptx_clc_query_cancel)
         self.fetch_register: Callable[..., Any] = _op_wrapper(_cuda_op.ptx_fetch_register)
-        self.mbarrier_test_wait_parity = _op_wrapper(_cuda_op.ptx_mbarrier_test_wait_parity)
         self.cp_async_bulk_g2s_cta = _op_wrapper(_cuda_op.ptx_cp_async_bulk_g2s_cta)
         self.cp_async_bulk_g2s_cluster = _op_wrapper(_cuda_op.ptx_cp_async_bulk_g2s_cluster)
         self.cp_async_bulk_s2g = _op_wrapper(_cuda_op.ptx_cp_async_bulk_s2g)
@@ -143,7 +142,6 @@ class MbarrierNamespace:
 
     def __init__(self):
         self.try_wait = _op_wrapper(_cuda_op.ptx_mbarrier_try_wait)
-        self.try_wait_once = _op_wrapper(_cuda_op.ptx_mbarrier_try_wait_once)
         self.try_wait_acquire_cluster = _op_wrapper(_cuda_op.ptx_mbarrier_try_wait_acquire_cluster)
 
 
@@ -157,20 +155,6 @@ class Tcgen05Namespace:
             _cuda_op.ptx_tcgen05_encode_instr_descriptor_block_scaled
         )
         self.cp = _op_wrapper(_cuda_op.ptx_tcgen05_cp)
-        self.mma = Tcgen05MmaNamespace()
-
-
-class Tcgen05MmaNamespace:
-    """The Tcgen05 MMA instruction submodule."""
-
-    def __init__(self):
-        self.block_scale = _op_wrapper(_cuda_op.ptx_tcgen05_mma_block_scale)
-
-    def __call__(self, *args, **kwds):
-        return _op_wrapper(_cuda_op.ptx_tcgen05_mma)(*args, **kwds)
-
-    # __call__ corresponds to ptx_tcgen05_mma
-    __tir_call_op_name__ = "ptx_tcgen05_mma"
 
 
 class IketNamespace:

@@ -200,35 +200,6 @@ device_intrinsic(
 
 
 # =============================================================================
-# mbarrier.try_wait.parity — ONE-SHOT non-blocking variant. Returns true
-# if the requested parity has already been reached, false otherwise.
-# The TIRx-standard ``ptx_mbarrier_try_wait`` above wraps this in a
-# label loop that retries until success; this one-shot form is the
-# building block for bounded-retry debug waits (Nymph's
-# ``debug_bounded_wait`` lowering mode wraps it in a Python-counted
-# loop so the kernel cannot hang forever at a mis-protocoled wait).
-# =============================================================================
-device_intrinsic(
-    "ptx_mbarrier_try_wait_once",
-    c_signature="(void* barrier, int phase, int ticks)",
-    return_type="uint32_t",
-    body=(
-        "    unsigned int barrier_addr_int = __cvta_generic_to_shared(barrier);\n"
-        "    unsigned int ticks_u = (unsigned int)ticks;\n"
-        "    unsigned int result;\n"
-        "    asm volatile(\n"
-        '        "{\\n"\n'
-        '        ".reg .pred                P1;\\n"\n'
-        '        "mbarrier.try_wait.parity.shared::cta.b64 P1, [%1], %2, %3;\\n"\n'
-        '        "selp.u32                  %0, 1, 0, P1;\\n"\n'
-        '        "}\\n"\n'
-        '        : "=r"(result) : "r"(barrier_addr_int), "r"(phase), "r"(ticks_u) : "memory");\n'
-        "    return result;"
-    ),
-)
-
-
-# =============================================================================
 # elect.sync — TIRx uses the CUDA builtin ``tvm_builtin_elect_one_sync()``
 # helper (declared in the CUDA header tags), not direct PTX.
 # =============================================================================
@@ -293,47 +264,6 @@ device_intrinsic(
 # Additional mbarrier, grid-sync, and warp collective helpers.
 # =============================================================================
 
-
-# PTX mbarrier parity wait form:
-#   mbarrier.test_wait.parity{.sem.scope}{.shared{::cta}}.b64 waitComplete, [addr], phaseParity;
-def _mbarrier_test_wait_parity_parts(_barrier, _phase, sem, scope, space):
-    sem = parse_str(sem)
-    scope = parse_str(scope)
-    space = parse_str(space)
-    if sem and sem not in ("acquire", "relaxed"):
-        raise ValueError(f"Unsupported mbarrier.test_wait.parity sem {sem!r}")
-    if scope and scope not in ("cta", "cluster"):
-        raise ValueError(f"Unsupported mbarrier.test_wait.parity scope {scope!r}")
-    if space not in ("shared", "shared::cta"):
-        raise ValueError(f"Unsupported mbarrier.test_wait.parity space {space!r}")
-    sem_scope = f".{sem}.{scope}" if sem else ""
-    name = (
-        "tvm_builtin_ptx_mbarrier_test_wait_parity"
-        f"{('_' + sem + '_' + scope) if sem else ''}_{space.replace('::', '_')}_b64"
-    )
-    body = (
-        "    unsigned int ready = 0;\n"
-        "    asm volatile(\n"
-        '        "{\\n\\t"\n'
-        '        ".reg .pred P1; \\n\\t"\n'
-        f'        "mbarrier.test_wait.parity{sem_scope}.{space}.b64 P1, [%1], %2; \\n\\t"\n'
-        '        "selp.b32 %0, 1, 0, P1; \\n\\t"\n'
-        '        "}" : "=r"(ready) : "r"((unsigned int)__cvta_generic_to_shared(barrier)), '
-        '"r"(phase) : "memory");\n'
-        "    return ready;"
-    )
-    return name, body
-
-
-device_intrinsic(
-    "ptx_mbarrier_test_wait_parity",
-    n_attrs=3,
-    helper_name=lambda *a: _mbarrier_test_wait_parity_parts(*a)[0],
-    c_signature="(void* barrier, int phase)",
-    return_type="unsigned int",
-    tvm_return_type="uint32",
-    body=lambda *a: _mbarrier_test_wait_parity_parts(*a)[1],
-)
 
 device_intrinsic(
     "cuda_ballot_sync",

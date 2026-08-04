@@ -730,7 +730,11 @@ def test_ptxd_coercion_ir_forms():
 _CERT_PRELUDE = "#include <cstdint>\n#include <cuda_fp16.h>\n#include <cuda_bf16.h>"
 
 _ASM_RE = re.compile(r'asm(?: volatile)?\("(.*?)"\s*:', re.S)
-_PRED_RE = re.compile(r"^\{ \.reg \.pred p; setp\.ne\.b32 p, %\d+, 0; @p (?P<instr>[^;]+;) \}$")
+_BLOCK_RE = re.compile(r"^\{ (?P<body>.*) \}$")
+# The sanctioned in-block boundary conversions, and nothing else: predicate
+# register declarations, setp conversions in (@p's own guard and pred_src
+# operands), selp materializations out (pred_dst operands).
+_BOUNDARY_PREFIXES = (".reg .pred ", "setp.ne.b32 ", "selp.b32 ")
 
 
 def _as_render_args(rendering):
@@ -743,11 +747,19 @@ def _as_render_args(rendering):
 def _sole_instruction(asm_text):
     """The single PTX statement in ``asm_text``, or None if it is not exactly one.
 
-    The sanctioned ``@p`` wrapper is unwrapped first: it guards one instruction
-    rather than adding one.
+    The sanctioned boundary conversions are peeled first: ``@p``'s guard,
+    pred_src's setp, pred_dst's selp. They convert values at the block
+    boundary; they never add a second instruction.
     """
-    m = _PRED_RE.match(asm_text)
-    body = m.group("instr") if m else asm_text
+    m = _BLOCK_RE.match(asm_text)
+    if m:
+        stmts = [f"{part.strip()};" for part in m.group("body").split(";") if part.strip()]
+        core = [st for st in stmts if not st.startswith(_BOUNDARY_PREFIXES)]
+        if len(core) != 1:
+            return None
+        body = core[0].removeprefix("@p ")
+    else:
+        body = asm_text
     if body.count(";") != 1 or not body.endswith(";"):
         return None
     return body
@@ -828,9 +840,16 @@ def test_ptxd_all_variants_render_unique():
             if predicated:  # framework-level @p twin, guarded inside the block
                 assert f"@p {opcode} " in source or f"@p {opcode};" in source
             else:
-                assert f'"{opcode} ' in source or f'"{opcode};"' in source
+                # The instruction may open the asm text or sit inside a
+                # boundary-conversion block after a setp.
+                assert (
+                    f'"{opcode} ' in source
+                    or f'"{opcode};"' in source
+                    or f"; {opcode} " in source
+                    or f"; {opcode};" in source
+                )
             total += not predicated  # a @p twin is not a separate variant
-    assert total == 70221  # update when the table grows
+    assert total == 70291  # update when the table grows
 
 
 def test_ptxd_stub_up_to_date():

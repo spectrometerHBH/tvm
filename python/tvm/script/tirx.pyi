@@ -355,11 +355,12 @@ class _Chain_max:
     def __call__(self, *args: Any) -> None: ...
 
 class _Chain_mbarrier:
-    """`mbarrier` — 8 entries sharing this mnemonic; PTX puts their difference in the operand
+    """`mbarrier` — 10 entries sharing this mnemonic; PTX puts their difference in the operand
     list, so the call selects one. Shapes: (addr, count); (addr); (addr, tx_count); (state,
-    addr, count)
+    addr, count); (wait_complete, addr, phase); (wait_complete, addr, phase, time_hint)
     """
 
+    acquire: _Chain_mbarrier
     arrive: _Chain_mbarrier
     b64: _Chain_mbarrier
     cluster: _Chain_mbarrier
@@ -369,12 +370,15 @@ class _Chain_mbarrier:
     init: _Chain_mbarrier
     inval: _Chain_mbarrier
     noComplete: _Chain_mbarrier
+    parity: _Chain_mbarrier
     relaxed: _Chain_mbarrier
     release: _Chain_mbarrier
     shared: _Chain_mbarrier
     shared__cluster: _Chain_mbarrier
     shared__cta: _Chain_mbarrier
-    def __call__(self, *args: Any, pred: Any = None) -> None: ...
+    test_wait: _Chain_mbarrier
+    try_wait: _Chain_mbarrier
+    def __call__(self, *args: Any) -> None: ...
 
 class _Chain_min:
     """`min` — 2 entries sharing this mnemonic; PTX puts their difference in the operand list,
@@ -655,26 +659,41 @@ class _Chain_sub:
     def __call__(self, d: Any, a: Any, b: Any, *args: Any) -> None: ...
 
 class _Chain_tcgen05:
-    """`tcgen05` — 9 entries sharing this mnemonic; PTX puts their difference in the operand
+    """`tcgen05` — 15 entries sharing this mnemonic; PTX puts their difference in the operand
     list, so the call selects one. Shapes: (dst, ncols); (taddr, ncols); (); (mbar); (mbar,
-    mask); (*__operands)
+    mask); (*__operands); (d_tmem, a_desc, b_desc, idesc, enable_input_d, zero_col_mask);
+    (d_tmem, a_tmem, b_desc, idesc, enable_input_d, zero_col_mask); (d_tmem, a_desc, b_desc,
+    idesc, sfa_tmem, sfb_tmem, enable_input_d); (d_tmem, a_tmem, b_desc, idesc, sfa_tmem,
+    sfb_tmem, enable_input_d)
     """
 
     aligned: _Chain_tcgen05
     alloc: _Chain_tcgen05
     b32: _Chain_tcgen05
     b64: _Chain_tcgen05
+    block_scale: _Chain_tcgen05
     commit: _Chain_tcgen05
     cta_group__1: _Chain_tcgen05
     cta_group__2: _Chain_tcgen05
     dealloc: _Chain_tcgen05
     fence__after_thread_sync: _Chain_tcgen05
     fence__before_thread_sync: _Chain_tcgen05
+    kind__f16: _Chain_tcgen05
+    kind__f8f6f4: _Chain_tcgen05
+    kind__i8: _Chain_tcgen05
+    kind__mxf4: _Chain_tcgen05
+    kind__mxf4nvf4: _Chain_tcgen05
+    kind__mxf8f6f4: _Chain_tcgen05
+    kind__tf32: _Chain_tcgen05
     ld: _Chain_tcgen05
     mbarrier__arrive__one: _Chain_tcgen05
+    mma: _Chain_tcgen05
     multicast__cluster: _Chain_tcgen05
     pack__16b: _Chain_tcgen05
     relinquish_alloc_permit: _Chain_tcgen05
+    scale_vec__1X: _Chain_tcgen05
+    scale_vec__2X: _Chain_tcgen05
+    scale_vec__4X: _Chain_tcgen05
     shared__cluster: _Chain_tcgen05
     shared__cta: _Chain_tcgen05
     st: _Chain_tcgen05
@@ -682,6 +701,7 @@ class _Chain_tcgen05:
     unpack__16b: _Chain_tcgen05
     wait__ld: _Chain_tcgen05
     wait__st: _Chain_tcgen05
+    ws: _Chain_tcgen05
     x1: _Chain_tcgen05
     x128: _Chain_tcgen05
     x16: _Chain_tcgen05

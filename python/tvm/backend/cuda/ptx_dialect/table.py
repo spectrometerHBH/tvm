@@ -159,6 +159,16 @@ class OperandSlot:
         accumulator, bound "+" where a dst binds "=". Takes an lvalue like a
         dst; unlike a dst it does not block ``@p``, because "+" keeps the old
         value live under a false predicate.
+      - ``"pred_dst"`` a ``.pred`` result. Inline asm has no constraint letter
+        for predicate registers, so the boundary conversion lives inside the
+        block: the instruction writes a predicate register and a trailing
+        ``selp.b32`` materializes it as 0/1 into a "=r" uint32 the caller
+        receives through a reference parameter, exactly like a dst (and it
+        gates ``@p`` like one).
+      - ``"pred_src"`` a ``.pred`` argument. The mirror conversion: a leading
+        ``setp.ne.b32`` turns a "r"-bound uint32 into the predicate register
+        the instruction reads. These are the block's second and third
+        boundary-conversion exceptions -- ``@p``'s own setp was the first.
 
     ``lanes`` > 1 makes the operand a brace-enclosed register group. PTX writes
     the group in the operand list (``mov.b64 d, {lo, hi}``), so the group is
@@ -263,9 +273,10 @@ class InstructionEntry:
         ``"="`` output constraint tells nvcc the prior value is dead, so a
         predicated destination silently loses it. An accumulator (``role="acc"``)
         binds "+" instead, which keeps the old value live -- so it does not
-        count here and @p remains available on it.
+        count here and @p remains available on it. A pred_dst is written
+        through "=" the same way a dst is, so it counts.
         """
-        return any(slot.role == "dst" for slot in self.operands)
+        return any(slot.role in ("dst", "pred_dst") for slot in self.operands)
 
 
 def mods(entry: InstructionEntry, tokens) -> dict:
@@ -992,6 +1003,25 @@ def _check_tma_gather4(m):
     in the 2-dimensional tensor"), so ptxas rejects every other .dim."""
     if m["load_mode"] in ("tile::gather4", "tile::scatter4") and m["dim"] != "2d":
         return f"{m['load_mode']} is a 2d-only load mode"
+    return None
+
+
+# tcgen05.mma disable-output-lane, per ISA 9.7.17.10.9.1: "The size of the
+# vector is as follows: .cta_group::1 -> 4, .cta_group::2 -> 8".
+def _tcgen05_mma_mask_lanes(m):
+    return 8 if m["cta_group"] == "cta_group::2" else 4
+
+
+def _check_tcgen05_mma_block_scale(m):
+    """Valid .scale_vec sizes per kind (ISA "Scale factor" table): mxf8f6f4
+    scales in 1X, mxf4 in 2X, mxf4nvf4 in 2X or 4X."""
+    valid = {
+        "kind::mxf8f6f4": ("scale_vec::1X",),
+        "kind::mxf4": ("scale_vec::2X",),
+        "kind::mxf4nvf4": ("scale_vec::2X", "scale_vec::4X"),
+    }[m["kind"]]
+    if m["scale_vec"] not in valid:
+        return f"{m['kind']} scales in {'/'.join(valid)}"
     return None
 
 
@@ -2109,7 +2139,10 @@ _ENTRIES = [
     # - the `state, [addr]` forms: the destination is the barrier's pre-arrival
     #   state, which nothing reads today. (`arrive.noComplete` has no sink form
     #   at all, so it is registered below with a real state result.)
-    # - the try_wait / test_wait lines: they produce a `.pred` result.
+    # - the non-parity try_wait / test_wait lines (their `state` operand is the
+    #   arrive-returned token nothing reads today), the `.phase_type` qualifiers
+    #   (no call site), and try_wait's timeHint-less arity (every caller passes
+    #   the tick budget).
     #
     # The addr slot takes no fixed space: with `.space` omitted the ISA means
     # a generic address, which is 64-bit on sm_90+, so pinning the operand to
@@ -2219,6 +2252,38 @@ _ENTRIES = [
             OperandSlot("count", role="value", dtype="u32"),
         ),
     ),
+    # mbarrier.test_wait.parity{.sem.scope}{.ss}.b64 waitComplete, [addr], phaseParity;
+    # mbarrier.try_wait.parity{.sem.scope}{.ss}.b64 waitComplete, [addr], phaseParity, timeHint;
+    #
+    # waitComplete is a `.pred` result -- role="pred_dst", the in-block selp
+    # materialization. try_wait is registered in its timeHint arity only (the
+    # hint is a nanosecond budget the callers always pass).
+    *[
+        InstructionEntry(
+            name=f"mbarrier_{act}_parity",
+            mnemonic="mbarrier",
+            slots=(
+                ModifierSlot("action", (act,)),
+                ModifierSlot("parity", ("parity",)),
+                ModifierSlot("sem", ("acquire", "relaxed"), optional=True),
+                ModifierSlot("scope", ("cta", "cluster"), optional=True),
+                ModifierSlot("space", ("shared", "shared::cta"), optional=True),
+                ModifierSlot("type", ("b64",)),
+            ),
+            check=_check_mbarrier_sem_scope,
+            operands=(
+                OperandSlot("wait_complete", role="pred_dst"),
+                OperandSlot("addr", role="addr"),
+                OperandSlot("phase", role="value", dtype="u32"),
+                *(
+                    (OperandSlot("time_hint", role="value", dtype="u32"),)
+                    if act == "try_wait"
+                    else ()
+                ),
+            ),
+        )
+        for act in ("test_wait", "try_wait")
+    ],
     *[
         InstructionEntry(  # mbarrier.{expect_tx,complete_tx}{.sem.scope}{.space}.b64 [addr], tx;
             name=f"mbarrier_{act}",
@@ -2426,6 +2491,110 @@ _ENTRIES = [
             OperandSlot("r", role="value", dtype="b32", lanes=_tcgen05_ldst_lanes),
         ),
     ),
+    # tcgen05.mma per PTX ISA 9.7.17.10.9.1 (sm_100a): D = A*B + D where D
+    # lives in Tensor Memory (an address, not registers -- so the instruction
+    # has no dst and @p stays available). Two entries per family split on the
+    # A operand's home: a 64-bit shared-memory descriptor ("ss") or a tmem
+    # address ("ts"), the same split the syntax lines draw. enable-input-d is
+    # a runtime .pred argument -- role="pred_src", the in-block setp
+    # conversion -- and disable-output-lane is a register vector whose length
+    # follows .cta_group (4 or 8).
+    #
+    # NOT REGISTERED:
+    # - `{, scale-input-d}`: an instruction-text immediate in [0, 15], no
+    #   call site uses it.
+    # - `tcgen05.mma.sp` / `.ws.sp` (sparse metadata operand), the
+    #   .collector::/.ashift qualifiers, and the i8 convolution lines that
+    #   only differ by those qualifiers: no call sites.
+    # - .ws without the zero-column-mask-desc operand: every caller passes
+    #   the mask (as literal zero).
+    # - block_scale's .block16/.block32 vector sizes and its
+    #   scale_vec-omitted spelling: the library always writes .scale_vec::NX.
+    *[
+        InstructionEntry(
+            name=f"tcgen05_mma_{form}",
+            mnemonic="tcgen05",
+            slots=(
+                ModifierSlot("action", ("mma",)),
+                ModifierSlot("cta_group", ("cta_group::1", "cta_group::2")),
+                ModifierSlot("kind", ("kind::f16", "kind::tf32", "kind::f8f6f4", "kind::i8")),
+            ),
+            cert_arch="sm_100a",
+            operands=(
+                OperandSlot("d_tmem", role="addr", space="tmem"),
+                *(
+                    (OperandSlot("a_desc", role="value", dtype="u64"),)
+                    if form == "ss"
+                    else (OperandSlot("a_tmem", role="addr", space="tmem"),)
+                ),
+                OperandSlot("b_desc", role="value", dtype="u64"),
+                OperandSlot("idesc", role="value", dtype="u32"),
+                OperandSlot(
+                    "disable_output_lane",
+                    role="value",
+                    dtype="u32",
+                    lanes=_tcgen05_mma_mask_lanes,
+                ),
+                OperandSlot("enable_input_d", role="pred_src"),
+            ),
+        )
+        for form in ("ss", "ts")
+    ],
+    *[
+        InstructionEntry(  # weight-stationary: no mask vector, a zero-column desc
+            name=f"tcgen05_mma_ws_{form}",
+            mnemonic="tcgen05",
+            slots=(
+                ModifierSlot("action", ("mma",)),
+                ModifierSlot("ws", ("ws",)),
+                ModifierSlot("cta_group", ("cta_group::1",)),
+                ModifierSlot("kind", ("kind::f16", "kind::tf32", "kind::f8f6f4", "kind::i8")),
+            ),
+            cert_arch="sm_100a",
+            operands=(
+                OperandSlot("d_tmem", role="addr", space="tmem"),
+                *(
+                    (OperandSlot("a_desc", role="value", dtype="u64"),)
+                    if form == "ss"
+                    else (OperandSlot("a_tmem", role="addr", space="tmem"),)
+                ),
+                OperandSlot("b_desc", role="value", dtype="u64"),
+                OperandSlot("idesc", role="value", dtype="u32"),
+                OperandSlot("enable_input_d", role="pred_src"),
+                OperandSlot("zero_col_mask", role="value", dtype="u64"),
+            ),
+        )
+        for form in ("ss", "ts")
+    ],
+    *[
+        InstructionEntry(  # block-scaled: A/B scale factors live in tmem
+            name=f"tcgen05_mma_block_scale_{form}",
+            mnemonic="tcgen05",
+            slots=(
+                ModifierSlot("action", ("mma",)),
+                ModifierSlot("cta_group", ("cta_group::1", "cta_group::2")),
+                ModifierSlot("kind", ("kind::mxf8f6f4", "kind::mxf4", "kind::mxf4nvf4")),
+                ModifierSlot("block_scale", ("block_scale",)),
+                ModifierSlot("scale_vec", ("scale_vec::1X", "scale_vec::2X", "scale_vec::4X")),
+            ),
+            cert_arch="sm_100a",
+            check=_check_tcgen05_mma_block_scale,
+            operands=(
+                OperandSlot("d_tmem", role="addr", space="tmem"),
+                *(
+                    (OperandSlot("a_desc", role="value", dtype="u64"),)
+                    if form == "ss"
+                    else (OperandSlot("a_tmem", role="addr", space="tmem"),)
+                ),
+                OperandSlot("b_desc", role="value", dtype="u64"),
+                OperandSlot("idesc", role="value", dtype="u32"),
+                OperandSlot("sfa_tmem", role="addr", space="tmem"),
+                OperandSlot("sfb_tmem", role="addr", space="tmem"),
+                OperandSlot("enable_input_d", role="pred_src"),
+            ),
+        )
+        for form in ("ss", "ts")
+    ],
     # mma per PTX ISA 9.7.15.5.14. Four operand groups (d, a, b, c), each a
     # register vector whose length follows the Matrix Fragments tables -- four
     # callable `lanes`, one per group. `d` and `c` are separate operands: the

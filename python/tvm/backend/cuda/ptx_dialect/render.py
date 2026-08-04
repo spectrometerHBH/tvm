@@ -144,6 +144,10 @@ def render_variant(entry: InstructionEntry, tokens, predicated=False, dtypes=Non
 
     params, inputs, outputs, rendered = [], [], [], []
     pre, post = [], []  # carrier declarations / boundary conversions
+    # Predicate-boundary pieces, all inside the asm block: `.reg .pred`
+    # declarations, leading setp conversions (pred_src), trailing selp
+    # conversions (pred_dst). See the pred_dst/pred_src role notes.
+    pred_decls, asm_pre, asm_post = [], [], []
     dtype_of = dict(zip(entry.typed_operands, dtypes, strict=True))
     idx = 0
     for slot in entry.operands:
@@ -215,6 +219,31 @@ def render_variant(entry: InstructionEntry, tokens, predicated=False, dtypes=Non
             elif slot.role == "ptr":
                 params.append(f"const void* {lname}")
                 inputs.append(f'"l"({lname})')
+            elif slot.role == "pred_dst":
+                # No constraint letter exists for .pred, so the instruction
+                # writes a predicate register and selp materializes it as 0/1
+                # into a "=r" uint32 -- the same in-block boundary conversion
+                # @p performs on the way in. The C side is a dst: a reference
+                # parameter the caller binds a writable lvalue to.
+                reg = f"pd{sum(1 for d in pred_decls if '.pred pd' in d)}"
+                params.append(f"uint32_t& {lname}")
+                outputs.append(f'"=r"({lname})')
+                pred_decls.append(f".reg .pred {reg};")
+                asm_post.append(f"selp.b32 %{idx}, 1, 0, {reg};")
+                regs.append(reg)
+                idx += 1
+                continue
+            elif slot.role == "pred_src":
+                # The mirror conversion: setp turns a "r"-bound uint32 into
+                # the predicate register the instruction names.
+                reg = f"ps{sum(1 for d in pred_decls if '.pred ps' in d)}"
+                params.append(f"uint32_t {lname}")
+                inputs.append(f'"r"({lname})')
+                pred_decls.append(f".reg .pred {reg};")
+                asm_pre.append(f"setp.ne.b32 {reg}, %{idx}, 0;")
+                regs.append(reg)
+                idx += 1
+                continue
             else:  # value
                 cb = C_BINDING[dtype_of[slot]]
                 params.append(f"{cb.c_type} {lname}")
@@ -238,7 +267,13 @@ def render_variant(entry: InstructionEntry, tokens, predicated=False, dtypes=Non
     if predicated:
         params.append("uint32_t __pred")
         inputs.append('"r"(__pred)')
-        asm_text = f"{{ .reg .pred p; setp.ne.b32 p, %{idx}, 0; @p {instr} }}"
+        pred_decls.append(".reg .pred p;")
+        asm_pre.append(f"setp.ne.b32 p, %{idx}, 0;")
+        instr = f"@p {instr}"
+    if pred_decls:
+        # One block: predicate declarations, the setp conversions in, the
+        # instruction, the selp conversions out.
+        asm_text = "{ " + " ".join([*pred_decls, *asm_pre, instr, *asm_post]) + " }"
     else:
         asm_text = instr
     # Two independent C-level properties, deliberately not conflated:
@@ -253,7 +288,15 @@ def render_variant(entry: InstructionEntry, tokens, predicated=False, dtypes=Non
     volatile = " volatile" if entry.asm_volatile else ""
     # Two ways to clobber memory: name an address, or order everyone else's
     # accesses (a fence names nothing but must not let loads/stores move past).
-    touches_memory = any(s.role == "addr" for s in entry.operands) or entry.orders_memory
+    # A tmem address does not count: Tensor Memory is not C-visible memory, so
+    # the compiler has nothing to spill/reload around the instruction, and the
+    # legacy tcgen05 ld/st/mma helpers never claimed the clobber -- for mma,
+    # issued per K-step in the hottest loop, the needless barrier is measurable.
+    # Ordering against tmem consumers is the job of tcgen05.fence/commit/wait.
+    touches_memory = (
+        any(s.role == "addr" and operand_space(s, mod_map) != "tmem" for s in entry.operands)
+        or entry.orders_memory
+    )
     clobber = ' : "memory"' if touches_memory else ""
     asm_line = f'asm{volatile}("{asm_text}" : {", ".join(outputs)} : {", ".join(inputs)}{clobber});'
     body = "\n".join(f"  {line}" for line in [*pre, asm_line, *post])

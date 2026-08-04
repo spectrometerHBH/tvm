@@ -20,6 +20,7 @@ import pytest
 
 import tvm
 import tvm.testing
+from tvm.backend.cuda.intrinsics.tcgen05 import _get_tcgen05_mma_kind
 from tvm.script import tirx as T
 from tvm.script.tirx import tile as Tx
 from tvm.testing import env
@@ -125,14 +126,17 @@ def test_mbarrier_try_wait_once_codegen():
         T.cta_id([1])
         T.thread_id([128])
         bar = T.shared_scalar("uint64")
-        T.evaluate(T.ptx.mbarrier.try_wait_once(T.address_of(bar), 0, 0))
+        ok = T.local_scalar("uint32")
+        T.ptxd.mbarrier.try_wait.parity.shared__cta.b64(
+            ok, T.address_of(bar), T.uint32(0), T.uint32(0)
+        )
     # fmt: on
 
     target = tvm.target.Target("cuda")
     with target:
         src, _ = _get_source(test_try_wait_once)
-        assert "mbarrier.try_wait.parity.shared::cta.b64" in src
-        assert "selp.u32" in src
+        assert "mbarrier.try_wait.parity.shared::cta.b64 pd0, [%1], %2, %3;" in src
+        assert "selp.b32 %0, 1, 0, pd0;" in src
 
 
 @pytest.mark.gpu
@@ -485,6 +489,10 @@ def test_tcgen05_mma_ss_no_tma(swizzle):
 
     dyn_smem_bytes = 1024 + (M * K + N * K) * 2
 
+    mma_kind = _get_tcgen05_mma_kind(d_type, a_type, b_type)
+    mma_chain = f"tcgen05.mma.cta_group::{cta_group}.kind::{mma_kind}"
+    mma_masks = [0] * (4 if cta_group == 1 else 8)
+
     # fmt: off
     @T.prim_func
     def test_mma_ss_no_tma(A: T.Buffer((M, K), a_type, layout=T.TileLayout(T.S[M, K])),
@@ -528,9 +536,9 @@ def test_tcgen05_mma_ss_no_tma(swizzle):
                 T.ptx.tcgen05.encode_matrix_descriptor(descA.data, A_smem.ptr_to([0, k * MMA_K]), ldo=ldo, sdo=sdo, swizzle=SWIZZLE)  # noqa: E501
                 T.ptx.tcgen05.encode_matrix_descriptor(descB.data, B_smem.ptr_to([0, k * MMA_K]), ldo=ldo, sdo=sdo, swizzle=SWIZZLE)  # noqa: E501
                 if k == 0:
-                    T.ptx.tcgen05.mma(tmem_addr, descA[0], descB[0], descI[0], d_dtype=d_type, a_dtype=a_type, b_dtype=b_type, use_a_tmem=False, cta_group=cta_group, enable_input_d=0)  # noqa: E501
+                    T.ptxd[mma_chain](tmem_addr, descA[0], descB[0], descI[0], *mma_masks, 0)
                 else:
-                    T.ptx.tcgen05.mma(tmem_addr, descA[0], descB[0], descI[0], d_dtype=d_type, a_dtype=a_type, b_dtype=b_type, use_a_tmem=False, cta_group=cta_group, enable_input_d=1)  # noqa: E501
+                    T.ptxd[mma_chain](tmem_addr, descA[0], descB[0], descI[0], *mma_masks, 1)
             T.ptxd[f"tcgen05.commit.cta_group::{cta_group}.mbarrier::arrive::one.shared::cluster.b64"](bar.data)
         T.ptx.mbarrier.try_wait(bar.data, phase[0])
         phase[0] = phase[0] ^ 1
@@ -599,16 +607,16 @@ def test_tcgen05_mma_pred_codegen():
         desc_b[0] = T.uint64(0)
         desc_i[0] = T.uint32(0)
         pred[0] = T.uint32(1)
-        T.ptx.tcgen05.mma(
+        T.ptxd["tcgen05.mma.cta_group::1.kind::f16"](
             tmem_addr[0],
             desc_a[0],
             desc_b[0],
             desc_i[0],
-            d_dtype="float32",
-            a_dtype="float16",
-            b_dtype="float16",
-            use_a_tmem=False,
-            cta_group=1,
+            0,
+            0,
+            0,
+            0,
+            1,
             pred=pred[0],
         )
     # fmt: on
@@ -616,9 +624,11 @@ def test_tcgen05_mma_pred_codegen():
     target = tvm.target.Target("cuda")
     with target:
         src, _ = _get_source(test_mma_pred)
-        assert "ptx_tcgen05_mma_cta_1_kind_f16_SS_pred" in src
-        assert "setp.ne.b32 p_issue" in src
-        assert "@p_issue tcgen05.mma.cta_group::1.kind::f16" in src
+        assert "tvm_builtin_ptxd_tcgen05_mma_ss_mma_cta_group__1_kind__f16_pred" in src
+        # enable-input-d converts in via ps0, the @p guard via p -- two
+        # independent setp conversions inside one block.
+        assert "setp.ne.b32 ps0" in src
+        assert "@p tcgen05.mma.cta_group::1.kind::f16" in src
 
 
 if __name__ == "__main__":
