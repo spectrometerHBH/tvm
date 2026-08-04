@@ -121,7 +121,6 @@ class CpAsyncBulkNamespace:
     """The CpAsyncBulk instruction submodule."""
 
     def __init__(self):
-        self.tensor = CpAsyncBulkTensorNamespace()
         self.s2c = _op_wrapper(_cuda_op.ptx_cp_async_bulk_shared_to_cluster)
 
     def __call__(self, *args, **kwds):
@@ -129,17 +128,6 @@ class CpAsyncBulkNamespace:
 
     # __call__ corresponds to ptx_cp_async_bulk
     __tir_call_op_name__ = "ptx_cp_async_bulk"
-
-
-class CpAsyncBulkTensorNamespace:
-    """The CpAsyncBulkTensor instruction submodule."""
-
-    def __init__(self):
-        self.g2s_cta = _op_wrapper(_cuda_op.ptx_cp_async_bulk_tensor_g2s_cta)
-        self.g2s_cluster = _op_wrapper(_cuda_op.ptx_cp_async_bulk_tensor_g2s_cluster)
-        self.s2g = _op_wrapper(_cuda_op.ptx_cp_async_bulk_tensor_shared_to_global)
-        self.s2g_reduce = _op_wrapper(_cuda_op.ptx_cp_async_bulk_tensor_shared_to_global_reduce)
-        self.prefetch = _op_wrapper(_cuda_op.ptx_cp_async_bulk_tensor_prefetch)
 
 
 class WgmmaNamespace:

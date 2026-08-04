@@ -186,6 +186,12 @@ class OperandSlot:
     # ahead of time -- an operand whose length varies between 0 and 1 is a
     # bracketed-optional scalar, not a vector.
     vector: bool | None = None
+    # A composite memory operand: adjacent slots naming the same bracket render
+    # inside one pair of square brackets, each keeping its own C parameters and
+    # constraints. This is how TMA spells its address -- `[tensorMap,
+    # tensorCoords]` is a single PTX operand holding a 64-bit pointer and an
+    # .s32 coordinate vector that have no single-register encoding.
+    bracket: str | None = None
 
 
 CheckFn = Callable[[dict], str | None]
@@ -959,6 +965,34 @@ _WGMMA_N_B1 = (*_WGMMA_N_S8, "240", "256")
 def _wgmma_acc_lanes(m):
     n = int(m["shape"].split("n")[1].split("k")[0])
     return n // 4 if m["dtype"] == "f16" else n // 2
+
+
+# cp.async.bulk.tensor coordinate vectors, per ISA 9.7.9.26.5.2: "Vector of
+# n elements where n = .dim" -- except the gather4/scatter4 load modes, whose
+# tensorCoords is a "fixed length vector of size 5" (one column index plus
+# four row indices) whatever the dimension.
+def _tma_coords_lanes(m):
+    if m["load_mode"] in ("tile::gather4", "tile::scatter4"):
+        return 5
+    return int(m["dim"][0])
+
+
+def _tma_mask_lanes(m):
+    # `{, ctaMask}` exists exactly when `.multicast::cluster` is written.
+    return 1 if m["multicast"] else 0
+
+
+def _tma_cache_lanes(m):
+    # `{, cache_policy}` exists exactly when `.L2::cache_hint` is written.
+    return 1 if m["cache"] else 0
+
+
+def _check_tma_gather4(m):
+    """gather4/scatter4 reindex four rows of a 2D tensor (ISA: "the four rows
+    in the 2-dimensional tensor"), so ptxas rejects every other .dim."""
+    if m["load_mode"] in ("tile::gather4", "tile::scatter4") and m["dim"] != "2d":
+        return f"{m['load_mode']} is a 2d-only load mode"
+    return None
 
 
 _ENTRIES = [
@@ -1905,6 +1939,163 @@ _ENTRIES = [
             ModifierSlot("action", ("commit_group",)),
         ),
         operands=(),
+    ),
+    # cp.async.bulk.tensor (TMA), per ISA 9.7.9.26.5.2-4. The tensor address
+    # is the composite `[tensorMap, tensorCoords]` -- one PTX operand holding
+    # a 64-bit tensor-map pointer plus an .s32 coordinate vector -- which is
+    # what OperandSlot.bracket transcribes. The coordinate count follows .dim
+    # except in the gather4/scatter4 modes (fixed 5); ctaMask and cache_policy
+    # are trailing operands that exist exactly when their modifier is written,
+    # a zero-lanes function each.
+    #
+    # NOT REGISTERED:
+    # - the .im2col family of load modes (im2col/im2col::w/im2col::w::128 and
+    #   s2g's im2col_no_offs) with their `{, im2colInfo}` operand: no call
+    #   site uses im2col, and the legacy helpers never supported it.
+    # - `.tile::scatter4` under cp.reduce: absent from that syntax line.
+    InstructionEntry(  # global -> shared::cluster (the TMA load every kernel uses)
+        name="cp_async_bulk_tensor_g2s_cluster",
+        mnemonic="cp",
+        slots=(
+            ModifierSlot("api", ("async",)),
+            ModifierSlot("kind", ("bulk",)),
+            ModifierSlot("unit", ("tensor",)),
+            ModifierSlot("dim", ("1d", "2d", "3d", "4d", "5d")),
+            ModifierSlot("dst", ("shared::cluster",)),
+            ModifierSlot("src", ("global",)),
+            # ptxas accepts both spellings of the default load mode: written
+            # `.tile` or omitted entirely (the legacy g2s helpers omitted it,
+            # the s2g/prefetch ones wrote it).
+            ModifierSlot("load_mode", ("tile", "tile::gather4"), optional=True),
+            ModifierSlot("completion", ("mbarrier::complete_tx::bytes",)),
+            ModifierSlot("multicast", ("multicast::cluster",), optional=True),
+            ModifierSlot("cta_group", ("cta_group::1", "cta_group::2"), optional=True),
+            ModifierSlot("cache", ("L2::cache_hint",), optional=True),
+        ),
+        cert_arch="sm_100a",
+        check=_check_tma_gather4,
+        operands=(
+            OperandSlot("dst_mem", role="addr", space="shared::cluster"),
+            OperandSlot("tmap", role="addr", space="global", bracket="src"),
+            OperandSlot(
+                "coords", role="value", dtype="s32", lanes=_tma_coords_lanes, bracket="src"
+            ),
+            OperandSlot("mbar", role="addr", space="shared"),
+            OperandSlot("cta_mask", role="value", dtype="u16", lanes=_tma_mask_lanes, vector=False),
+            OperandSlot(
+                "cache_policy", role="value", dtype="u64", lanes=_tma_cache_lanes, vector=False
+            ),
+        ),
+    ),
+    InstructionEntry(  # global -> shared::cta (no multicast operand)
+        name="cp_async_bulk_tensor_g2s_cta",
+        mnemonic="cp",
+        slots=(
+            ModifierSlot("api", ("async",)),
+            ModifierSlot("kind", ("bulk",)),
+            ModifierSlot("unit", ("tensor",)),
+            ModifierSlot("dim", ("1d", "2d", "3d", "4d", "5d")),
+            ModifierSlot("dst", ("shared::cta",)),
+            ModifierSlot("src", ("global",)),
+            ModifierSlot("load_mode", ("tile", "tile::gather4"), optional=True),
+            ModifierSlot("completion", ("mbarrier::complete_tx::bytes",)),
+            ModifierSlot("cta_group", ("cta_group::1", "cta_group::2"), optional=True),
+            ModifierSlot("cache", ("L2::cache_hint",), optional=True),
+        ),
+        cert_arch="sm_100a",
+        check=_check_tma_gather4,
+        operands=(
+            OperandSlot("dst_mem", role="addr", space="shared::cta"),
+            OperandSlot("tmap", role="addr", space="global", bracket="src"),
+            OperandSlot(
+                "coords", role="value", dtype="s32", lanes=_tma_coords_lanes, bracket="src"
+            ),
+            OperandSlot("mbar", role="addr", space="shared"),
+            OperandSlot(
+                "cache_policy", role="value", dtype="u64", lanes=_tma_cache_lanes, vector=False
+            ),
+        ),
+    ),
+    InstructionEntry(  # shared::cta -> global
+        name="cp_async_bulk_tensor_s2g",
+        mnemonic="cp",
+        slots=(
+            ModifierSlot("api", ("async",)),
+            ModifierSlot("kind", ("bulk",)),
+            ModifierSlot("unit", ("tensor",)),
+            ModifierSlot("dim", ("1d", "2d", "3d", "4d", "5d")),
+            ModifierSlot("dst", ("global",)),
+            ModifierSlot("src", ("shared::cta",)),
+            ModifierSlot("load_mode", ("tile", "tile::scatter4"), optional=True),
+            ModifierSlot("completion", ("bulk_group",)),
+            ModifierSlot("cache", ("L2::cache_hint",), optional=True),
+        ),
+        cert_arch="sm_100a",
+        check=_check_tma_gather4,
+        operands=(
+            OperandSlot("tmap", role="addr", space="global", bracket="dst"),
+            OperandSlot(
+                "coords", role="value", dtype="s32", lanes=_tma_coords_lanes, bracket="dst"
+            ),
+            OperandSlot("src_mem", role="addr", space="shared::cta"),
+            OperandSlot(
+                "cache_policy", role="value", dtype="u64", lanes=_tma_cache_lanes, vector=False
+            ),
+        ),
+    ),
+    InstructionEntry(  # global -> L2 prefetch
+        name="cp_async_bulk_tensor_prefetch",
+        mnemonic="cp",
+        slots=(
+            ModifierSlot("api", ("async",)),
+            ModifierSlot("kind", ("bulk",)),
+            ModifierSlot("action", ("prefetch",)),
+            ModifierSlot("unit", ("tensor",)),
+            ModifierSlot("dim", ("1d", "2d", "3d", "4d", "5d")),
+            ModifierSlot("level", ("L2",)),
+            ModifierSlot("src", ("global",)),
+            ModifierSlot("load_mode", ("tile", "tile::gather4"), optional=True),
+            ModifierSlot("cache", ("L2::cache_hint",), optional=True),
+        ),
+        cert_arch="sm_100a",
+        check=_check_tma_gather4,
+        operands=(
+            OperandSlot("tmap", role="addr", space="global", bracket="src"),
+            OperandSlot(
+                "coords", role="value", dtype="s32", lanes=_tma_coords_lanes, bracket="src"
+            ),
+            OperandSlot(
+                "cache_policy", role="value", dtype="u64", lanes=_tma_cache_lanes, vector=False
+            ),
+        ),
+    ),
+    InstructionEntry(  # cp.reduce.async.bulk.tensor: shared::cta -> global, in place
+        name="cp_reduce_async_bulk_tensor",
+        mnemonic="cp",
+        slots=(
+            ModifierSlot("op", ("reduce",)),
+            ModifierSlot("api", ("async",)),
+            ModifierSlot("kind", ("bulk",)),
+            ModifierSlot("unit", ("tensor",)),
+            ModifierSlot("dim", ("1d", "2d", "3d", "4d", "5d")),
+            ModifierSlot("dst", ("global",)),
+            ModifierSlot("src", ("shared::cta",)),
+            ModifierSlot("redop", ("add", "min", "max", "inc", "dec", "and", "or", "xor")),
+            ModifierSlot("load_mode", ("tile",), optional=True),
+            ModifierSlot("completion", ("bulk_group",)),
+            ModifierSlot("cache", ("L2::cache_hint",), optional=True),
+        ),
+        cert_arch="sm_100a",
+        operands=(
+            OperandSlot("tmap", role="addr", space="global", bracket="dst"),
+            OperandSlot(
+                "coords", role="value", dtype="s32", lanes=_tma_coords_lanes, bracket="dst"
+            ),
+            OperandSlot("src_mem", role="addr", space="shared::cta"),
+            OperandSlot(
+                "cache_policy", role="value", dtype="u64", lanes=_tma_cache_lanes, vector=False
+            ),
+        ),
     ),
     # ------------------------------------------------------------------
     # mbarrier, per PTX ISA 9.7.14.5-9.7.14.12.

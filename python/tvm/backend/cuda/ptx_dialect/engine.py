@@ -115,13 +115,19 @@ def _make_codegen(entry: InstructionEntry):
         predicated = parse_str(args[-1]) == "pred"
         tokens = [parse_str(a) for a in args[len(args) - n_slots - 1 : -1]]
         rest = args[: len(args) - n_slots - 1]  # operands, plus pred when present
-        layout = operand_layout(entry, mods(entry, tokens))
+        mod_map = mods(entry, tokens)
+        layout = operand_layout(entry, mod_map)
         n_operands = sum(n for _, _, n in layout)
         # Which dtype each typed operand actually carries. It is already in the
         # Call -- the same channel PTX uses, where a register's type lives in its
-        # .reg declaration rather than in the instruction text.
+        # .reg declaration rather than in the instruction text. An operand whose
+        # length function resolved to zero has no argument to read; it still
+        # needs its dtype slot filled (the render aligns dtypes with *every*
+        # typed operand), so it reports its canonical dtype.
         dtypes = tuple(
-            arg_dtype(rest[i]) for slot, i, _ in layout if slot.role in ("value", "dst", "acc")
+            arg_dtype(rest[i]) if n else operand_dtypes(slot, mod_map)[0]
+            for slot, i, n in layout
+            if slot.role in ("value", "dst", "acc")
         )
         # Caller-chosen immediates ride the Call as IntImm args but are baked
         # into the instruction text, so they are read here and NOT forwarded to

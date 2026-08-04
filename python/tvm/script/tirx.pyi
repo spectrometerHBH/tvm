@@ -125,23 +125,45 @@ class _Chain_clusterlaunchcontrol:
     def __call__(self, addr: Any, mbar: Any, *args: Any, pred: Any = None) -> None: ...
 
 class _Chain_cp:
-    """`cp` — 6 entries sharing this mnemonic; PTX puts their difference in the operand list,
-    so the call selects one. Shapes: (dst, src, size, mbar); (addr); (); (group)
+    """`cp` — 11 entries sharing this mnemonic; PTX puts their difference in the operand list,
+    so the call selects one. Shapes: (dst, src, size, mbar); (addr); (); (group);
+    (*__operands)
     """
 
+    L2: _Chain_cp
+    L2__cache_hint: _Chain_cp
+    add: _Chain_cp
+    and_: _Chain_cp
     arrive: _Chain_cp
     async_: _Chain_cp
     b64: _Chain_cp
     bulk: _Chain_cp
+    bulk_group: _Chain_cp
     commit_group: _Chain_cp
+    cta_group__1: _Chain_cp
+    cta_group__2: _Chain_cp
+    dec: _Chain_cp
     global_: _Chain_cp
+    inc: _Chain_cp
+    max: _Chain_cp
     mbarrier: _Chain_cp
     mbarrier__complete_tx__bytes: _Chain_cp
+    min: _Chain_cp
+    multicast__cluster: _Chain_cp
     noinc: _Chain_cp
+    or_: _Chain_cp
+    prefetch: _Chain_cp
     read: _Chain_cp
+    reduce: _Chain_cp
     shared: _Chain_cp
+    shared__cluster: _Chain_cp
     shared__cta: _Chain_cp
+    tensor: _Chain_cp
+    tile: _Chain_cp
+    tile__gather4: _Chain_cp
+    tile__scatter4: _Chain_cp
     wait_group: _Chain_cp
+    xor: _Chain_cp
     def __call__(self, *args: Any, pred: Any = None) -> None: ...
 
 class _Chain_cvta:

@@ -21,6 +21,7 @@ and by :mod:`.gen_helpers`, which dumps the generated helpers for humans to
 inspect without compiling a kernel.
 """
 
+import itertools
 from typing import NamedTuple
 
 from .table import (
@@ -141,7 +142,7 @@ def render_variant(entry: InstructionEntry, tokens, predicated=False, dtypes=Non
         assert not entry.has_dst, "@p is only supported on instructions without a destination"
         helper += "_pred"
 
-    params, inputs, outputs, ptx_operands = [], [], [], []
+    params, inputs, outputs, rendered = [], [], [], []
     pre, post = [], []  # carrier declarations / boundary conversions
     dtype_of = dict(zip(entry.typed_operands, dtypes, strict=True))
     idx = 0
@@ -151,7 +152,7 @@ def render_variant(entry: InstructionEntry, tokens, predicated=False, dtypes=Non
             # An immediate lives in the instruction text. Either the ISA fixed
             # its value (`literal`) or the caller chose it from a closed set
             # (`choices`); neither is a C parameter.
-            ptx_operands.append(slot.literal if slot.choices is None else imm_of[slot])
+            rendered.append((slot.bracket, slot.literal if slot.choices is None else imm_of[slot]))
             continue
         regs = []
         n_lanes = lanes_of(slot, mod_map)
@@ -218,9 +219,20 @@ def render_variant(entry: InstructionEntry, tokens, predicated=False, dtypes=Non
                 cb = C_BINDING[dtype_of[slot]]
                 params.append(f"{cb.c_type} {lname}")
                 inputs.append(f'"{cb.constraint}"({cb.to_carrier.format(lname)})')
-            regs.append(f"[%{idx}]" if slot.role == "addr" else f"%{idx}")
+            regs.append(f"[%{idx}]" if slot.role == "addr" and slot.bracket is None else f"%{idx}")
             idx += 1
-        ptx_operands.append("{" + ", ".join(regs) + "}" if is_group else regs[0])
+        rendered.append((slot.bracket, "{" + ", ".join(regs) + "}" if is_group else regs[0]))
+
+    # Adjacent slots naming the same `bracket` are one composite memory operand:
+    # `[tensorMap, {c0, c1}]` is a single PTX operand whose members keep their
+    # own registers and constraints.
+    ptx_operands = []
+    for key, members in itertools.groupby(rendered, key=lambda pair: pair[0]):
+        texts = [text for _, text in members]
+        if key is None:
+            ptx_operands.extend(texts)
+        else:
+            ptx_operands.append(f"[{', '.join(texts)}]")
 
     instr = f"{opcode} {', '.join(ptx_operands)};" if ptx_operands else f"{opcode};"
     if predicated:

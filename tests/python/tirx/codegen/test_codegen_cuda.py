@@ -692,6 +692,21 @@ def test_tensor_map_param_codegen():
     assert "((unsigned long long)(&(A_map)))" in src
 
 
+_TMA_G2S_CG2_CACHE = (
+    "cp.async.bulk.tensor.2d.shared::cluster.global"
+    ".mbarrier::complete_tx::bytes.cta_group::2.L2::cache_hint"
+)
+_TMA_G2S_MC_CG2_CACHE = (
+    "cp.async.bulk.tensor.2d.shared::cluster.global"
+    ".mbarrier::complete_tx::bytes.multicast::cluster.cta_group::2.L2::cache_hint"
+)
+_TMA_CTA_GATHER4_CG2_CACHE = (
+    "cp.async.bulk.tensor.2d.shared::cta.global.tile::gather4"
+    ".mbarrier::complete_tx::bytes.cta_group::2.L2::cache_hint"
+)
+_TMA_S2G_CACHE = "cp.async.bulk.tensor.2d.global.shared::cta.tile.bulk_group.L2::cache_hint"
+
+
 def test_tma_cache_policy_operand_codegen():
     @T.prim_func
     def main(Cache: T.Buffer((1,), "uint64")):
@@ -703,116 +718,38 @@ def test_tma_cache_policy_operand_codegen():
         if tx == 0:
             smem = T.alloc_buffer((128,), "float32", scope="shared", align=128)
             bar = T.shared_scalar("uint64")
-            T.ptx.cp_async.bulk.tensor.g2s_cluster(
-                2,
-                smem.data,
-                T.address_of(bar),
-                T.address_of(A_map),
-                1,
-                2,
-                "",
-                0,
-                0,
-                cache_policy=Cache[0],
+            T.ptxd[_TMA_G2S_CG2_CACHE](
+                smem.data, T.address_of(A_map), 0, 0, T.address_of(bar), Cache[0]
             )
-            T.ptx.cp_async.bulk.tensor.g2s_cluster(
-                2,
-                smem.data,
-                T.address_of(bar),
-                T.address_of(A_map),
-                3,
-                2,
-                "",
-                0,
-                0,
-                cache_policy=Cache[0],
+            T.ptxd[_TMA_G2S_MC_CG2_CACHE](
+                smem.data, T.address_of(A_map), 0, 0, T.address_of(bar), 3, Cache[0]
             )
-            T.ptx.cp_async.bulk.tensor.s2g(
-                2, smem.data, T.address_of(A_map), "", 0, 0, cache_policy=Cache[0]
-            )
-            T.ptx.cp_async.bulk.tensor.g2s_cta(
-                2,
-                smem.data,
-                T.address_of(bar),
-                T.address_of(A_map),
-                2,
-                "",
-                0,
-                1,
-                2,
-                3,
-                4,
-                load_mode="tile_gather4",
-                cache_policy=Cache[0],
+            T.ptxd[_TMA_S2G_CACHE](T.address_of(A_map), 0, 0, smem.data, Cache[0])
+            T.ptxd[_TMA_CTA_GATHER4_CG2_CACHE](
+                smem.data, T.address_of(A_map), 0, 1, 2, 3, 4, T.address_of(bar), Cache[0]
             )
             leader_mbar_addr = T.cuda.sm100_2sm_leader_smem_addr(T.address_of(bar))
-            T.ptx.cp_async.bulk.tensor.g2s_cluster(
-                2,
-                smem.data,
-                leader_mbar_addr,
-                T.address_of(A_map),
-                1,
-                2,
-                "",
-                0,
-                0,
-                mbar_is_shared_addr=True,
-                cache_policy=Cache[0],
+            T.ptxd[_TMA_G2S_CG2_CACHE](
+                smem.data, T.address_of(A_map), 0, 0, leader_mbar_addr, Cache[0]
             )
             if tx == 0:
-                T.ptx.cp_async.bulk.tensor.g2s_cluster(
-                    2,
-                    smem.data,
-                    leader_mbar_addr,
-                    T.address_of(A_map),
-                    1,
-                    2,
-                    "",
-                    0,
-                    0,
-                    mbar_is_shared_addr=True,
-                    cache_policy=Cache[0],
+                T.ptxd[_TMA_G2S_CG2_CACHE](
+                    smem.data, T.address_of(A_map), 0, 0, leader_mbar_addr, Cache[0]
                 )
             else:
-                T.ptx.cp_async.bulk.tensor.g2s_cluster(
-                    2,
-                    smem.data,
-                    leader_mbar_addr,
-                    T.address_of(B_map),
-                    1,
-                    2,
-                    "",
-                    0,
-                    0,
-                    mbar_is_shared_addr=True,
-                    cache_policy=Cache[0],
+                T.ptxd[_TMA_G2S_CG2_CACHE](
+                    smem.data, T.address_of(B_map), 0, 0, leader_mbar_addr, Cache[0]
                 )
 
     src, _ = _get_source(main)
-    assert "ptx_cp_async_bulk_tensor_g2s_cluster_tile_2d_cache_hint" in src
-    assert "ptx_cp_async_bulk_tensor_g2s_cta_tile_gather4_2d_cache_hint" in src
-    assert "ptx_cp_async_bulk_tensor_g2s_cluster_tile_2d_multicast_cache_hint" in src
-    assert "g2cluster" not in src
-    assert "cta_group2_unicast" not in src
-    assert (
-        "cp.async.bulk.tensor.2d.shared::cluster.global"
-        ".mbarrier::complete_tx::bytes.cta_group::2.L2::cache_hint"
-    ) in src
-    assert (
-        "cp.async.bulk.tensor.2d.shared::cluster.global"
-        ".mbarrier::complete_tx::bytes.multicast::cluster"
-        ".cta_group::2.L2::cache_hint"
-    ) in src
-    assert (
-        "cp.async.bulk.tensor.2d.shared::cta.global.tile::gather4"
-        ".mbarrier::complete_tx::bytes.cta_group::2.L2::cache_hint"
-    ) in src
-    assert "cp.async.bulk.tensor.2d.global.shared::cta.tile.bulk_group.L2::cache_hint" in src
+    assert _TMA_G2S_CG2_CACHE in src
+    assert _TMA_G2S_MC_CG2_CACHE in src
+    assert _TMA_CTA_GATHER4_CG2_CACHE in src
+    assert _TMA_S2G_CACHE in src
     assert "bar_addr &= 0xFEFFFFFFu;" not in src
     assert "mbar_addr &= 0xFEFFFFFFu;" not in src
     assert "tvm_builtin_cuda_cvta_generic_to_shared((&(bar_ptr[0]))) & (uint)4278190079" in src
-    assert "ptx_cp_async_bulk_tensor_g2s_cluster_tile_2d_cache_hint_mbar_addr" in src
-    assert "unsigned long long cache_policy" in src
+    assert "uint64_t __cache_policy" in src
 
 
 def test_cuda_thread_fence():
