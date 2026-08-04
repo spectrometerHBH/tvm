@@ -17,16 +17,16 @@
 
 """Generic swizzle-aware iter pattern for CUDA copy dispatches.
 
-The swizzle map σ(q) = q ^ ((q>>at) & (2^sw − 1)) of a
+The swizzle map sigma(q) = q ^ ((q>>at) & (2^sw - 1)) of a
 ``ComposeLayout(per_element=p, swizzle_len=sw, atom_len=at,
 swizzle_inner=True)`` is GF(2)-linear and additive over high bits
 (>= 2^(at+sw) chunks), so the swizzled physical address at iter ``k``
 reduces to
 
-    addr(k) = (base_off + D_high) ^ σ(D_low)         [element units]
+    addr(k) = (base_off + D_high) ^ sigma(D_low)     [element units]
 
 where ``base_off = swizzle.apply(s_off)`` is computed once per thread and
-σ(D_low) is a compile-time constant — one XOR per iter instead of a full
+sigma(D_low) is a compile-time constant — one XOR per iter instead of a full
 ``swizzle.apply(...)``. Verified bitwise for the whole swizzle family
 (128B/64B/32B/NONE; sw = 3/2/1/0).
 
@@ -270,9 +270,9 @@ def try_recognize(
     Pass ``{lane_ph: Range(0, 32), warp_ph: Range(0, n_warps)}`` (or the
     scope's equivalents) to let the (C1) check fire on these templates.
 
-    No support-disjointness condition is needed: σ is GF(2)-linear, so
+    No support-disjointness condition is needed: sigma is GF(2)-linear, so
     inner-outer iter pairs (``bj_A`` + ``bj_A + at``) cancel exactly inside
-    σ(Δ).
+    sigma(delta).
     """
     core = _recognize_common(swizzle, iter_extents, iter_strides, s_off_template, var_bounds)
     if core is None:
@@ -296,7 +296,7 @@ def xor_delta(swizzle: ComposeLayout, delta_chunks: int) -> tuple[int, int]:
     """Split a compile-time chunk-domain delta into (low_xor_chunks, high_add_chunks).
 
     Physical address = ``(base + high * 2^p) ^ (low * 2^p)`` in element units.
-    ``low = σ(delta mod 2^(at+sw))``; the high part is swizzle-invariant and
+    ``low = sigma(delta mod 2^(at+sw))``; the high part is swizzle-invariant and
     stays additive.
     """
     at = int(swizzle.atom_len)
@@ -362,10 +362,10 @@ def emit_xor_offset_var(pattern: SwizzlePattern, base_off, k):
     Decomposes ``k`` across ``pattern.outer_iters`` with floordiv/floormod
     and emits, for each binary iter j with chunk stride ``stride_j``:
 
-        off ^= bit_j(k) * σ(stride_j)        (XOR part, σ compile-time)
+        off ^= bit_j(k) * sigma(stride_j)    (XOR part, sigma compile-time)
 
-    GF(2)-linearity makes ``σ(Σ_j bit_j(k)·stride_j) = XOR_j σ(stride_j)``
-    exact, so each set bit selects its compile-time σ constant — ~2
+    GF(2)-linearity makes ``sigma(sum_j bit_j(k)*stride_j) = XOR_j sigma(stride_j)``
+    exact, so each set bit selects its compile-time sigma constant — ~2
     instructions per bit.
     ``_LinearIter`` contributes ``c * stride`` additively as usual.
     """

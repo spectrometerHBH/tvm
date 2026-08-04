@@ -24,7 +24,7 @@ Two layers:
   ``SwizzlePattern`` (or rejects) under (C1)+(distinctness).
 * **Numeric correctness tests** verify the XOR formula empirically: for
   many ``(M0, k)`` samples,
-  ``(apply(M0) + D_high) ^ σ(D_low)``
+  ``(apply(M0) + D_high) ^ sigma(D_low)``
   equals ``apply(M0 + ds_k)`` computed by the layout's own Apply formula —
   including bases whose mask-source bits toggle per thread (the case the
   old additive signed-strides needed runtime signs for; the GF(2)-linear
@@ -71,7 +71,7 @@ def py_swizzle_apply(M: int, p: int, sw: int, at: int) -> int:
 
 
 def py_xor_offset(base_off: int, delta_elems: int, p: int, sw: int, at: int) -> int:
-    """The XOR formula: (base_off + D_high) ^ σ(D_low), element units."""
+    """The XOR formula: (base_off + D_high) ^ sigma(D_low), element units."""
     C = 1 << p
     assert delta_elems % C == 0
     d_chunks = delta_elems // C
@@ -149,7 +149,7 @@ def test_recognize_binary_split():
 
 def test_recognize_mid_bits():
     """swizzle(p=4, sw=2, at=4): an iter at bj=2 lives in the mid range
-    [sw, at) — accepted; its delta is swizzle-invariant (σ = identity)."""
+    [sw, at) — accepted; its delta is swizzle-invariant (sigma = identity)."""
     sw = ComposeLayout(4, 2, 4, TileLayout(S[(1024,)]))  # C=16, mid covers bits 2..3
     tid = _TirVar("tid", "int32")
     # row_stride = 256 (= 16*C) → M0/C = tid*16 → bits 0..3 all 0.
@@ -277,7 +277,7 @@ def test_formula_matches_apply_under_conditions(
 def test_mask_source_bit_toggle_needs_no_sign():
     """The case the old additive form needed a runtime ±1 sign for: an inner
     iter whose mask-source bit (at + bj) toggles with tid. The XOR form uses
-    one compile-time σ for every base and is still exactly right."""
+    one compile-time sigma for every base and is still exactly right."""
     p, sw, at = 3, 3, 3
     row_stride = 64  # M0/C = tid * 8 → mask-source bit (at + 0) = bit 0 of tid
     swizzle = ComposeLayout(p, sw, at, TileLayout(S[(1 << (p + sw + at),)]))

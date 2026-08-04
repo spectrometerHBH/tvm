@@ -345,7 +345,7 @@ def _emit(op_call: TilePrimitiveCall, sctx: DispatchContext) -> PrimFunc:
     # Swizzle fast-path setup. When S is swizzled, the per-mm `tile_off +
     # row_off` is a logical offset; the physical SMEM address is
     # `swizzle.apply(logical)`. The slow path computes that per iter; the
-    # fast path reduces it to `(base_off + D_high) ^ σ(D_low)` with
+    # fast path reduces it to `(base_off + D_high) ^ sigma(D_low)` with
     # compile-time constants, base_off computed once per thread. We try to
     # recognize the m_outer iter list as such a pattern; if it fails (e.g.
     # the analyzer can't discharge condition C1 over the lane/warp
@@ -459,9 +459,9 @@ def _emit(op_call: TilePrimitiveCall, sctx: DispatchContext) -> PrimFunc:
     # swizzle apply input. When the sliced offset carries a compile-time
     # constant Δ (e.g. the k0 region min of a chain of copies), emit
     #
-    #     addr = (apply(X) + D_high) ^ σ(D_low)      (element units)
+    #     addr = (apply(X) + D_high) ^ sigma(D_low)  (element units)
     #
-    # with X = s_off − Δ. Every copy in the chain then emits a *textually
+    # with X = s_off - delta. Every copy in the chain then emits a *textually
     # identical* apply(X) plus a per-copy XOR constant, and nvcc's plain
     # CSE merges them into one base computation + one XOR per copy — the
     # same shape the handwritten .cu relies on. Valid iff X is carry-free
@@ -549,8 +549,8 @@ def _emit(op_call: TilePrimitiveCall, sctx: DispatchContext) -> PrimFunc:
     def _smem_off(mm_idx, logical_off):
         # Three paths:
         #   * pattern matched + compile-time mm: physical off =
-        #     (base_off + D_high) ^ σ(D_low) — one XOR immediate.
-        #   * pattern matched + runtime mm: per-bit XOR with compile-time σ.
+        #     (base_off + D_high) ^ sigma(D_low) — one XOR immediate.
+        #   * pattern matched + runtime mm: per-bit XOR with compile-time sigma.
         #   * swizzle present, pattern missed: per-iter swizzle.apply(logical).
         #   * no swizzle: identity.
         if swizzle_pattern is not None and isinstance(mm_idx, int):
