@@ -377,6 +377,45 @@ class _Chain_min:
     xorsign: _Chain_min
     def __call__(self, *args: Any) -> None: ...
 
+class _Chain_mma:
+    """`mma` — 4 entries sharing this mnemonic; PTX puts their difference in the operand list,
+    so the call selects one. Shapes: (*__operands)
+    """
+
+    aligned: _Chain_mma
+    and_: _Chain_mma
+    b1: _Chain_mma
+    bf16: _Chain_mma
+    col: _Chain_mma
+    e4m3: _Chain_mma
+    e5m2: _Chain_mma
+    f16: _Chain_mma
+    f32: _Chain_mma
+    f64: _Chain_mma
+    m16n8k128: _Chain_mma
+    m16n8k16: _Chain_mma
+    m16n8k256: _Chain_mma
+    m16n8k32: _Chain_mma
+    m16n8k4: _Chain_mma
+    m16n8k64: _Chain_mma
+    m16n8k8: _Chain_mma
+    m8n8k128: _Chain_mma
+    m8n8k16: _Chain_mma
+    m8n8k32: _Chain_mma
+    m8n8k4: _Chain_mma
+    popc: _Chain_mma
+    row: _Chain_mma
+    s32: _Chain_mma
+    s4: _Chain_mma
+    s8: _Chain_mma
+    satfinite: _Chain_mma
+    sync: _Chain_mma
+    tf32: _Chain_mma
+    u4: _Chain_mma
+    u8: _Chain_mma
+    xor: _Chain_mma
+    def __call__(self, *args: Any) -> None: ...
+
 class _Chain_mov:
     """`mov` — 10 entries sharing this mnemonic; PTX puts their difference in the operand list,
     so the call selects one. Shapes: (d, a0, a1); (d0, d1, a); (d, a0, a1, a2, a3); (d0, d1,
@@ -658,6 +697,7 @@ class _PTXD:
     max: _Chain_max
     mbarrier: _Chain_mbarrier
     min: _Chain_min
+    mma: _Chain_mma
     mov: _Chain_mov
     mul: _Chain_mul
     prefetch: _Chain_prefetch

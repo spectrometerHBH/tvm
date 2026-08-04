@@ -53,6 +53,7 @@ order), every helper is ``void``, and every call is a statement::
 import functools
 import itertools
 import keyword
+import re
 from collections.abc import Callable
 from dataclasses import dataclass
 
@@ -796,6 +797,136 @@ def _check_tcgen05_ldst(m):
     """The Table 52/53 rows marked NA -- the products that exceed 128 registers."""
     if _tcgen05_ldst_lanes(m) > 128:
         return f"shape {m['shape']} caps .num where the vector would exceed 128 registers"
+    return None
+
+
+# mma fragment sizes, per the Matrix Fragments tables of ISA 9.7.15.5.1-13.
+# Each is `rows * cols * bits / threads / 32`, the register count a thread holds
+# of an MxN (or MxK / KxN) tile -- the ISA states the tables, this states the
+# rule they follow. .m8n8k4 with .f16 multiplicands is the one shape a warp
+# runs as four independent 8-thread MMAs, so its A/B fragments divide by 8.
+_MMA_BITS = {
+    "f16": 16, "bf16": 16, "tf32": 32, "f32": 32, "f64": 64, "s32": 32,
+    "u8": 8, "s8": 8, "u4": 4, "s4": 4, "b1": 1,
+    "e4m3": 8, "e5m2": 8, "e3m2": 6, "e2m3": 6, "e2m1": 4,
+}  # fmt: skip
+
+
+def _mma_shape(m):
+    mm, nn, kk = re.match(r"m(\d+)n(\d+)k(\d+)", m["shape"]).groups()
+    return int(mm), int(nn), int(kk)
+
+
+def _mma_regs(dtype, rows, cols, threads, reg_bits=32):
+    return max(1, rows * cols * _MMA_BITS[dtype] // threads // reg_bits)
+
+
+def _mma_threads(m):
+    # ISA: "A warp executing mma.sync.m8n8k4 computes 4 matrix multiply and
+    # accumulate operations". Each is over 8 threads, so a thread's fragment is
+    # an eighth of the tile rather than a thirty-second -- ptxas agrees
+    # (d=4, a=2, b=2 for .f16; anything else is "Arguments mismatch").
+    return 8 if m["shape"] == "m8n8k4" else 32
+
+
+def _mma_lanes(which):
+    """Registers in one of the four operand groups, as a function of the modifiers."""
+
+    def lanes(m):
+        mm, nn, kk = _mma_shape(m)
+        threads = _mma_threads(m)
+        # f64 fragments live in .f64 registers, everything else in .b32.
+        reg_bits = 64 if m["dtype"] == "f64" else 32
+        if which == "d":
+            return _mma_regs(m["dtype"], mm, nn, threads, reg_bits)
+        if which == "c":
+            return _mma_regs(m["ctype"], mm, nn, threads, reg_bits)
+        if which == "a":
+            return _mma_regs(m["atype"], mm, kk, threads, reg_bits)
+        return _mma_regs(m["btype"], kk, nn, threads, reg_bits)
+
+    return lanes
+
+
+def _check_mma_fp_f16(m):
+    """The .f16-accumulator forms: the ISA's f16 and f8 lines."""
+    if m["atype"] != m["btype"]:
+        return "the multiplicand types must match"
+    shape, a = m["shape"], m["atype"]
+    if shape != "m8n8k4" and (m["alayout"], m["blayout"]) != ("row", "col"):
+        return f"{shape} is spelled .row.col"
+    if a == "f16" and shape not in ("m8n8k4", "m16n8k8", "m16n8k16"):
+        return f"{shape} has no .f16 multiplicand line"
+    if a in ("e4m3", "e5m2") and shape not in ("m16n8k16", "m16n8k32"):
+        return f"{shape} has no .f8 multiplicand line"
+    return None
+
+
+def _check_mma_fp_f32(m):
+    """One check per floating-point syntax line of ISA 9.7.15.5.14.
+
+    The lines differ in which shapes pair with which operand types, and only
+    the .m8n8k4 line leaves the layouts free -- every other line spells
+    `.row.col`.
+    """
+    shape, d, c = m["shape"], m["dtype"], m["ctype"]
+    a, b = m["atype"], m["btype"]
+    if a != b:
+        # Every floating-point line spells the two operand types identically.
+        return "the multiplicand types must match"
+    if shape != "m8n8k4" and (m["alayout"], m["blayout"]) != ("row", "col"):
+        return f"{shape} is spelled .row.col"
+    if a == "f16":
+        # "mma.m8n8k4 / m16n8k8 / m16n8k16 .dtype.f16.f16.ctype"
+        if shape not in ("m8n8k4", "m16n8k8", "m16n8k16"):
+            return f"{shape} has no .f16 multiplicand line"
+        if shape == "m8n8k4" and c == "f32" and d != "f32":
+            return "m8n8k4 with a .f32 accumulator must produce .f32"
+    elif a == "tf32":
+        # "m16n8k4 .f32.tf32.tf32.f32" and the m16n8k8 atype/btype line.
+        if shape not in ("m16n8k4", "m16n8k8") or d != "f32" or c != "f32":
+            return "the .tf32 lines are m16n8k4 / m16n8k8, .f32 in and out"
+    elif a == "bf16":
+        # "m16n8k16 .f32.bf16.bf16.f32" and the m16n8k8 atype/btype line.
+        if shape not in ("m16n8k8", "m16n8k16") or d != "f32" or c != "f32":
+            return "the .bf16 lines are m16n8k8 / m16n8k16, .f32 in and out"
+    else:  # e4m3 / e5m2
+        # "mma.shape.row.col.dtype.f8type.f8type.ctype", shape in k16/k32.
+        if shape not in ("m16n8k16", "m16n8k32"):
+            return f"{shape} has no .f8 multiplicand line"
+    if shape in ("m16n8k8", "m16n8k16", "m16n8k32") and d != c:
+        # ".dtype must be the same as .ctype" on these shapes.
+        return f"{shape} requires .dtype == .ctype"
+    return None
+
+
+def _check_mma_int(m):
+    """The integer / sub-byte / single-bit lines of ISA 9.7.15.5.14."""
+    shape, a, b = m["shape"], m["atype"], m["btype"]
+    if a != b:
+        # "the values for .atype and .btype must be the same"
+        return "the multiplicand types must match"
+    if a in ("u8", "s8"):
+        if shape not in ("m8n8k16", "m16n8k16", "m16n8k32"):
+            return f"{shape} has no 8-bit integer line"
+    elif a in ("u4", "s4"):
+        if shape not in ("m8n8k32", "m16n8k32", "m16n8k64"):
+            return f"{shape} has no 4-bit integer line"
+    else:  # b1
+        if shape not in ("m8n8k128", "m16n8k128", "m16n8k256"):
+            return f"{shape} has no single-bit line"
+        if not m["bitop"]:
+            # "mma.sync...s32.b1.b1.s32.bitOp.popc" -- bitOp is not optional.
+            return "the single-bit line requires .xor or .and"
+    if a != "b1" and (m["bitop"] or m["popc"]):
+        # `.bitOp.popc` belongs to the single-bit line alone; ptxas otherwise
+        # reports "Unexpected instruction types specified for 'mma'".
+        return "only the single-bit line takes .bitOp.popc"
+    if a == "b1":
+        if m["satfinite"]:
+            return "the single-bit line takes no .satfinite"
+        if not m["popc"]:
+            return "the single-bit line spells .popc"
     return None
 
 
@@ -2052,6 +2183,118 @@ _ENTRIES = [
         operands=(
             OperandSlot("taddr", role="addr", space="tmem"),
             OperandSlot("r", role="value", dtype="b32", lanes=_tcgen05_ldst_lanes),
+        ),
+    ),
+    # mma per PTX ISA 9.7.15.5.14. Four operand groups (d, a, b, c), each a
+    # register vector whose length follows the Matrix Fragments tables -- four
+    # callable `lanes`, one per group. `d` and `c` are separate operands: the
+    # ISA lists them separately and the legacy helper bound them to separate
+    # "=" and "r" constraints, so no read-modify-write constraint is involved
+    # even when a caller passes the same registers for both.
+    #
+    # NOT REGISTERED:
+    # - The `.kind::`/`.block_scale` lines and the .e3m2/.e2m3/.e2m1 types,
+    #   which require sm_120a -- outside the architectures this table certifies.
+    # - `mma.sp`, a separate instruction with a metadata operand.
+    InstructionEntry(  # half precision, and the alternate formats that share it
+        name="mma",
+        slots=(
+            ModifierSlot("sync", ("sync",)),
+            ModifierSlot("aligned", ("aligned",)),
+            ModifierSlot("shape", ("m8n8k4", "m16n8k4", "m16n8k8", "m16n8k16", "m16n8k32")),
+            ModifierSlot("alayout", ("row", "col")),
+            ModifierSlot("blayout", ("row", "col")),
+            ModifierSlot("dtype", ("f32",)),
+            ModifierSlot("atype", ("f16", "bf16", "tf32", "e4m3", "e5m2")),
+            ModifierSlot("btype", ("f16", "bf16", "tf32", "e4m3", "e5m2")),
+            ModifierSlot("ctype", ("f32",)),
+        ),
+        check=_check_mma_fp_f32,
+        # Register carriers, not element types: A and B fragments are packed
+        # into .b32 registers whatever the element format, so they bind "r"
+        # through a uint32; an .f32 accumulator holds one float per register
+        # and binds "f". Pinning each to a single-dtype PTX type keeps the
+        # dtype axis from offering combinations ptxas refuses.
+        operands=(
+            OperandSlot("d", role="dst", dtype="f32", lanes=_mma_lanes("d")),
+            OperandSlot("a", role="value", dtype="u32", lanes=_mma_lanes("a")),
+            OperandSlot("b", role="value", dtype="u32", lanes=_mma_lanes("b")),
+            OperandSlot("c", role="value", dtype="f32", lanes=_mma_lanes("c")),
+        ),
+    ),
+    InstructionEntry(  # the same lines with an .f16 accumulator
+        name="mma_f16acc",
+        mnemonic="mma",
+        slots=(
+            ModifierSlot("sync", ("sync",)),
+            ModifierSlot("aligned", ("aligned",)),
+            ModifierSlot("shape", ("m8n8k4", "m16n8k8", "m16n8k16", "m16n8k32")),
+            ModifierSlot("alayout", ("row", "col")),
+            ModifierSlot("blayout", ("row", "col")),
+            ModifierSlot("dtype", ("f16",)),
+            ModifierSlot("atype", ("f16", "e4m3", "e5m2")),
+            ModifierSlot("btype", ("f16", "e4m3", "e5m2")),
+            ModifierSlot("ctype", ("f16",)),
+        ),
+        check=_check_mma_fp_f16,
+        operands=(
+            OperandSlot("d", role="dst", dtype="u32", lanes=_mma_lanes("d")),
+            OperandSlot("a", role="value", dtype="u32", lanes=_mma_lanes("a")),
+            OperandSlot("b", role="value", dtype="u32", lanes=_mma_lanes("b")),
+            OperandSlot("c", role="value", dtype="u32", lanes=_mma_lanes("c")),
+        ),
+    ),
+    InstructionEntry(  # integer, sub-byte and single-bit lines
+        name="mma_int",
+        mnemonic="mma",
+        slots=(
+            ModifierSlot("sync", ("sync",)),
+            ModifierSlot("aligned", ("aligned",)),
+            ModifierSlot(
+                "shape",
+                ("m8n8k16", "m16n8k16", "m16n8k32", "m8n8k32", "m16n8k64",
+                 "m8n8k128", "m16n8k128", "m16n8k256"),
+            ),
+            ModifierSlot("alayout", ("row",)),
+            ModifierSlot("blayout", ("col",)),
+            ModifierSlot("satfinite", ("satfinite",), optional=True),
+            ModifierSlot("dtype", ("s32",)),
+            ModifierSlot("atype", ("u8", "s8", "u4", "s4", "b1")),
+            ModifierSlot("btype", ("u8", "s8", "u4", "s4", "b1")),
+            ModifierSlot("ctype", ("s32",)),
+            ModifierSlot("bitop", ("xor", "and"), optional=True),
+            ModifierSlot("popc", ("popc",), optional=True),
+        ),
+        check=_check_mma_int,
+        operands=(
+            OperandSlot("d", role="dst", dtype="u32", lanes=_mma_lanes("d")),
+            OperandSlot("a", role="value", dtype="u32", lanes=_mma_lanes("a")),
+            OperandSlot("b", role="value", dtype="u32", lanes=_mma_lanes("b")),
+            OperandSlot("c", role="value", dtype="u32", lanes=_mma_lanes("c")),
+        ),
+    ),
+    InstructionEntry(  # double precision
+        name="mma_f64",
+        mnemonic="mma",
+        slots=(
+            ModifierSlot("sync", ("sync",)),
+            ModifierSlot("aligned", ("aligned",)),
+            # The ISA writes ".m8n84" in this line's shape list -- a typo. It is
+            # not .m8n8k4: ptxas rejects that ("Argument vector size mismatch"),
+            # so the double-precision shapes are the three m16n8 ones.
+            ModifierSlot("shape", ("m16n8k4", "m16n8k8", "m16n8k16")),
+            ModifierSlot("alayout", ("row",)),
+            ModifierSlot("blayout", ("col",)),
+            ModifierSlot("dtype", ("f64",)),
+            ModifierSlot("atype", ("f64",)),
+            ModifierSlot("btype", ("f64",)),
+            ModifierSlot("ctype", ("f64",)),
+        ),
+        operands=(
+            OperandSlot("d", role="dst", dtype="f64", lanes=_mma_lanes("d")),
+            OperandSlot("a", role="value", dtype="f64", lanes=_mma_lanes("a")),
+            OperandSlot("b", role="value", dtype="f64", lanes=_mma_lanes("b")),
+            OperandSlot("c", role="value", dtype="f64", lanes=_mma_lanes("c")),
         ),
     ),
 ]
