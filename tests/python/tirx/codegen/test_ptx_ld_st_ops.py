@@ -149,9 +149,7 @@ def test_ptx_ld_st_raw_shared_address_codegen():
             raw_addr: T.uint32 = T.cuda.cvta_generic_to_shared(smem.data)
             T.ptxd.ld.shared.u64(out[0], raw_addr)
             T.ptxd.ld.shared.u64(out[1], smem.data)
-            T.ptx.st(
-                raw_addr, src=values.ptr_to([0]), weak=True, space="shared::cta", ptx_type="b128"
-            )
+            T.ptxd.st.weak.shared__cta.b128(raw_addr, values.view("uint128")[0])
 
     with TARGET:
         mod = tvm.compile(tvm.IRModule({"main": main}), target=TARGET, tir_pipeline="tirx")
@@ -161,7 +159,7 @@ def test_ptx_ld_st_raw_shared_address_codegen():
     # uint32 and passes straight through -- ptxd converts only pointers.
     assert src.count("__cvta_generic_to_shared") == 1
     assert '"st.weak.shared::cta.b128 [%0], %1;"' in src
-    assert '"q"(value));' in src
+    assert '"q"(__value)' in src
 
 
 def test_ptx_ld_global_nc_v8_codegen():

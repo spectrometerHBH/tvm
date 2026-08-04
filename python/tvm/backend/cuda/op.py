@@ -2857,61 +2857,6 @@ def _validate_ptx_address(addr, space, op_name):
             )
 
 
-def ptx_st(
-    address,
-    *values,
-    src=None,
-    weak=False,
-    space="shared",
-    cop="",
-    vec="",
-    ptx_type,
-    cache_hint="",
-    cache_policy=None,
-    l1_evict="",
-    l2_evict="",
-):
-    _choice("space", space, _PTX_MEM_SPACE | {"local", "param::func"})
-    _choice("cop", cop, _PTX_ST_COP)
-    _choice("vec", vec, _PTX_ST_VEC)
-    _choice("ptx_type", ptx_type, _PTX_SCALAR_TYPE | {"b128"})
-    _validate_ptx_address(address, space, "ptx_st")
-    if ptx_type == "b128" and not (
-        src is not None
-        and not values
-        and weak
-        and space == "shared::cta"
-        and not cop
-        and not vec
-        and not cache_hint
-        and cache_policy is None
-        and not l1_evict
-        and not l2_evict
-    ):
-        raise ValueError(
-            "ptx_st b128 requires src=, weak=True, space='shared::cta', "
-            "and no cache/vector modifiers"
-        )
-    cache_policy, has_cache_policy = _resolve_cache_policy(cache_hint, cache_policy)
-    attrs = (
-        cache_policy,
-        int(bool(weak)),
-        space,
-        cop,
-        vec,
-        ptx_type,
-        int(has_cache_policy),
-        l1_evict,
-        l2_evict,
-        int(src is not None),
-    )
-    if src is not None:
-        if values:
-            raise ValueError("ptx_st expects values or src, not both")
-        return call_intrin("", "tirx.ptx.st", address, src, *attrs)
-    return call_intrin("", "tirx.ptx.st", address, *values, *attrs)
-
-
 def ptx_mbarrier_test_wait_parity(barrier, phase, *, sem="", scope="", space="shared::cta"):
     if sem not in ("", "acquire", "relaxed"):
         raise ValueError(f"Unsupported mbarrier.test_wait.parity sem {sem!r}")

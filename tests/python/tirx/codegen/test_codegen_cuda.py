@@ -439,17 +439,8 @@ def test_megamoe_extracted_intrinsics_codegen():
             T.ptxd.atom.release.gpu.global_.add.u32(U32[0], U32.data, U32[0])
             T.ptxd.atom.sys.global_.add.u64(U64[0], U64.data, U64[0])
             T.ptxd.red.gpu.global_.add.u32(U32.data, U32[0])
-            T.ptx.st(U32.data, U32[0], space="shared", ptx_type="u32")
-            T.ptx.st(
-                U32.data,
-                U32[0],
-                U32[1],
-                U32[2],
-                U32[3],
-                space="shared",
-                vec="v4",
-                ptx_type="b32",
-            )
+            T.ptxd.st.shared.u32(U32.data, U32[0])
+            T.ptxd.st.shared.v4.b32(U32.data, U32[0], U32[1], U32[2], U32[3])
             T.ptxd.st_bulk.weak.shared__cta(U32.data, T.uint64(16))
             T.ptxd.fns.b32(U32[0], U32[0], U32[1], I32[0])
             T.ptxd.stmatrix.sync.aligned.m16n8.x1.trans.shared.b8(U32.data, U32[0])

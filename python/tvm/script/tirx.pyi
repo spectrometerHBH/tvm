@@ -234,6 +234,7 @@ class _Chain_ld:
     L2__evict_last: _Chain_ld
     L2__evict_normal: _Chain_ld
     acquire: _Chain_ld
+    b128: _Chain_ld
     b16: _Chain_ld
     b32: _Chain_ld
     b64: _Chain_ld
@@ -544,6 +545,7 @@ class _Chain_st:
     L2__evict_first: _Chain_st
     L2__evict_last: _Chain_st
     L2__evict_normal: _Chain_st
+    b128: _Chain_st
     b16: _Chain_st
     b32: _Chain_st
     b64: _Chain_st

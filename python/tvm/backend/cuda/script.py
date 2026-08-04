@@ -57,7 +57,6 @@ class PTXNamespace:
         self.cp_async_bulk_g2s_cta = _op_wrapper(_cuda_op.ptx_cp_async_bulk_g2s_cta)
         self.cp_async_bulk_g2s_cluster = _op_wrapper(_cuda_op.ptx_cp_async_bulk_g2s_cluster)
         self.cp_async_bulk_s2g = _op_wrapper(_cuda_op.ptx_cp_async_bulk_s2g)
-        self.st = _op_wrapper(_cuda_op.ptx_st)
         self.any_sync = _op_wrapper(_cuda_op.ptx_any_sync)
         # Math operations
         self.cvt = _dtype_forward(_cuda_op.ptx_cvt)

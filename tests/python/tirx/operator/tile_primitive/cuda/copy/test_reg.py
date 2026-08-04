@@ -516,7 +516,7 @@ def test_reg_copy_wg_local_to_swizzled_shared_uses_structured_compose_apply():
 @pytest.mark.gpu
 @pytest.mark.skipif(not env.has_cuda_compute(9), reason="need cuda compute >= 9.0")
 def test_ptx_st_from_src_f32_vector_preserves_values():
-    """The generic ``T.ptx.st(src=...)`` helper must preserve f32 values."""
+    """A vector store of f32 registers must preserve the values."""
 
     @T.prim_func
     def kernel(B_ptr: T.handle) -> None:
@@ -529,7 +529,7 @@ def test_ptx_st_from_src_f32_vector_preserves_values():
         out = T.alloc_local((4,), "float32")
         for i in range(4):
             reg[i] = T.cast(i + 1, "float32")
-        T.ptx.st(smem.ptr_to([0]), src=reg.ptr_to([0]), space="shared", vec="v4", ptx_type="f32")
+        T.ptxd.st.shared.v4.f32(smem.ptr_to([0]), reg[0], reg[1], reg[2], reg[3])
         T.ptxd.ld.shared.v4.f32(out[0], out[1], out[2], out[3], smem.ptr_to([0]))
         for i in range(4):
             B[i] = out[i]
@@ -540,8 +540,9 @@ def test_ptx_st_from_src_f32_vector_preserves_values():
         ex = tvm.compile(mod, target=target, tir_pipeline="tirx")
         src = ex.mod.imports[0].inspect_source()
 
-    assert "float4 src_" in src
     assert "st.shared.v4.f32" in src
+    # The values stay floats: each lane binds "f", not a reinterpreted "r".
+    assert '"f"(__value0)' in src
 
     dev = tvm.cuda(0)
     out = tvm.runtime.tensor(np.zeros((4,), dtype="float32"), dev)

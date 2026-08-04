@@ -709,11 +709,10 @@ def _check_atomic(m):
 
 _LD_TYPES = (
     "b8", "u8", "s8", "b16", "u16", "s16", "b32", "u32",
-    "s32", "b64", "u64", "s64", "f32", "f64",
+    "s32", "b64", "u64", "s64", "f32", "f64", "b128",
 )  # fmt: skip
-# ISA 5.4.2 caps a vector register at 128 bits, so .v2.b128 does not exist --
-# the vector lines take the scalar type set as-is.
-_LD_VEC_TYPES = _LD_TYPES
+# ISA 5.4.2 caps a vector register at 128 bits, so .v2.b128 does not exist.
+_LD_VEC_TYPES = tuple(t for t in _LD_TYPES if t != "b128")
 _L1_EVICT = (
     "L1::evict_normal",
     "L1::evict_unchanged",
@@ -949,11 +948,6 @@ _ENTRIES = [
     ),
     # Complete scalar `ld` per PTX ISA 9.7.9.8 + the 9.7.9.9 ld.global.nc
     # forms. Deliberately excluded (each needs a mechanism this shape lacks):
-    # - .b128: the rendered helper is correct and assembles, but nothing can
-    #   call it -- the operand would have to be a 128-bit TVM value, and the
-    #   CUDA codegen has no uint128 type ("Cannot convert type T.uint128").
-    #   The legacy helper sidestepped this by doing the 128-bit load itself,
-    #   inside the helper, so the wide value never entered the IR.
     # - .level::cache_hint + the cache_policy operand (optional operand)
     # - .unified (variable-attribute addressing)
     # - .param/.const spaces (require kernel-parameter / const addresses,
@@ -991,7 +985,6 @@ _ENTRIES = [
     ),
     # Complete scalar `st` per PTX ISA 9.7.9.11, at parity with `ld`.
     # Deliberately excluded (each needs a mechanism this shape lacks):
-    # - .b128, for the reason spelled out on `ld` above
     # - .level::cache_hint + its trailing cache_policy operand (optional operand)
     # - .param::func (kernel-parameter addresses cannot flow through the
     #   helper-function ABI)
@@ -2252,8 +2245,16 @@ _ENTRIES = [
             ModifierSlot("aligned", ("aligned",)),
             ModifierSlot(
                 "shape",
-                ("m8n8k16", "m16n8k16", "m16n8k32", "m8n8k32", "m16n8k64",
-                 "m8n8k128", "m16n8k128", "m16n8k256"),
+                (
+                    "m8n8k16",
+                    "m16n8k16",
+                    "m16n8k32",
+                    "m8n8k32",
+                    "m16n8k64",
+                    "m8n8k128",
+                    "m16n8k128",
+                    "m16n8k256",
+                ),
             ),
             ModifierSlot("alayout", ("row",)),
             ModifierSlot("blayout", ("col",)),

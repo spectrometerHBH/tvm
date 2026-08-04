@@ -480,6 +480,13 @@ void CodeGenCUDA::PrintType(const PrimType& t, std::ostream& os) {  // NOLINT(*)
       return;
     }
   } else if (t.MatchesCode(DLDataTypeCode::kDLUInt, DLDataTypeCode::kDLInt)) {
+    if (t.bits() == 128 && t.IsScalar()) {
+      // nvcc's 128-bit integer, which is what a PTX .b128 operand binds to
+      // through the "q" constraint. Handled before the "u" prefix below,
+      // because the spelling is `__uint128_t`, not `u` + a signed name.
+      os << (t.MatchesCode(DLDataTypeCode::kDLUInt) ? "__uint128_t" : "__int128_t");
+      return;
+    }
     if (t.MatchesCode(DLDataTypeCode::kDLUInt)) {
       os << "u";
     }
@@ -611,6 +618,7 @@ void CodeGenCUDA::PrintType(const PrimType& t, std::ostream& os) {  // NOLINT(*)
         }
         return;
       }
+
       default:
         fail = true;
         break;
