@@ -25,11 +25,12 @@ Direction (ld vs st) and exec scope (warp / warpgroup) are decided inside
 from math import prod
 
 import tvm
+from tvm import arith
 from tvm.script import tirx as T
 from tvm.tirx import PrimFunc
 from tvm.tirx import Var as _TirVar
 from tvm.tirx.expr import IntImm as _IntImm
-from tvm.tirx.layout import S, TileLayout
+from tvm.tirx.layout import ComposeLayout, S, TileLayout
 from tvm.tirx.operator.tile_primitive.dispatcher import fail, predicate, register_dispatch
 from tvm.tirx.operator.tile_primitive.registry import DispatchContext
 from tvm.tirx.tile_primitive import TilePrimitiveCall
@@ -38,7 +39,15 @@ from ._common import (  # noqa: F401  (_carve_tail reserved for future variants)
     _carve_tail,
     _extract_tile,
 )
-from ._swizzle_iter import emit_init, emit_iter_offset, get_swizzle, try_recognize
+from ._swizzle_iter import (
+    emit_base,
+    emit_init,
+    emit_iter_offset,
+    emit_xor_offset,
+    get_swizzle,
+    try_recognize_xor,
+    xor_delta,
+)
 from .utils import _is_valid_copy, _scope_allowed
 from .vec_auto_reg import _all_threads_active, _ptr_off
 
@@ -285,6 +294,29 @@ def _emit(op_call: TilePrimitiveCall, sctx: DispatchContext) -> PrimFunc:
         fail("ldstmatrix layout doesn't fit any num ∈ {4,2,1}")
     r, r_seps, s, s_seps, trans, p, num = chosen
 
+    # Order the num atom (seg 4) iters by R m-stride descending. The dst of
+    # each ldmatrix/stmatrix must be 4 consecutive registers; when the seg-4
+    # decomposition order matches R's fragment word order (largest m-stride
+    # slowest), the frag words land in consecutive dst registers and ptxas
+    # needs no register-shuffle MOVs. R and S are permuted in lockstep, so
+    # the R↔S element pairing (and thus numerics) is unchanged.
+    r_num_iters = list(r.shard[r_seps[4] : r_seps[5]])
+    if len(r_num_iters) > 1:
+        num_order = sorted(range(len(r_num_iters)), key=lambda i: -int(r_num_iters[i].stride))
+        if num_order != list(range(len(r_num_iters))):
+            r_iters = list(r.shard)
+            s_iters = list(s.shard)
+            r_seg = [r_iters[r_seps[4] : r_seps[5]][i] for i in num_order]
+            s_seg = [s_iters[s_seps[4] : s_seps[5]][i] for i in num_order]
+            r = TileLayout.from_iters(
+                r_iters[: r_seps[4]] + r_seg + r_iters[r_seps[5] :],
+                offset=dict(r.offset),
+            )
+            s = TileLayout.from_iters(
+                s_iters[: s_seps[4]] + s_seg + s_iters[s_seps[5] :],
+                offset=dict(s.offset),
+            )
+
     # Step 10: emit one ldmatrix/stmatrix per mm, per warp.
 
     def _get_warp_idx_in_T():
@@ -350,7 +382,7 @@ def _emit(op_call: TilePrimitiveCall, sctx: DispatchContext) -> PrimFunc:
         var_bounds = {lane_ph: tvm.ir.Range.from_min_extent(0, 32)}
         if warp_ph is not None:
             var_bounds[warp_ph] = tvm.ir.Range.from_min_extent(0, t_total // 32)
-        swizzle_pattern = try_recognize(
+        swizzle_pattern = try_recognize_xor(
             s_swizzle,
             iter_extents,
             iter_strides,
@@ -362,8 +394,137 @@ def _emit(op_call: TilePrimitiveCall, sctx: DispatchContext) -> PrimFunc:
         def __init__(self):
             self.signed_strides = None
             self.base_off = None
+            self.s_off_resolved = None
+
+    def _split_carry_free(split_tmpl, low_pre, p_):
+        """Numeric carry-free check for the constant split.
+
+        Every chunk-bit set in ``low_pre`` must be 0 in the split base's
+        chunk index, for every (lane, warp) in scope. Kernel-scalar buffer
+        reads (``prep_stage`` etc.) are sealed to 0 — they only contribute
+        bits above the checked range (stage * 20992 and pair_base * 64 start
+        at bit 6 while checks are at bits <= 8).
+        """
+        from tvm.tirx.buffer import BufferType as _BufferType
+        from tvm.tirx.expr_functor import ExprMutator as _ExprMutator
+        from tvm.tirx.expr_functor import ExprVisitor as _ExprVisitor
+        from tvm.tirx.stmt_functor import substitute as _subst_expr
+
+        free: dict[str, object] = {}
+        scalar_bufs: dict[str, object] = {}
+
+        class _VarGrab(_ExprVisitor):
+            def visit_var_(self, op):
+                if isinstance(op.ty, _BufferType):
+                    scalar_bufs.setdefault(str(op), op)
+                else:
+                    free.setdefault(str(op), op)
+
+            def visit_buffer_load_(self, op):
+                if isinstance(op.buffer.ty, _BufferType):
+                    scalar_bufs.setdefault(str(op.buffer), op.buffer)
+                super().visit_buffer_load_(op)
+
+        class _SealReads(_ExprMutator):
+            def __init__(self, val_of):
+                super().__init__()
+                self._val_of = val_of
+
+            def visit_buffer_load_(self, op):
+                if op.buffer in self._val_of:
+                    return _IntImm(str(op.expr_ty()), self._val_of[op.buffer])
+                return super().visit_buffer_load_(op)
+
+        _VarGrab().visit_expr(split_tmpl)
+        scalar_bufs = list(scalar_bufs.values())
+        seal = _SealReads({b: 0 for b in scalar_bufs})
+        an = arith.Analyzer()
+        n_warps = max(1, t_total // 32)
+        for b in range(32):
+            if not (low_pre >> b) & 1:
+                continue
+            for lane_i in range(32):
+                for warp_i in range(n_warps):
+                    subs = {lane_ph: _IntImm("int32", lane_i)}
+                    if warp_ph is not None:
+                        subs[warp_ph] = _IntImm("int32", warp_i)
+                    v = an.simplify(seal.visit_expr(_subst_expr(split_tmpl, subs)))
+                    if not isinstance(v, _IntImm):
+                        return False
+                    if (int(v.value) >> (p_ + b)) & 1:
+                        return False
+        return True
 
     state = _SwizzleState()
+
+    # ------------------------------------------------------------------
+    # Region-min constant split: keep compile-time constants out of the
+    # swizzle apply input. When the sliced offset carries a compile-time
+    # constant Δ (e.g. the k0 region min of a chain of copies), emit
+    #
+    #     addr = (apply(X) + D_high) ^ σ(D_low)      (element units)
+    #
+    # with X = s_off − Δ. Every copy in the chain then emits a *textually
+    # identical* apply(X) plus a per-copy XOR constant, and nvcc's plain
+    # CSE merges them into one base computation + one XOR per copy — the
+    # same shape the handwritten .cu relies on. Valid iff X is carry-free
+    # at Δ's low chunk-bits (checked numerically below); otherwise the
+    # behavior is unchanged (correct by construction regardless — the
+    # split only changes codegen shape, never addresses).
+    # ------------------------------------------------------------------
+    def _region_min_delta():
+        """Compile-time constant in the smem offset attributable to IntImm
+        region mins, from the S layout's per-dim shard strides (positionally
+        grouped to tensor dims)."""
+        base_lay = s_layout.tile_layout if isinstance(s_layout, ComposeLayout) else s_layout
+        iters = list(base_lay.shard)
+        groups = []
+        i = 0
+        for t_ext in s_shape:
+            acc = []
+            prod_e = 1
+            while prod_e < int(t_ext) and i < len(iters):
+                it = iters[i]
+                acc.append((int(it.extent), int(it.stride)))
+                prod_e *= int(it.extent)
+                i += 1
+            if prod_e != int(t_ext):
+                return 0
+            groups.append(acc)
+        if i != len(iters):
+            return 0
+        delta = 0
+        for (r_min, _), acc in zip(s_region, groups):
+            if not isinstance(r_min, _IntImm):
+                continue
+            m = int(r_min.value)
+            for sub_ext, stride in reversed(acc):
+                delta += (m % sub_ext) * stride
+                m //= sub_ext
+            if m:
+                return 0
+        return delta
+
+    split_low_elems = 0
+    split_high_elems = 0
+    s_off_template_base = s_off_template
+    if (
+        s_swizzle is not None
+        and s_off_template is not None
+        and swizzle_pattern is not None
+        and not swizzle_pattern.outer_iters
+    ):
+        d_elems = _region_min_delta()
+        p_ = int(s_swizzle.per_element)
+        if d_elems > 0 and d_elems % (1 << p_) == 0:
+            d_chunks = d_elems >> p_
+            low_c, high_c = xor_delta(s_swizzle, d_chunks)
+            low_pre = d_chunks % (1 << (int(s_swizzle.atom_len) + int(s_swizzle.swizzle_len)))
+            cand_template = s_off_template - _IntImm("int32", d_elems)
+            if _split_carry_free(cand_template, low_pre, p_):
+                split_low_elems = low_c << p_
+                split_high_elems = high_c << p_
+                s_off_template_base = cand_template
 
     def _resolve_s_off(laneid_var, warp_var):
         # Build the placeholder→runtime-var map and substitute. Keep this in a
@@ -372,27 +533,41 @@ def _emit(op_call: TilePrimitiveCall, sctx: DispatchContext) -> PrimFunc:
         vmap = {lane_ph: laneid_var}
         if warp_ph is not None:
             vmap[warp_ph] = warp_var
-        return tvm.tirx.stmt_functor.substitute(s_off_template, vmap)
+        return tvm.tirx.stmt_functor.substitute(s_off_template_base, vmap)
 
     def _setup_swizzle(s_off_resolved):
         if swizzle_pattern is None:
             return
-        state.signed_strides, state.base_off = emit_init(
-            swizzle_pattern,
-            s_off_resolved,
-        )
+        state.s_off_resolved = s_off_resolved
+        state.base_off = emit_base(s_swizzle, s_off_resolved)
+
+    def _apply_split(off):
+        # Append the region-min constant back as one XOR (the split form).
+        if split_high_elems:
+            off = off + _IntImm("int32", split_high_elems)
+        if split_low_elems:
+            off = off ^ _IntImm("int32", split_low_elems)
+        return off
 
     def _smem_off(mm_idx, logical_off):
         # Three paths:
-        #   * pattern matched: physical off = base_off + Σ bit_j(mm)·ss[j].
+        #   * pattern matched + compile-time mm: physical off =
+        #     (base_off + D_high) ^ σ(D_low) — one XOR, no signed_strides.
+        #   * pattern matched + runtime mm: additive signed-strides (lazy).
         #   * swizzle present, pattern missed: per-iter swizzle.apply(logical).
         #   * no swizzle: identity.
+        if swizzle_pattern is not None and isinstance(mm_idx, int):
+            return _apply_split(emit_xor_offset(swizzle_pattern, state.base_off, mm_idx))
         if swizzle_pattern is not None:
-            return emit_iter_offset(
-                swizzle_pattern,
-                state.signed_strides,
-                state.base_off,
-                mm_idx,
+            if state.signed_strides is None:
+                state.signed_strides, _ = emit_init(swizzle_pattern, state.s_off_resolved)
+            return _apply_split(
+                emit_iter_offset(
+                    swizzle_pattern,
+                    state.signed_strides,
+                    state.base_off,
+                    mm_idx,
+                )
             )
         if s_swizzle is not None:
             return s_swizzle.apply(logical_off)["m"]
