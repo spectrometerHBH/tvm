@@ -20,6 +20,7 @@ These classes emit TIR via @T.inline. Decorate with @T.meta_class so that
 instances are automatically treated as meta values inside @T.prim_func.
 """
 
+from tvm.backend.cuda.lang.clc import query_cancel_first_ctaid_x
 from tvm.backend.cuda.lang.pipeline import Pipeline, PipelineState
 from tvm.script import tirx as T
 
@@ -870,7 +871,7 @@ class _CLCWorker(ClusterPersistentScheduler2D):
         # Single-elected-thread scope: wait for the handle, decode, release the slot.
         self._clc.sched_arr.full.wait(0, self._sa.phase)
         self._sa.advance()
-        self._nxt = T.ptx.clc_query_cancel(T.address_of(self._clc.clc_handle[0]))
+        query_cancel_first_ctaid_x(self._nxt, T.address_of(self._clc.clc_handle[0]))
         self._clc.sched_fin.empty.arrive(0, remote=0, pred=True)
 
     @T.inline
@@ -878,7 +879,7 @@ class _CLCWorker(ClusterPersistentScheduler2D):
         # Warpgroup scope: all threads decode; one elected lane releases the slot.
         self._clc.sched_arr.full.wait(0, self._sa.phase)
         self._sa.advance()
-        self._nxt = T.ptx.clc_query_cancel(T.address_of(self._clc.clc_handle[0]))
+        query_cancel_first_ctaid_x(self._nxt, T.address_of(self._clc.clc_handle[0]))
         T.cuda.warpgroup_sync(wg_id + 1)
         if (warp_id == 0) & (lane_id == 0):
             self._clc.sched_fin.empty.arrive(0, remote=0, pred=True)
@@ -939,7 +940,7 @@ class ClusterLaunchControlScheduler:
                 self.sched_arr.full.arrive(0, 16)  # expect_bytes for the 16B handle
                 self.sched_arr.full.wait(0, sa.phase)
                 sa.advance()
-                self._s_nxt = T.ptx.clc_query_cancel(T.address_of(self.clc_handle[0]))
+                query_cancel_first_ctaid_x(self._s_nxt, T.address_of(self.clc_handle[0]))
                 self.sched_fin.empty.arrive(0, remote=0, pred=True)
                 if self._s_nxt == 0xFFFFFFFF:
                     self._s_done = 1

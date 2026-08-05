@@ -22,6 +22,7 @@ import pytest
 
 import tvm
 import tvm.testing
+from tvm.backend.cuda.lang.clc import query_cancel_first_ctaid_x
 from tvm.script import tirx as T
 from tvm.testing import env
 
@@ -581,8 +582,11 @@ def test_ptx_sync_and_clc_codegen():
                 "clusterlaunchcontrol.try_cancel.async.shared::cta"
                 ".mbarrier::complete_tx::bytes.multicast::cluster::all.b128"
             ](response.ptr_to([0]), bar.ptr_to([0]))
-            A[0] = T.ptx.clc_query_cancel(response.ptr_to([0]))
-            A[0] = T.ptx.clc_query_cancel(response.ptr_to([0]), use_ld_acquire=False)
+            nxt = T.local_scalar("uint32")
+            query_cancel_first_ctaid_x(nxt, response.ptr_to([0]))
+            A[0] = nxt
+            query_cancel_first_ctaid_x(nxt, response.ptr_to([0]), use_ld_acquire=False)
+            A[0] = nxt
             T.ptxd.griddepcontrol.launch_dependents()
 
     target = tvm.target.Target({"kind": "cuda", "arch": "sm_100a"})

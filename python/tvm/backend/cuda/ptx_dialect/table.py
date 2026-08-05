@@ -1672,9 +1672,6 @@ _ENTRIES = [
         ),
     ),
     # clusterlaunchcontrol.try_cancel per PTX ISA 9.7.14.15.
-    # NOT REGISTERED: the `query_cancel` lines (9.7.14.16) -- they decode the
-    # b128 response into a `.pred` or a `.v4.b32` group, which needs both a
-    # predicate result and a variable register group.
     InstructionEntry(
         name="clusterlaunchcontrol_try_cancel",
         mnemonic="clusterlaunchcontrol",
@@ -1692,6 +1689,59 @@ _ENTRIES = [
         operands=(
             OperandSlot("addr", role="addr", space="shared::cta"),
             OperandSlot("mbar", role="addr", space="shared::cta"),
+        ),
+    ),
+    # clusterlaunchcontrol.query_cancel per PTX ISA 9.7.14.19: decode the
+    # opaque b128 response a try_cancel wrote. Two syntax shapes, so two
+    # entries -- the ISA writes them as separate lines.
+    #
+    #   ...query_cancel.is_canceled.pred.b128         p, response;
+    #   ...query_cancel.get_first_ctaid{::dim}.b32.b128  d, response;
+    #
+    # NOT REGISTERED: the `.v4.b32` line, whose fourth destination the ISA
+    # writes as the sink symbol `_` ("the contents of the 4th element is
+    # unspecified"); the sink needs an operand role for "this lane is
+    # discarded", and the per-dimension line covers every call site.
+    InstructionEntry(
+        name="clusterlaunchcontrol_query_cancel_is_canceled",
+        mnemonic="clusterlaunchcontrol",
+        slots=(
+            ModifierSlot("action", ("query_cancel",)),
+            ModifierSlot("query", ("is_canceled",)),
+            ModifierSlot("ptype", ("pred",)),
+            ModifierSlot("type", ("b128",)),
+        ),
+        cert_arch="sm_100a",
+        operands=(
+            OperandSlot("p", role="pred_dst"),
+            OperandSlot("response", role="value", dtype="b128"),
+        ),
+    ),
+    InstructionEntry(
+        # `d` is role="acc", not "dst": the caller seeds it with a sentinel and
+        # predicates the instruction on the cancellation having succeeded, so a
+        # false predicate has to leave the seed intact. "=" would tell nvcc the
+        # prior value is dead; "+" keeps it live, and (unlike a dst) it does not
+        # block the framework's `@p` wrapper.
+        name="clusterlaunchcontrol_query_cancel_get_first_ctaid",
+        mnemonic="clusterlaunchcontrol",
+        slots=(
+            ModifierSlot("action", ("query_cancel",)),
+            # `::dimension` binds to the query name with no dot between them
+            # (ISA: `get_first_ctaid{::dimension}`), so it is part of this
+            # token rather than a slot of its own -- the same shape as
+            # tcgen05's `wait::ld`.
+            ModifierSlot(
+                "query",
+                ("get_first_ctaid::x", "get_first_ctaid::y", "get_first_ctaid::z"),
+            ),
+            ModifierSlot("dtype", ("b32",)),
+            ModifierSlot("type", ("b128",)),
+        ),
+        cert_arch="sm_100a",
+        operands=(
+            OperandSlot("d", role="acc", dtype="b32"),
+            OperandSlot("response", role="value", dtype="b128"),
         ),
     ),
     # ------------------------------------------------------------------

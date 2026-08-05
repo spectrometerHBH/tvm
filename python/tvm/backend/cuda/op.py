@@ -461,25 +461,6 @@ def _is_static_unicast_cta_mask(cta_mask):
     return False
 
 
-def ptx_clc_query_cancel(handle, *, use_ld_acquire=True):
-    """TVM intrinsic to call clusterlaunchcontrol.query_cancel.
-
-    Decodes the response handle written by ``clusterlaunchcontrol.try_cancel``
-    (now ``T.ptxd``). Returns the
-    cancelled cluster's first ``ctaid.x``, or ``0xFFFFFFFF`` when no work was stolen.
-
-    Parameters
-    ----------
-    handle : Expr
-        Pointer to the 16B (uint4) smem response handle.
-
-    use_ld_acquire : bool
-        Whether to load the 16-byte response with ``ld.acquire.cta.shared.b128``.
-
-    """
-    return call_intrin("uint32", "tirx.ptx.clc_query_cancel", handle, int(bool(use_ld_acquire)))
-
-
 def ptx_elect_sync():
     """TVM intrinsic to call elect.sync"""
     return call_intrin("uint32", "tirx.ptx.elect_sync")

@@ -51,7 +51,6 @@ class PTXNamespace:
         # working without rewriting their tirx code.
         self.ldmatrix_legacy = _dtype_forward(_cuda_op.ptx_ldmatrix_legacy)
         self.elect_sync: Callable[..., Any] = _op_wrapper(_cuda_op.ptx_elect_sync)
-        self.clc_query_cancel = _op_wrapper(_cuda_op.ptx_clc_query_cancel)
         # Math operations
         self.cvt = _dtype_forward(_cuda_op.ptx_cvt)
         # add/sub/mul/fma DPS form: (d_addr, a, b[, c], *, rounding, ftz[, sat])

@@ -111,18 +111,25 @@ class _Chain_barrier:
     def __call__(self, *args: Any, pred: Any = None) -> None: ...
 
 class _Chain_clusterlaunchcontrol:
-    """`clusterlaunchcontrol` — action∈{try_cancel}; async_∈{async}; space∈{shared::cta} (opt);
-    completion∈{mbarrier::complete_tx::bytes}; multicast∈{multicast::cluster::all} (opt);
-    type∈{b128}
+    """`clusterlaunchcontrol` — 3 entries sharing this mnemonic; PTX puts their difference in
+    the operand list, so the call selects one. Shapes: (addr, mbar); (p, response); (d,
+    response)
     """
 
     async_: _Chain_clusterlaunchcontrol
     b128: _Chain_clusterlaunchcontrol
+    b32: _Chain_clusterlaunchcontrol
+    get_first_ctaid__x: _Chain_clusterlaunchcontrol
+    get_first_ctaid__y: _Chain_clusterlaunchcontrol
+    get_first_ctaid__z: _Chain_clusterlaunchcontrol
+    is_canceled: _Chain_clusterlaunchcontrol
     mbarrier__complete_tx__bytes: _Chain_clusterlaunchcontrol
     multicast__cluster__all: _Chain_clusterlaunchcontrol
+    pred: _Chain_clusterlaunchcontrol
+    query_cancel: _Chain_clusterlaunchcontrol
     shared__cta: _Chain_clusterlaunchcontrol
     try_cancel: _Chain_clusterlaunchcontrol
-    def __call__(self, addr: Any, mbar: Any, *args: Any, pred: Any = None) -> None: ...
+    def __call__(self, *args: Any) -> None: ...
 
 class _Chain_cp:
     """`cp` — 19 entries sharing this mnemonic; PTX puts their difference in the operand list,

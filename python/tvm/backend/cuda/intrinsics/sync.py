@@ -97,54 +97,6 @@ def _ptx_barrier_cluster_wait(acquire, aligned):
 
 
 # =============================================================================
-# clusterlaunchcontrol.try_cancel / query_cancel — Blackwell Cluster Launch
-# Control (CLC) work-stealing, written from the PTX ISA spec (section
-# "clusterlaunchcontrol", PTX ISA 8.6). try_cancel async-requests cancelling the
-# next cluster's launch, writing a 16B response to smem + signalling mbar. query
-# decodes the response: on success it extracts the cancelled cluster's first
-# ctaid.x (via the get_first_ctaid::x form); a single uint32 is returned, with
-# 0xFFFFFFFF as the "no work stolen" sentinel (a device helper returns one scalar).
-# =============================================================================
-
-
-def _ptx_clc_query_cancel_parts(use_ld_acquire):
-    use_ld_acquire = (
-        bool(int(use_ld_acquire)) if hasattr(use_ld_acquire, "value") else bool(use_ld_acquire)
-    )
-    name = f"tvm_builtin_ptx_clc_query_cancel{'_ld_acquire' if use_ld_acquire else ''}"
-    load_instr = "ld.acquire.cta.shared.b128" if use_ld_acquire else "ld.shared.b128"
-    body = (
-        "    unsigned int addr = (unsigned int)__cvta_generic_to_shared(handle);\n"
-        "    unsigned int first_ctaid_x;\n"
-        "    asm volatile(\n"
-        '        "{\\n"\n'
-        '        ".reg .pred canceled;\\n"\n'
-        '        ".reg .b128 response;\\n"\n'
-        f'        "{load_instr} response, [%1];\\n"\n'
-        '        "clusterlaunchcontrol.query_cancel.is_canceled.pred.b128 canceled, response;\\n"\n'
-        '        "mov.u32 %0, 0xffffffff;\\n"\n'
-        '        "@canceled clusterlaunchcontrol.query_cancel.get_first_ctaid::x.b32.b128"\n'
-        '        " %0, response;\\n"\n'
-        '        "}\\n"\n'
-        '        : "=r"(first_ctaid_x) : "r"(addr) : "memory");\n'
-        '    asm volatile("fence.proxy.async.shared::cta;\\n" ::: "memory");\n'
-        "    return first_ctaid_x;"
-    )
-    return name, body
-
-
-device_intrinsic(
-    "ptx_clc_query_cancel",
-    n_attrs=1,
-    helper_name=lambda *args: _ptx_clc_query_cancel_parts(args[-1])[0],
-    c_signature="(void* handle)",
-    return_type="uint32_t",
-    tvm_return_type="uint32",
-    body=lambda *args: _ptx_clc_query_cancel_parts(args[-1])[1],
-)
-
-
-# =============================================================================
 # mbarrier.try_wait.parity.shared::cta.b64 — 1 form. Body wraps the asm in a
 # label loop (TIRx convention; the magic ``ticks = 0x989680`` is the timeout
 # hint in ns).
