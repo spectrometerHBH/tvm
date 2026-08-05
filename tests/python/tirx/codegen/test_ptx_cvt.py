@@ -23,6 +23,13 @@ from tvm.backend.cuda.ptx_dialect.table import TABLE, renderings
 
 # (entry name, one modifier combination, the instruction that combination emits)
 _FORM_CASES = [
+    # generic scalar line: one case per rule the check enforces
+    ("cvt", ("rzi", "", "", "s32", "f32"), "cvt.rzi.s32.f32"),
+    ("cvt", ("rn", "", "", "f32", "s32"), "cvt.rn.f32.s32"),
+    ("cvt", ("rn", "", "", "f16", "f32"), "cvt.rn.f16.f32"),
+    ("cvt", ("", "", "", "f32", "f16"), "cvt.f32.f16"),
+    ("cvt", ("", "", "sat", "s8", "s32"), "cvt.sat.s8.s32"),
+    ("cvt", ("rzi", "ftz", "", "s32", "f32"), "cvt.rzi.ftz.s32.f32"),
     ("cvt_ue8m0x2_f32", ("rz", "", "ue8m0x2", "f32"), "cvt.rz.ue8m0x2.f32"),
     ("cvt_ue8m0x2_f32", ("rp", "satfinite", "ue8m0x2", "f32"), "cvt.rp.satfinite.ue8m0x2.f32"),
     ("cvt_ue8m0x2_bf16x2", ("rz", "", "ue8m0x2", "bf16x2"), "cvt.rz.ue8m0x2.bf16x2"),
@@ -48,7 +55,9 @@ _FORM_CASES = [
     ),
 ]
 
-_CVT_ENTRIES = {name for name in TABLE if name.startswith("cvt_")}
+# The generic scalar line is one entry named plain "cvt"; the packed lines are
+# the "cvt_*" family.
+_CVT_ENTRIES = {name for name in TABLE if name == "cvt" or name.startswith("cvt_")}
 
 
 @pytest.mark.parametrize("entry_name,tokens,instruction", _FORM_CASES)

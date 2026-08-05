@@ -180,20 +180,38 @@ class _Chain_cp:
     def __call__(self, *args: Any, pred: Any = None) -> None: ...
 
 class _Chain_cvt:
-    """`cvt` — 7 entries sharing this mnemonic; PTX puts their difference in the operand list,
-    so the call selects one. Shapes: (d, a, b); (d, a)
+    """`cvt` — 8 entries sharing this mnemonic; PTX puts their difference in the operand list,
+    so the call selects one. Shapes: (d, a); (d, a, b)
     """
 
+    bf16: _Chain_cvt
     bf16x2: _Chain_cvt
     e4m3x2: _Chain_cvt
     e5m2x2: _Chain_cvt
+    f16: _Chain_cvt
     f16x2: _Chain_cvt
     f32: _Chain_cvt
+    f64: _Chain_cvt
+    ftz: _Chain_cvt
     relu: _Chain_cvt
+    rm: _Chain_cvt
+    rmi: _Chain_cvt
     rn: _Chain_cvt
+    rni: _Chain_cvt
     rp: _Chain_cvt
+    rpi: _Chain_cvt
     rz: _Chain_cvt
+    rzi: _Chain_cvt
+    s16: _Chain_cvt
+    s32: _Chain_cvt
+    s64: _Chain_cvt
+    s8: _Chain_cvt
+    sat: _Chain_cvt
     satfinite: _Chain_cvt
+    u16: _Chain_cvt
+    u32: _Chain_cvt
+    u64: _Chain_cvt
+    u8: _Chain_cvt
     ue8m0x2: _Chain_cvt
     def __call__(self, *args: Any) -> None: ...
 

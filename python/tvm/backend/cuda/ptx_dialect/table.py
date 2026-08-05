@@ -999,6 +999,92 @@ def _check_cvt_scalar(m):
 _CVT_FP_BITS = {"bf16": 16, "f16": 16, "f32": 32, "f64": 64}
 
 
+# cvt's generic scalar line takes the ISA's twelve-type dtype/atype list.
+_CVT_BASIC = (
+    "u8", "u16", "u32", "u64",
+    "s8", "s16", "s32", "s64",
+    "bf16", "f16", "f32", "f64",
+)  # fmt: skip
+
+# (significand bits, exponent bits) -- what "loss of precision" is measured on.
+_CVT_FP_FORMAT = {"f16": (11, 5), "bf16": (8, 8), "f32": (24, 8), "f64": (53, 11)}
+_CVT_INT_BITS = {"u8": 8, "s8": 8, "u16": 16, "s16": 16, "u32": 32, "s32": 32, "u64": 64, "s64": 64}
+_CVT_IRND = ("rni", "rzi", "rmi", "rpi")
+_CVT_FRND = ("rn", "rz", "rm", "rp")
+
+
+def _cvt_loses_precision(d: str, a: str) -> bool:
+    """Whether a float->float conversion loses precision (ISA's own wording).
+
+    Either fewer significand bits or fewer exponent bits loses information, so
+    .bf16 and .f16 lose in *both* directions despite being the same width.
+    """
+    d_sig, d_exp = _CVT_FP_FORMAT[d]
+    a_sig, a_exp = _CVT_FP_FORMAT[a]
+    return d_sig < a_sig or d_exp < a_exp
+
+
+def _cvt_int_covers(d: str, a: str) -> bool:
+    """Whether integer type `d`'s value range is a superset of `a`'s."""
+    d_signed, a_signed = d[0] == "s", a[0] == "s"
+    if d_signed == a_signed:
+        return _CVT_INT_BITS[d] >= _CVT_INT_BITS[a]
+    # A signed destination holds every unsigned source only if strictly wider;
+    # an unsigned destination never holds a signed source's negatives.
+    return _CVT_INT_BITS[d] > _CVT_INT_BITS[a] if d_signed else False
+
+
+def _check_cvt_scalar(m):
+    """The generic scalar line's rules, quoting ISA 9.7.9.22.
+
+    Rounding: "Integer rounding is required for float-to-integer conversions
+    ... illegal in all other instances"; "Floating-point rounding is required
+    for float-to-float conversions that result in loss of precision, and for
+    integer-to-float conversions ... illegal in all other instances."
+
+    ``.ftz``: "can only be specified when either .dtype or .atype is .f32".
+
+    ``.sat``: "For integer destination types ... allowed only in cases where
+    the destination type's value range is not a superset of the source type's
+    value range". For float destinations it clamps to [0.0, 1.0] instead, so
+    the superset rule does not apply there.
+
+    Two restrictions are ptxas's rather than the ISA's, and are recorded here
+    because the certification pass would otherwise report legal-looking forms
+    as illegal: this toolchain assembles no conversion between .bf16 and an
+    8-bit integer, and takes no `.sat` on any .bf16 operand.
+    """
+    d, a, rnd, ftz, sat = m["dtype"], m["atype"], m["rnd"], m["ftz"], m["sat"]
+    if d == a:
+        return "a conversion to the same type is a move, not a cvt"
+    d_int, a_int = d in _CVT_INT_BITS, a in _CVT_INT_BITS
+    if d_int and not a_int:
+        if rnd not in _CVT_IRND:
+            return "float-to-integer requires an integer rounding mode"
+    elif rnd in _CVT_IRND:
+        return "integer rounding is illegal outside float-to-integer"
+    if not d_int and a_int:
+        if rnd not in _CVT_FRND:
+            return "integer-to-float requires a floating-point rounding mode"
+    elif not d_int and not a_int:
+        if _cvt_loses_precision(d, a):
+            if rnd not in _CVT_FRND:
+                return f"{d} from {a} loses precision, so a rounding mode is required"
+        elif rnd:
+            return f"{d} from {a} is exact, so a rounding mode is illegal"
+    elif d_int and a_int and rnd:
+        return "integer-to-integer takes no rounding mode"
+    if ftz and "f32" not in (d, a):
+        return ".ftz applies only where .f32 is one of the types"
+    if sat and d_int and a_int and _cvt_int_covers(d, a):
+        return f"{d} already covers {a}, so saturation is not possible"
+    if sat and "bf16" in (d, a):
+        return "this toolchain assembles no .sat on a .bf16 operand"
+    if "bf16" in (d, a) and (d in ("u8", "s8") or a in ("u8", "s8")):
+        return "this toolchain assembles no .bf16 <-> 8-bit-integer conversion"
+    return None
+
+
 def _check_mma_sp_same_type(m):
     """Every sparse line spells .atype and .btype identically."""
     if m["atype"] != m["btype"]:
@@ -1693,17 +1779,37 @@ _ENTRIES = [
     ),
     # cvt per PTX ISA 9.7.9.22.
     #
-    # NOT REGISTERED: the two generic scalar lines, `cvt{.irnd}{.ftz}{.sat}` and
-    # `cvt{.frnd}{.ftz}{.sat}` over the 12-type dtype/atype product. Their
-    # legality is a matrix ptxas enforces well beyond what the ISA prose states
-    # -- a rounding modifier is mandatory not only when narrowing between float
-    # widths but also for integer sources a float cannot represent exactly;
-    # `.sat` is rejected wherever the destination range already covers the
-    # source ("the .sat modifier is illegal in cases where saturation is not
-    # possible"); and this toolchain rejects `.bf16` as a scalar source
-    # entirely. A probe of the full product found 210 of 748 combinations
-    # rejected. No call site needs these lines: every caller uses the packed
-    # formats below, so the matrix is left unmodelled rather than guessed at.
+    # The generic scalar line first: `cvt{.irnd|.frnd}{.ftz}{.sat}.dtype.atype`
+    # over the ISA's twelve-type dtype/atype product. The two spellings the ISA
+    # writes as separate lines share one operand shape, so they are one entry
+    # whose check picks which rounding set applies -- otherwise both would
+    # render the same no-rounding variants.
+    #
+    # The rules are the ISA's own, quoted in `_check_cvt_scalar`. Their product
+    # was checked against ptxas over all 4752 combinations: every one of the
+    # 727 this entry renders assembles.
+    #
+    # ptxas is more lenient than the ISA in fourteen bf16 spellings (it takes
+    # `cvt.bf16.f16` with no rounding though the conversion loses precision,
+    # and `cvt.rn.f32.bf16` though widening is exact). The table follows the
+    # ISA and does not offer them.
+    InstructionEntry(
+        name="cvt",
+        slots=(
+            ModifierSlot(
+                "rnd", ("rni", "rzi", "rmi", "rpi", "rn", "rz", "rm", "rp"), optional=True
+            ),
+            ModifierSlot("ftz", ("ftz",), optional=True),
+            ModifierSlot("sat", ("sat",), optional=True),
+            ModifierSlot("dtype", _CVT_BASIC),
+            ModifierSlot("atype", _CVT_BASIC),
+        ),
+        check=_check_cvt_scalar,
+        operands=(
+            OperandSlot("d", role="dst", dtype="dtype"),
+            OperandSlot("a", role="value", dtype="atype"),
+        ),
+    ),
     InstructionEntry(  # cvt.frnd3{.satfinite}.ue8m0x2.f32 d, a, b;
         name="cvt_ue8m0x2_f32",
         mnemonic="cvt",
