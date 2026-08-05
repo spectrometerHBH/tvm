@@ -200,7 +200,7 @@ def test_backend_specific_wrappers_are_not_root_exports():
     from tvm.tirx.trn import op as trn_op
 
     backend_only_names = [
-        "ptx_mma",
+        "ptx_mma_legacy",
         "mma_store",
         "cuda_thread_fence",
         "nvshmem_fence",
@@ -213,7 +213,7 @@ def test_backend_specific_wrappers_are_not_root_exports():
         assert not hasattr(tvm.tirx, name)
         assert not hasattr(T, name)
 
-    assert cuda_op.ptx_mma
+    assert cuda_op.ptx_mma_legacy
     assert cuda_op.mma_store
     assert cuda_op.cuda_thread_fence
     assert cuda_op.nvshmem_fence

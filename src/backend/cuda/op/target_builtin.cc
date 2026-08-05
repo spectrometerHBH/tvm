@@ -66,7 +66,7 @@ TIRX_DEFINE_BUILTIN_FUNC(tvm_fill_fragment)
 TIRX_DEFINE_BUILTIN_FUNC(tvm_store_matrix_sync)
     .set_attr<TCallEffectKind>("TCallEffectKind", static_cast<int64_t>(CallEffectKind::kOpaque));
 
-// Siblings of ptx_mma / ptx_ldmatrix / mma_store / mma_fill that accept
+// Siblings of mma_store / mma_fill that accept
 // (ptr_var, offset) pairs. Codegen emits `ptr + offset` C-pointer
 // arithmetic and lower_warp_memory rewrites the offset's group component
 // to its thread-local index. Used by the s_tir tensor_intrin tensorize
@@ -237,9 +237,7 @@ const DeviceIntrinsicRegistration kDeviceIntrinsics[] = {
     TIRX_DEVICE_INTRIN_ALIAS(nvshmem_wait_until, nvshmem, kOpaque),
     TIRX_DEVICE_INTRIN_ALIAS(ptx_cvt, ptx, kPure),
     TIRX_DEVICE_INTRIN_ALIAS(ptx_elect_sync, ptx, kOpaque),
-    TIRX_DEVICE_INTRIN_ALIAS(ptx_ldmatrix, ptx, kOpaque),
     TIRX_DEVICE_INTRIN_ALIAS(ptx_ldmatrix_legacy, ptx, kOpaque),
-    TIRX_DEVICE_INTRIN_ALIAS(ptx_mma, ptx, kOpaque),
     TIRX_DEVICE_INTRIN_ALIAS(ptx_mma_legacy, ptx, kOpaque),
     TIRX_DEVICE_INTRIN_ALIAS(ptx_neg_f32, ptx, kPure),
     TIRX_DEVICE_INTRIN_ALIAS(ptx_sub_f16x2, ptx, kPure),

@@ -43,12 +43,10 @@ class PTXNamespace:
 
     def __init__(self):
         self.ldg32 = _ptx_ldg32
-        self.ldmatrix = _dtype_forward(_cuda_op.ptx_ldmatrix)
-        # Apache-compatible variant. Same lowered intrinsic as
-        # ``ldmatrix`` but accepts the historical ``(trans, num, dtype,
-        # local_ptr, local_offset, smem_ptr, smem_offset)`` form. Coexists
-        # with the fork-native version so upstream-derived tests keep
-        # working without rewriting their tirx code.
+        # Apache-compatible ldmatrix: the historical ``(trans, num, dtype,
+        # local_ptr, local_offset, smem_ptr, smem_offset)`` form, kept so
+        # upstream-derived tests keep working without rewriting their tirx
+        # code. Fork-native code writes `T.ptxd.ldmatrix...`.
         self.ldmatrix_legacy = _dtype_forward(_cuda_op.ptx_ldmatrix_legacy)
         self.elect_sync: Callable[..., Any] = _op_wrapper(_cuda_op.ptx_elect_sync)
         # Math operations
@@ -61,17 +59,10 @@ class PTXNamespace:
 
 
 class MmaNamespace:
-    """The MMA instruction submodule."""
+    """The MMA instruction submodule: the Apache-compatible legacy form only."""
 
     def __init__(self):
-        # Apache-compatible variant of ptx_mma. Coexists with the
-        # fork-native ``__call__`` form (``T.ptx.mma(...)``).
         self.legacy = _dtype_forward(_cuda_op.ptx_mma_legacy)
-        # __call__ corresponds to ptx_mma
-        self.__tir_call_op_name__ = "ptx_mma"
-
-    def __call__(self, *args, **kwds):
-        return _dtype_forward(_cuda_op.ptx_mma)(*args, **kwds)
 
 
 class CpAsyncNamespace:

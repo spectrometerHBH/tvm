@@ -218,23 +218,6 @@ def test_tir_op_mma_fill():
     assert expr.op.name == "tirx.mma_fill"
 
 
-def test_op_ptx_ldmatrix():
-    buffer_shared = tirx.decl_buffer([16, 16], "float16", scope="shared")
-    buffer_local = tirx.decl_buffer([8], "float16", scope="local")
-    # New API: 4 scatter-form dst handles for .x4.b16 (one per output register).
-    expr = _cuda_op.ptx_ldmatrix(
-        False,
-        4,
-        ".b16",
-        buffer_shared.data,
-        buffer_local.data,
-        buffer_local.data,
-        buffer_local.data,
-        buffer_local.data,
-    )
-    assert expr.op.name == "tirx.ptx.ldmatrix"
-
-
 def test_op_ptx_cp_async():
     buffer_shared = tirx.decl_buffer([16, 16], "float16", scope="shared")
     buffer_local = tirx.decl_buffer([8], "float16", scope="local")

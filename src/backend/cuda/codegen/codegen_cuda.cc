@@ -1028,7 +1028,6 @@ void CodeGenCUDA::VisitExpr_(const CallNode* op, std::ostream& os) {
   static const Op& tvm_store_matrix_sync_op = Op::Get("tirx.tvm_store_matrix_sync");
   static const Op& tvm_mma_sync_op = Op::Get("tirx.tvm_mma_sync");
   static const Op& tvm_bmma_sync_op = Op::Get("tirx.tvm_bmma_sync");
-  static const Op& ptx_mma_op = Op::Get("tirx.ptx.mma");
   static const Op& mma_store_op = Op::Get("tirx.mma_store");
   static const Op& mma_fill_op = Op::Get("tirx.mma_fill");
   static const Op& ptx_mma_legacy_op = Op::Get("tirx.ptx.mma_legacy");
@@ -1097,41 +1096,6 @@ void CodeGenCUDA::VisitExpr_(const CallNode* op, std::ostream& os) {
       this->PrintExpr(op->args[i * 2 + 1], os);
       os << "]" << ((i < 3) ? ", " : ")");
     }
-  } else if (IsOp(op, ptx_mma_op, "tirx.ptx.mma")) {
-    // arg 0: shape: mXnXkX
-    // arg 1: A layout: row/col
-    // arg 2: B layout: row/col
-    // arg 3: A precision: fp16, fp64, ...
-    // arg 4: B precision: fp16, fp64, ...
-    // arg 5: C precision: fp32, fp64, ...
-    // arg 6: A multiplicand
-    // arg 7: A multiplicand index
-    // arg 8: B multiplicand
-    // arg 9: B multiplicand index
-    // arg 10: C accumulator
-    // arg 11: C accumulator index
-    // arg 12: saturate
-    // arg 13: (optional) 1-bit operator (xor or and)
-    TVM_FFI_ICHECK(op->args.size() == 13U || op->args.size() == 14U);
-    std::string shape = op->args[0].as_or_throw<StringImm>()->value;
-    std::string A_layout = op->args[1].as_or_throw<StringImm>()->value;
-    std::string B_layout = op->args[2].as_or_throw<StringImm>()->value;
-    std::string A_dtype = op->args[3].as_or_throw<StringImm>()->value;
-    std::string B_dtype = op->args[4].as_or_throw<StringImm>()->value;
-    std::string C_dtype = op->args[5].as_or_throw<StringImm>()->value;
-    std::string a_ref = this->PrintExpr(op->args[6]);
-    std::string a_bias = this->PrintExpr(op->args[7]);
-    std::string b_ref = this->PrintExpr(op->args[8]);
-    std::string b_bias = this->PrintExpr(op->args[9]);
-    std::string c_ref = this->PrintExpr(op->args[10]);
-    std::string c_bias = this->PrintExpr(op->args[11]);
-    bool saturate = op->args[12].as_or_throw<IntImm>()->value;
-    std::string bit_op = op->args.size() > 13 ? op->args[13].as_or_throw<StringImm>()->value : "";
-    std::string asm_code =
-        PrintMMAAssembly(shape, A_layout, B_layout, A_dtype, B_dtype, C_dtype, a_ref, a_bias, b_ref,
-                         b_bias, c_ref, c_bias, "", "", "", bit_op, false, saturate);
-
-    this->stream << asm_code;
   } else if (op->op.same_as(mma_store_op)) {
     int m = op->args[0].as_or_throw<IntImm>()->value;
     int n = op->args[1].as_or_throw<IntImm>()->value;
@@ -1211,8 +1175,7 @@ void CodeGenCUDA::VisitExpr_(const CallNode* op, std::ostream& os) {
     bool saturate = op->args[12].as_or_throw<IntImm>()->value;
     std::string bit_op = op->args.size() > 13 ? op->args[13].as_or_throw<StringImm>()->value : "";
     this->stream << PrintMMAAssembly(shape, A_layout, B_layout, A_dtype, B_dtype, C_dtype, a_ref,
-                                     a_bias, b_ref, b_bias, c_ref, c_bias, "", "", "", bit_op,
-                                     false, saturate);
+                                     a_bias, b_ref, b_bias, c_ref, c_bias, bit_op, saturate);
   } else if (IsOp(op, ptx_ldmatrix_legacy_op, "tirx.ptx.ldmatrix_legacy")) {
     // args: trans, num, type, local_ptr_var, local_offset, smem_ptr_var, smem_offset
     codegen_tags_.insert("mma");

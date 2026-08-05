@@ -309,10 +309,6 @@ def test_printer_ptx_mma_and_wgmma():
     a = tir.Var("a", "handle")
     tir.Var("b", "handle")
     _assert_print(
-        cuda_op.ptx_mma("m8n8k4", "row", "row", "fp16", "fp16", "fp16", "fp16", [r], [r], [r]),
-        'r = T.handle()\nT.ptx.mma("m8n8k4", "row", "row", "fp16", "fp16", "fp16", "fp16", 1, 1, 1, 0, T.bool(True), r, r, r, T.bool(False))',  # noqa: E501
-    )
-    _assert_print(
         cuda_op.cuda_wgmma_encode_matrix_descriptor(d, a, 1, 1, 0),
         "d = T.handle()\na = T.handle()\nT.cuda.wgmma.encode_matrix_descriptor(d, a, 1, 1, 0)",
     )

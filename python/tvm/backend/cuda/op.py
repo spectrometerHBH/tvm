@@ -27,8 +27,6 @@ from tvm.tirx.op import bitwise_and, call_intrin, tvm_access_ptr
 from tvm.tirx.operator.intrinsics._common import (
     CP_ASYNC_BULK_CACHE_HINT as _CP_ASYNC_BULK_CACHE_HINT,
 )
-from tvm.tirx.operator.intrinsics._common import LDMATRIX_DTYPE as _LDMATRIX_DTYPE
-from tvm.tirx.operator.intrinsics._common import LDMATRIX_NUM as _LDMATRIX_NUM
 from tvm.tirx.operator.intrinsics._common import MBARRIER_ARRIVE_SCOPE as _MBARRIER_ARRIVE_SCOPE
 from tvm.tirx.operator.intrinsics._common import MBARRIER_ARRIVE_SEM as _MBARRIER_ARRIVE_SEM
 from tvm.tirx.operator.intrinsics._common import MBARRIER_ARRIVE_SPACE as _MBARRIER_ARRIVE_SPACE
@@ -485,127 +483,13 @@ def cuda_mov_sreg(bits, reg_name):
     return call_intrin("int" + str(bits), "tirx.cuda.mov_sreg", bits, reg_name)
 
 
-def ptx_mma(
-    shape,
-    a_layout,
-    b_layout,
-    d_type,
-    a_type,
-    b_type,
-    c_type,
-    d_ptrs,
-    a_ptrs,
-    b_ptrs,
-    c_ptrs=None,
-    saturate=False,
-    bit_op=None,
-):
-    """TVM intrinsic for ptx tensor core mma instructions.
-    https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#warp-level-matrix-instructions-for-mma
-
-    Each per-thread register of every operand is addressed by its OWN pointer
-    (one ``void*`` per b32/f32 register), so the register fragments need not be
-    contiguous in the register file. ``d_ptrs`` / ``a_ptrs`` / ``b_ptrs`` /
-    ``c_ptrs`` are lists of one pointer per 32-bit register (b32 for
-    fp16/bf16/tf32/int8 multiplicands, f32/f64 for the accumulator), enumerated
-    in the fixed PTX register order (see the gemm dispatch /
-    ``tests/python/tirx-base/test_tir_ptx_mma.py``).
-
-    Within one b32 register the packed elements (e.g. 2 fp16 along k_pack)
-    must stay contiguous (stride 1); only the b32 registers themselves may be
-    scattered.
-
-    Parameters
-    ----------
-    shape : str
-        The shape of mma fragment.
-
-    a_layout : Literal["row", "col"]
-        The layout of multiplicand fragment A.
-
-    b_layout : Literal["row", "col"]
-        The layout of multiplicand fragment B.
-
-    d_type : str
-        The data type of result fragment D.
-
-    a_type : str
-        The data type of multiplicand fragment A.
-
-    b_type : str
-        The data type of multiplicand fragment B.
-
-    c_type : str
-        The data type of accumulator fragment C.
-
-    d_ptrs : List[Expr]
-        One pointer per result-fragment D register, in PTX order.
-
-    a_ptrs : List[Expr]
-        One pointer per multiplicand-A register, in PTX order.
-
-    b_ptrs : List[Expr]
-        One pointer per multiplicand-B register, in PTX order.
-
-    c_ptrs : Optional[List[Expr]]
-        One pointer per accumulator-C register, in PTX order. ``None`` (the
-        default) means the accumulator is not used (beta == 0): codegen feeds
-        a literal 0 for each C slot.
-
-    saturate : bool
-        The optional saturation at the output.
-
-    bit_op : Optional[Literal["xor", "and"]]
-        The 1-bit operator (for the b1 subbyte form). ``None`` means unused.
-
-    Returns
-    -------
-    call : Expr
-        The call expression.
-    """
-    d_ptrs = list(d_ptrs)
-    a_ptrs = list(a_ptrs)
-    b_ptrs = list(b_ptrs)
-    has_c = c_ptrs is not None
-    c_ptrs = list(c_ptrs) if has_c else []
-
-    # Encode group register counts as leading attrs so codegen can slice the
-    # flat pointer tail. ``no_c_ptr`` mirrors the legacy IntImm(0) sentinel.
-    no_c_ptr = not has_c
-    # Flattened pointer list: D regs, A regs, B regs, then C regs (if any).
-    ptrs = [*d_ptrs, *a_ptrs, *b_ptrs, *c_ptrs]
-
-    base = [
-        "",
-        "tirx.ptx.mma",
-        shape,
-        a_layout,
-        b_layout,
-        d_type,
-        a_type,
-        b_type,
-        c_type,
-        len(d_ptrs),
-        len(a_ptrs),
-        len(b_ptrs),
-        len(c_ptrs),
-        no_c_ptr,
-        *ptrs,
-        saturate,
-    ]
-    if bit_op is None:
-        return call_intrin(*base)
-    return call_intrin(*base, bit_op)
-
-
 def ptx_mma_legacy(*all_args, operator=None):
     """Legacy ``ptx_mma`` API.
 
     Signature: ``(shape, A_layout, B_layout, A_dtype, B_dtype, C_dtype,
     multiplicand_a, a_index, multiplicand_b, b_index, accumulator,
     c_index, saturate, operator=None)``. The accumulator is reused as
-    both input and output (no separate ``d``/``c`` slot), unlike
-    fork-native :func:`ptx_mma` which distinguishes them. Translation:
+    both input and output (no separate ``d``/``c`` slot). Translation:
 
     * ``a_dtype, b_dtype, c_dtype`` → fork ``a_type, b_type, c_type``
       (and reuse ``c_dtype`` as fork ``d_type`` since the accumulator
@@ -705,42 +589,6 @@ def mma_fill_legacy(dtype, local_size, local_ptr, offset):
     return call_intrin(dtype, "tirx.mma_fill_legacy", local_size, local_ptr, offset)
 
 
-def ptx_ldmatrix(trans, num, dtype, smem_ptr, *dst_handles):
-    """TVM intrinsic for ldmatrix.sync.aligned.m8n8.x{num}{.trans}.shared.{dtype}.
-
-    Mirrors the PTX ISA destination form: each output register is a separate
-    operand. Pass ``T.address_of(buf[idx])`` (or ``buf.ptr_to([idx])``) for
-    each destination — the slots may be non-contiguous.
-
-    Parameters
-    ----------
-    trans : bool
-        Apply the ``.trans`` modifier.
-    num : int
-        One of 1, 2, 4 — number of m8n8 fragments.
-    dtype : str
-        ``"b16"`` (4 bytes per fragment register) or ``"b8"`` (2 bytes per).
-    smem_ptr : Expr
-        Generic pointer to source shared memory.
-    *dst_handles : Expr
-        N pointer-to-uint32 destinations, where
-        ``N = num if dtype == "b16" else num // 2``.
-
-    https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#warp-level-matrix-instructions-ldmatrix
-    """
-    _choice("num", num, _LDMATRIX_NUM)
-    _choice("dtype", dtype, _LDMATRIX_DTYPE)
-    # _LDMATRIX_DTYPE entries carry leading dot (".b16" / ".b8").
-    dtype_bare = dtype.lstrip(".") if isinstance(dtype, str) else dtype
-    n_regs = int(num) if dtype_bare == "b16" else int(num) // 2
-    if len(dst_handles) != n_regs:
-        raise ValueError(
-            f"ldmatrix .x{int(num)}.{dtype_bare} expects {n_regs} destination "
-            f"handles, got {len(dst_handles)}"
-        )
-    return call_intrin("", "tirx.ptx.ldmatrix", trans, num, dtype, smem_ptr, *dst_handles)
-
-
 _PTX_TO_NUMPY_DTYPE = {
     "fp16": "float16",
     "fp32": "float32",
@@ -810,8 +658,7 @@ def ptx_ldmatrix_legacy(*all_args):
 
     Signature: ``(trans, num, dtype, local_ptr, local_offset, smem_ptr,
     smem_offset)``. Offsets are folded into the pointers via
-    ``tvm_access_ptr`` and dispatched to the fork-native
-    :func:`ptx_ldmatrix`.
+    ``tvm_access_ptr``.
 
     ``T.ptx.ldmatrix_legacy`` runs through ``_dtype_forward`` which
     prepends a ``dtype=`` kwarg as a leading positional naming the buffer
