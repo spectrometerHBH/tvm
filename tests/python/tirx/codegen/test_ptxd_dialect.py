@@ -773,22 +773,52 @@ def test_ptxd_single_instruction_invariant():
     the framework-level ``@p`` wrapper, which guards a single instruction
     rather than adding one. cvta coercion is a separate IR node and must never
     appear inside a helper body.
+
+    ``RAW_ENTRIES`` below is the one exemption, and it is a list of names, not
+    a predicate: the entries whose helper body the table cannot derive because
+    one operand is typed ``.b8`` and inline asm has no 8-bit constraint, so the
+    value has to be staged through a block-local ``.reg .b8``. Naming them here
+    and asserting the set equals the table's own ``raw_render`` entries means a
+    new one can never be added without editing this test. Every other assertion
+    still applies to them.
     """
     from tvm.backend.cuda.ptx_dialect.render import render_variant
     from tvm.backend.cuda.ptx_dialect.table import TABLE, renderings
 
+    RAW_ENTRIES = {"cvt_f4x2_f32", "cvt_f4x2_fp16x2", "cvt_f16x2_f4x2", "cvt_bf16x2_f4x2"}
+    assert RAW_ENTRIES == {name for name, e in TABLE.items() if e.raw_render}, (
+        "the set of hand-written (raw_render) entries changed; each one is a "
+        "permanent exemption from the single-instruction invariant, so it has "
+        "to be added here deliberately"
+    )
+
     asm_re, sole_instruction = _ASM_RE, _sole_instruction
     checked = 0
     for entry in TABLE.values():
+        raw = entry.name in RAW_ENTRIES
         for tokens, dtypes, predicated, imms in renderings(entry):
-            opcode, _, source = render_variant(entry, tokens, predicated, dtypes, imms)
+            opcode, helper, source = render_variant(entry, tokens, predicated, dtypes, imms)
             asm_blocks = asm_re.findall(source)
             assert len(asm_blocks) == 1, f"{opcode}: {len(asm_blocks)} asm blocks, expected 1"
-            instr = sole_instruction(asm_blocks[0])
-            assert instr is not None, f"{opcode}: not a single statement: {asm_blocks[0]!r}"
-            assert instr.startswith(opcode + " ") or instr == opcode + ";", (
-                f"{opcode}: emitted instruction does not match the opcode: {instr!r}"
-            )
+            if raw:
+                # The `.reg .b8` prologue is several statements, which is why
+                # this entry is exempt. What is still checked: the instruction
+                # is in there as its own statement, and the body defines the
+                # helper name render_variant reports (a raw body writes its own
+                # signature, so a divergence would leave dispatch calling a
+                # function that does not exist).
+                assert f"; {opcode} " in asm_blocks[0], (
+                    f"{opcode}: raw body does not emit the opcode: {asm_blocks[0]!r}"
+                )
+                assert f"void {helper}(" in source, (
+                    f"{opcode}: raw body defines a different helper than {helper}"
+                )
+            else:
+                instr = sole_instruction(asm_blocks[0])
+                assert instr is not None, f"{opcode}: not a single statement: {asm_blocks[0]!r}"
+                assert instr.startswith(opcode + " ") or instr == opcode + ";", (
+                    f"{opcode}: emitted instruction does not match the opcode: {instr!r}"
+                )
             assert "cvta" not in source or entry.name == "cvta", (
                 f"{opcode}: cvta must be a separate IR node, never inside a helper"
             )
@@ -849,7 +879,7 @@ def test_ptxd_all_variants_render_unique():
                     or f"; {opcode};" in source
                 )
             total += not predicated  # a @p twin is not a separate variant
-    assert total == 110508  # update when the table grows
+    assert total == 110672  # update when the table grows
 
 
 def test_ptxd_stub_up_to_date():

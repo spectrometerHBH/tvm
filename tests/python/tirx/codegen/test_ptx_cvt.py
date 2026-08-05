@@ -24,12 +24,41 @@ from tvm.backend.cuda.ptx_dialect.table import TABLE, renderings
 # (entry name, one modifier combination, the instruction that combination emits)
 _FORM_CASES = [
     # generic scalar line: one case per rule the check enforces
-    ("cvt", ("rzi", "", "", "s32", "f32"), "cvt.rzi.s32.f32"),
-    ("cvt", ("rn", "", "", "f32", "s32"), "cvt.rn.f32.s32"),
-    ("cvt", ("rn", "", "", "f16", "f32"), "cvt.rn.f16.f32"),
-    ("cvt", ("", "", "", "f32", "f16"), "cvt.f32.f16"),
-    ("cvt", ("", "", "sat", "s8", "s32"), "cvt.sat.s8.s32"),
-    ("cvt", ("rzi", "ftz", "", "s32", "f32"), "cvt.rzi.ftz.s32.f32"),
+    # (slots: rnd, relu, satfinite, ftz, sat, dtype, atype)
+    ("cvt", ("rzi", "", "", "", "", "s32", "f32"), "cvt.rzi.s32.f32"),
+    ("cvt", ("rn", "", "", "", "", "f32", "s32"), "cvt.rn.f32.s32"),
+    ("cvt", ("rn", "", "", "", "", "f16", "f32"), "cvt.rn.f16.f32"),
+    ("cvt", ("", "", "", "", "", "f32", "f16"), "cvt.f32.f16"),
+    ("cvt", ("", "", "", "", "sat", "s8", "s32"), "cvt.sat.s8.s32"),
+    ("cvt", ("rzi", "", "", "ftz", "", "s32", "f32"), "cvt.rzi.ftz.s32.f32"),
+    # the two frnd2 scalar lines, which share that entry's shape and types
+    ("cvt", ("rn", "relu", "satfinite", "", "", "f16", "f32"), "cvt.rn.relu.satfinite.f16.f32"),
+    ("cvt", ("rz", "", "satfinite", "", "", "bf16", "f32"), "cvt.rz.satfinite.bf16.f32"),
+    # the frnd2 lines that pack two .f32 sources into one register
+    ("cvt_f16x2_f32", ("rn", "", "", "f16x2", "f32"), "cvt.rn.f16x2.f32"),
+    (
+        "cvt_f16x2_f32",
+        ("rz", "relu", "satfinite", "f16x2", "f32"),
+        "cvt.rz.relu.satfinite.f16x2.f32",
+    ),
+    ("cvt_bf16x2_f32", ("rn", "relu", "", "bf16x2", "f32"), "cvt.rn.relu.bf16x2.f32"),
+    # both .tf32 lines
+    ("cvt_tf32_f32", ("rna", "satfinite", "", "tf32", "f32"), "cvt.rna.satfinite.tf32.f32"),
+    ("cvt_tf32_f32", ("rn", "satfinite", "relu", "tf32", "f32"), "cvt.rn.satfinite.relu.tf32.f32"),
+    # the .rs lines: a trailing rbits operand, and {a, b, e, f} on the x4 forms
+    ("cvt_rs_f16x2_f32", ("rs", "", "", "f16x2", "f32"), "cvt.rs.f16x2.f32"),
+    (
+        "cvt_rs_bf16x2_f32",
+        ("rs", "relu", "satfinite", "bf16x2", "f32"),
+        "cvt.rs.relu.satfinite.bf16x2.f32",
+    ),
+    ("cvt_rs_f8x4_f32", ("rs", "", "satfinite", "e4m3x4", "f32"), "cvt.rs.satfinite.e4m3x4.f32"),
+    (
+        "cvt_rs_f4x4_f32",
+        ("rs", "relu", "satfinite", "e2m1x4", "f32"),
+        "cvt.rs.relu.satfinite.e2m1x4.f32",
+    ),
+    ("cvt_rs_f6x4_f32", ("rs", "", "satfinite", "e2m3x4", "f32"), "cvt.rs.satfinite.e2m3x4.f32"),
     ("cvt_ue8m0x2_f32", ("rz", "", "ue8m0x2", "f32"), "cvt.rz.ue8m0x2.f32"),
     ("cvt_ue8m0x2_f32", ("rp", "satfinite", "ue8m0x2", "f32"), "cvt.rp.satfinite.ue8m0x2.f32"),
     ("cvt_ue8m0x2_bf16x2", ("rz", "", "ue8m0x2", "bf16x2"), "cvt.rz.ue8m0x2.bf16x2"),
@@ -47,12 +76,60 @@ _FORM_CASES = [
     ),
     ("cvt_f16x2_f8x2", ("rn", "", "f16x2", "e4m3x2"), "cvt.rn.f16x2.e4m3x2"),
     ("cvt_f16x2_f8x2", ("rn", "relu", "f16x2", "e5m2x2"), "cvt.rn.relu.f16x2.e5m2x2"),
-    ("cvt_bf16x2_f8x2", ("rn", "", "", "bf16x2", "e4m3x2"), "cvt.rn.bf16x2.e4m3x2"),
+    ("cvt_bf16x2_f8x2", ("rn", "", "", "", "bf16x2", "e4m3x2"), "cvt.rn.bf16x2.e4m3x2"),
     (
         "cvt_bf16x2_f8x2",
-        ("rn", "relu", "satfinite", "bf16x2", "e5m2x2"),
+        ("rn", "relu", "satfinite", "", "bf16x2", "e5m2x2"),
         "cvt.rn.relu.satfinite.bf16x2.e5m2x2",
     ),
+    (
+        "cvt_bf16x2_f8x2",
+        ("rn", "", "satfinite", "scaled::n2::ue8m0", "bf16x2", "e4m3x2"),
+        "cvt.rn.satfinite.scaled::n2::ue8m0.bf16x2.e4m3x2",
+    ),
+    # the fp4 lines, whose `.b8` operand puts them on the raw_render path
+    (
+        "cvt_f4x2_f32",
+        ("rn", "satfinite", "relu", "e2m1x2", "f32"),
+        "cvt.rn.satfinite.relu.e2m1x2.f32",
+    ),
+    (
+        "cvt_f4x2_fp16x2",
+        ("rn", "satfinite", "", "e2m1x2", "bf16x2"),
+        "cvt.rn.satfinite.e2m1x2.bf16x2",
+    ),
+    ("cvt_f16x2_f4x2", ("rn", "relu", "f16x2", "e2m1x2"), "cvt.rn.relu.f16x2.e2m1x2"),
+    (
+        "cvt_bf16x2_f4x2",
+        ("rn", "", "satfinite", "scaled::n2::ue8m0", "bf16x2", "e2m1x2"),
+        "cvt.rn.satfinite.scaled::n2::ue8m0.bf16x2.e2m1x2",
+    ),
+    # the fp6 lines
+    ("cvt_f6x2_f32", ("rn", "satfinite", "", "e2m3x2", "f32"), "cvt.rn.satfinite.e2m3x2.f32"),
+    (
+        "cvt_f6x2_fp16x2",
+        ("rn", "satfinite", "relu", "e3m2x2", "bf16x2"),
+        "cvt.rn.satfinite.relu.e3m2x2.bf16x2",
+    ),
+    ("cvt_f16x2_f6x2", ("rn", "relu", "f16x2", "e2m3x2"), "cvt.rn.relu.f16x2.e2m3x2"),
+    (
+        "cvt_bf16x2_f6x2",
+        ("rn", "", "satfinite", "scaled::n2::ue8m0", "bf16x2", "e3m2x2"),
+        "cvt.rn.satfinite.scaled::n2::ue8m0.bf16x2.e3m2x2",
+    ),
+    # the .s2f6x2 lines, with and without the scale-factor operand
+    ("cvt_s2f6x2_f32", ("rn", "satfinite", "", "", "s2f6x2", "f32"), "cvt.rn.satfinite.s2f6x2.f32"),
+    (
+        "cvt_s2f6x2_f32",
+        ("rn", "satfinite", "relu", "scaled::n2::ue8m0", "s2f6x2", "f32"),
+        "cvt.rn.satfinite.relu.scaled::n2::ue8m0.s2f6x2.f32",
+    ),
+    (
+        "cvt_s2f6x2_bf16x2",
+        ("rn", "satfinite", "", "scaled::n2::ue8m0", "s2f6x2", "bf16x2"),
+        "cvt.rn.satfinite.scaled::n2::ue8m0.s2f6x2.bf16x2",
+    ),
+    ("cvt_bf16x2_s2f6x2", ("rn", "", "relu", "", "bf16x2", "s2f6x2"), "cvt.rn.relu.bf16x2.s2f6x2"),
 ]
 
 # The generic scalar line is one entry named plain "cvt"; the packed lines are
@@ -65,7 +142,13 @@ def test_cvt_form_renders_its_instruction(entry_name, tokens, instruction):
     entry = TABLE[entry_name]
     opcode, helper, source = render_variant(entry, tokens)
     assert opcode == instruction
-    assert f'"{instruction} ' in source
+    if entry.raw_render is None:
+        assert f'"{instruction} ' in source
+    else:
+        # The `.e2m1x2` lines stage a `.b8` operand in a block-local `.reg .b8`
+        # (see `_cvt_f4x2_raw`), so the instruction is a statement inside the
+        # block rather than the whole asm text.
+        assert f"; {instruction} " in source
     assert helper.startswith("tvm_builtin_ptxd_cvt_")
     # Every ptxd helper is void: the destination is an operand, not a return.
     assert source.startswith("__forceinline__ __device__ void ")
@@ -90,16 +173,121 @@ def test_cvt_packed_operands_bind_their_carrier():
     assert "uint16_t __a" in source
 
 
+def test_cvt_e2m1x2_stages_its_b8_operand():
+    """`.e2m1x2` is the one cvt format with no register of its own width.
+
+    ISA 9.7.9.22:92 "When converting to .e2m1x2 data formats, the destination
+    operand d has .b8 type." and :101 "When converting from .e2m1x2 to
+    .f16x2/.bf16x2, source operand a has .b8 type." Inline asm has no 8-bit
+    constraint letter, so both directions declare the register inside the block
+    and bridge it to the 16-bit "h" carrier; uint8_t is what the caller sees.
+    """
+    _, _, source = render_variant(TABLE["cvt_f4x2_f32"], ("rn", "satfinite", "", "e2m1x2", "f32"))
+    assert "void tvm_builtin_ptxd_cvt_f4x2_f32_rn_satfinite_e2m1x2_f32(" in source
+    assert "(uint8_t& __d, float __a, float __b)" in source
+    assert (
+        '"{ .reg .b8 raw_d; cvt.rn.satfinite.e2m1x2.f32 raw_d, %1, %2;'
+        ' cvt.u16.u8 %0, raw_d; }" : "=h"(__d_reg)' in source
+    )
+    assert "__d = (uint8_t)__d_reg;" in source
+
+    _, _, source = render_variant(TABLE["cvt_f16x2_f4x2"], ("rn", "", "f16x2", "e2m1x2"))
+    assert "(uint32_t& __d, uint8_t __a)" in source
+    assert (
+        '"{ .reg .b8 raw_a; cvt.u8.u16 raw_a, %1; cvt.rn.f16x2.e2m1x2 %0, raw_a; }"'
+        ' : "=r"(__d) : "h"((uint16_t)__a)' in source
+    )
+
+    # The scale-factor operand is .b16, so it binds a register directly and
+    # rides alongside the staged source.
+    scaled = ("rn", "", "", "scaled::n2::ue8m0", "bf16x2", "e2m1x2")
+    _, _, source = render_variant(TABLE["cvt_bf16x2_f4x2"], scaled)
+    assert "(uint32_t& __d, uint8_t __a, uint16_t __scale_factor)" in source
+    assert "cvt.rn.scaled::n2::ue8m0.bf16x2.e2m1x2 %0, raw_a, %2;" in source
+
+
+# The cvt type tokens ISA 9.7.9.22's Target ISA Notes list architecture by
+# architecture (:527-639), plus the .rs rounding mode (":602 .rs rounding mode
+# is supported on following architectures:", listing sm_100a and sm_103a).
+_CVT_BLACKWELL_TOKENS = {
+    "ue8m0x2",
+    "s2f6x2",
+    "e2m1x2",
+    "e2m3x2",
+    "e3m2x2",
+    "e2m1x4",
+    "e2m3x4",
+    "e3m2x4",
+    "e4m3x4",
+    "e5m2x4",
+    "rs",
+}
+
+
 def test_cvt_blackwell_lines_carry_their_arch_floor():
-    """bf16x2 and ue8m0x2 conversions are Blackwell lines; certifying them at
-    the sm_90 default would report legal forms as illegal."""
+    """The Blackwell-only cvt lines must certify at sm_100a; certifying them at
+    the sm_90 default would report legal forms as illegal.
+
+    The floor rides the narrow format, not `.bf16x2` on its own: ISA
+    9.7.9.22:517-518 puts `.bf16x2` as a destination format at "sm_80 or
+    higher", which is where cvt.frnd2{.relu}{.satfinite}.bf16x2.f32 lives,
+    while :634-639 restrict `.bf16x2` *from* an fp8/fp6/fp4 format to
+    family-specific architectures.
+    """
     for name in _CVT_ENTRIES:
         entry = TABLE[name]
-        touches_blackwell = any(
-            tok in ("bf16x2", "ue8m0x2") for tokens, _, _, _ in renderings(entry) for tok in tokens
-        )
-        if touches_blackwell:
+        needs_floor = False
+        for tokens, _, _, _ in renderings(entry):
+            written = set(tokens)
+            if written & _CVT_BLACKWELL_TOKENS:
+                needs_floor = True
+            # `.e4m3x2`/`.e5m2x2` alone are sm_89 lines. Pairing either with
+            # `.bf16x2` needs a floor whichever side it sits on: as the
+            # destination it is the PTX 9.2 line at :634-639, and as the source
+            # it is :612-617 ("cvt.rn.satfinite{.relu}{.e5m2x2/.e4m3x2}
+            # {.bf16x2} is supported on following family-specific
+            # architectures:"). This predicate covers both directions.
+            if "bf16x2" in written and written & {"e4m3x2", "e5m2x2"}:
+                needs_floor = True
+        if needs_floor:
             assert entry.cert_arch == "sm_100a", name
+
+
+def test_cvt_tf32_satfinite_carries_its_sm_100_floor():
+    """ISA 9.7.9.22:526 "cvt.{rn/rz}.satfinite.tf32.f32 requires sm_100 or
+    higher." -- the maximum floor over the entry, whose other spellings sit at
+    sm_80/sm_90."""
+    entry = TABLE["cvt_tf32_f32"]
+    assert entry.cert_arch == "sm_100"
+    opcodes = {render_variant(entry, tokens)[0] for tokens, _, _, _ in renderings(entry)}
+    assert "cvt.rn.satfinite.tf32.f32" in opcodes
+
+
+def test_cvt_rs_and_scale_factor_shapes():
+    """The two operand shapes this family added: the .rs lines' trailing rbits
+    (with a grouped ``{a, b, e, f}`` source on the x4 forms), and the
+    scale-factor operand that exists exactly when .scaled::n2::ue8m0 is
+    written (ISA 9.7.9.22:180-182 "Operand scale-factor and qualifier
+    .scaled::n2::ue8m0 must be used together.")."""
+    _, _, source = render_variant(TABLE["cvt_rs_f16x2_f32"], ("rs", "", "", "f16x2", "f32"))
+    assert "uint32_t& __d, float __a, float __b, uint32_t __rbits" in source
+    assert '"cvt.rs.f16x2.f32 %0, %1, %2, %3;"' in source
+
+    _, _, source = render_variant(
+        TABLE["cvt_rs_f8x4_f32"], ("rs", "", "satfinite", "e4m3x4", "f32")
+    )
+    # One operand, four registers: PTX writes the group in the operand list.
+    assert "float __abef0, float __abef1, float __abef2, float __abef3" in source
+    assert '"cvt.rs.satfinite.e4m3x4.f32 %0, {%1, %2, %3, %4}, %5;"' in source
+
+    plain = ("rn", "satfinite", "", "", "s2f6x2", "f32")
+    scaled = ("rn", "satfinite", "", "scaled::n2::ue8m0", "s2f6x2", "f32")
+    _, _, source = render_variant(TABLE["cvt_s2f6x2_f32"], plain)
+    assert '"cvt.rn.satfinite.s2f6x2.f32 %0, %1, %2;"' in source
+    assert "__scale_factor" not in source
+    _, _, source = render_variant(TABLE["cvt_s2f6x2_f32"], scaled)
+    assert '"cvt.rn.satfinite.scaled::n2::ue8m0.s2f6x2.f32 %0, %1, %2, %3;"' in source
+    assert "uint16_t __scale_factor" in source
 
 
 if __name__ == "__main__":

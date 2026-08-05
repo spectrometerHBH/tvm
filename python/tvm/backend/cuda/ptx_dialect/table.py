@@ -1070,6 +1070,116 @@ _CVT_IRND = ("rni", "rzi", "rmi", "rpi")
 _CVT_FRND = ("rn", "rz", "rm", "rp")
 
 
+def _cvt_scale_lanes(m):
+    """`{, scale-factor}` exists exactly when `.scaled::n2::ue8m0` is written.
+
+    ISA 9.7.9.22:180-182: "Optional qualifier .scaled::n2::ue8m0 specifies that
+    the instruction uses packed scale-factor with 2 scale values of ue8m0 type.
+    Operand scale-factor and qualifier .scaled::n2::ue8m0 must be used
+    together." -- the same 0-or-1 length function TMA's `{, cache_policy}` uses
+    for `.L2::cache_hint`.
+    """
+    return 1 if m["scaled"] else 0
+
+
+def _cvt_f4x2_raw(entry_name: str, names: tuple[str, ...]):
+    """Build the hand-written helper body for one `.e2m1x2` line (Hatch A).
+
+    `names` is the entry's typed operands in PTX order, destination first --
+    the same order `canonical_dtypes` reports, so the dtypes this receives are
+    zipped straight onto it and nothing about the C boundary is restated here.
+
+    These four lines are the only client of `raw_render`, for the reason that
+    field documents: exactly one of their operands is `.b8`, and the value has
+    to be staged through a block-local `.reg .b8`. What varies between them is
+    only which end that operand sits on, so both shapes live in this one
+    builder:
+
+        dst  `{ .reg .b8 raw_d; <cvt> raw_d, %1[, %2]; cvt.u16.u8 %0, raw_d; }`
+        src  `{ .reg .b8 raw_a; cvt.u8.u16 raw_a, %1; <cvt> %0, raw_a[, %2]; }`
+
+    Every other piece -- carrier locals, constraint letters, the `(uint8_t)`
+    truncation at the C boundary -- is taken from `render.C_BINDING`, the same
+    table the derived path reads, so a raw helper differs from a derived one in
+    the asm text and nowhere else. The import is deferred because `.render`
+    imports this module.
+    """
+
+    def raw_render(tokens, dtypes):
+        from .render import C_BINDING
+
+        written = [tok for tok in tokens if tok]
+        opcode = ".".join(["cvt", *written])
+        # The same name `render._helper_name` derives: these entries have one
+        # dtype combination per modifier combination and no caller immediates,
+        # so it reduces to the table name plus the written tokens, and `::` is
+        # the only character in those tokens a C identifier cannot take. The
+        # single-instruction invariant test asserts the two agree.
+        helper = "tvm_builtin_ptxd_" + "_".join([entry_name, *written]).replace("::", "__")
+        # `{, scale-factor}` is present exactly when `.scaled::n2::ue8m0` is
+        # written -- the rule `_cvt_scale_lanes` gives the derived path.
+        operands = [
+            (name, dtype)
+            for name, dtype in zip(names, dtypes, strict=True)
+            if name != "scale_factor" or "scaled::n2::ue8m0" in written
+        ]
+        (dname, ddtype), srcs = operands[0], operands[1:]
+        params, inputs, texts = [], [], []
+        for index, (name, dtype) in enumerate(srcs, start=1):
+            cb = C_BINDING[dtype]
+            params.append(f"{cb.c_type} __{name}")
+            inputs.append(f'"{cb.constraint}"({cb.to_carrier.format(f"__{name}")})')
+            texts.append(f"%{index}")
+        dcb = C_BINDING[ddtype]
+        params.insert(0, f"{dcb.c_type}& __{dname}")
+        pre, post = [], []
+        if ddtype == "uint8":
+            # The instruction writes the `.reg .b8`; the "h" carrier picks it
+            # up, and the C boundary truncates back to uint8_t.
+            reg = f"__{dname}_reg"
+            pre.append(f"{dcb.carrier} {reg};")
+            post.append(f"__{dname} = {dcb.from_carrier.format(reg)};")
+            output = f'"={dcb.constraint}"({reg})'
+            block = [
+                f".reg .b8 raw_{dname};",
+                f"{opcode} raw_{dname}, {', '.join(texts)};",
+                f"cvt.u16.u8 %0, raw_{dname};",
+            ]
+        else:
+            # The `.b8` operand is the source `a`, always first in the list.
+            aname = srcs[0][0]
+            texts[0] = f"raw_{aname}"
+            output = f'"={dcb.constraint}"(__{dname})'
+            block = [
+                f".reg .b8 raw_{aname};",
+                f"cvt.u8.u16 raw_{aname}, %1;",
+                f"{opcode} %0, {', '.join(texts)};",
+            ]
+        asm_text = "{ " + " ".join(block) + " }"
+        asm_line = f'asm volatile("{asm_text}" : {output} : {", ".join(inputs)});'
+        body = "\n".join(f"  {line}" for line in [*pre, asm_line, *post])
+        return f"__forceinline__ __device__ void {helper}({', '.join(params)}) {{\n{body}\n}}\n"
+
+    return raw_render
+
+
+def _check_cvt_tf32(m):
+    """The two `.tf32` lines, ISA 9.7.9.22:18-19 --
+
+        cvt.rna{.satfinite}.tf32.f32               d, a;
+        cvt.frnd2{.satfinite}{.relu}.tf32.f32      d, a;
+
+    One entry: same `d, a` shape, same types, and the only difference is which
+    modifiers each spelling admits. `.rna` is written on the line that has no
+    `{.relu}`, so the two never meet. (ptxas 13.2 agrees -- it answers
+    "Modifier '.relu' cannot be combined with modifier '.rna'" -- but the
+    grammar above is the reason this is rejected.)
+    """
+    if m["rnd"] == "rna" and m["relu"]:
+        return "the .rna tf32 line has no .relu"
+    return None
+
+
 def _cvt_loses_precision(d: str, a: str) -> bool:
     """Whether a float->float conversion loses precision (ISA's own wording).
 
@@ -1150,6 +1260,46 @@ def _check_cvt_same_type(t, rnd, ftz, sat):
     return None
 
 
+def _check_cvt_frnd2_scalar(d, a, rnd, ftz, sat):
+    """The frnd2 *scalar* lines' sub-grid, ISA 9.7.9.22:10 and :14 --
+
+        cvt.frnd2{.relu}{.satfinite}.f16.f32       d, a;
+        cvt.frnd2{.relu}{.satfinite}.bf16.f32      d, a;
+
+    -- read with ":49 .frnd2  = { .rn,  .rz };".
+
+    These two lines have the generic scalar line's `d, a` shape and draw both
+    of their types from its dtype/atype list, so they are the same entry; the
+    only thing that distinguishes them is modifiers, and `.relu`/`.satfinite`
+    are exactly the modifiers the generic line does not have. This function is
+    that sub-grid: it runs when either token is written.
+
+    - Types: the two lines convert `.f32` to `.f16` or to `.bf16`, and no
+      other line in this entry's type product carries either token. The ISA
+      lists the destination types `.satfinite` reaches at :204-209,
+      ".satfinite modifier is only supported for conversions involving the
+      following types: ... .f16, .bf16, .f16x2, .bf16x2, .tf32, .ue8m0x2 as
+      destination types." -- the four that are not `.f16`/`.bf16` name shapes
+      that live in other entries.
+    - Rounding: mandatory, and `.frnd2` is `{.rn, .rz}`; `.rm`/`.rp` and the
+      integer-rounding modes appear on no frnd2 line.
+    - Neither line brackets `{.ftz}` or `{.sat}`.
+
+    The section's Examples spell the shape out at :647, "cvt.rn.relu.f16.f32
+    b, f;        // result is saturated with .relu saturation mode".
+    """
+    if (d, a) not in (("f16", "f32"), ("bf16", "f32")):
+        return (
+            f".relu/.satfinite ride the frnd2 lines, which convert f32 to f16 or bf16, "
+            f"not {a} to {d}"
+        )
+    if rnd not in ("rn", "rz"):
+        return "the frnd2 lines round .rn or .rz only"
+    if ftz or sat:
+        return "the frnd2 lines carry neither .ftz nor .sat"
+    return None
+
+
 def _check_cvt_scalar(m):
     """The generic scalar line's rules, quoting ISA 9.7.9.22.
 
@@ -1183,8 +1333,14 @@ def _check_cvt_scalar(m):
     requires integer rounding for exactly those conversions. The `.dtype !=
     .atype` branch below therefore rejects them, which is a toolchain verdict,
     not the ISA's.
+
+    ``.relu``/``.satfinite`` belong to the two frnd2 scalar lines, which share
+    this entry's shape and type list; `_check_cvt_frnd2_scalar` is their
+    sub-grid, and it runs whenever either token is written.
     """
     d, a, rnd, ftz, sat = m["dtype"], m["atype"], m["rnd"], m["ftz"], m["sat"]
+    if m["relu"] or m["satfinite"]:
+        return _check_cvt_frnd2_scalar(d, a, rnd, ftz, sat)
     if d == a:
         return _check_cvt_same_type(d, rnd, ftz, sat)
     d_int, a_int = d in _CVT_INT_BITS, a in _CVT_INT_BITS
@@ -2106,9 +2262,24 @@ _ENTRIES = [
     # whose check picks which rounding set applies -- otherwise both would
     # render the same no-rounding variants.
     #
+    # The two frnd2 *scalar* lines join them for the same reason:
+    #
+    #     cvt.frnd2{.relu}{.satfinite}.f16.f32       d, a;
+    #     cvt.frnd2{.relu}{.satfinite}.bf16.f32      d, a;
+    #
+    # are `d, a` over two (dtype, atype) pairs this entry's slots already
+    # spell, so what they add is the `.relu` and `.satfinite` tokens. Both are
+    # optional slots and neither rides any other pair -- see
+    # `_check_cvt_frnd2_scalar`, whose sub-grid runs whenever one is written.
+    # Splitting them out instead would have made `cvt.rn.f16.f32` a variant of
+    # two entries, since it is a legal spelling of both lines.
+    #
     # The rules are the ISA's own, quoted in `_check_cvt_scalar`. Their product
-    # was checked against ptxas over all 5184 combinations: every one of the
-    # 780 this entry renders assembles.
+    # was checked against ptxas over the 5184 no-relu/no-satfinite
+    # combinations: every one of the 780 variants that sweep found this entry
+    # renders assembles. The .relu/.satfinite slots added later widen the grid
+    # to 20736 and the rendered set to 792; the twelve added variants are
+    # covered by the certification pass rather than by that sweep.
     #
     # ptxas is more lenient than the ISA in fourteen bf16 spellings (it takes
     # `cvt.bf16.f16` with no rounding though the conversion loses precision,
@@ -2120,15 +2291,141 @@ _ENTRIES = [
             ModifierSlot(
                 "rnd", ("rni", "rzi", "rmi", "rpi", "rn", "rz", "rm", "rp"), optional=True
             ),
+            # The frnd2 lines write these two ahead of the types and carry no
+            # `{.ftz}`/`{.sat}`, so the render order agrees with both lines.
+            ModifierSlot("relu", ("relu",), optional=True),
+            ModifierSlot("satfinite", ("satfinite",), optional=True),
             ModifierSlot("ftz", ("ftz",), optional=True),
             ModifierSlot("sat", ("sat",), optional=True),
             ModifierSlot("dtype", _CVT_BASIC),
             ModifierSlot("atype", _CVT_BASIC),
         ),
         check=_check_cvt_scalar,
+        # No floor of its own: the highest one this entry reaches is the .bf16
+        # conversions' (":520-522 cvt.bf16.{u8/s8/u16/s16/u32/s32/u64/s64/f16/
+        # f64/bf16}, cvt.{u8/s8/u16/s16/u32/s32/u64/s64/f16/f64}.bf16, and
+        # cvt.tf32.f32.{relu}.{rn/rz} require sm_90 or higher."), which is the
+        # arch the certification already defaults to. The two tokens added for
+        # the frnd2 lines stay under it -- ":517-518 .relu modifier and
+        # {.f16x2, .bf16, .bf16x2, .tf32} destination formats require sm_80 or
+        # higher."
         operands=(
             OperandSlot("d", role="dst", dtype="dtype"),
             OperandSlot("a", role="value", dtype="atype"),
+        ),
+    ),
+    # The two frnd2 lines that pack *two* .f32 sources into one register are a
+    # different shape (`d, a, b`), so they are their own entries. ISA
+    # 9.7.9.22:65-68: "For .f16x2 and .bf16x2 instruction type, two inputs a and
+    # b of .f32 type are converted into .f16 or .bf16 type and the converted
+    # values are packed in the destination register d, such that the value
+    # converted from input a is stored in the upper half of d and the value
+    # converted from input b is stored in the lower half of d".
+    #
+    # Carriers, ISA:69-71: "For .f16x2 instruction type, destination operand d
+    # has .f16x2 or .b32 type. ... For .bf16x2 instruction type, operand d has
+    # .b32 type."
+    InstructionEntry(  # cvt.frnd2{.relu}{.satfinite}.f16x2.f32 d, a, b;
+        name="cvt_f16x2_f32",
+        mnemonic="cvt",
+        slots=(
+            ModifierSlot("rnd", ("rn", "rz")),
+            ModifierSlot("relu", ("relu",), optional=True),
+            ModifierSlot("satfinite", ("satfinite",), optional=True),
+            ModifierSlot("dtype", ("f16x2",)),
+            ModifierSlot("atype", ("f32",)),
+        ),
+        # ":517-518 .relu modifier and {.f16x2, .bf16, .bf16x2, .tf32}
+        # destination formats require sm_80 or higher." -- the whole entry is
+        # under the sm_90 default, so it states no floor of its own.
+        operands=(
+            OperandSlot("d", role="dst", dtype="f16x2"),
+            OperandSlot("a", role="value", dtype="f32"),
+            OperandSlot("b", role="value", dtype="f32"),
+        ),
+    ),
+    InstructionEntry(  # cvt.frnd2{.relu}{.satfinite}.bf16x2.f32 d, a, b;
+        name="cvt_bf16x2_f32",
+        mnemonic="cvt",
+        slots=(
+            ModifierSlot("rnd", ("rn", "rz")),
+            ModifierSlot("relu", ("relu",), optional=True),
+            ModifierSlot("satfinite", ("satfinite",), optional=True),
+            ModifierSlot("dtype", ("bf16x2",)),
+            ModifierSlot("atype", ("f32",)),
+        ),
+        operands=(
+            OperandSlot("d", role="dst", dtype="bf16x2"),
+            OperandSlot("a", role="value", dtype="f32"),
+            OperandSlot("b", role="value", dtype="f32"),
+        ),
+    ),
+    # Both .tf32 lines, in one entry: see `_check_cvt_tf32` for why .rna and
+    # .frnd2 share it. ISA:71 "For .tf32 instruction type, operand d has .b32
+    # type."
+    InstructionEntry(  # cvt.rna{.satfinite}.tf32.f32 / cvt.frnd2{.satfinite}{.relu}.tf32.f32 d, a;
+        name="cvt_tf32_f32",
+        mnemonic="cvt",
+        slots=(
+            ModifierSlot("rnd", ("rna", "rn", "rz")),
+            ModifierSlot("satfinite", ("satfinite",), optional=True),
+            ModifierSlot("relu", ("relu",), optional=True),
+            ModifierSlot("dtype", ("tf32",)),
+            ModifierSlot("atype", ("f32",)),
+        ),
+        check=_check_cvt_tf32,
+        # The maximum floor over this entry's variants, ISA:526:
+        # "cvt.{rn/rz}.satfinite.tf32.f32 requires sm_100 or higher." The rest
+        # of the entry sits far lower (:521-522 puts cvt.tf32.f32.{relu}.{rn/rz}
+        # at sm_90), but certifying the entry below sm_100 would report those
+        # four satfinite spellings as illegal.
+        cert_arch="sm_100",
+        operands=(
+            OperandSlot("d", role="dst", dtype="tf32"),
+            OperandSlot("a", role="value", dtype="f32"),
+        ),
+    ),
+    # The .rs (stochastic rounding) lines. Their trailing operand is one more
+    # register, so each is its own shape: ISA:183 "rbits is a .b32 type register
+    # operand used for providing random bits for .rs rounding mode."
+    #
+    # Every .rs entry certifies at sm_100a: ISA:602 ".rs rounding mode is
+    # supported on following architectures:", and the list at :604-605 is
+    # sm_100a and sm_103a.
+    InstructionEntry(  # cvt.rs{.relu}{.satfinite}.f16x2.f32 d, a, b, rbits;
+        name="cvt_rs_f16x2_f32",
+        mnemonic="cvt",
+        slots=(
+            ModifierSlot("rnd", ("rs",)),
+            ModifierSlot("relu", ("relu",), optional=True),
+            ModifierSlot("satfinite", ("satfinite",), optional=True),
+            ModifierSlot("dtype", ("f16x2",)),
+            ModifierSlot("atype", ("f32",)),
+        ),
+        cert_arch="sm_100a",
+        operands=(
+            OperandSlot("d", role="dst", dtype="f16x2"),
+            OperandSlot("a", role="value", dtype="f32"),
+            OperandSlot("b", role="value", dtype="f32"),
+            OperandSlot("rbits", role="value", dtype="b32"),
+        ),
+    ),
+    InstructionEntry(  # cvt.rs{.relu}{.satfinite}.bf16x2.f32 d, a, b, rbits;
+        name="cvt_rs_bf16x2_f32",
+        mnemonic="cvt",
+        slots=(
+            ModifierSlot("rnd", ("rs",)),
+            ModifierSlot("relu", ("relu",), optional=True),
+            ModifierSlot("satfinite", ("satfinite",), optional=True),
+            ModifierSlot("dtype", ("bf16x2",)),
+            ModifierSlot("atype", ("f32",)),
+        ),
+        cert_arch="sm_100a",
+        operands=(
+            OperandSlot("d", role="dst", dtype="bf16x2"),
+            OperandSlot("a", role="value", dtype="f32"),
+            OperandSlot("b", role="value", dtype="f32"),
+            OperandSlot("rbits", role="value", dtype="b32"),
         ),
     ),
     InstructionEntry(  # cvt.frnd3{.satfinite}.ue8m0x2.f32 d, a, b;
@@ -2205,7 +2502,9 @@ _ENTRIES = [
             ModifierSlot("dtype", ("e4m3x2", "e5m2x2")),
             ModifierSlot("atype", ("f16x2", "bf16x2")),
         ),
-        # bf16x2 / ue8m0x2 conversions are Blackwell lines.
+        # The .bf16x2 source is the PTX ISA 9.2 line: "cvt.rn.satfinite{.relu}
+        # {.e5m2x2/.e4m3x2}{.bf16x2} is supported on following family-specific
+        # architectures:" (9.7.9.22), listing sm_100f, sm_110f and sm_120f.
         cert_arch="sm_100a",
         operands=(
             OperandSlot("d", role="dst", dtype="dtype"),
@@ -2226,21 +2525,423 @@ _ENTRIES = [
             OperandSlot("a", role="value", dtype="atype"),
         ),
     ),
-    InstructionEntry(  # cvt.rn{.relu}{.satfinite}.bf16x2.f8x2type d, a;
+    # The scale-factor operand: ISA:86-87 "For .bf16x2 destination type optional
+    # scale-factor operand of type .b16 can be specified along with
+    # .scaled::n2::ue8m0 qualifier. Operand scale-factor stores two packed
+    # scaling factors of type .ue8m0." It is present exactly when the qualifier
+    # is written (`_cvt_scale_lanes`), so the qualifier and the operand are one
+    # optional slot plus one 0-or-1 length function, not a second entry -- the
+    # operand list is `d, a` either way, with one register appended.
+    #
+    # The carrier is the 16-bit register the ISA's `.b16` names; the table binds
+    # it through the `.ue8m0x2` token, whose entry in PTX_TYPE_DTYPES is that
+    # one carrier, so the unscaled variants keep a single dtype combination.
+    # cvt.rn{.relu}{.satfinite}{.scaled::n2::ue8m0}.bf16x2.f8x2type
+    #     d, a{, scale-factor};
+    InstructionEntry(
         name="cvt_bf16x2_f8x2",
         mnemonic="cvt",
         slots=(
             ModifierSlot("rnd", ("rn",)),
             ModifierSlot("relu", ("relu",), optional=True),
             ModifierSlot("satfinite", ("satfinite",), optional=True),
+            ModifierSlot("scaled", ("scaled::n2::ue8m0",), optional=True),
             ModifierSlot("dtype", ("bf16x2",)),
             ModifierSlot("atype", ("e4m3x2", "e5m2x2")),
         ),
-        # bf16x2 / ue8m0x2 conversions are Blackwell lines.
+        # ISA:634-639 puts this line on "following family-specific
+        # architectures": "sm_100f or higher in the same family", "sm_110f or
+        # higher in the same family", "sm_120f or higher in the same family".
+        # The entry certifies at sm_100a, which ptxas 13.2 accepts for every
+        # variant here -- a toolchain fact; the sentence above is the rule.
         cert_arch="sm_100a",
         operands=(
             OperandSlot("d", role="dst", dtype="bf16x2"),
             OperandSlot("a", role="value", dtype="atype"),
+            OperandSlot(
+                "scale_factor",
+                role="value",
+                dtype="ue8m0x2",
+                lanes=_cvt_scale_lanes,
+                vector=False,
+            ),
+        ),
+    ),
+    InstructionEntry(  # cvt.rs{.relu}.satfinite.f8x4type.f32 d, {a, b, e, f}, rbits;
+        name="cvt_rs_f8x4_f32",
+        mnemonic="cvt",
+        slots=(
+            ModifierSlot("rnd", ("rs",)),
+            ModifierSlot("relu", ("relu",), optional=True),
+            # Unbracketed on the line, and ISA:204-208 ".satfinite modifier is
+            # only supported for conversions involving the following types:
+            # .e4m3x2, .e5m2x2, .e2m1x2, .e2m3x2, .e3m2x2, .e4m3x4, .e5m2x4,
+            # .e2m1x4, .e2m3x4, .e3m2x4, .s2f6x2 destination types. .satfinite
+            # modifier is mandatory for such conversions."
+            ModifierSlot("satfinite", ("satfinite",)),
+            ModifierSlot("dtype", ("e4m3x4", "e5m2x4")),
+            ModifierSlot("atype", ("f32",)),
+        ),
+        # ISA:607 "cvt.rs{.e2m1x4/.e4m3x4/.e5m2x4/.e3m2x4/.e2m3x4}.f32 is
+        # supported on following architectures:", listing sm_100a and sm_103a.
+        cert_arch="sm_100a",
+        operands=(
+            # ISA:138-140 "When converting to .e5m2x4/.e4m3x4/.e3m2x4/.e2m3x4
+            # data format, the destination operand d has .b32 type."
+            OperandSlot("d", role="dst", dtype="dtype"),
+            # The four sources are one brace-enclosed group in the operand
+            # list, which is what `lanes` renders; the name is the ISA's own
+            # spelling of the group, `{a, b, e, f}`.
+            OperandSlot("abef", role="value", dtype="f32", lanes=4),
+            OperandSlot("rbits", role="value", dtype="b32"),
+        ),
+    ),
+    # The four `.f4x2type = { .e2m1x2 };` lines. These are the table's only
+    # `raw_render` entries, and the reason is one sentence per direction:
+    # ISA:92 "When converting to .e2m1x2 data formats, the destination operand d
+    # has .b8 type." and :101 "When converting from .e2m1x2 to .f16x2/.bf16x2,
+    # source operand a has .b8 type."
+    #
+    # Inline asm has no 8-bit constraint letter, so the derived path can only
+    # offer that operand a wider register. The ISA says that should be fine --
+    # :476-480 "A source register wider than the specified type may be used,
+    # except when the source operand has .bf16 or .bf16x2 format." and :481-486
+    # "A destination register wider than the specified type may be used, except
+    # when the destination operand has .bf16, .bf16x2 or .tf32 format." Neither
+    # exception names .e2m1x2. It still does not assemble. TOOLCHAIN FACTS,
+    # measured on ptxas 13.2 at -arch=sm_100a, both carrier widths in both
+    # directions:
+    #
+    #   - destination, 16-bit ("h") and 32-bit ("r"), on
+    #     cvt.rn.satfinite.e2m1x2.f32, cvt.rn.satfinite.e2m1x2.f16x2 and
+    #     cvt.rn.satfinite.e2m1x2.bf16x2 -- every one of the six is
+    #     "Arguments mismatch for instruction 'cvt'".
+    #   - source, the same two widths, on cvt.rn.f16x2.e2m1x2 and
+    #     cvt.rn.bf16x2.e2m1x2 -- the same message on all four.
+    #
+    # So the operand has to be a `.reg .b8` declared inside the asm block, and
+    # something has to move the value between it and the "h" carrier. ptxas
+    # refuses `mov` for that bridge in both directions -- `mov.b16` and
+    # `mov.u16` between a `.reg .b8` and a 16-bit register are "Arguments
+    # mismatch for instruction 'mov'" (same toolchain, same probe). The
+    # `cvt.u8.u16` / `cvt.u16.u8` pair the deleted legacy implementation used
+    # assembles, which settles the question that idiom raised: it was the
+    # correct bridge, not a defect to be cleaned up. `_cvt_f4x2_raw` writes it.
+    #
+    # Declaration plus instruction plus bridge is three PTX statements, so all
+    # four entries are listed in the single-instruction invariant's exemption
+    # set. The detector that test falsifies still rejects the shape, which is
+    # the point of putting the exemption in the table walk and not in it.
+    InstructionEntry(  # cvt.rn.satfinite{.relu}.f4x2type.f32 d, a, b;
+        name="cvt_f4x2_f32",
+        mnemonic="cvt",
+        slots=(
+            ModifierSlot("rnd", ("rn",)),
+            ModifierSlot("satfinite", ("satfinite",)),
+            ModifierSlot("relu", ("relu",), optional=True),
+            ModifierSlot("dtype", ("e2m1x2",)),
+            ModifierSlot("atype", ("f32",)),
+        ),
+        # ISA:527 "cvt.rn.satfinite{.relu}.{e2m1x2/e2m3x2/e3m2x2/ue8m0x2}.f32
+        # is supported on following architectures:", listing sm_100a,
+        # "sm_101a (Renamed to sm_110a from PTX ISA version 9.0)" and sm_120a,
+        # plus family-specific targets from PTX ISA version 8.8 at :533-540.
+        cert_arch="sm_100a",
+        operands=(
+            OperandSlot("d", role="dst", dtype="e2m1x2"),
+            OperandSlot("a", role="value", dtype="f32"),
+            OperandSlot("b", role="value", dtype="f32"),
+        ),
+        raw_render=_cvt_f4x2_raw("cvt_f4x2_f32", ("d", "a", "b")),
+    ),
+    InstructionEntry(  # cvt.rn.satfinite{.relu}.f4x2type.fp16x2type d, a;
+        name="cvt_f4x2_fp16x2",
+        mnemonic="cvt",
+        slots=(
+            ModifierSlot("rnd", ("rn",)),
+            ModifierSlot("satfinite", ("satfinite",)),
+            ModifierSlot("relu", ("relu",), optional=True),
+            ModifierSlot("dtype", ("e2m1x2",)),
+            ModifierSlot("atype", ("f16x2", "bf16x2")),
+        ),
+        # ISA:619-624 puts this line on "following family-specific
+        # architectures": "sm_100f or higher in the same family", "sm_110f or
+        # higher in the same family", "sm_120f or higher in the same family".
+        # Certified at sm_100a, which ptxas 13.2 accepts here (toolchain fact),
+        # the same treatment cvt_f6x2_fp16x2 gets from the same sentence.
+        cert_arch="sm_100a",
+        operands=(
+            OperandSlot("d", role="dst", dtype="e2m1x2"),
+            OperandSlot("a", role="value", dtype="atype"),
+        ),
+        raw_render=_cvt_f4x2_raw("cvt_f4x2_fp16x2", ("d", "a")),
+    ),
+    InstructionEntry(  # cvt.rn{.relu}.f16x2.f4x2type d, a;
+        name="cvt_f16x2_f4x2",
+        mnemonic="cvt",
+        slots=(
+            ModifierSlot("rnd", ("rn",)),
+            ModifierSlot("relu", ("relu",), optional=True),
+            ModifierSlot("dtype", ("f16x2",)),
+            ModifierSlot("atype", ("e2m1x2",)),
+        ),
+        # ISA:542 "cvt.rn{.relu}.f16x2.{e2m1x2/e2m3x2/e3m2x2} is supported on
+        # following architectures:", the same sm_100a / sm_101a / sm_120a list
+        # `cvt_f4x2_f32` cites, plus :548-555's family-specific targets.
+        cert_arch="sm_100a",
+        operands=(
+            OperandSlot("d", role="dst", dtype="f16x2"),
+            OperandSlot("a", role="value", dtype="e2m1x2"),
+        ),
+        raw_render=_cvt_f4x2_raw("cvt_f16x2_f4x2", ("d", "a")),
+    ),
+    # cvt.rn{.relu}{.satfinite}{.scaled::n2::ue8m0}.bf16x2.f4x2type
+    #     d, a{, scale-factor};
+    InstructionEntry(
+        name="cvt_bf16x2_f4x2",
+        mnemonic="cvt",
+        slots=(
+            ModifierSlot("rnd", ("rn",)),
+            ModifierSlot("relu", ("relu",), optional=True),
+            ModifierSlot("satfinite", ("satfinite",), optional=True),
+            ModifierSlot("scaled", ("scaled::n2::ue8m0",), optional=True),
+            ModifierSlot("dtype", ("bf16x2",)),
+            ModifierSlot("atype", ("e2m1x2",)),
+        ),
+        # ISA:634-639, the same family-specific list as cvt_bf16x2_f8x2.
+        cert_arch="sm_100a",
+        operands=(
+            OperandSlot("d", role="dst", dtype="bf16x2"),
+            OperandSlot("a", role="value", dtype="e2m1x2"),
+            # ISA:106-107 "For .bf16x2 destination type optional scale-factor
+            # operand of type .b16 can be specified along with
+            # .scaled::n2::ue8m0 qualifier." -- .b16, not .b8, so only `a`
+            # needs the staging register.
+            OperandSlot(
+                "scale_factor",
+                role="value",
+                dtype="ue8m0x2",
+                lanes=_cvt_scale_lanes,
+                vector=False,
+            ),
+        ),
+        raw_render=_cvt_f4x2_raw("cvt_bf16x2_f4x2", ("d", "a", "scale_factor")),
+    ),
+    InstructionEntry(  # cvt.rs{.relu}.satfinite.f4x4type.f32 d, {a, b, e, f}, rbits;
+        name="cvt_rs_f4x4_f32",
+        mnemonic="cvt",
+        slots=(
+            ModifierSlot("rnd", ("rs",)),
+            ModifierSlot("relu", ("relu",), optional=True),
+            ModifierSlot("satfinite", ("satfinite",)),
+            ModifierSlot("dtype", ("e2m1x4",)),
+            ModifierSlot("atype", ("f32",)),
+        ),
+        cert_arch="sm_100a",
+        operands=(
+            # The x4 fp4 destination is a full 16-bit register, so this line
+            # needs no `.reg .b8` staging the way the .e2m1x2 lines do:
+            # ISA:112-113 "When converting to .e2m1x4 data format, the
+            # destination operand d has .b16 type."
+            OperandSlot("d", role="dst", dtype="e2m1x4"),
+            OperandSlot("abef", role="value", dtype="f32", lanes=4),
+            OperandSlot("rbits", role="value", dtype="b32"),
+        ),
+    ),
+    # The fp6 lines. `.f6x2type = { .e2m3x2, .e3m2x2 };` and both members ride a
+    # 16-bit register in either direction -- ISA:116-117 "When converting to
+    # .e2m3x2/.e3m2x2 data formats, the destination operand d has .b16 type."
+    # and :127 "When converting from .e2m3x2/.e3m2x2 to .f16x2/.bf16x2, source
+    # operand a has .b16 type."
+    InstructionEntry(  # cvt.rn.satfinite{.relu}.f6x2type.f32 d, a, b;
+        name="cvt_f6x2_f32",
+        mnemonic="cvt",
+        slots=(
+            ModifierSlot("rnd", ("rn",)),
+            ModifierSlot("satfinite", ("satfinite",)),
+            ModifierSlot("relu", ("relu",), optional=True),
+            ModifierSlot("dtype", ("e2m3x2", "e3m2x2")),
+            ModifierSlot("atype", ("f32",)),
+        ),
+        # ISA:527 "cvt.rn.satfinite{.relu}.{e2m1x2/e2m3x2/e3m2x2/ue8m0x2}.f32
+        # is supported on following architectures:", listing sm_100a,
+        # "sm_101a (Renamed to sm_110a from PTX ISA version 9.0)" and sm_120a,
+        # plus family-specific targets from PTX ISA version 8.8 at :533-540.
+        cert_arch="sm_100a",
+        operands=(
+            OperandSlot("d", role="dst", dtype="dtype"),
+            OperandSlot("a", role="value", dtype="f32"),
+            OperandSlot("b", role="value", dtype="f32"),
+        ),
+    ),
+    InstructionEntry(  # cvt.rn.satfinite{.relu}.f6x2type.fp16x2type d, a;
+        name="cvt_f6x2_fp16x2",
+        mnemonic="cvt",
+        slots=(
+            ModifierSlot("rnd", ("rn",)),
+            ModifierSlot("satfinite", ("satfinite",)),
+            ModifierSlot("relu", ("relu",), optional=True),
+            ModifierSlot("dtype", ("e2m3x2", "e3m2x2")),
+            ModifierSlot("atype", ("f16x2", "bf16x2")),
+        ),
+        # ISA:619-624 puts this line on "following family-specific
+        # architectures": "sm_100f or higher in the same family", "sm_110f or
+        # higher in the same family", "sm_120f or higher in the same family".
+        # Certified at sm_100a, which ptxas 13.2 accepts here (toolchain fact).
+        cert_arch="sm_100a",
+        operands=(
+            OperandSlot("d", role="dst", dtype="dtype"),
+            OperandSlot("a", role="value", dtype="atype"),
+        ),
+    ),
+    InstructionEntry(  # cvt.rn{.relu}.f16x2.f6x2type d, a;
+        name="cvt_f16x2_f6x2",
+        mnemonic="cvt",
+        slots=(
+            ModifierSlot("rnd", ("rn",)),
+            ModifierSlot("relu", ("relu",), optional=True),
+            ModifierSlot("dtype", ("f16x2",)),
+            ModifierSlot("atype", ("e2m3x2", "e3m2x2")),
+        ),
+        # ISA:542 "cvt.rn{.relu}.f16x2.{e2m1x2/e2m3x2/e3m2x2} is supported on
+        # following architectures:", the same sm_100a / sm_101a / sm_120a list
+        # `cvt_f6x2_f32` cites, plus :548-555's family-specific targets.
+        cert_arch="sm_100a",
+        operands=(
+            OperandSlot("d", role="dst", dtype="f16x2"),
+            OperandSlot("a", role="value", dtype="atype"),
+        ),
+    ),
+    # cvt.rn{.relu}{.satfinite}{.scaled::n2::ue8m0}.bf16x2.f6x2type
+    #     d, a{, scale-factor};
+    InstructionEntry(
+        name="cvt_bf16x2_f6x2",
+        mnemonic="cvt",
+        slots=(
+            ModifierSlot("rnd", ("rn",)),
+            ModifierSlot("relu", ("relu",), optional=True),
+            ModifierSlot("satfinite", ("satfinite",), optional=True),
+            ModifierSlot("scaled", ("scaled::n2::ue8m0",), optional=True),
+            ModifierSlot("dtype", ("bf16x2",)),
+            ModifierSlot("atype", ("e2m3x2", "e3m2x2")),
+        ),
+        # ISA:634-639, the same family-specific list as cvt_bf16x2_f8x2.
+        cert_arch="sm_100a",
+        operands=(
+            OperandSlot("d", role="dst", dtype="bf16x2"),
+            OperandSlot("a", role="value", dtype="atype"),
+            OperandSlot(
+                "scale_factor",
+                role="value",
+                dtype="ue8m0x2",
+                lanes=_cvt_scale_lanes,
+                vector=False,
+            ),
+        ),
+    ),
+    InstructionEntry(  # cvt.rs{.relu}.satfinite.f6x4type.f32 d, {a, b, e, f}, rbits;
+        name="cvt_rs_f6x4_f32",
+        mnemonic="cvt",
+        slots=(
+            ModifierSlot("rnd", ("rs",)),
+            ModifierSlot("relu", ("relu",), optional=True),
+            ModifierSlot("satfinite", ("satfinite",)),
+            ModifierSlot("dtype", ("e2m3x4", "e3m2x4")),
+            ModifierSlot("atype", ("f32",)),
+        ),
+        cert_arch="sm_100a",
+        operands=(
+            OperandSlot("d", role="dst", dtype="dtype"),
+            OperandSlot("abef", role="value", dtype="f32", lanes=4),
+            OperandSlot("rbits", role="value", dtype="b32"),
+        ),
+    ),
+    # The .s2f6x2 lines. ISA:154 "When converting to .s2f6x2 data formats, the
+    # destination operand d has .b16 type." and :169 "When converting from
+    # .s2f6x2 to .bf16x2, source operand a has .b16 type."
+    #
+    # All three certify at sm_100a: ISA:626 "cvt with .s2f6x2 instruction type
+    # is supported on following architectures:", and the list at :628-632 is
+    # sm_100a, sm_103a, sm_110a, sm_120a, sm_121a.
+    # cvt.rn.satfinite{.relu}{.scaled::n2::ue8m0}.s2f6x2.f32
+    #     d, a, b{, scale-factor};
+    InstructionEntry(
+        name="cvt_s2f6x2_f32",
+        mnemonic="cvt",
+        slots=(
+            ModifierSlot("rnd", ("rn",)),
+            ModifierSlot("satfinite", ("satfinite",)),
+            ModifierSlot("relu", ("relu",), optional=True),
+            ModifierSlot("scaled", ("scaled::n2::ue8m0",), optional=True),
+            ModifierSlot("dtype", ("s2f6x2",)),
+            ModifierSlot("atype", ("f32",)),
+        ),
+        cert_arch="sm_100a",
+        operands=(
+            OperandSlot("d", role="dst", dtype="s2f6x2"),
+            OperandSlot("a", role="value", dtype="f32"),
+            OperandSlot("b", role="value", dtype="f32"),
+            # ISA:162-163 "Optional operand scale-factor has type .b16 and
+            # stores two packed scaling factors of type .ue8m0."
+            OperandSlot(
+                "scale_factor",
+                role="value",
+                dtype="ue8m0x2",
+                lanes=_cvt_scale_lanes,
+                vector=False,
+            ),
+        ),
+    ),
+    # cvt.rn.satfinite{.relu}{.scaled::n2::ue8m0}.s2f6x2.bf16x2
+    #     d, a{, scale-factor};
+    InstructionEntry(
+        name="cvt_s2f6x2_bf16x2",
+        mnemonic="cvt",
+        slots=(
+            ModifierSlot("rnd", ("rn",)),
+            ModifierSlot("satfinite", ("satfinite",)),
+            ModifierSlot("relu", ("relu",), optional=True),
+            ModifierSlot("scaled", ("scaled::n2::ue8m0",), optional=True),
+            ModifierSlot("dtype", ("s2f6x2",)),
+            ModifierSlot("atype", ("bf16x2",)),
+        ),
+        cert_arch="sm_100a",
+        operands=(
+            OperandSlot("d", role="dst", dtype="s2f6x2"),
+            OperandSlot("a", role="value", dtype="bf16x2"),
+            OperandSlot(
+                "scale_factor",
+                role="value",
+                dtype="ue8m0x2",
+                lanes=_cvt_scale_lanes,
+                vector=False,
+            ),
+        ),
+    ),
+    # cvt.rn{.satfinite}{.relu}{.scaled::n2::ue8m0}.bf16x2.s2f6x2
+    #     d, a{, scale-factor};
+    InstructionEntry(
+        name="cvt_bf16x2_s2f6x2",
+        mnemonic="cvt",
+        slots=(
+            ModifierSlot("rnd", ("rn",)),
+            ModifierSlot("satfinite", ("satfinite",), optional=True),
+            ModifierSlot("relu", ("relu",), optional=True),
+            ModifierSlot("scaled", ("scaled::n2::ue8m0",), optional=True),
+            ModifierSlot("dtype", ("bf16x2",)),
+            ModifierSlot("atype", ("s2f6x2",)),
+        ),
+        cert_arch="sm_100a",
+        operands=(
+            OperandSlot("d", role="dst", dtype="bf16x2"),
+            OperandSlot("a", role="value", dtype="s2f6x2"),
+            OperandSlot(
+                "scale_factor",
+                role="value",
+                dtype="ue8m0x2",
+                lanes=_cvt_scale_lanes,
+                vector=False,
+            ),
         ),
     ),
     # cp.async.bulk per PTX ISA 9.7.9.26.4.1, which has eight syntax lines (four

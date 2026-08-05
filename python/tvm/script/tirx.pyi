@@ -185,14 +185,23 @@ class _Chain_cp:
     def __call__(self, *args: Any, pred: Any = None) -> None: ...
 
 class _Chain_cvt:
-    """`cvt` — 8 entries sharing this mnemonic; PTX puts their difference in the operand list,
-    so the call selects one. Shapes: (d, a); (d, a, b)
+    """`cvt` — 27 entries sharing this mnemonic; PTX puts their difference in the operand list,
+    so the call selects one. Shapes: (d, a); (d, a, b); (d, a, b, rbits); (*__operands); (d,
+    abef0, abef1, abef2, abef3, rbits)
     """
 
     bf16: _Chain_cvt
     bf16x2: _Chain_cvt
+    e2m1x2: _Chain_cvt
+    e2m1x4: _Chain_cvt
+    e2m3x2: _Chain_cvt
+    e2m3x4: _Chain_cvt
+    e3m2x2: _Chain_cvt
+    e3m2x4: _Chain_cvt
     e4m3x2: _Chain_cvt
+    e4m3x4: _Chain_cvt
     e5m2x2: _Chain_cvt
+    e5m2x4: _Chain_cvt
     f16: _Chain_cvt
     f16x2: _Chain_cvt
     f32: _Chain_cvt
@@ -202,17 +211,22 @@ class _Chain_cvt:
     rm: _Chain_cvt
     rmi: _Chain_cvt
     rn: _Chain_cvt
+    rna: _Chain_cvt
     rni: _Chain_cvt
     rp: _Chain_cvt
     rpi: _Chain_cvt
+    rs: _Chain_cvt
     rz: _Chain_cvt
     rzi: _Chain_cvt
     s16: _Chain_cvt
+    s2f6x2: _Chain_cvt
     s32: _Chain_cvt
     s64: _Chain_cvt
     s8: _Chain_cvt
     sat: _Chain_cvt
     satfinite: _Chain_cvt
+    scaled__n2__ue8m0: _Chain_cvt
+    tf32: _Chain_cvt
     u16: _Chain_cvt
     u32: _Chain_cvt
     u64: _Chain_cvt
