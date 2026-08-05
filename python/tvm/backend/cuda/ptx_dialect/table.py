@@ -551,11 +551,78 @@ def _check_st_vec(m):
 
 
 def _check_ld_vec256(m):
-    return _check_vec256(m) or _check_ld(_scalar_view(m))
+    """The 256-bit ld lines -- the only ld entry with a `.level2::eviction_priority`.
+
+    PTX ISA 9.7.9.8 spells the L2 priority only where the L1 priority already
+    is, and on no line that carries `.cop` or `.volatile`. The three lines that
+    settle it, wrapped here but otherwise verbatim:
+
+        ld{.weak}{.ss}{.cop}{.level::cache_hint}{.level::prefetch_size}{.vec}.type
+            d, [a]{.unified}{, cache_policy};
+
+        ld{.weak}{.ss}{.level1::eviction_priority}{.level2::eviction_priority}
+           {.level::cache_hint}{.level::prefetch_size}{.vec}.type
+            d, [a]{.unified}{, cache_policy};
+
+        ld.volatile{.ss}{.level::prefetch_size}{.vec}.type  d, [a];
+
+    with "The .weak, .volatile, .relaxed and .acquire qualifiers are mutually
+    exclusive", so the third line is the only one `.volatile` can be on.
+
+    9.7.9.9 splits `ld.global.nc` the same way -- `ld.global{.cop}.nc{...}`
+    against `ld.global.nc{.level1::eviction_priority}{.level2::eviction_priority}`
+    -- so `.nc` with an L2 priority is on a syntax line while `.nc` with a
+    `.cop` and one is not. The two priorities are grammatically joined: every
+    exclusion _check_ld applies to `l1ev` applies to `l2ev` too, and that is
+    the rule mirrored below.
+
+    ptxas is no authority here. It rejects the L1 spellings ("Modifier
+    '.evict_first' cannot be combined with modifier '.cg'", and the same with
+    '.volatile') but silently assembles the identical L2 ones.
+    """
+    err = _check_vec256(m) or _check_ld(_scalar_view(m))
+    if err:
+        return err
+    if m["sem"] == "volatile" and m["l2ev"]:
+        return "ld.volatile only takes the prefetch_size cache qualifier"
+    if m["cop"] and m["l2ev"]:
+        return "cache operators and eviction priorities are mutually exclusive"
+    return None
 
 
 def _check_st_vec256(m):
-    return _check_vec256(m) or _check_st(_scalar_view(m))
+    """The 256-bit st lines -- the only st entry with a `.level2::eviction_priority`.
+
+    Same structure as `_check_ld_vec256`, from PTX ISA 9.7.9.11: the L2
+    priority shares its lines with the L1 one and appears on neither the `.cop`
+    line nor the `.volatile` line, which spells no cache qualifier at all.
+
+        st{.weak}{.ss}{.cop}{.level::cache_hint}{.vec}.type   [a], b{, cache_policy};
+
+        st{.weak}{.ss}{.level1::eviction_priority}{.level2::eviction_priority}
+           {.level::cache_hint}{.vec}.type                    [a], b{, cache_policy};
+
+        st.volatile{.ss}{.vec}.type                           [a], b;
+
+    The third line is the whole argument for the volatile case: it spells no
+    eviction position at all, and "The .weak, .volatile, .relaxed and .release
+    qualifiers are mutually exclusive" leaves `.volatile` no other line. Do not
+    argue it from the prose ".volatile: ... Cache operations are not allowed."
+    instead -- the ISA says exactly the same of `.relaxed` and `.release`, whose
+    lines *do* carry both eviction priorities, so "cache operations" there means
+    `.cop`. So `l2ev` falls under the existing "st.volatile takes no cache
+    qualifiers" rule, and under the cop/eviction exclusion, exactly as `l1ev`
+    does. ptxas accepts both L2 pairings while rejecting their L1 twins, so it
+    cannot be used to justify keeping them.
+    """
+    err = _check_vec256(m) or _check_st(_scalar_view(m))
+    if err:
+        return err
+    if m["sem"] == "volatile" and m["l2ev"]:
+        return "st.volatile takes no cache qualifiers"
+    if m["cop"] and m["l2ev"]:
+        return "cache operators and eviction priorities are mutually exclusive"
+    return None
 
 
 def _check_st(m):
