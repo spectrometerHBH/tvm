@@ -35,9 +35,13 @@ from .expr import BufferLoad, CommReducer, ExprOp, ExprWithOp, IntImm, Var
 
 tir = tirx  # alias for backward compat with upstream tir.convert() calls
 
+# Insertion order matters: a longer prefix has to be tried before the shorter
+# one it starts with, or `ptx_legacy_mma` would strip as `ptx` + `legacy_mma`.
 _DEVICE_INTRIN_PREFIX_TO_NAMESPACE = {
     "cuda_": "cuda",
+    "ptx_legacy_": "ptx_legacy",
     "ptx_": "ptx",
+    "s_tir_": "s_tir",
     "nvshmem_": "nvshmem",
     "nki_": "nki",
 }
