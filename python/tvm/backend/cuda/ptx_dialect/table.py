@@ -998,13 +998,80 @@ def _cvt_int_covers(d: str, a: str) -> bool:
     return _CVT_INT_BITS[d] > _CVT_INT_BITS[a] if d_signed else False
 
 
+def _check_cvt_same_type(t, rnd, ftz, sat):
+    """The `.dtype == .atype` sub-grid of the generic scalar line, ISA 9.7.9.22.
+
+    A same-type cvt is a real instruction, not a move: an *integer* rounding
+    mode may ride a float-to-float conversion here. The ISA licenses that for
+    every *same-size* float-to-float pair, which over this entry's type list is
+    six pairs, not four -- `.f16` and `.bf16` are both 16-bit. This toolchain
+    assembles only the same-type four; see the third ptxas-only restriction in
+    `_check_cvt_scalar`, which is where the cross-type pairs are ruled on. ISA
+    9.7.9.22:329-331 (Integer Notes): "Integer rounding is required for
+    float-to-integer conversions, and for same-size float-to-float conversions
+    where the value is rounded to an integer. Integer rounding is illegal in
+    all other instances." And 9.7.9.22:424-426: "A floating-point value may be
+    rounded to an integral value using the integer rounding modifiers (see
+    Integer Notes). The operands must be of the same size. The result is an
+    integral value, stored in floating-point format." The section's Examples
+    spell three of these forms outright (:645-646, :660): "cvt.rni.f32.f32 x,y;
+    // round to nearest int, result is fp", "cvt.f32.f32 x,y;", and
+    "cvt.bf16.bf16.rpi        b1, b2       // convert bf16 to corresponding int
+    represented in bf16 format".
+
+    So, for `.dtype == .atype == t`:
+
+    - An integer rounding mode is legal exactly when `t` is a floating-point
+      type -- ":425 The result is an integral value, stored in floating-point
+      format." On an integer `t` the conversion rounds nothing, and ":330
+      Integer rounding is illegal in all other instances."
+    - A floating-point rounding mode is never legal: ":392-393
+      Floating-point rounding is required for float-to-float conversions that
+      result in loss of precision, and for integer-to-float conversions.
+      Floating-point rounding is illegal in all other instances." -- and a
+      conversion to its own type loses no precision.
+    - `.ftz` only on .f32: ":432-434 Modifier .ftz can only be specified when
+      either .dtype or .atype is .f32 and applies only to single precision
+      (.f32) inputs and results."
+    - `.sat` only on .f16 / .f32 / .f64: ":452-453 For floating-point
+      destination types, .sat limits the result to the range [0.0, 1.0]. NaN
+      results are flushed to positive zero. Applies to .f16, .f32, and .f64
+      types." For an integer `t` the destination range is the source range, and
+      ":385-386 the .sat modifier is illegal in cases where saturation is not
+      possible based on the source and destination types."
+
+    That admits 53 of the 432 same-type spellings in this entry's slot grid,
+    which is exactly the set ptxas assembles (measured over the full grid, nvcc
+    13.2 -arch=sm_90; no spelling in either direction differs).
+    """
+    if rnd in _CVT_FRND:
+        return f"{t} from {t} is exact, so a floating-point rounding mode is illegal"
+    if rnd and t not in _CVT_FP_FORMAT:
+        return "integer rounding rounds nothing on an integer-to-same-integer cvt"
+    if ftz and t != "f32":
+        return ".ftz applies only where .f32 is one of the types"
+    if sat and t not in ("f16", "f32", "f64"):
+        # .bf16 falls out here too: the ISA's .sat list omits it, and this
+        # toolchain assembles no .sat on a .bf16 operand either.
+        return f".sat is not possible converting {t} to {t}"
+    return None
+
+
 def _check_cvt_scalar(m):
     """The generic scalar line's rules, quoting ISA 9.7.9.22.
 
-    Rounding: "Integer rounding is required for float-to-integer conversions
-    ... illegal in all other instances"; "Floating-point rounding is required
+    Rounding: "Integer rounding is required for float-to-integer conversions,
+    and for same-size float-to-float conversions where the value is rounded to
+    an integer. Integer rounding is illegal in all other instances";
+    "Floating-point rounding is required
     for float-to-float conversions that result in loss of precision, and for
     integer-to-float conversions ... illegal in all other instances."
+
+    The same-size float-to-float clause covers six pairs of this entry's types:
+    the four same-type ones, which `_check_cvt_same_type` rules on, plus
+    `.f16`/`.bf16` in either order, which are same-size but not same-type and
+    so fall to the `.dtype != .atype` case below. The rest of this function is
+    that case.
 
     ``.ftz``: "can only be specified when either .dtype or .atype is .f32".
 
@@ -1013,14 +1080,20 @@ def _check_cvt_scalar(m):
     value range". For float destinations it clamps to [0.0, 1.0] instead, so
     the superset rule does not apply there.
 
-    Two restrictions are ptxas's rather than the ISA's, and are recorded here
+    Three restrictions are ptxas's rather than the ISA's, and are recorded here
     because the certification pass would otherwise report legal-looking forms
     as illegal: this toolchain assembles no conversion between .bf16 and an
-    8-bit integer, and takes no `.sat` on any .bf16 operand.
+    8-bit integer, takes no `.sat` on any .bf16 operand, and refuses an integer
+    rounding mode on the two same-size cross-type float pairs -- `cvt.rni.bf16.f16`
+    and `cvt.rni.f16.bf16` are "Illegal rounding modifier for instruction 'cvt'"
+    at ptxas 13.2 / sm_90 even though the Integer Notes clause quoted above
+    requires integer rounding for exactly those conversions. The `.dtype !=
+    .atype` branch below therefore rejects them, which is a toolchain verdict,
+    not the ISA's.
     """
     d, a, rnd, ftz, sat = m["dtype"], m["atype"], m["rnd"], m["ftz"], m["sat"]
     if d == a:
-        return "a conversion to the same type is a move, not a cvt"
+        return _check_cvt_same_type(d, rnd, ftz, sat)
     d_int, a_int = d in _CVT_INT_BITS, a in _CVT_INT_BITS
     if d_int and not a_int:
         if rnd not in _CVT_IRND:
@@ -1049,10 +1122,82 @@ def _check_cvt_scalar(m):
     return None
 
 
-def _check_mma_sp_same_type(m):
-    """Every sparse line spells .atype and .btype identically."""
+# Which multiplicand-type *set* each mma / mma.sp syntax line draws BOTH of its
+# type positions from. A line never pairs a type from one set with a type from
+# another -- ISA 9.7.15.5.14 spells the integer lines as
+#
+#     mma.sync.aligned.shape.row.col{.satfinite}.s32.atype.btype.s32 d, a, b, c;
+#     .atype   = {.u8, .s8};
+#     .btype   = {.u8, .s8};
+#
+# and again, as a separate line, with ".atype   = {.u4, .s4};" / ".btype   =
+# {.u4, .s4};" -- so `.u8` and `.u4` never meet. Neither the dense nor the
+# sparse entries can leave that to their slot domains: `mma_int` offers all of
+# {u8, s8, u4, s4, b1} on both .atype and .btype, `mma` offers all of {f16,
+# bf16, tf32, e4m3, e5m2}, and `mma_sp_int_pair` / `mma_sp_int_all` offer all of
+# {u8, s8, u4, s4}, so the width-class pairing is enforced by the checks below
+# and nowhere else. (`mma_sp_all` is the one entry whose slot domain does the
+# job on its own: its .atype/.btype are exactly `.f8type = {.e4m3, .e5m2}`.)
+_MMA_FP_LINE = {"f16": "f16", "bf16": "alt", "tf32": "alt", "e4m3": "f8", "e5m2": "f8"}
+_MMA_INT_LINE = {"u8": "i8", "s8": "i8", "u4": "i4", "s4": "i4", "b1": "b1"}
+
+
+def _check_mma_sp_fp_types(m):
+    """The sparse floating-point lines spell one literal token in both
+    multiplicand positions, per ISA 9.7.15.6.3:8-21 --
+
+        mma.spvariant.sync.aligned.m16n8k16.row.col.dtype.f16.f16.ctype  d, a, b, c, e, f;
+        mma.spvariant.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32     d, a, b, c, e, f;
+        mma.spvariant.sync.aligned.m16n8k8.row.col.f32.tf32.tf32.f32      d, a, b, c, e, f;
+
+    -- so `.f16 x .bf16` and friends are simply not in the grammar. That is a
+    fact about these three lines' type positions, NOT a general mma.sp rule.
+    The section's one type-equality sentence is at :109-112, "The qualifiers
+    .dtype, .atype, .btype and .ctype indicate the data-type of the elements in
+    the matrices D, A, B and C respectively. The qualifier .stype indicate the
+    data-type of the elements in the matrices scale_A and scale_B. In case of
+    shapes .m16n8k16, .m16n8k32 and .m16n8k64, .dtype must be the same as
+    .ctype." -- .dtype/.ctype only; grepping "must be the same" over the whole
+    9.7.15.6.3 slice returns that line and nothing else, so the section states
+    no .atype/.btype equality rule.
+
+    The blanket "the multiplicand types must match" this check used to apply to
+    every sparse entry came from the **wmma.mma** section, a different
+    instruction: ISA 9.7.15.4.5:77-78, "For integer wmma, .ctype and .dtype must
+    be specified as .s32. Also, the values for .atype and .btype must be the
+    same, i.e., either both are .s8 or both are .u8." The sparse lines that do
+    name two independent type variables -- ".s32.atype.btype.s32" and
+    "...f32.f8type.f8type.f32" -- are handled by `_check_mma_sp_int_types` and
+    by `mma_sp_all`'s slot domain, and they mix freely.
+
+    (.dtype == .ctype needs no test here: every sparse entry pins .dtype and
+    .ctype to the same one-element slot domain, so the :112 rule holds by
+    construction.)
+    """
     if m["atype"] != m["btype"]:
-        return "the multiplicand types must match"
+        return f"no sparse floating-point line pairs .{m['atype']} with .{m['btype']}"
+    return None
+
+
+def _check_mma_sp_int_types(m):
+    """The sparse integer lines pair by width class, per ISA 9.7.15.6.3:60-71 --
+
+        mma.spvariant.sync.aligned.shape.row.col{.satfinite}.s32.atype.btype.s32 d, a, b, c, e, f;
+        .atype     = {.u8, .s8};
+        .btype     = {.u8, .s8};
+
+    and the same line again with ".atype     = {.u4, .s4};" / ".btype     =
+    {.u4, .s4};". Each line quantifies its two positions independently, so
+    mixed signedness (.u8 x .s8, .u4 x .s4) is in the grammar; only crossing
+    the 8-bit and 4-bit lines is not.
+
+    9.7.15.6.3 states no .atype/.btype equality rule (see
+    `_check_mma_sp_fp_types` for the section's one type-equality sentence);
+    the equality this check used to apply is wmma.mma's, ISA 9.7.15.4.5:77-78.
+    """
+    a, b = m["atype"], m["btype"]
+    if _MMA_INT_LINE[a] != _MMA_INT_LINE[b]:
+        return f"no syntax line pairs .{a} with .{b}"
     return None
 
 
@@ -1063,7 +1208,7 @@ def _check_mma_sp_fp_thread(m):
     doubles K against the dense line it mirrors, so these shape lists differ
     from the dense `_check_mma_fp_f32`'s.
     """
-    if (bad := _check_mma_sp_same_type(m)) is not None:
+    if (bad := _check_mma_sp_fp_types(m)) is not None:
         return bad
     want = "m16n8k8" if m["atype"] == "tf32" else "m16n8k16"
     if m["shape"] != want:
@@ -1073,7 +1218,7 @@ def _check_mma_sp_fp_thread(m):
 
 def _check_mma_sp_fp_pair(m):
     """The floating-point lines whose selector names a thread-pair (0 or 1)."""
-    if (bad := _check_mma_sp_same_type(m)) is not None:
+    if (bad := _check_mma_sp_fp_types(m)) is not None:
         return bad
     want = "m16n8k16" if m["atype"] == "tf32" else "m16n8k32"
     if m["shape"] != want:
@@ -1083,7 +1228,7 @@ def _check_mma_sp_fp_pair(m):
 
 def _check_mma_sp_int_pair(m):
     """Integer lines with a thread-pair selector: .u8/.s8 at k32, .u4/.s4 at k64."""
-    if (bad := _check_mma_sp_same_type(m)) is not None:
+    if (bad := _check_mma_sp_int_types(m)) is not None:
         return bad
     want = "m16n8k32" if m["atype"] in ("u8", "s8") else "m16n8k64"
     if m["shape"] != want:
@@ -1093,7 +1238,7 @@ def _check_mma_sp_int_pair(m):
 
 def _check_mma_sp_int_all(m):
     """Integer lines where all four threads contribute: .u8/.s8 at k64, .u4/.s4 at k128."""
-    if (bad := _check_mma_sp_same_type(m)) is not None:
+    if (bad := _check_mma_sp_int_types(m)) is not None:
         return bad
     want = "m16n8k64" if m["atype"] in ("u8", "s8") else "m16n8k128"
     if m["shape"] != want:
@@ -1102,10 +1247,43 @@ def _check_mma_sp_int_all(m):
 
 
 def _check_mma_fp_f16(m):
-    """The .f16-accumulator forms: the ISA's f16 and f8 lines."""
-    if m["atype"] != m["btype"]:
-        return "the multiplicand types must match"
+    """The .f16-accumulator forms: the ISA's f16 and f8 lines.
+
+    The half-precision lines (ISA 9.7.15.5.14:8-10, with ".ctype   = {.f16,
+    .f32};" / ".dtype   = {.f16, .f32};" at :14-15) spell the token literally in
+    both multiplicand positions --
+
+        mma.sync.aligned.m8n8k4.alayout.blayout.dtype.f16.f16.ctype  d, a, b, c;
+        mma.sync.aligned.m16n8k8.row.col.dtype.f16.f16.ctype  d, a, b, c;
+        mma.sync.aligned.m16n8k16.row.col.dtype.f16.f16.ctype d, a, b, c;
+
+    -- while the f8 line, ISA 9.7.15.5.14:23 with ".f8type     = {.e4m3,
+    .e5m2};" (:28) and ".shape      = {.m16n8k16, .m16n8k32};" (:32),
+
+        mma.sync.aligned.shape.row.col.dtype.f8type.f8type.ctype  d, a, b, c;
+
+    quantifies its two positions independently, so `.e4m3 x .e5m2` is in the
+    grammar. All that is left to check across the two positions is that they
+    come from the same line -- the entry's .atype/.btype slot domains both offer
+    every type either line uses.
+
+    This check used to reject every `.atype != .btype`. That blanket rule is a
+    sentence from the **wmma.mma** section, a different instruction: ISA
+    9.7.15.4.5:77-78, "For integer wmma, .ctype and .dtype must be specified as
+    .s32. Also, the values for .atype and .btype must be the same, i.e., either
+    both are .s8 or both are .u8." mma's own restriction block
+    (9.7.15.5.14:122-135) scopes ".atype must be the same as .btype." to
+    .m16n8k8 alone, and this entry reaches .m16n8k8 only through the .f16.f16
+    line above -- the f8 line's shapes are .m16n8k16 / .m16n8k32 -- so that rule
+    holds by construction here.
+
+    The block's other rule, ".dtype must be the same as .ctype." at .m16n8k8 /
+    .m16n8k16 / .m16n8k32, needs no test either: this entry pins both slots to
+    .f16.
+    """
     shape, a = m["shape"], m["atype"]
+    if _MMA_FP_LINE[a] != _MMA_FP_LINE[m["btype"]]:
+        return f"no syntax line pairs .{a} with .{m['btype']}"
     if shape != "m8n8k4" and (m["alayout"], m["blayout"]) != ("row", "col"):
         return f"{shape} is spelled .row.col"
     if a == "f16" and shape not in ("m8n8k4", "m16n8k8", "m16n8k16"):
@@ -1121,12 +1299,49 @@ def _check_mma_fp_f32(m):
     The lines differ in which shapes pair with which operand types, and only
     the .m8n8k4 line leaves the layouts free -- every other line spells
     `.row.col`.
+
+    Multiplicand types are NOT equal in general. This check used to reject
+    every `.atype != .btype`; that blanket rule is a sentence from the
+    **wmma.mma** section, a different instruction -- ISA 9.7.15.4.5:77-78, "For
+    integer wmma, .ctype and .dtype must be specified as .s32. Also, the values
+    for .atype and .btype must be the same, i.e., either both are .s8 or both
+    are .u8." mma's own restriction block, ISA 9.7.15.5.14:122-135, reads:
+
+        Specific shapes have type restrictions :
+        .m8n8k4 : When .ctype is .f32, .dtype must also be .f32.
+        .m16n8k8 :
+        .dtype must be the same as .ctype.
+        .atype must be the same as .btype.
+        .m16n8k16 and .m16n8k32 :
+        .dtype must be the same as .ctype.
+
+    so `.atype == .btype` binds at .m16n8k8 alone. That is exactly the one
+    alternate-fp line whose two type positions are separate variables over one
+    set (9.7.15.5.14:21,26-27):
+
+        mma.sync.aligned.m16n8k8.row.col.f32.atype.btype.f32      d, a, b, c;
+        .atype      = {.bf16, .tf32};
+        .btype      = {.bf16, .tf32};
+
+    The other alternate-fp lines spell one literal token in both positions
+    (":20 ...m16n8k4.row.col.f32.tf32.tf32.f32", ":22
+    ...m16n8k16.row.col.f32.bf16.bf16.f32"), so on the lines this entry covers
+    .bf16 never pairs with .tf32. The .f8type line does quantify its positions
+    independently
+    (":23 mma.sync.aligned.shape.row.col.dtype.f8type.f8type.ctype  d, a, b,
+    c;", ":28 .f8type     = {.e4m3, .e5m2};"), so `.e4m3 x .e5m2` renders.
+
+    Which line a type belongs to is the check's job here: the entry's
+    .atype/.btype slot domains both offer every type any of these lines uses.
     """
     shape, d, c = m["shape"], m["dtype"], m["ctype"]
     a, b = m["atype"], m["btype"]
-    if a != b:
-        # Every floating-point line spells the two operand types identically.
-        return "the multiplicand types must match"
+    if _MMA_FP_LINE[a] != _MMA_FP_LINE[b]:
+        return f"no syntax line pairs .{a} with .{b}"
+    if _MMA_FP_LINE[a] == "alt" and a != b:
+        # ".m16n8k8 : ... .atype must be the same as .btype." -- and the .tf32
+        # and .bf16 lines of the other two shapes are literal in both slots.
+        return "no syntax line pairs .bf16 with .tf32"
     if shape != "m8n8k4" and (m["alayout"], m["blayout"]) != ("row", "col"):
         return f"{shape} is spelled .row.col"
     if a == "f16":
@@ -1154,11 +1369,36 @@ def _check_mma_fp_f32(m):
 
 
 def _check_mma_int(m):
-    """The integer / sub-byte / single-bit lines of ISA 9.7.15.5.14."""
+    """The integer / sub-byte / single-bit lines of ISA 9.7.15.5.14.
+
+    Mixed signedness is legal. This check used to reject every `.atype !=
+    .btype` under the comment "the values for .atype and .btype must be the
+    same" -- that sentence is the **wmma.mma** section's, a different
+    instruction: ISA 9.7.15.4.5:77-78, "For integer wmma, .ctype and .dtype
+    must be specified as .s32. Also, the values for .atype and .btype must be
+    the same, i.e., either both are .s8 or both are .u8." mma's own restriction
+    block (9.7.15.5.14:122-135) states no rule for the integer lines at all,
+    and scopes ".atype must be the same as .btype." to .m16n8k8 -- a shape no
+    integer or single-bit line lists. The integer lines quantify their two
+    positions independently (9.7.15.5.14:67-77):
+
+        mma.sync.aligned.shape.row.col{.satfinite}.s32.atype.btype.s32 d, a, b, c;
+        .shape   = {.m8n8k16, .m16n8k16, .m16n8k32}
+        .atype   = {.u8, .s8};
+        .btype   = {.u8, .s8};
+
+    plus the same line again with ".shape   = {.m8n8k32, .m16n8k32,
+    .m16n8k64}" / ".atype   = {.u4, .s4};" / ".btype   = {.u4, .s4};". What
+    survives is the width-class pairing those two lines imply -- .u8 never
+    meets .u4 -- which this check enforces, since the entry offers all of
+    {u8, s8, u4, s4, b1} on both slots.
+
+    ".dtype must be the same as .ctype." needs no test: the entry pins both to
+    .s32.
+    """
     shape, a, b = m["shape"], m["atype"], m["btype"]
-    if a != b:
-        # "the values for .atype and .btype must be the same"
-        return "the multiplicand types must match"
+    if _MMA_INT_LINE[a] != _MMA_INT_LINE[b]:
+        return f"no syntax line pairs .{a} with .{b}"
     if a in ("u8", "s8"):
         if shape not in ("m8n8k16", "m16n8k16", "m16n8k32"):
             return f"{shape} has no 8-bit integer line"
@@ -1249,14 +1489,6 @@ def _check_tcgen05_mma_block_scale(m):
     }[m["kind"]]
     if m["scale_vec"] not in valid:
         return f"{m['kind']} scales in {'/'.join(valid)}"
-    return None
-
-
-def _check_cp_async_bulk_s2g(m):
-    """ptxas: .cp_mask without .L2::cache_hint is rejected (the legacy helper
-    raised on the same pairing)."""
-    if m["cp_mask"] and not m["cache"]:
-        return ".cp_mask requires .L2::cache_hint"
     return None
 
 
@@ -1755,8 +1987,8 @@ _ENTRIES = [
     # render the same no-rounding variants.
     #
     # The rules are the ISA's own, quoted in `_check_cvt_scalar`. Their product
-    # was checked against ptxas over all 4752 combinations: every one of the
-    # 727 this entry renders assembles.
+    # was checked against ptxas over all 5184 combinations: every one of the
+    # 780 this entry renders assembles.
     #
     # ptxas is more lenient than the ISA in fourteen bf16 spellings (it takes
     # `cvt.bf16.f16` with no rounding though the conversion loses precision,
@@ -2400,6 +2632,22 @@ _ENTRIES = [
         ),
     ),
     # wgmma.wait_group per PTX ISA 9.7.16.7.3, same caller-immediate shape.
+    #
+    # The ISA's domain for N is open: the whole section says only "Operand N is
+    # an integer constant." (9.7.16.7.3:14), with no upper bound anywhere --
+    # unlike setmaxnreg above, whose [24, 256] the ISA closes itself. The 0..7
+    # below is therefore this table's closure, not an ISA rule: `choices` needs
+    # a finite set to enumerate and certify, and every variant of a registered
+    # entry must assemble.
+    #
+    # NOT REGISTERED: N >= 8. ptxas accepts them (measured at sm_90a up to
+    # 2**32, every value assembling; only a negative N is refused, "Argument 0
+    # of instruction 'wgmma.wait_group': unexpected value '-1', expected to be
+    # non-negative integer"), but they are not distinct instructions: SASS shows
+    # N in 0..7 lowering to `WARPGROUP.DEPBAR.LE gsb0, 0xN` and every N >= 8
+    # lowering to `WARPGROUP.DEPBAR.LE gsb0, 0x7`, i.e. clamped to the same
+    # instruction 7 already renders. Widen this if a call site ever wants the
+    # wider spelling for source-level clarity.
     InstructionEntry(
         name="wgmma_wait_group",
         mnemonic="wgmma",
@@ -2546,13 +2794,27 @@ _ENTRIES = [
             ModifierSlot("src", ("shared::cta",)),
             ModifierSlot("completion", ("bulk_group",)),
             ModifierSlot("cache", ("L2::cache_hint",), optional=True),
-            # .cp_mask (sm_100) masks bytes within each 16-byte word; ptxas
-            # requires it to ride with .L2::cache_hint, which the legacy
-            # helper enforced too.
+            # .cp_mask masks bytes within each 16-byte chunk: "The i-th bit in
+            # the 16-bit wide byteMask operand specifies whether the i-th byte
+            # of each 16-byte wide chunk of source data is copied to the
+            # destination." (ISA 9.7.9.26.4.1:181-182). It is independent of
+            # .L2::cache_hint -- the syntax line brace-marks the two separately
+            # ("cp.async.bulk{.sem}.dst.src.completion_mechanism{.level::cache_hint}{.cp_mask}",
+            # :72) and the section's only couplings are ":173 When the optional
+            # argument cache_policy is specified, the qualifier
+            # .level::cache_hint is required." and ":180 When the optional
+            # qualifier .cp_mask is specified, the argument byteMask is
+            # required." -- both of which this entry's operand `lanes` already
+            # encode. This entry used to reject bare .cp_mask on the claim that
+            # ptxas required the pairing; ptxas (CUDA 13.2) assembles
+            # `cp.async.bulk.global.shared::cta.bulk_group.cp_mask [%rd], [%r1],
+            # %r2, %h;` at sm_100 and sm_100a, so the claim was false.
+            # .cp_mask is a Blackwell feature -- below sm_100 ptxas reports
+            # "Feature '.cp_mask' requires .target sm_100 or higher", which the
+            # entry's cert_arch already covers.
             ModifierSlot("cp_mask", ("cp_mask",), optional=True),
         ),
         cert_arch="sm_100a",
-        check=_check_cp_async_bulk_s2g,
         operands=(
             OperandSlot("dst_mem", role="addr", space="global"),
             OperandSlot("src_mem", role="addr", space="shared::cta"),
@@ -3405,7 +3667,17 @@ _ENTRIES = [
                 _check_mma_sp_fp_pair,
             ),
             # "All threads within a group of four ... must be 0."
-            ("_all", ("m16n8k64",), ("e4m3", "e5m2"), ("0",), _check_mma_sp_same_type),
+            #
+            # No check: this entry is one syntax line, ISA 9.7.15.6.3:22,
+            # "mma.spvariant.sync.aligned.m16n8k64.row.col.f32.f8type.f8type.f32
+            # d, a, b, c, e, f;" with ".f8type     = {.e4m3, .e5m2};", and the
+            # slots spell it exactly -- one shape, and .atype/.btype domains
+            # that ARE .f8type. The two positions are quantified independently,
+            # so .e4m3 x .e5m2 is in the grammar (the section's own example at
+            # :249 is "mma.sp.sync.aligned.m16n8k64.row.col.f32.e5m2.e4m3.f32").
+            # The same-type rule this entry used to carry was wmma.mma's
+            # (9.7.15.4.5:77-78), not mma.sp's -- see `_check_mma_sp_fp_types`.
+            ("_all", ("m16n8k64",), ("e4m3", "e5m2"), ("0",), None),
         )
     ],
     *[
