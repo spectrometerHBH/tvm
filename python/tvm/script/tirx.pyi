@@ -85,13 +85,14 @@ class _Chain_atom:
     def __call__(self, d: Any, addr: Any, value: Any, *args: Any) -> None: ...
 
 class _Chain_bar:
-    """`bar` — 3 entries sharing this mnemonic; PTX puts their difference in the operand list,
-    so the call selects one. Shapes: (a); (a, b)
+    """`bar` — 4 entries sharing this mnemonic; PTX puts their difference in the operand list,
+    so the call selects one. Shapes: (a); (a, b); (membermask)
     """
 
     arrive: _Chain_bar
     cta: _Chain_bar
     sync: _Chain_bar
+    warp: _Chain_bar
     def __call__(self, *args: Any, pred: Any = None) -> None: ...
 
 class _Chain_barrier:
@@ -111,14 +112,15 @@ class _Chain_barrier:
     def __call__(self, *args: Any, pred: Any = None) -> None: ...
 
 class _Chain_clusterlaunchcontrol:
-    """`clusterlaunchcontrol` — 3 entries sharing this mnemonic; PTX puts their difference in
+    """`clusterlaunchcontrol` — 4 entries sharing this mnemonic; PTX puts their difference in
     the operand list, so the call selects one. Shapes: (addr, mbar); (p, response); (d,
-    response)
+    response); (d0, d1, d2, d3, response)
     """
 
     async_: _Chain_clusterlaunchcontrol
     b128: _Chain_clusterlaunchcontrol
     b32: _Chain_clusterlaunchcontrol
+    get_first_ctaid: _Chain_clusterlaunchcontrol
     get_first_ctaid__x: _Chain_clusterlaunchcontrol
     get_first_ctaid__y: _Chain_clusterlaunchcontrol
     get_first_ctaid__z: _Chain_clusterlaunchcontrol
@@ -129,10 +131,11 @@ class _Chain_clusterlaunchcontrol:
     query_cancel: _Chain_clusterlaunchcontrol
     shared__cta: _Chain_clusterlaunchcontrol
     try_cancel: _Chain_clusterlaunchcontrol
+    v4: _Chain_clusterlaunchcontrol
     def __call__(self, *args: Any) -> None: ...
 
 class _Chain_cp:
-    """`cp` — 19 entries sharing this mnemonic; PTX puts their difference in the operand list,
+    """`cp` — 20 entries sharing this mnemonic; PTX puts their difference in the operand list,
     so the call selects one. Shapes: (dst, src, size, mbar); (addr); (); (group);
     (*__operands); (dst_mem, src_mem, size, mbar)
     """
@@ -157,6 +160,7 @@ class _Chain_cp:
     cta_group__2: _Chain_cp
     dec: _Chain_cp
     global_: _Chain_cp
+    ignore_oob: _Chain_cp
     inc: _Chain_cp
     max: _Chain_cp
     mbarrier: _Chain_cp
@@ -175,6 +179,7 @@ class _Chain_cp:
     tile: _Chain_cp
     tile__gather4: _Chain_cp
     tile__scatter4: _Chain_cp
+    wait_all: _Chain_cp
     wait_group: _Chain_cp
     xor: _Chain_cp
     def __call__(self, *args: Any, pred: Any = None) -> None: ...
@@ -404,13 +409,15 @@ class _Chain_max:
     def __call__(self, *args: Any) -> None: ...
 
 class _Chain_mbarrier:
-    """`mbarrier` — 10 entries sharing this mnemonic; PTX puts their difference in the operand
+    """`mbarrier` — 15 entries sharing this mnemonic; PTX puts their difference in the operand
     list, so the call selects one. Shapes: (addr, count); (addr); (addr, tx_count); (state,
-    addr, count); (wait_complete, addr, phase); (wait_complete, addr, phase, time_hint)
+    addr, count); (count, state); (wait_complete, addr, phase); (wait_complete, addr, phase,
+    time_hint)
     """
 
     acquire: _Chain_mbarrier
     arrive: _Chain_mbarrier
+    arrive_drop: _Chain_mbarrier
     b64: _Chain_mbarrier
     cluster: _Chain_mbarrier
     complete_tx: _Chain_mbarrier
@@ -420,6 +427,7 @@ class _Chain_mbarrier:
     inval: _Chain_mbarrier
     noComplete: _Chain_mbarrier
     parity: _Chain_mbarrier
+    pending_count: _Chain_mbarrier
     relaxed: _Chain_mbarrier
     release: _Chain_mbarrier
     shared: _Chain_mbarrier
@@ -456,7 +464,7 @@ class _Chain_min:
     def __call__(self, *args: Any) -> None: ...
 
 class _Chain_mma:
-    """`mma` — 11 entries sharing this mnemonic; PTX puts their difference in the operand list,
+    """`mma` — 12 entries sharing this mnemonic; PTX puts their difference in the operand list,
     so the call selects one. Shapes: (*__operands)
     """
 
@@ -482,7 +490,11 @@ class _Chain_mma:
     m8n8k32: _Chain_mma
     m8n8k4: _Chain_mma
     popc: _Chain_mma
+    rm: _Chain_mma
+    rn: _Chain_mma
     row: _Chain_mma
+    rp: _Chain_mma
+    rz: _Chain_mma
     s32: _Chain_mma
     s4: _Chain_mma
     s8: _Chain_mma
