@@ -826,6 +826,28 @@ def _check_tcgen05_ldst(m):
     return None
 
 
+def _check_tcgen05_cp(m):
+    """The shape <-> multicast pairings ISA 9.7.17.9.2 states, and the fmt pair.
+
+    ".64x128b requires .warpx2::02_13 or .warpx2::01_23" and ".32x128b
+    requires .warpx4"; the wider shapes copy to all warps and take no
+    multicast. Decompression is stated as a pair of qualifiers, so one
+    without the other is not a syntax line.
+    """
+    shape, multicast = m["shape"], m["multicast"]
+    if shape == "64x128b":
+        if multicast not in ("warpx2::02_13", "warpx2::01_23"):
+            return "shape 64x128b requires multicast warpx2::02_13 or warpx2::01_23"
+    elif shape == "32x128b":
+        if multicast != "warpx4":
+            return "shape 32x128b requires multicast warpx4"
+    elif multicast:
+        return f"shape {shape} takes no multicast"
+    if bool(m["dst_fmt"]) != bool(m["src_fmt"]):
+        return "dst_fmt and src_fmt are specified together"
+    return None
+
+
 # mma fragment sizes, per the Matrix Fragments tables of ISA 9.7.15.5.1-13.
 # Each is `rows * cols * bits / threads / 32`, the register count a thread holds
 # of an MxN (or MxK / KxN) tile -- the ISA states the tables, this states the
@@ -872,6 +894,81 @@ def _mma_lanes(which):
         return _mma_regs(m["btype"], kk, nn, threads, reg_bits)
 
     return lanes
+
+
+def _mma_sp_lanes(which):
+    """Like `_mma_lanes`, but A holds half of K -- the structured-sparse half.
+
+    ISA 9.7.15.6.1: "matrix A is stored in a compressed form where only the
+    non-zero elements are stored", two of every four along K, so the A fragment
+    of an MxK sparse line is the dense fragment of MxK/2. The other three groups
+    are unchanged.
+    """
+
+    def lanes(m):
+        mm, nn, kk = _mma_shape(m)
+        threads = 32  # every sparse line is m16n8, never the 8-thread m8n8k4
+        if which == "d":
+            return _mma_regs(m["dtype"], mm, nn, threads)
+        if which == "c":
+            return _mma_regs(m["ctype"], mm, nn, threads)
+        if which == "a":
+            return _mma_regs(m["atype"], mm, kk // 2, threads)
+        return _mma_regs(m["btype"], kk, nn, threads)
+
+    return lanes
+
+
+def _check_mma_sp_same_type(m):
+    """Every sparse line spells .atype and .btype identically."""
+    if m["atype"] != m["btype"]:
+        return "the multiplicand types must match"
+    return None
+
+
+def _check_mma_sp_fp_thread(m):
+    """The floating-point lines whose selector names one thread of four.
+
+    ISA 9.7.15.6.1: .f16/.bf16 at .m16n8k16 and .tf32 at .m16n8k8. Sparse
+    doubles K against the dense line it mirrors, so these shape lists differ
+    from the dense `_check_mma_fp_f32`'s.
+    """
+    if (bad := _check_mma_sp_same_type(m)) is not None:
+        return bad
+    want = "m16n8k8" if m["atype"] == "tf32" else "m16n8k16"
+    if m["shape"] != want:
+        return f"the one-thread selector line for .{m['atype']} is {want}"
+    return None
+
+
+def _check_mma_sp_fp_pair(m):
+    """The floating-point lines whose selector names a thread-pair (0 or 1)."""
+    if (bad := _check_mma_sp_same_type(m)) is not None:
+        return bad
+    want = "m16n8k16" if m["atype"] == "tf32" else "m16n8k32"
+    if m["shape"] != want:
+        return f"the thread-pair selector line for .{m['atype']} is {want}"
+    return None
+
+
+def _check_mma_sp_int_pair(m):
+    """Integer lines with a thread-pair selector: .u8/.s8 at k32, .u4/.s4 at k64."""
+    if (bad := _check_mma_sp_same_type(m)) is not None:
+        return bad
+    want = "m16n8k32" if m["atype"] in ("u8", "s8") else "m16n8k64"
+    if m["shape"] != want:
+        return f"the thread-pair selector line for .{m['atype']} is {want}"
+    return None
+
+
+def _check_mma_sp_int_all(m):
+    """Integer lines where all four threads contribute: .u8/.s8 at k64, .u4/.s4 at k128."""
+    if (bad := _check_mma_sp_same_type(m)) is not None:
+        return bad
+    want = "m16n8k64" if m["atype"] in ("u8", "s8") else "m16n8k128"
+    if m["shape"] != want:
+        return f"the all-thread selector line for .{m['atype']} is {want}"
+    return None
 
 
 def _check_mma_fp_f16(m):
@@ -1785,13 +1882,9 @@ _ENTRIES = [
     # had `::: "memory"`, and the waits/fences name no address at all.
     #
     # NOT REGISTERED:
-    # - `tcgen05.shift.cta_group.down [taddr]` -- the operand is bracketed, so
-    #   it needs the `addr` role, but `addr` only picks the 32-bit carrier when
-    #   the state space starts with "shared". A tmem address is neither shared
-    #   nor generic, and labelling it shared to get the right carrier would be
-    #   a lie in the table; it needs a tmem address space first.
-    # - `tcgen05.ld` / `.st` / `.mma` / `.cp`, which need register groups whose
-    #   length is a function of the modifiers.
+    # - `tcgen05.shift.cta_group.down [taddr]`: no call site. (The tmem address
+    #   space its bracketed operand needs now exists -- `tcgen05.ld`/`.st`/`.cp`
+    #   all use it -- so this one is registrable the day something calls it.)
     InstructionEntry(  # tcgen05.alloc.cta_group.sync.aligned{.shared::cta}.b32 [dst], nCols;
         name="tcgen05_alloc",
         mnemonic="tcgen05",
@@ -2643,6 +2736,32 @@ _ENTRIES = [
             OperandSlot("r", role="value", dtype="b32", lanes=_tcgen05_ldst_lanes),
         ),
     ),
+    # tcgen05.cp per PTX ISA 9.7.17.9.2: an async shared -> tmem copy of one
+    # shape, optionally multicast across the warps of a warpgroup and
+    # optionally decompressing fp4/fp6 into fp8 on the way. `s-desc` is the
+    # same 64-bit shared-memory matrix descriptor tcgen05.mma takes.
+    #
+    # The ISA states the decompression qualifiers as a pair (".dst_fmt and
+    # .src_fmt"), so they are two slots that appear together, not the single
+    # glued token ("b8x16.b6x16_p32") the legacy helper spelled.
+    InstructionEntry(  # tcgen05.cp.cta_group.shape{.multicast}{.dst_fmt.src_fmt} [taddr], s-desc;
+        name="tcgen05_cp",
+        mnemonic="tcgen05",
+        slots=(
+            ModifierSlot("action", ("cp",)),
+            ModifierSlot("cta_group", ("cta_group::1", "cta_group::2")),
+            ModifierSlot("shape", ("128x256b", "4x256b", "128x128b", "64x128b", "32x128b")),
+            ModifierSlot("multicast", ("warpx2::02_13", "warpx2::01_23", "warpx4"), optional=True),
+            ModifierSlot("dst_fmt", ("b8x16",), optional=True),
+            ModifierSlot("src_fmt", ("b6x16_p32", "b4x16_p64"), optional=True),
+        ),
+        cert_arch="sm_100a",
+        check=_check_tcgen05_cp,
+        operands=(
+            OperandSlot("taddr", role="addr", space="tmem"),
+            OperandSlot("s_desc", role="value", dtype="b64"),
+        ),
+    ),
     # tcgen05.mma per PTX ISA 9.7.17.10.9.1 (sm_100a): D = A*B + D where D
     # lives in Tensor Memory (an address, not registers -- so the instruction
     # has no dst and @p stays available). Two entries per family split on the
@@ -2867,6 +2986,136 @@ _ENTRIES = [
             OperandSlot("c", role="value", dtype="f64", lanes=_mma_lanes("c")),
         ),
     ),
+    # mma.sp / mma.sp::ordered_metadata per PTX ISA 9.7.15.6.3: the same
+    # multiply-accumulate with a structured-sparse A. A holds half of K (the
+    # other half is implied), so only its group shrinks; `e` carries the
+    # sparsity metadata and `f` selects which threads contributed it -- the ISA
+    # calls it "a 32-bit integer constant with values in the range 0..3", an
+    # instruction-text immediate rather than a register.
+    #
+    # That domain is not 0..3 everywhere: ISA 9.7.15.6.1 states it per shape and
+    # type as "one thread within a group of four" (0..3), "a thread-pair" (0 or
+    # 1), or "all threads ... must be 0". A `check` sees only the modifier map,
+    # never the immediate axis, so each selector domain is its own entry -- the
+    # split the ISA's own prose draws. ptxas enforces it exactly ("Argument 5 of
+    # instruction 'mma': unexpected value '1', expected to be 0").
+    #
+    # NOT REGISTERED:
+    # - The `.block_scale` lines (.kind::mxf4 / .mxf4nvf4 / .mxf8f6f4): they add
+    #   scale-a/scale-b data plus `{byte-id, thread-id}` selector tuples, an
+    #   operand shape no caller needs yet.
+    # - The `.kind::f8f6f4` line, whose multiplicands mix 4- and 6-bit types in
+    #   one .b32 group: same story, no call site.
+    *[
+        InstructionEntry(  # mma.spvariant.sync.aligned.shape.row.col.f32.atype.btype.f32
+            name=f"mma_sp{suffix}",
+            mnemonic="mma",
+            slots=(
+                ModifierSlot("spvariant", ("sp", "sp::ordered_metadata")),
+                ModifierSlot("sync", ("sync",)),
+                ModifierSlot("aligned", ("aligned",)),
+                ModifierSlot("shape", shapes),
+                ModifierSlot("alayout", ("row",)),
+                ModifierSlot("blayout", ("col",)),
+                ModifierSlot("dtype", ("f32",)),
+                ModifierSlot("atype", types),
+                ModifierSlot("btype", types),
+                ModifierSlot("ctype", ("f32",)),
+            ),
+            check=check,
+            operands=(
+                OperandSlot("d", role="dst", dtype="f32", lanes=_mma_sp_lanes("d")),
+                OperandSlot("a", role="value", dtype="u32", lanes=_mma_sp_lanes("a")),
+                OperandSlot("b", role="value", dtype="u32", lanes=_mma_sp_lanes("b")),
+                OperandSlot("c", role="value", dtype="f32", lanes=_mma_sp_lanes("c")),
+                OperandSlot("e", role="value", dtype="u32"),
+                OperandSlot("f", role="imm", choices=selector),
+            ),
+        )
+        for suffix, shapes, types, selector, check in (
+            # "One thread within a group of four consecutive threads contributes
+            # the metadata for the entire group."
+            (
+                "",
+                ("m16n8k8", "m16n8k16"),
+                ("f16", "bf16", "tf32"),
+                ("0", "1", "2", "3"),
+                _check_mma_sp_fp_thread,
+            ),
+            # "A thread-pair within a group of four ... must be either 0 or 1."
+            (
+                "_pair",
+                ("m16n8k16", "m16n8k32"),
+                ("f16", "bf16", "tf32"),
+                ("0", "1"),
+                _check_mma_sp_fp_pair,
+            ),
+            # "All threads within a group of four ... must be 0."
+            ("_all", ("m16n8k64",), ("e4m3", "e5m2"), ("0",), _check_mma_sp_same_type),
+        )
+    ],
+    *[
+        InstructionEntry(  # the same .f16 lines with an .f16 accumulator
+            name=f"mma_sp_f16acc{suffix}",
+            mnemonic="mma",
+            slots=(
+                ModifierSlot("spvariant", ("sp", "sp::ordered_metadata")),
+                ModifierSlot("sync", ("sync",)),
+                ModifierSlot("aligned", ("aligned",)),
+                ModifierSlot("shape", (shape,)),
+                ModifierSlot("alayout", ("row",)),
+                ModifierSlot("blayout", ("col",)),
+                ModifierSlot("dtype", ("f16",)),
+                ModifierSlot("atype", ("f16",)),
+                ModifierSlot("btype", ("f16",)),
+                ModifierSlot("ctype", ("f16",)),
+            ),
+            operands=(
+                OperandSlot("d", role="dst", dtype="u32", lanes=_mma_sp_lanes("d")),
+                OperandSlot("a", role="value", dtype="u32", lanes=_mma_sp_lanes("a")),
+                OperandSlot("b", role="value", dtype="u32", lanes=_mma_sp_lanes("b")),
+                OperandSlot("c", role="value", dtype="u32", lanes=_mma_sp_lanes("c")),
+                OperandSlot("e", role="value", dtype="u32"),
+                OperandSlot("f", role="imm", choices=selector),
+            ),
+        )
+        for suffix, shape, selector in (
+            ("", "m16n8k16", ("0", "1", "2", "3")),
+            ("_pair", "m16n8k32", ("0", "1")),
+        )
+    ],
+    *[
+        InstructionEntry(  # integer and sub-byte lines
+            name=f"mma_sp_int{suffix}",
+            mnemonic="mma",
+            slots=(
+                ModifierSlot("spvariant", ("sp", "sp::ordered_metadata")),
+                ModifierSlot("sync", ("sync",)),
+                ModifierSlot("aligned", ("aligned",)),
+                ModifierSlot("shape", shapes),
+                ModifierSlot("alayout", ("row",)),
+                ModifierSlot("blayout", ("col",)),
+                ModifierSlot("satfinite", ("satfinite",), optional=True),
+                ModifierSlot("dtype", ("s32",)),
+                ModifierSlot("atype", ("u8", "s8", "u4", "s4")),
+                ModifierSlot("btype", ("u8", "s8", "u4", "s4")),
+                ModifierSlot("ctype", ("s32",)),
+            ),
+            check=check,
+            operands=(
+                OperandSlot("d", role="dst", dtype="u32", lanes=_mma_sp_lanes("d")),
+                OperandSlot("a", role="value", dtype="u32", lanes=_mma_sp_lanes("a")),
+                OperandSlot("b", role="value", dtype="u32", lanes=_mma_sp_lanes("b")),
+                OperandSlot("c", role="value", dtype="u32", lanes=_mma_sp_lanes("c")),
+                OperandSlot("e", role="value", dtype="u32"),
+                OperandSlot("f", role="imm", choices=selector),
+            ),
+        )
+        for suffix, shapes, selector, check in (
+            ("_pair", ("m16n8k32", "m16n8k64"), ("0", "1"), _check_mma_sp_int_pair),
+            ("_all", ("m16n8k64", "m16n8k128"), ("0",), _check_mma_sp_int_all),
+        )
+    ],
     # wgmma.mma_async per PTX ISA 9.7.16.5.2 (sm_90a). Six type groups, each
     # with an ss line (both A and B from shared memory, named by 64-bit matrix
     # descriptors) and an rs line (A from registers -- always four .b32, see

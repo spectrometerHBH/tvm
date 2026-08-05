@@ -34,9 +34,6 @@ from tvm.tirx.operator.intrinsics._common import MBARRIER_ARRIVE_SEM as _MBARRIE
 from tvm.tirx.operator.intrinsics._common import MBARRIER_ARRIVE_SPACE as _MBARRIER_ARRIVE_SPACE
 from tvm.tirx.operator.intrinsics._common import NVSHMEM_CMP as _NVSHMEM_CMP
 from tvm.tirx.operator.intrinsics._common import NVSHMEM_SIG_OP as _NVSHMEM_SIG_OP
-from tvm.tirx.operator.intrinsics._common import TCGEN05_CP_DECOMPRESS as _TCGEN05_CP_DECOMPRESS
-from tvm.tirx.operator.intrinsics._common import TCGEN05_CP_MULTICAST as _TCGEN05_CP_MULTICAST
-from tvm.tirx.operator.intrinsics._common import TCGEN05_CP_SHAPES as _TCGEN05_CP_SHAPES
 from tvm.tirx.operator.intrinsics._common import TCGEN05_CTA_GROUP as _TCGEN05_CTA_GROUP
 
 tir = tirx
@@ -375,108 +372,6 @@ def cuda_float8tohalf8(src_addr, dst_addr):
     return call_intrin("", "tirx.cuda.float8tohalf8", src_addr, dst_addr)
 
 
-def ptx_mma_sp(
-    dtype,
-    shape,
-    A_layout,
-    B_layout,
-    A_dtype,
-    B_dtype,
-    C_dtype,
-    multiplicand_a,
-    a_index,
-    multiplicand_b,
-    b_index,
-    accumulator,
-    c_index,
-    metadata,
-    meta_index,
-    sparse_selector,
-    saturate,
-):
-    """TVM intrinsic for sparse tensor core ptx instructions
-    https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#warp-level-matrix-instructions-for-sparse-mma
-
-    Parameters
-    ----------
-    dtype : str
-        The data type of the result.
-
-    shape : str
-        The shape of mma fragment.
-
-    A_layout : Literal["row", "col"]
-        The layout of multiplicand fragment A.
-
-    B_layout : Literal["row", "col"]
-        The layout of multiplicand fragment B.
-
-    A_dtype : str
-        The data type of multiplicand fragment A.
-
-    B_dtype : str
-        The data type of multiplicand fragment B.
-
-    C_dtype : str
-        The data type of multiplicand fragment C.
-
-    multiplicand_a : Var
-        The multiplicand fragment A variable.
-
-    a_index : Expr
-        The index of multiplicand fragment A.
-
-    multiplicand_b : Var
-        The multiplicand fragment B variable.
-
-    b_index : Expr
-        The index of multiplicand fragment B.
-
-    accumulator : Var
-        The accumulator fragment C variable.
-
-    c_index : Expr
-        The index of accumulator fragment C.
-
-    metadata : Expr
-        The metadata of operand.
-
-    meta_index : Expr
-        The metadata index of operand.
-
-    sparse_selector : Expr
-        The sparse selector indicating the thread that stores the metadata.
-
-    saturate : bool
-        The optional saturation at the output.
-
-    Returns
-    -------
-    call : Expr
-        The call expression.
-    """
-    return call_intrin(
-        dtype,
-        "tirx.ptx.mma_sp",
-        shape,
-        A_layout,
-        B_layout,
-        A_dtype,
-        B_dtype,
-        C_dtype,
-        multiplicand_a,
-        a_index,
-        multiplicand_b,
-        b_index,
-        accumulator,
-        c_index,
-        metadata,
-        meta_index,
-        sparse_selector,
-        saturate,
-    )
-
-
 def _validate_mbarrier_arrive_attrs(sem, scope, space, remote):
     if (sem == "") != (scope == ""):
         raise ValueError("mbarrier.arrive sem and scope must be specified together")
@@ -794,64 +689,6 @@ def ptx_mma_legacy(*all_args, operator=None):
     if operator is not None:
         call_args.append(operator)
     return call_intrin("", "tirx.ptx.mma_legacy", *call_args)
-
-
-def ptx_mma_sp_legacy(*all_args):
-    """Legacy ``ptx_mma_sp`` API.
-
-    Signature: ``(shape, A_layout, B_layout, A_dtype, B_dtype, C_dtype,
-    multiplicand_a, a_index, multiplicand_b, b_index, accumulator,
-    c_index, metadata, meta_index, sparse_selector, saturate)``.
-
-    ``T.ptx.mma_sp.legacy`` runs through ``_dtype_forward`` which prepends
-    a ``dtype=`` kwarg as a leading positional, so this function accepts
-    either 16 or 17 positional args.
-    """
-    args = list(all_args)
-    if len(args) == 17:
-        _ = args.pop(0)
-    if len(args) != 16:
-        raise ValueError(
-            f"ptx_mma_sp_legacy expects 16 args (or 17 with dtype= kwarg "
-            f"prepended); got {len(all_args)}"
-        )
-    (
-        shape,
-        a_layout,
-        b_layout,
-        a_dtype,
-        b_dtype,
-        c_dtype,
-        a_ptr,
-        a_offset,
-        b_ptr,
-        b_offset,
-        acc_ptr,
-        c_offset,
-        meta_ptr,
-        meta_offset,
-        sparse_selector,
-        saturate,
-    ) = args
-    return ptx_mma_sp(
-        c_dtype,
-        shape,
-        a_layout,
-        b_layout,
-        a_dtype,
-        b_dtype,
-        c_dtype,
-        a_ptr,
-        a_offset,
-        b_ptr,
-        b_offset,
-        acc_ptr,
-        c_offset,
-        meta_ptr,
-        meta_offset,
-        sparse_selector,
-        saturate,
-    )
 
 
 def mma_store(dtype, m, n, dst_ptr, src_ptr, src_offset, dst_stride):
@@ -1310,77 +1147,6 @@ def _static_str(value):
 # See top-of-file imports for `_FENCE_SEM` etc. (re-exported from _common).
 # Note: TCGEN05_LDST_SHAPES values must stay in sync with the shape branches
 # of codegen_ptx_tcgen05_ld/_st in intrinsics/cuda/tcgen05.py.
-
-
-def ptx_tcgen05_cp(
-    taddr, src_desc, *, shape, cta_group=1, multicast="", decompress="", row=0, col=0
-):
-    """TVM intrinsic for the Blackwell `tcgen05.cp` PTX instruction.
-
-    The emitted PTX is::
-
-        tcgen05.cp.cta_group::{cta_group}.{shape}[.{multicast}][.{decompress}] [taddr], src_desc;
-
-    Each keyword argument maps 1:1 to a PTX token: read the call and you
-    know what instruction is emitted.
-
-    Parameters
-    ----------
-    taddr : Expr
-        Destination tensor-memory address (uint32). Callers typically pass
-        ``tmem_base + column_offset_in_uint32s`` directly. Use the optional
-        ``row`` / ``col`` keyword arguments only when the address needs
-        runtime row/col composition via ``get_tmem_addr`` (high 16 bits row,
-        low 16 bits col).
-
-    src_desc : Expr
-        The 64-bit shared-memory matrix descriptor.
-
-    shape : str
-        One of ``"32x128b"``, ``"4x256b"``, ``"128x128b"``, ``"128x256b"``,
-        ``"64x128b"``.
-
-    cta_group : int
-        1 or 2.
-
-    multicast : str
-        One of ``""``, ``"warpx4"``, ``"warpx2::02_13"``, ``"warpx2::01_23"``.
-        ``"32x128b"`` requires ``"warpx4"``; ``"64x128b"`` requires one of the
-        ``warpx2::*`` values; other shapes require ``""``.
-
-    decompress : str
-        Trailing PTX suffix for fp4/fp6 → fp8 on-the-fly decompression.
-        One of ``""``, ``"b8x16.b4x16_p64"``, ``"b8x16.b6x16_p32"``.
-
-    row, col : Expr
-        Optional row/col offsets added to ``taddr`` at runtime. Default 0.
-    """
-    _choice("shape", shape, _TCGEN05_CP_SHAPES)
-    _choice("cta_group", cta_group, _TCGEN05_CTA_GROUP)
-    _choice("multicast", multicast, _TCGEN05_CP_MULTICAST)
-    _choice("decompress", decompress, _TCGEN05_CP_DECOMPRESS)
-    shape_s = _static_str(shape)
-    multicast_s = _static_str(multicast)
-    if shape_s is not None and multicast_s is not None:
-        if shape_s == "32x128b" and multicast_s != "warpx4":
-            raise ValueError(f"shape=32x128b requires multicast='warpx4', got {multicast_s!r}")
-        if shape_s == "64x128b" and multicast_s not in ("warpx2::02_13", "warpx2::01_23"):
-            raise ValueError(f"shape=64x128b requires multicast in warpx2::*, got {multicast_s!r}")
-        if shape_s in ("128x128b", "128x256b", "4x256b") and multicast_s != "":
-            raise ValueError(f"shape={shape_s} requires multicast='', got {multicast_s!r}")
-
-    return call_intrin(
-        "",
-        "tirx.ptx.tcgen05_cp",
-        taddr,
-        src_desc,
-        shape,
-        cta_group,
-        multicast,
-        decompress,
-        row,
-        col,
-    )
 
 
 def timer_init_cuda(profiler_buffer, profiler_tag, profiler_write_offset, num_groups, group_id):

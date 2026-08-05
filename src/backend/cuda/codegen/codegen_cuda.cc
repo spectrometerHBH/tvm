@@ -1029,7 +1029,6 @@ void CodeGenCUDA::VisitExpr_(const CallNode* op, std::ostream& os) {
   static const Op& tvm_mma_sync_op = Op::Get("tirx.tvm_mma_sync");
   static const Op& tvm_bmma_sync_op = Op::Get("tirx.tvm_bmma_sync");
   static const Op& ptx_mma_op = Op::Get("tirx.ptx.mma");
-  static const Op& ptx_mma_sp_op = Op::Get("tirx.ptx.mma_sp");
   static const Op& mma_store_op = Op::Get("tirx.mma_store");
   static const Op& mma_fill_op = Op::Get("tirx.mma_fill");
   static const Op& ptx_mma_legacy_op = Op::Get("tirx.ptx.mma_legacy");
@@ -1132,44 +1131,6 @@ void CodeGenCUDA::VisitExpr_(const CallNode* op, std::ostream& os) {
         PrintMMAAssembly(shape, A_layout, B_layout, A_dtype, B_dtype, C_dtype, a_ref, a_bias, b_ref,
                          b_bias, c_ref, c_bias, "", "", "", bit_op, false, saturate);
 
-    this->stream << asm_code;
-  } else if (IsOp(op, ptx_mma_sp_op, "tirx.ptx.mma_sp")) {
-    // arg 0: shape: mXnXkX
-    // arg 1: A layout: row/col
-    // arg 2: B layout: row/col
-    // arg 3: A precision: fp16, fp32, ...
-    // arg 4: B precision: fp16, fp32, ...
-    // arg 5: C precision: fp16, fp32, ...
-    // arg 6: A multiplicand pointer
-    // arg 7: A multiplicand index
-    // arg 8: B multiplicand pointer
-    // arg 9: B multiplicand index
-    // arg 10: C accumulator pointer
-    // arg 11: C accumulator index
-    // arg 12: metadata
-    // arg 13: metadata index
-    // arg 14: sparse_selector
-    // arg 15: saturate
-    TVM_FFI_ICHECK_EQ(op->args.size(), 16U);
-    std::string shape = op->args[0].as_or_throw<StringImm>()->value;
-    std::string A_layout = op->args[1].as_or_throw<StringImm>()->value;
-    std::string B_layout = op->args[2].as_or_throw<StringImm>()->value;
-    std::string A_dtype = op->args[3].as_or_throw<StringImm>()->value;
-    std::string B_dtype = op->args[4].as_or_throw<StringImm>()->value;
-    std::string C_dtype = op->args[5].as_or_throw<StringImm>()->value;
-    std::string a_ref = this->PrintExpr(op->args[6]);
-    std::string a_offset = this->PrintExpr(op->args[7]);
-    std::string b_ref = this->PrintExpr(op->args[8]);
-    std::string b_offset = this->PrintExpr(op->args[9]);
-    std::string c_ref = this->PrintExpr(op->args[10]);
-    std::string c_offset = this->PrintExpr(op->args[11]);
-    std::string metadata = this->PrintExpr(op->args[12]);
-    std::string metadata_offset = this->PrintExpr(op->args[13]);
-    std::string sparse_selector = this->PrintExpr(op->args[14]);
-    bool saturate = op->args[15].as_or_throw<IntImm>()->value;
-    std::string asm_code = PrintMMAAssembly(
-        shape, A_layout, B_layout, A_dtype, B_dtype, C_dtype, a_ref, a_offset, b_ref, b_offset,
-        c_ref, c_offset, metadata, metadata_offset, sparse_selector, "", true, saturate);
     this->stream << asm_code;
   } else if (op->op.same_as(mma_store_op)) {
     int m = op->args[0].as_or_throw<IntImm>()->value;

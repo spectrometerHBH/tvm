@@ -1006,9 +1006,9 @@ def test_gemm_block_scaled_fp8_cta_group_1(task):
                 # Copy SFA/SFB from shared to TMEM via tcgen05.cp, then issue MMA
         if tid_in_wg == 0:
             T.cuda.tcgen05.encode_matrix_descriptor(descSFA.data, SFA_smem.access_ptr("r", offset=0), ldo=16, sdo=8 * 4 * F32_BYTES // F128_BYTES, swizzle=0)  # noqa: E501
-            T.ptx.tcgen05.cp(SFA_TMEM_START, descSFA[0], shape="32x128b", cta_group=1, multicast="warpx4")  # noqa: E501
+            T.ptxd["tcgen05.cp.cta_group::1.32x128b.warpx4"](T.uint32(SFA_TMEM_START), descSFA[0])
             T.cuda.tcgen05.encode_matrix_descriptor(descSFB.data, SFB_smem.access_ptr("r", offset=0), ldo=16, sdo=8 * 4 * F32_BYTES // F128_BYTES, swizzle=0)  # noqa: E501
-            T.ptx.tcgen05.cp(SFB_TMEM_START, descSFB[0], shape="32x128b", cta_group=1, multicast="warpx4")  # noqa: E501
+            T.ptxd["tcgen05.cp.cta_group::1.32x128b.warpx4"](T.uint32(SFB_TMEM_START), descSFB[0])
 
             Tx.gemm_async(tmem[tuple(r_tmem_C)], A_smem[tuple(r_smem_A)], B_smem[tuple(r_smem_B)], SFA=sfa_tmem[0:M, 0:sf_mma_k], SFB=sfb_tmem[0:N, 0:sf_mma_k], dispatch="tcgen05")  # noqa: E501
             T.ptxd.tcgen05.commit.cta_group__1.mbarrier__arrive__one.shared__cluster.b64(mma_mbar.ptr_to([0]))
@@ -1214,9 +1214,9 @@ def test_gemm_block_scaled_fp8_cta_group_2(task):
                 # Copy SFA/SFB from shared to TMEM via tcgen05.cp (both CTAs, cta_group=2)
         if tid_in_wg == 0:
             T.cuda.tcgen05.encode_matrix_descriptor(descSFA.data, SFA_smem.access_ptr("r", offset=0), ldo=16, sdo=8 * 4 * F32_BYTES // F128_BYTES, swizzle=0)  # noqa: E501
-            T.ptx.tcgen05.cp(SFA_TMEM_START, descSFA[0], shape="32x128b", cta_group=2, multicast="warpx4")  # noqa: E501
+            T.ptxd["tcgen05.cp.cta_group::2.32x128b.warpx4"](T.uint32(SFA_TMEM_START), descSFA[0])
             T.cuda.tcgen05.encode_matrix_descriptor(descSFB.data, SFB_smem.access_ptr("r", offset=0), ldo=16, sdo=8 * 4 * F32_BYTES // F128_BYTES, swizzle=0)  # noqa: E501
-            T.ptx.tcgen05.cp(SFB_TMEM_START, descSFB[0], shape="32x128b", cta_group=2, multicast="warpx4")  # noqa: E501
+            T.ptxd["tcgen05.cp.cta_group::2.32x128b.warpx4"](T.uint32(SFB_TMEM_START), descSFB[0])
         T.cuda.cta_sync()
         T.cuda.cluster_sync()
 
@@ -1413,9 +1413,9 @@ def test_gemm_block_scaled_nvfp4_cta_group_1():
                 # Copy SFA/SFB from shared to TMEM via tcgen05.cp, then issue MMA
         if tid_in_wg == 0:
             T.cuda.tcgen05.encode_matrix_descriptor(descSFA.data, SFA_smem.access_ptr("r", offset=0), ldo=16, sdo=8 * 4 * F32_BYTES // F128_BYTES, swizzle=0)  # noqa: E501
-            T.ptx.tcgen05.cp(SFA_TMEM_START, descSFA[0], shape="32x128b", cta_group=1, multicast="warpx4")  # noqa: E501
+            T.ptxd["tcgen05.cp.cta_group::1.32x128b.warpx4"](T.uint32(SFA_TMEM_START), descSFA[0])
             T.cuda.tcgen05.encode_matrix_descriptor(descSFB.data, SFB_smem.access_ptr("r", offset=0), ldo=16, sdo=8 * 4 * F32_BYTES // F128_BYTES, swizzle=0)  # noqa: E501
-            T.ptx.tcgen05.cp(SFB_TMEM_START, descSFB[0], shape="32x128b", cta_group=1, multicast="warpx4")  # noqa: E501
+            T.ptxd["tcgen05.cp.cta_group::1.32x128b.warpx4"](T.uint32(SFB_TMEM_START), descSFB[0])
 
             Tx.gemm_async(tmem[0:128, 0:N], A_smem[:, :], B_smem[:, :], SFA=sfa_tmem[0:M, 0:sf_mma_k], SFB=sfb_tmem[0:N, 0:sf_mma_k], dispatch="tcgen05")  # noqa: E501
             T.ptxd.tcgen05.commit.cta_group__1.mbarrier__arrive__one.shared__cluster.b64(mma_mbar.ptr_to([0]))
@@ -1605,9 +1605,9 @@ def test_gemm_block_scaled_nvfp4_cta_group_2():
                 # Copy SFA/SFB from shared to TMEM via tcgen05.cp
         if tid_in_wg == 0:
             T.cuda.tcgen05.encode_matrix_descriptor(descSFA.data, SFA_smem.access_ptr("r", offset=0), ldo=16, sdo=8 * 4 * F32_BYTES // F128_BYTES, swizzle=0)  # noqa: E501
-            T.ptx.tcgen05.cp(SFA_TMEM_START, descSFA[0], shape="32x128b", cta_group=2, multicast="warpx4")  # noqa: E501
+            T.ptxd["tcgen05.cp.cta_group::2.32x128b.warpx4"](T.uint32(SFA_TMEM_START), descSFA[0])
             T.cuda.tcgen05.encode_matrix_descriptor(descSFB.data, SFB_smem.access_ptr("r", offset=0), ldo=16, sdo=8 * 4 * F32_BYTES // F128_BYTES, swizzle=0)  # noqa: E501
-            T.ptx.tcgen05.cp(SFB_TMEM_START, descSFB[0], shape="32x128b", cta_group=2, multicast="warpx4")  # noqa: E501
+            T.ptxd["tcgen05.cp.cta_group::2.32x128b.warpx4"](T.uint32(SFB_TMEM_START), descSFB[0])
         T.cuda.cta_sync()
         T.cuda.cluster_sync()
 
@@ -1809,9 +1809,9 @@ def test_gemm_block_scaled_fp8_sf_id():
                 # Copy SF to TMEM, then single MMA call (schedule auto-derives sf_id per ki)
         if tid_in_wg == 0:
             T.cuda.tcgen05.encode_matrix_descriptor(descSFA.data, SFA_smem.access_ptr("r", offset=0), ldo=16, sdo=8 * 4 * F32_BYTES // F128_BYTES, swizzle=0)  # noqa: E501
-            T.ptx.tcgen05.cp(SFA_TMEM_START, descSFA[0], shape="32x128b", cta_group=1, multicast="warpx4")  # noqa: E501
+            T.ptxd["tcgen05.cp.cta_group::1.32x128b.warpx4"](T.uint32(SFA_TMEM_START), descSFA[0])
             T.cuda.tcgen05.encode_matrix_descriptor(descSFB.data, SFB_smem.access_ptr("r", offset=0), ldo=16, sdo=8 * 4 * F32_BYTES // F128_BYTES, swizzle=0)  # noqa: E501
-            T.ptx.tcgen05.cp(SFB_TMEM_START, descSFB[0], shape="32x128b", cta_group=1, multicast="warpx4")  # noqa: E501
+            T.ptxd["tcgen05.cp.cta_group::1.32x128b.warpx4"](T.uint32(SFB_TMEM_START), descSFB[0])
 
                     # Single call with K=128: schedule auto-encodes descI and
                     # rotates sf_id=0,1,2,3 for each of the 4 ki iterations.

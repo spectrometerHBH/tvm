@@ -413,7 +413,7 @@ class _Chain_min:
     def __call__(self, *args: Any) -> None: ...
 
 class _Chain_mma:
-    """`mma` — 4 entries sharing this mnemonic; PTX puts their difference in the operand list,
+    """`mma` — 11 entries sharing this mnemonic; PTX puts their difference in the operand list,
     so the call selects one. Shapes: (*__operands)
     """
 
@@ -444,6 +444,8 @@ class _Chain_mma:
     s4: _Chain_mma
     s8: _Chain_mma
     satfinite: _Chain_mma
+    sp: _Chain_mma
+    sp__ordered_metadata: _Chain_mma
     sync: _Chain_mma
     tf32: _Chain_mma
     u4: _Chain_mma
@@ -665,20 +667,24 @@ class _Chain_sub:
     def __call__(self, d: Any, a: Any, b: Any, *args: Any) -> None: ...
 
 class _Chain_tcgen05:
-    """`tcgen05` — 15 entries sharing this mnemonic; PTX puts their difference in the operand
+    """`tcgen05` — 16 entries sharing this mnemonic; PTX puts their difference in the operand
     list, so the call selects one. Shapes: (dst, ncols); (taddr, ncols); (); (mbar); (mbar,
-    mask); (*__operands); (d_tmem, a_desc, b_desc, idesc, enable_input_d, zero_col_mask);
-    (d_tmem, a_tmem, b_desc, idesc, enable_input_d, zero_col_mask); (d_tmem, a_desc, b_desc,
-    idesc, sfa_tmem, sfb_tmem, enable_input_d); (d_tmem, a_tmem, b_desc, idesc, sfa_tmem,
-    sfb_tmem, enable_input_d)
+    mask); (*__operands); (taddr, s_desc); (d_tmem, a_desc, b_desc, idesc, enable_input_d,
+    zero_col_mask); (d_tmem, a_tmem, b_desc, idesc, enable_input_d, zero_col_mask); (d_tmem,
+    a_desc, b_desc, idesc, sfa_tmem, sfb_tmem, enable_input_d); (d_tmem, a_tmem, b_desc,
+    idesc, sfa_tmem, sfb_tmem, enable_input_d)
     """
 
     aligned: _Chain_tcgen05
     alloc: _Chain_tcgen05
     b32: _Chain_tcgen05
+    b4x16_p64: _Chain_tcgen05
     b64: _Chain_tcgen05
+    b6x16_p32: _Chain_tcgen05
+    b8x16: _Chain_tcgen05
     block_scale: _Chain_tcgen05
     commit: _Chain_tcgen05
+    cp: _Chain_tcgen05
     cta_group__1: _Chain_tcgen05
     cta_group__2: _Chain_tcgen05
     dealloc: _Chain_tcgen05
@@ -707,6 +713,9 @@ class _Chain_tcgen05:
     unpack__16b: _Chain_tcgen05
     wait__ld: _Chain_tcgen05
     wait__st: _Chain_tcgen05
+    warpx2__01_23: _Chain_tcgen05
+    warpx2__02_13: _Chain_tcgen05
+    warpx4: _Chain_tcgen05
     ws: _Chain_tcgen05
     x1: _Chain_tcgen05
     x128: _Chain_tcgen05

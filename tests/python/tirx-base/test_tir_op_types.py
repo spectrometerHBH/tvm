@@ -193,32 +193,6 @@ def test_tir_op_ptx_mma():
     assert expr.op.name == "tirx.ptx.mma_legacy"
 
 
-def test_tir_op_ptx_mma_sp():
-    buffer_a = tirx.decl_buffer([32], "int4", scope="local")
-    buffer_b = tirx.decl_buffer([16], "uint4", scope="local")
-    buffer_c = tirx.decl_buffer([4], "int32", scope="local")
-    buffer_d = tirx.decl_buffer([1], "uint32", scope="local")
-    expr = _cuda_op.ptx_mma_sp_legacy(
-        "m8n8k32",
-        "row",
-        "col",
-        "int4",
-        "uint4",
-        "int32",
-        buffer_a.data,
-        0,
-        buffer_b.data,
-        0,
-        buffer_c.data,
-        0,
-        buffer_d.data,
-        0,
-        0,
-        False,
-    )
-    assert expr.op.name == "tirx.ptx.mma_sp"
-
-
 def test_tir_op_mma_store():
     x = tirx.Var("x", ty="int32")
     y = tirx.Var("y", ty="int32")

@@ -60,14 +60,12 @@ class PTXNamespace:
         self.sub_f16x2 = _op_wrapper(_cuda_op.ptx_sub_f16x2)
         self.mma = MmaNamespace()
         self.cp_async = CpAsyncNamespace()
-        self.tcgen05 = Tcgen05Namespace()
 
 
 class MmaNamespace:
     """The MMA instruction submodule."""
 
     def __init__(self):
-        self.sp = _dtype_forward(_cuda_op.ptx_mma_sp)
         # Apache-compatible variant of ptx_mma. Coexists with the
         # fork-native ``__call__`` form (``T.ptx.mma(...)``).
         self.legacy = _dtype_forward(_cuda_op.ptx_mma_legacy)
@@ -106,13 +104,6 @@ class CpAsyncNamespace:
             "T.ptx.cp_async now only accepts the printed 6-arg raw form; "
             'issue new copies through T.ptxd["cp.async..."]'
         )
-
-
-class Tcgen05Namespace:
-    """The Tcgen05 instruction submodule."""
-
-    def __init__(self):
-        self.cp = _op_wrapper(_cuda_op.ptx_tcgen05_cp)
 
 
 class CudaWgmmaNamespace:

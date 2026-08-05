@@ -373,7 +373,7 @@ def test_cp_4x256b_compile_emits_shape_and_count():
     mod = _compile(kernel)
     src = mod.mod.imports[0].inspect_source()
     assert "tcgen05.cp.cta_group::1.4x256b" in src, f"cp asm missing; src=\n{src}"
-    helper_refs = src.count("ptx_tcgen05_cp_cta_group_1_shape_4x256b")
+    helper_refs = src.count("tvm_builtin_ptxd_tcgen05_cp_cp_cta_group__1_4x256b")
     assert helper_refs - 1 == 2, f"expected 2 cp calls, got {helper_refs - 1}; src=\n{src}"
 
 
@@ -688,12 +688,14 @@ def test_cp_default_32x128b_instruction_sequence_unchanged():
     cp_lines = [
         line
         for line in src.splitlines()
-        if "ptx_tcgen05_cp_cta_group_1_shape_32x128b_multicast_warpx4_decompress_(" in line
+        if "tvm_builtin_ptxd_tcgen05_cp_cp_cta_group__1_32x128b_warpx4(" in line
         and "__forceinline__" not in line
     ]
     assert len(cp_lines) == 4, f"expected 4 cp calls, got {len(cp_lines)}"
     for i, (t_off, s_off) in enumerate([(0, 0), (4, 512), (8, 1024), (12, 1536)]):
-        t_tok = "[0], 0, 0," if t_off == 0 else f"[0] + (uint){t_off}), 0, 0,"
+        # The tmem column is the whole first argument now: ptxd takes the
+        # composed address, where the legacy helper took (addr, row, col).
+        t_tok = "[0], " if t_off == 0 else f"[0] + (uint){t_off}), "
         assert t_tok in cp_lines[i], f"cp[{i}] tmem col: want {t_tok!r} in {cp_lines[i]!r}"
         s_tok = f"+ {s_off}))"
         assert s_tok in cp_lines[i], f"cp[{i}] smem byte off: want {s_tok!r} in {cp_lines[i]!r}"

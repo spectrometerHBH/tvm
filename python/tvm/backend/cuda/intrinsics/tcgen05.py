@@ -501,54 +501,6 @@ def _get_tcgen05_mma_scale_vec_size(kind, scale_dtype):
 
 
 # =============================================================================
-
-
-def _tcgen05_cp_parts(taddr_, row_, col_, src_desc_, cta_group, shape, multicast, decompress):
-    cta_group = int(cta_group)
-    shape = parse_str(shape)
-    multicast = parse_str(multicast)
-    decompress = parse_str(decompress)
-    name = (
-        f"ptx_tcgen05_cp_cta_group_{cta_group}_shape_{_safe(shape)}"
-        f"_multicast_{_safe(multicast)}_decompress_{_safe(decompress)}"
-    )
-    instr = (
-        f"tcgen05.cp.cta_group::{cta_group}.{shape}"
-        f"{('.' + multicast) if multicast else ''}"
-        f"{('.' + decompress) if decompress else ''}"
-    )
-    body = (
-        "    asm volatile(\n"
-        f'        "{instr} [%0], %1;"\n'
-        "        :\n"
-        '        : "r"(get_tmem_addr(taddr, row_offset, col_offset)), "l"(src_desc)\n'
-        "    );"
-    )
-    return name, body
-
-
-device_intrinsic(
-    "_ptx_tcgen05_cp_impl",
-    n_attrs=4,
-    c_signature="(uint32_t taddr, int row_offset, int col_offset, uint64_t src_desc)",
-    helper_name=lambda *a: _tcgen05_cp_parts(*a)[0],
-    body=lambda *a: _tcgen05_cp_parts(*a)[1],
-    extra_deps=("get_tmem_addr",),
-)
-
-
-@register_codegen("ptx_tcgen05_cp")
-def codegen_ptx_tcgen05_cp(taddr, src_desc, shape, cta_group, multicast, decompress, row, col):
-    shape = parse_str(shape)
-    multicast = parse_str(multicast)
-    decompress = parse_str(decompress)
-    cta_group = validate_cta_group(cta_group)
-    return CODEGEN_REGISTRY["tirx._ptx_tcgen05_cp_impl"](
-        [taddr, row, col, src_desc, cta_group, shape, multicast, decompress]
-    )
-
-
-# =============================================================================
 # tcgen05 address / descriptor patch helpers — used by the dispatch wrappers
 # in ``tile_primitive/cuda/gemm_async/tcgen05.py``. They live here
 # (not in ``memory.py``) because their semantics are tcgen05-specific:
