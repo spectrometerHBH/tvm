@@ -33,8 +33,8 @@ def _safe(s):
     return s.replace("::", "_").replace(".", "_")
 
 
-@register_codegen("ptx_cp_async_raw")
-def codegen_ptx_cp_async_raw(*args):
+@register_codegen("s_tir_cp_async_raw")
+def codegen_s_tir_cp_async_raw(*args):
     """The raw cp.async op InjectPTXAsyncCopy emits (new copies are ptxd).
 
     Accepts two call shapes:

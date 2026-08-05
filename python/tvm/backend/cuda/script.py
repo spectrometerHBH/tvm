@@ -29,43 +29,17 @@ from tvm.tirx.script.builder.ir import _dtype_forward, _op_wrapper
 # pylint: disable=protected-access
 
 
-def _ptx_ldg32(reg, guard, addr, local_addr):
+def _s_tir_ldg32(reg, guard, addr, local_addr):
     if is_buffer_var(addr):
         addr = addr[0]
-    return _tir_op.call_intrin(reg.ty, "tirx.ptx.ldg32", reg, guard, addr, local_addr)
+    return _tir_op.call_intrin(reg.ty, "tirx.s_tir.ldg32", reg, guard, addr, local_addr)
 
 
-_ptx_ldg32.__tir_op_name__ = "ptx.ldg32"
+_s_tir_ldg32.__tir_op_name__ = "s_tir.ldg32"
 
 
-class PTXNamespace:
-    """The PTX instruction submodule."""
-
-    def __init__(self):
-        self.ldg32 = _ptx_ldg32
-        # Apache-compatible ldmatrix: the historical ``(trans, num, dtype,
-        # local_ptr, local_offset, smem_ptr, smem_offset)`` form, kept so
-        # upstream-derived tests keep working without rewriting their tirx
-        # code. Fork-native code writes `T.ptxd.ldmatrix...`.
-        self.ldmatrix_legacy = _dtype_forward(_cuda_op.ptx_ldmatrix_legacy)
-        self.elect_sync: Callable[..., Any] = _op_wrapper(_cuda_op.ptx_elect_sync)
-        # Math operations
-        # add/sub/mul/fma DPS form: (d_addr, a, b[, c], *, rounding, ftz[, sat])
-        self.neg_f32 = _op_wrapper(_cuda_op.ptx_neg_f32)
-        self.sub_f16x2 = _op_wrapper(_cuda_op.ptx_sub_f16x2)
-        self.mma = MmaNamespace()
-        self.cp_async = CpAsyncNamespace()
-
-
-class MmaNamespace:
-    """The MMA instruction submodule: the Apache-compatible legacy form only."""
-
-    def __init__(self):
-        self.legacy = _dtype_forward(_cuda_op.ptx_mma_legacy)
-
-
-class CpAsyncNamespace:
-    """The CpAsync instruction submodule (the raw op's printer surface)."""
+class _CpAsyncRaw:
+    """The raw cp.async node's printer surface."""
 
     def __init__(self):
         # Legacy variant: takes (dst_ptr, dst_offset, src_ptr, src_offset,
@@ -75,7 +49,7 @@ class CpAsyncNamespace:
 
     def __call__(self, *args, **kwds):
         # The 6-arg form ``(elem_dtype, dst, dst_off, src, src_off, cp_size)``
-        # the printer round-trips for the raw ``tirx.ptx.cp_async_raw`` Call
+        # the printer round-trips for the raw ``tirx.s_tir.cp_async_raw`` Call
         # emitted by ``tvm.backend.cuda.transform.InjectPTXAsyncCopy``. The
         # pass-emitted Call has 5 args (no ``tvm_access_ptr`` fold) and a
         # per-element-dtype Call.dtype, so build it directly.
@@ -84,14 +58,44 @@ class CpAsyncNamespace:
 
             elem_dtype, dst, dst_off, src, src_off, cp_size = args
             return tvm.ir.Call(
-                tvm.ir.Op.get("tirx.ptx.cp_async_raw"),
+                tvm.ir.Op.get("tirx.s_tir.cp_async_raw"),
                 [dst, dst_off, src, src_off, cp_size],
                 ret_ty=tvm.ir.PrimType(elem_dtype),
             )
         raise TypeError(
-            "T.ptx.cp_async now only accepts the printed 6-arg raw form; "
+            "T.s_tir.cp_async_raw only accepts the printed 6-arg raw form; "
             'issue new copies through T.ptxd["cp.async..."]'
         )
+
+
+class STIRNamespace:
+    """Nodes the s_tir pipeline's own passes build.
+
+    Nothing here is meant to be written by hand: ``InjectPTXLDG32`` and
+    ``InjectPTXAsyncCopy`` construct these, later passes match on them, and
+    codegen turns them into asm. They have a script spelling only so printed
+    IR round-trips.
+    """
+
+    def __init__(self):
+        self.ldg32 = _s_tir_ldg32
+        self.cp_async_raw = _CpAsyncRaw()
+
+
+class PTXLegacyNamespace:
+    """Apache-compatible spellings of instructions the dialect already covers.
+
+    They take the historical argument order and are pattern-matched by the
+    passes that lower them, which is why they are not simply deleted: tests
+    inherited from upstream still write them.
+    """
+
+    def __init__(self):
+        # Same lowered asm as T.ptxd.mma, but the accumulator doubles as the
+        # destination and the offsets are explicit.
+        self.mma = _dtype_forward(_cuda_op.ptx_legacy_mma)
+        # (trans, num, dtype, local_ptr, local_offset, smem_ptr, smem_offset)
+        self.ldmatrix = _dtype_forward(_cuda_op.ptx_legacy_ldmatrix)
 
 
 class CudaWgmmaNamespace:
@@ -134,6 +138,10 @@ class CUDANamespace:
         self.wgmma = CudaWgmmaNamespace()
         self.tcgen05 = CudaTcgen05Namespace()
         self.any_sync = _op_wrapper(_cuda_op.cuda_any_sync)
+        # elect.sync plus the two movs that materialize its d|p pair: a
+        # multi-statement asm block, so it belongs here rather than T.ptxd.
+        # The warp-specialization passes match this op to build predicates.
+        self.elect_sync: Callable[..., Any] = _op_wrapper(_cuda_op.cuda_elect_sync)
         # `mov.u32 d, %sreg` -- one PTX instruction, but the special-register
         # name is baked into the asm text, so it is a helper per register
         # rather than a ptxd entry with a register operand.
@@ -300,4 +308,4 @@ class NVSHMEMPutMemSignalNBINamespace:
     __tir_call_op_name__ = "nvshmem_putmem_signal_nbi"
 
 
-__all__ = ["CUDANamespace", "NVSHMEMNamespace", "PTXNamespace"]
+__all__ = ["CUDANamespace", "NVSHMEMNamespace", "PTXLegacyNamespace", "STIRNamespace"]

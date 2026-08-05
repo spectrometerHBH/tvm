@@ -1219,7 +1219,7 @@ def test_tcgen05_32x32b_float32_keeps_typed_register_operands():
     """The .32x32b float32 lowering should pass the local fragment's typed
     registers to the PTX helper. The helper reinterprets operands as b32, so a
     call-site uint32 view is unnecessary and makes generated CUDA diverge from
-    handwritten ``T.ptx.tcgen05`` calls."""
+    handwritten ``T.ptxd.tcgen05`` calls."""
 
     K_cols = 32
 

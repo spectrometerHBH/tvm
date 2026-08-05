@@ -17,7 +17,7 @@
 # pylint: disable=missing-function-docstring
 """Codegen tests for Ampere (sm_80) warp-level ``mma.sync`` tensor cores.
 
-These exercise the ``T.ptx.mma`` intrinsic directly (not via the gemm
+These exercise the ``T.ptxd.mma`` chain directly (not via the gemm
 dispatch). ``ptx.mma`` takes one pointer per 32-bit register for each operand
 (``d_ptrs`` / ``a_ptrs`` / ``b_ptrs`` / ``c_ptrs``), enumerated in the fixed
 PTX register order, so the b32 registers may be scattered in the register file

@@ -81,14 +81,16 @@ def script_namespaces(**_):
     from .script import (  # pylint: disable=import-outside-toplevel
         CUDANamespace,
         NVSHMEMNamespace,
-        PTXNamespace,
+        PTXLegacyNamespace,
+        STIRNamespace,
     )
 
     return {
         "cuda": CUDANamespace(),
         "nvshmem": NVSHMEMNamespace(),
-        "ptx": PTXNamespace(),
+        "ptx_legacy": PTXLegacyNamespace(),
         "ptxd": PTXDNamespace(),
+        "s_tir": STIRNamespace(),
     }
 
 

@@ -37,7 +37,7 @@ def test_cp_async_raw_dtype_round_trips():
     def f(A: T.Buffer((128,), "float16"), B: T.Buffer((128,), "float16")):
         T.func_attr({"global_symbol": "f"})
         for i in T.serial(8):
-            T.ptx.cp_async("float16", B.data, i * 16, A.data, i * 16, 16)
+            T.s_tir.cp_async_raw("float16", B.data, i * 16, A.data, i * 16, 16)
 
     reparsed = tvm.script.from_source(f.script())
     tvm.ir.assert_structural_equal(f, reparsed)
@@ -47,7 +47,7 @@ def count_cp_async(stmt):
     num_alloc = [0]
 
     def verify(n):
-        if isinstance(n, tvm.ir.Call) and n.op.name == "tirx.ptx.cp_async_raw":
+        if isinstance(n, tvm.ir.Call) and n.op.name == "tirx.s_tir.cp_async_raw":
             num_alloc[0] += 1
 
     tvm.tirx.stmt_functor.post_order_visit(stmt, verify)
@@ -919,7 +919,7 @@ def test_multiplication_nodes_are_inlined():
             A_shared = T.decl_buffer((4096,), "float16", scope="shared")
             for i in range(16):
                 cse_v1: T.int64 = T.Cast("int64", i)
-                T.ptx.cp_async(
+                T.s_tir.cp_async_raw(
                     "float16",
                     A_shared.data,
                     tx * T.int64(128) + cse_v1 * T.int64(8),

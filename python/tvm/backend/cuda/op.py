@@ -426,7 +426,7 @@ def ptx_cp_async_legacy(*all_args):
     Offsets are folded into the pointers via ``tvm_access_ptr`` and the call
     lowers through the raw ``tirx.ptx.cp_async_raw`` op.
 
-    ``T.ptx.cp_async_legacy`` runs through ``_dtype_forward`` which
+    ``T.s_tir.cp_async_raw.legacy`` runs through ``_dtype_forward`` which
     prepends a ``dtype=`` kwarg as a leading positional. The dtype names
     the *element* type of the buffer (offsets are in elements of that
     dtype, not bytes), so this function accepts either 5 or 6 positional
@@ -447,7 +447,7 @@ def ptx_cp_async_legacy(*all_args):
     dst_ptr = _wrap_or_fold_access_ptr(dst_ptr, dst_offset, elem_dtype)
     src_ptr = _wrap_or_fold_access_ptr(src_ptr, src_offset, elem_dtype)
     # The raw 5-arg Call InjectPTXAsyncCopy emits; offsets are already folded.
-    return call_intrin(elem_dtype, "tirx.ptx.cp_async_raw", dst_ptr, 0, src_ptr, 0, cp_size)
+    return call_intrin(elem_dtype, "tirx.s_tir.cp_async_raw", dst_ptr, 0, src_ptr, 0, cp_size)
 
 
 def _is_static_unicast_cta_mask(cta_mask):
@@ -459,9 +459,9 @@ def _is_static_unicast_cta_mask(cta_mask):
     return False
 
 
-def ptx_elect_sync():
+def cuda_elect_sync():
     """TVM intrinsic to call elect.sync"""
-    return call_intrin("uint32", "tirx.ptx.elect_sync")
+    return call_intrin("uint32", "tirx.cuda.elect_sync")
 
 
 def cuda_mov_sreg(bits, reg_name):
@@ -483,7 +483,7 @@ def cuda_mov_sreg(bits, reg_name):
     return call_intrin("int" + str(bits), "tirx.cuda.mov_sreg", bits, reg_name)
 
 
-def ptx_mma_legacy(*all_args, operator=None):
+def ptx_legacy_mma(*all_args, operator=None):
     """Legacy ``ptx_mma`` API.
 
     Signature: ``(shape, A_layout, B_layout, A_dtype, B_dtype, C_dtype,
@@ -499,12 +499,12 @@ def ptx_mma_legacy(*all_args, operator=None):
     * ``(accumulator, c_index)`` → folded; passed for both ``d_ptr`` and
       ``c_ptr`` since the accumulator is reused as the output.
 
-    ``T.ptx.mma.legacy`` runs through ``_dtype_forward`` which prepends a
+    ``T.ptx_legacy.mma`` runs through ``_dtype_forward`` which prepends a
     ``dtype=`` kwarg as a leading positional, so this function accepts
     either 13 or 14 positional args.
     """
     args = list(all_args)
-    # ``T.ptx.mma.legacy(..., dtype="...")`` has the dtype prepended by
+    # ``T.ptx_legacy.mma(..., dtype="...")`` has the dtype prepended by
     # ``_dtype_forward``; strip it here.
     if len(args) in (14, 15):
         _ = args.pop(0)
@@ -513,7 +513,7 @@ def ptx_mma_legacy(*all_args, operator=None):
         operator = args.pop()
     if len(args) != 13:
         raise ValueError(
-            f"ptx_mma_legacy expects 13-15 positional args (with optional "
+            f"ptx_legacy_mma expects 13-15 positional args (with optional "
             f"leading ``call_dtype`` from dtype= kwarg and optional trailing "
             f"``operator``); got {len(all_args)}"
         )
@@ -532,7 +532,7 @@ def ptx_mma_legacy(*all_args, operator=None):
         c_offset,
         saturate,
     ) = args
-    # Emit tirx.ptx_mma_legacy directly with separate (ptr_var, offset)
+    # Emit tirx.ptx_legacy.mma directly with separate (ptr_var, offset)
     # pairs. codegen_cuda.cc uses C pointer arithmetic ``ptr + offset``
     # so element offsets stay element-accurate, and lower_warp_memory
     # rewrites the offset's group component to a thread-local index.
@@ -553,7 +553,7 @@ def ptx_mma_legacy(*all_args, operator=None):
     ]
     if operator is not None:
         call_args.append(operator)
-    return call_intrin("", "tirx.ptx.mma_legacy", *call_args)
+    return call_intrin("", "tirx.ptx_legacy.mma", *call_args)
 
 
 def mma_store(dtype, m, n, dst_ptr, src_ptr, src_offset, dst_stride):
@@ -653,14 +653,14 @@ def _wrap_or_fold_access_ptr(ptr, offset, elem_dtype):
     return tvm_access_ptr(elem_dtype, ptr, offset, 1, 1)
 
 
-def ptx_ldmatrix_legacy(*all_args):
+def ptx_legacy_ldmatrix(*all_args):
     """Legacy ``ptx_ldmatrix`` API taking explicit offsets.
 
     Signature: ``(trans, num, dtype, local_ptr, local_offset, smem_ptr,
     smem_offset)``. Offsets are folded into the pointers via
     ``tvm_access_ptr``.
 
-    ``T.ptx.ldmatrix_legacy`` runs through ``_dtype_forward`` which
+    ``T.ptx_legacy.ldmatrix`` runs through ``_dtype_forward`` which
     prepends a ``dtype=`` kwarg as a leading positional naming the buffer
     element type — offsets are in elements of that dtype, not bytes, so
     we forward it to ``tvm_access_ptr`` for correct scaling.
@@ -672,14 +672,14 @@ def ptx_ldmatrix_legacy(*all_args):
         elem_dtype = "int8"
     else:
         raise ValueError(
-            f"ptx_ldmatrix_legacy expects 7 args (or 8 with dtype= kwarg "
+            f"ptx_legacy_ldmatrix expects 7 args (or 8 with dtype= kwarg "
             f"prepended); got {len(all_args)}"
         )
     # Call.dtype carries the buffer element type so codegen can pick the
     # int8+trans manual-loop fallback (ldmatrix can't transpose int8).
     return call_intrin(
         elem_dtype,
-        "tirx.ptx.ldmatrix_legacy",
+        "tirx.ptx_legacy.ldmatrix",
         trans,
         num,
         dtype,
@@ -1377,10 +1377,6 @@ def cuda_any_sync(mask, pred):
     return call_intrin("int32", "tirx.cuda.any_sync", mask, pred)
 
 
-def ptx_neg_f32(x):
-    return call_intrin("float32", "tirx.ptx.neg_f32", x)
-def ptx_sub_f16x2(a, b):
-    return call_intrin("uint32", "tirx.ptx.sub_f16x2", a, b)
 _PTX_CVT_TYPES = {
     "u8",
     "u16",

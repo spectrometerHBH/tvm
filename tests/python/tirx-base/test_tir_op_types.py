@@ -175,7 +175,7 @@ def test_tir_op_ptx_mma():
     buffer_a = tirx.decl_buffer([32], "int4", scope="local")
     buffer_b = tirx.decl_buffer([16], "uint4", scope="local")
     buffer_c = tirx.decl_buffer([4], "int32", scope="local")
-    expr = _cuda_op.ptx_mma_legacy(
+    expr = _cuda_op.ptx_legacy_mma(
         "m8n8k32",
         "row",
         "col",
@@ -190,7 +190,7 @@ def test_tir_op_ptx_mma():
         0,
         False,
     )
-    assert expr.op.name == "tirx.ptx.mma_legacy"
+    assert expr.op.name == "tirx.ptx_legacy.mma"
 
 
 def test_tir_op_mma_store():
@@ -222,7 +222,7 @@ def test_op_ptx_cp_async():
     buffer_shared = tirx.decl_buffer([16, 16], "float16", scope="shared")
     buffer_local = tirx.decl_buffer([8], "float16", scope="local")
     expr = _cuda_op.ptx_cp_async_legacy(buffer_shared.data, 0, buffer_local.data, 0, 16)
-    assert expr.op.name == "tirx.ptx.cp_async_raw"
+    assert expr.op.name == "tirx.s_tir.cp_async_raw"
 
     inner_dst = tirx.tvm_access_ptr("float16", buffer_shared.data, 2, 8, 1)
     inner_src = tirx.tvm_access_ptr("float16", buffer_local.data, 4, 8, 1)

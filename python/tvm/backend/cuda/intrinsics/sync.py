@@ -147,7 +147,7 @@ device_intrinsic(
 # helper (declared in the CUDA header tags), not direct PTX.
 # =============================================================================
 device_intrinsic(
-    "ptx_elect_sync",
+    "cuda_elect_sync",
     helper_name="tvm_builtin_elect_one_sync_op",
     return_type="uint32_t",
     body="    return tvm_builtin_elect_one_sync();",

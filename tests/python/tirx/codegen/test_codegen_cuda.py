@@ -362,32 +362,6 @@ def test_ptx_f32x2_value_codegen():
     assert "add.rn.f32x2 %0, %1, %2;" in src
 
 
-def test_ptx_neg_f32_codegen():
-    @T.prim_func
-    def main(A: T.Buffer((2,), "float32")):
-        T.device_entry()
-        tx = T.thread_id([32])
-        if tx == 0:
-            A[1] = T.ptx.neg_f32(A[0])
-
-    src, _ = _get_source(main)
-    assert "tvm_builtin_ptx_neg_f32" in src
-    assert "neg.f32 %0, %1;" in src
-    assert "neg.ftz.f32" not in src
-
-
-def test_ptx_sub_f16x2_value_codegen():
-    @T.prim_func
-    def main(A: T.Buffer((3,), "uint32")):
-        T.device_entry()
-        tx = T.thread_id([32])
-        if tx == 0:
-            A[2] = T.ptx.sub_f16x2(A[0], A[1])
-
-    src, _ = _get_source(main)
-    assert "unsigned int tvm_builtin_ptx_sub_f16x2" in src
-    assert "sub.f16x2 %0, %1, %2;" in src
-    assert "A_ptr[2] = tvm_builtin_ptx_sub_f16x2(A_ptr[0], A_ptr[1]);" in src
 
 
 @pytest.mark.skipif(

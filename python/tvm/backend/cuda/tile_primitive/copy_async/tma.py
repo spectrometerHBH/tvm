@@ -2084,7 +2084,7 @@ def _prefetch_main_descriptor(tensor_map, key: str, sctx: DispatchContext) -> No
     @T.prim_func(check_well_formed=False)
     def prefetch_tensor_map():
         if warp_id == 0:
-            if T.ptx.elect_sync() != T.uint32(0):
+            if T.cuda.elect_sync() != T.uint32(0):
                 T.ptxd.prefetch.tensormap(T.address_of(tensor_map))
         T.tvm_kernel_replace_point()
     # fmt: on

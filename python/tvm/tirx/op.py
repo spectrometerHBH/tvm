@@ -2147,7 +2147,7 @@ def filter(var, pred, *, span=None):  # pylint: disable=redefined-builtin
     Use this wrapper only when the predicate is *not* in the canonical
     thread-filter grammar (see ``src/tirx/analysis/filter_canonical.h``).
     Canonical predicates -- pure conjunctions of ``scopeid_var <op> const``
-    comparisons plus bare ``T.ptx.elect_sync()`` calls -- are recognized by
+    comparisons plus bare ``T.cuda.elect_sync()`` calls -- are recognized by
     the lowering pass directly from ``if cond:``, so the wrapper is redundant
     for them.
 

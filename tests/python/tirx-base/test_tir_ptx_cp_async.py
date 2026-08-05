@@ -38,7 +38,7 @@ def ptx_cp_async(A: T.Buffer((32, 128), "float16"), B: T.Buffer((32, 128), "floa
 
         for i in range(16):
             T.evaluate(
-                T.ptx.cp_async.legacy(
+                T.s_tir.cp_async_raw.legacy(
                     A_shared.data, tx * 128 + 8 * i, A.data, tx * 128 + 8 * i, 16, dtype="float16"
                 )
             )

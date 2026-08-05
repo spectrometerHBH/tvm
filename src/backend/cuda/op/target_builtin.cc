@@ -77,23 +77,23 @@ TIRX_DEFINE_BUILTIN_FUNC(mma_store_legacy)
 TIRX_DEFINE_BUILTIN_FUNC(mma_fill_legacy)
     .set_attr<TCallEffectKind>("TCallEffectKind", static_cast<int64_t>(CallEffectKind::kOpaque));
 
-OpRegEntry::RegisterOrGet("tirx.ptx.ldg32")
+OpRegEntry::RegisterOrGet("tirx.s_tir.ldg32")
     .set_name()
     .set_num_inputs(4)
     .set_attr<TCallEffectKind>("TCallEffectKind", static_cast<int64_t>(CallEffectKind::kPure))
-    .set_attr<TScriptPrinterName>("TScriptPrinterName", ffi::String("ptx.ldg32"), 20)
+    .set_attr<TScriptPrinterName>("TScriptPrinterName", ffi::String("s_tir.ldg32"), 20)
     .set_attr<TIRxOpCategory>("TIRxOpCategory", ffi::String("device_intrin"), 10)
-    .set_attr<TDeviceIntrinsicNamespace>("TDeviceIntrinsicNamespace", ffi::String("ptx"), 10);
+    .set_attr<TDeviceIntrinsicNamespace>("TDeviceIntrinsicNamespace", ffi::String("s_tir"), 10);
 
 // Raw legacy cp.async form emitted by InjectPTXAsyncCopy (and round-tripped by
 // the T.ptx.cp_async 6-arg surface). It carries the element dtype in Call.dtype
 // and prints it dtype-first; user-issued copies go through T.ptxd instead.
-OpRegEntry::RegisterOrGet("tirx.ptx.cp_async_raw")
+OpRegEntry::RegisterOrGet("tirx.s_tir.cp_async_raw")
     .set_name()
     .set_attr<TCallEffectKind>("TCallEffectKind", static_cast<int64_t>(CallEffectKind::kOpaque))
     .set_attr<TIRxOpCategory>("TIRxOpCategory", ffi::String("device_intrin"))
-    .set_attr<TDeviceIntrinsicNamespace>("TDeviceIntrinsicNamespace", ffi::String("ptx"))
-    .set_attr<TScriptPrinterName>("TScriptPrinterName", ffi::String("ptx.cp_async"))
+    .set_attr<TDeviceIntrinsicNamespace>("TDeviceIntrinsicNamespace", ffi::String("s_tir"))
+    .set_attr<TScriptPrinterName>("TScriptPrinterName", ffi::String("s_tir.cp_async_raw"))
     .set_attr<TScriptDtypePrintLocation>("TScriptDtypePrintLocation",
                                          static_cast<int64_t>(ScriptDtypePrintLocation::kFirst));
 
@@ -174,6 +174,7 @@ const DeviceIntrinsicRegistration kDeviceIntrinsics[] = {
     TIRX_DEVICE_INTRIN_ALIAS(cuda_cta_reduce, cuda, kOpaque),
     TIRX_DEVICE_INTRIN_ALIAS(cuda_cta_sync, cuda, kOpaque),
     TIRX_DEVICE_INTRIN_ALIAS(cuda_cvta_generic_to_shared, cuda, kOpaque),
+    TIRX_DEVICE_INTRIN_ALIAS(cuda_elect_sync, cuda, kOpaque),
     TIRX_DEVICE_INTRIN_ALIAS(cuda_fadd2_rn, cuda, kOpaque),
     TIRX_DEVICE_INTRIN_ALIAS(cuda_fdividef, cuda, kPure),
     TIRX_DEVICE_INTRIN_ALIAS(cuda_ffs_u32, cuda, kOpaque),
@@ -235,11 +236,8 @@ const DeviceIntrinsicRegistration kDeviceIntrinsics[] = {
     TIRX_DEVICE_INTRIN_ALIAS(nvshmem_quiet, nvshmem, kOpaque),
     TIRX_DEVICE_INTRIN_ALIAS(nvshmem_signal_op, nvshmem, kOpaque),
     TIRX_DEVICE_INTRIN_ALIAS(nvshmem_wait_until, nvshmem, kOpaque),
-    TIRX_DEVICE_INTRIN_ALIAS(ptx_elect_sync, ptx, kOpaque),
-    TIRX_DEVICE_INTRIN_ALIAS(ptx_ldmatrix_legacy, ptx, kOpaque),
-    TIRX_DEVICE_INTRIN_ALIAS(ptx_mma_legacy, ptx, kOpaque),
-    TIRX_DEVICE_INTRIN_ALIAS(ptx_neg_f32, ptx, kPure),
-    TIRX_DEVICE_INTRIN_ALIAS(ptx_sub_f16x2, ptx, kPure),
+    TIRX_DEVICE_INTRIN_ALIAS(ptx_legacy_ldmatrix, ptx_legacy, kOpaque),
+    TIRX_DEVICE_INTRIN_ALIAS(ptx_legacy_mma, ptx_legacy, kOpaque),
 };
 
 void RegisterDeviceIntrinsicAliases() {

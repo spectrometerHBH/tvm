@@ -1030,11 +1030,11 @@ void CodeGenCUDA::VisitExpr_(const CallNode* op, std::ostream& os) {
   static const Op& tvm_bmma_sync_op = Op::Get("tirx.tvm_bmma_sync");
   static const Op& mma_store_op = Op::Get("tirx.mma_store");
   static const Op& mma_fill_op = Op::Get("tirx.mma_fill");
-  static const Op& ptx_mma_legacy_op = Op::Get("tirx.ptx.mma_legacy");
-  static const Op& ptx_ldmatrix_legacy_op = Op::Get("tirx.ptx.ldmatrix_legacy");
+  static const Op& ptx_mma_legacy_op = Op::Get("tirx.ptx_legacy.mma");
+  static const Op& ptx_ldmatrix_legacy_op = Op::Get("tirx.ptx_legacy.ldmatrix");
   static const Op& mma_store_legacy_op = Op::Get("tirx.mma_store_legacy");
   static const Op& mma_fill_legacy_op = Op::Get("tirx.mma_fill_legacy");
-  static const Op& ptx_ldg32_op = Op::Get("tirx.ptx.ldg32");
+  static const Op& ptx_ldg32_op = Op::Get("tirx.s_tir.ldg32");
   static const Op& cuda_func_call_op = Op::Get("tirx.cuda.func_call");
 
   if (op->op.same_as(tvm_fill_fragment_op)) {
@@ -1154,7 +1154,7 @@ void CodeGenCUDA::VisitExpr_(const CallNode* op, std::ostream& os) {
     os << "for (int i = 0; i < " << num_elem << "; ++i) {\n";
     os << dst << "[" << dst_offset << " + i] = 0.0;";
     os << "}\n";
-  } else if (IsOp(op, ptx_mma_legacy_op, "tirx.ptx.mma_legacy")) {
+  } else if (IsOp(op, ptx_mma_legacy_op, "tirx.ptx_legacy.mma")) {
     // args: shape, A_layout, B_layout, A_dtype, B_dtype, C_dtype,
     //       a_ptr_var, a_offset, b_ptr_var, b_offset,
     //       c_ptr_var, c_offset, saturate, [bit_op]
@@ -1176,7 +1176,7 @@ void CodeGenCUDA::VisitExpr_(const CallNode* op, std::ostream& os) {
     std::string bit_op = op->args.size() > 13 ? op->args[13].as_or_throw<StringImm>()->value : "";
     this->stream << PrintMMAAssembly(shape, A_layout, B_layout, A_dtype, B_dtype, C_dtype, a_ref,
                                      a_bias, b_ref, b_bias, c_ref, c_bias, bit_op, saturate);
-  } else if (IsOp(op, ptx_ldmatrix_legacy_op, "tirx.ptx.ldmatrix_legacy")) {
+  } else if (IsOp(op, ptx_ldmatrix_legacy_op, "tirx.ptx_legacy.ldmatrix")) {
     // args: trans, num, type, local_ptr_var, local_offset, smem_ptr_var, smem_offset
     codegen_tags_.insert("mma");
     TVM_FFI_ICHECK_EQ(op->args.size(), 7U);
@@ -1254,7 +1254,7 @@ void CodeGenCUDA::VisitExpr_(const CallNode* op, std::ostream& os) {
     os << "for (int i = 0; i < " << num_elem << "; ++i) {\n";
     os << dst << "[" << dst_offset << " + i] = 0.0;";
     os << "}\n";
-  } else if (IsOp(op, ptx_ldg32_op, "tirx.ptx.ldg32")) {
+  } else if (IsOp(op, ptx_ldg32_op, "tirx.s_tir.ldg32")) {
     /*
     asm volatile (
         "{.reg .pred p;\n"

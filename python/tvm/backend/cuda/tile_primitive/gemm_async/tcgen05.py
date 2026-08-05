@@ -1165,7 +1165,7 @@ def gemm_async_tcgen05_impl(op_call: TilePrimitiveCall, sctx: DispatchContext) -
     if not a_is_tmem:
         A_elem_per_16B = 128 // DataType(A_type).bits
 
-    elect_pred = T.ptx.elect_sync() if warp_scope else True
+    elect_pred = T.cuda.elect_sync() if warp_scope else True
 
     _SWIZZLE_TO_LAYOUT = {0: 0, 1: 6, 2: 4, 3: 2, 4: 1}
     _krp = Evaluate(tirx_op.tvm_kernel_replace_point())

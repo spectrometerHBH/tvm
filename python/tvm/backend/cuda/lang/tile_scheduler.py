@@ -925,7 +925,7 @@ class ClusterLaunchControlScheduler:
     def run_scheduler(self, cbx):
         # cta0 drives try_cancel; both CTAs expect_bytes + consume the handle so the
         # finished-barrier count is met and the slot can be reissued.
-        if T.ptx.elect_sync():
+        if T.cuda.elect_sync():
             sa = PipelineState(1, 0)
             sf = PipelineState(1, 1)
             self._s_done = 0

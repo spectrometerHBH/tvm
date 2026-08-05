@@ -361,7 +361,7 @@ def test_ptx_elect_sync():
         T.device_entry()
         cta_id = T.cta_id([1])
         tx = T.thread_id([128])
-        if (T.ptx.elect_sync()):
+        if (T.cuda.elect_sync()):
             A[tx] = tx
         # fmt: on
 

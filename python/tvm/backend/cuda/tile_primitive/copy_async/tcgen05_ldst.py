@@ -574,7 +574,7 @@ def _emit_datapath_b_path(
 # When: one buffer is in tmem (tensor memory, Blackwell SM100+) and the other
 # is in local scope, at warpgroup exec scope.
 #
-# Emits: T.ptx.tcgen05.ld / T.ptx.tcgen05.st (async). The caller is
+# Emits: T.ptxd.tcgen05.ld / T.ptxd.tcgen05.st (async). The caller is
 # responsible for issuing the matching ``T.ptxd.tcgen05.wait__ld`` /
 # ``T.ptxd.tcgen05.wait__st`` when synchronization is required.
 @register_dispatch(

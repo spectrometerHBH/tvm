@@ -290,8 +290,8 @@ class TCGen05Bar(MBarrier):
     """Barrier signaled by ``tcgen05`` commit.
 
     The caller is responsible for ensuring only one thread issues the
-    commit, e.g. by wrapping the call in ``if T.ptx.elect_sync():`` or by
-    passing ``pred=T.ptx.elect_sync()``. The ``pred`` form emits the
+    commit, e.g. by wrapping the call in ``if T.cuda.elect_sync():`` or by
+    passing ``pred=T.cuda.elect_sync()``. The ``pred`` form emits the
     predicated instruction (``@p tcgen05.commit``) instead of a branch and
     lets one elected leader predicate be shared across several commits.
     """

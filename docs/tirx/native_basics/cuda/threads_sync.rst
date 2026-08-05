@@ -19,13 +19,13 @@ CUDA C++/PTX intrinsics
 =======================
 
 When no tile primitive covers what you need, two escape hatches reach the hardware
-directly: **call a backend intrinsic** (the ``T.cuda.*`` / ``T.ptx.*`` namespaces
+directly: **call a backend intrinsic** (the ``T.cuda.*`` / ``T.ptxd.*`` namespaces
 from ``tvm.backend.cuda``), or **inline raw CUDA** source.
 
 Calling backend intrinsics
 --------------------------
 
-``T.cuda.*`` and ``T.ptx.*`` expose the CUDA backend's device intrinsics directly —
+``T.cuda.*`` and ``T.ptxd.*`` expose the CUDA backend's device intrinsics directly —
 synchronization, mbarriers, reductions, and the PTX data-movement / MMA families:
 
 .. code-block:: python
@@ -62,7 +62,7 @@ The shuffle lowers straight to ``__shfl_xor_sync``:
 
     v_ptr[0] = v_ptr[0] + __shfl_xor_sync(0xFFFFFFFF, v_ptr[0], i_ptr[0], 32);
 
-Other families under ``T.ptx.*`` / ``T.cuda.*``: ``cp_async`` (LDGSTS),
+Other families under ``T.ptxd.*`` / ``T.cuda.*``: ``cp_async`` (LDGSTS),
 ``cp_async.bulk.tensor`` (TMA), ``ldmatrix`` / ``stmatrix``, ``tcgen05.*``
 (Blackwell MMA), ``atomic_add``, ``fence`` … See :doc:`../../api/backend` for the
 full ``tvm.backend.cuda`` reference.
