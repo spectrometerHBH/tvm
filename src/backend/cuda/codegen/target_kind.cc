@@ -117,6 +117,7 @@ void RegisterTargetKinds() {
   TVM_REGISTER_TARGET_KIND("cuda", kDLCUDA)
       .add_attr_option<ffi::String>("mcpu")
       .add_attr_option<ffi::String>("arch")
+      .add_attr_option<bool>("fast-math", refl::DefaultValue(true))
       .add_attr_option<int64_t>("max_shared_memory_per_block")
       .add_attr_option<int64_t>("max_threads_per_block")
       .add_attr_option<int64_t>("thread_warp_size", refl::DefaultValue(32))
