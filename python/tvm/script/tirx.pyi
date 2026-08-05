@@ -179,6 +179,24 @@ class _Chain_cp:
     xor: _Chain_cp
     def __call__(self, *args: Any, pred: Any = None) -> None: ...
 
+class _Chain_cvt:
+    """`cvt` — 7 entries sharing this mnemonic; PTX puts their difference in the operand list,
+    so the call selects one. Shapes: (d, a, b); (d, a)
+    """
+
+    bf16x2: _Chain_cvt
+    e4m3x2: _Chain_cvt
+    e5m2x2: _Chain_cvt
+    f16x2: _Chain_cvt
+    f32: _Chain_cvt
+    relu: _Chain_cvt
+    rn: _Chain_cvt
+    rp: _Chain_cvt
+    rz: _Chain_cvt
+    satfinite: _Chain_cvt
+    ue8m0x2: _Chain_cvt
+    def __call__(self, *args: Any) -> None: ...
+
 class _Chain_cvta:
     """`cvta` — dir∈{to}; space∈{shared}; type∈{u64}"""
 
@@ -881,6 +899,7 @@ class _PTXD:
     barrier: _Chain_barrier
     clusterlaunchcontrol: _Chain_clusterlaunchcontrol
     cp: _Chain_cp
+    cvt: _Chain_cvt
     cvta: _Chain_cvta
     ex2: _Chain_ex2
     fence: _Chain_fence

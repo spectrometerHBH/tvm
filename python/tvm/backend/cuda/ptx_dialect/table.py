@@ -88,6 +88,28 @@ PTX_TYPE_DTYPES = {
     # in one 64-bit register. It names a packed layout whose container happens
     # to be .b64, not a bit container, so it is not widened.
     "f32x2": ("uint64",),
+    # cvt's narrow packed formats, per ISA 9.7.9.22's operand table. Each names
+    # a lane layout, not a container: two (or four) sub-byte or 8-bit elements
+    # ride one integer register, exactly as `.f16x2` does. The carrier width is
+    # what the register must be, so it is the dtype the operand binds.
+    "e4m3x2": ("uint16",),
+    "e5m2x2": ("uint16",),
+    "e2m3x2": ("uint16",),
+    "e3m2x2": ("uint16",),
+    "ue8m0x2": ("uint16",),
+    "s2f6x2": ("uint16",),
+    "e2m1x4": ("uint16",),
+    "e4m3x4": ("uint32",),
+    "e5m2x4": ("uint32",),
+    "e2m3x4": ("uint32",),
+    "e3m2x4": ("uint32",),
+    "tf32": ("uint32",),
+    # `.e2m1x2` is the one that does not fit: the ISA types it .b8, and ptxas
+    # rejects a wider register in that position, so it can only be reached
+    # through a raw entry that stages it in a block-local `.reg .b8`. The token
+    # is here so those entries can name it; the uint8 is the C-boundary
+    # contract, not the register the instruction sees.
+    "e2m1x2": ("uint8",),
     # Mixed-precision sources live in a plain 16-bit register -- the ISA's own
     # example declares them `.reg .b16`.
     "f16": ("uint16",),
@@ -240,6 +262,19 @@ class InstructionEntry:
     # floor makes ptxas report legal forms as illegal, and those verdicts would
     # then get baked into a check() and silently delete coverage.
     cert_arch: str | None = None
+    # An escape hatch, not a mechanism: a family whose helper body this table
+    # cannot derive writes it out by hand. `raw_render(tokens, dtypes)` returns
+    # the helper source; everything else (variant enumeration, certification,
+    # dispatch, stubs) is unchanged, so a raw entry is still enumerable and
+    # still proven against ptxas.
+    #
+    # It exists for one shape: an operand the ISA types as .b8. Inline asm has
+    # no 8-bit register constraint, ptxas rejects a wider carrier in those
+    # positions, and the value therefore has to be staged through a block-local
+    # `.reg .b8` -- several statements, which the single-instruction invariant
+    # otherwise forbids. Every raw entry must be listed in that test's
+    # exemption set, so adding one is never silent.
+    raw_render: Callable[[tuple, tuple], str] | None = None
 
     @property
     def op_name(self) -> str:
@@ -917,6 +952,51 @@ def _mma_sp_lanes(which):
         return _mma_regs(m["btype"], kk, nn, threads)
 
     return lanes
+
+
+# cvt's generic scalar lines take the ISA's full dtype list (9.7.9.22).
+_CVT_BASIC = (
+    "u8", "u16", "u32", "u64",
+    "s8", "s16", "s32", "s64",
+    "bf16", "f16", "f32", "f64",
+)  # fmt: skip
+
+
+def _check_cvt_scalar(m):
+    """The generic scalar lines' own rules, per ISA 9.7.9.22.
+
+    Rounding is mandatory exactly where the conversion has to pick a
+    representative -- float to integer, or a narrowing float step -- and
+    illegal where the destination can hold every source value. `.ftz` applies
+    only where an .f32 is involved, and `.sat` clamps to [0.0, 1.0] for
+    floating-point destinations, which the ISA allows only on .f32/.f64.
+    """
+    d, a, rnd, ftz, sat = m["dtype"], m["atype"], m["rnd"], m["ftz"], m["sat"]
+    if d == a:
+        return "a conversion to the same type is a move, not a cvt"
+    fp = ("bf16", "f16", "f32", "f64")
+    d_fp, a_fp = d in fp, a in fp
+    irnd = rnd in ("rni", "rzi", "rmi", "rpi")
+    if irnd != (a_fp and not d_fp):
+        # "cvt{.irnd}" is the float-to-integer line; nothing else takes it.
+        return "integer rounding belongs to the float-to-integer line"
+    if not irnd and rnd:
+        # A float rounding mode is required when narrowing between float
+        # widths and rejected otherwise (ptxas: "rounding modifier required").
+        if not (d_fp and a_fp):
+            return "float rounding applies to float-to-float conversions"
+        if _CVT_FP_BITS[d] >= _CVT_FP_BITS[a]:
+            return "float rounding applies to narrowing conversions"
+    if not irnd and not rnd and d_fp and a_fp and _CVT_FP_BITS[d] < _CVT_FP_BITS[a]:
+        return "a narrowing float conversion requires a rounding modifier"
+    if ftz and "f32" not in (d, a):
+        return ".ftz applies to .f32 operands"
+    if sat and d_fp and d not in ("f32", "f64"):
+        return ".sat on a floating-point destination is .f32/.f64 only"
+    return None
+
+
+_CVT_FP_BITS = {"bf16": 16, "f16": 16, "f32": 32, "f64": 64}
 
 
 def _check_mma_sp_same_type(m):
@@ -1610,6 +1690,131 @@ _ENTRIES = [
             OperandSlot("ptr", role="ptr"),
         ),
         asm_volatile=False,  # legacy cvta carried no barrier
+    ),
+    # cvt per PTX ISA 9.7.9.22.
+    #
+    # NOT REGISTERED: the two generic scalar lines, `cvt{.irnd}{.ftz}{.sat}` and
+    # `cvt{.frnd}{.ftz}{.sat}` over the 12-type dtype/atype product. Their
+    # legality is a matrix ptxas enforces well beyond what the ISA prose states
+    # -- a rounding modifier is mandatory not only when narrowing between float
+    # widths but also for integer sources a float cannot represent exactly;
+    # `.sat` is rejected wherever the destination range already covers the
+    # source ("the .sat modifier is illegal in cases where saturation is not
+    # possible"); and this toolchain rejects `.bf16` as a scalar source
+    # entirely. A probe of the full product found 210 of 748 combinations
+    # rejected. No call site needs these lines: every caller uses the packed
+    # formats below, so the matrix is left unmodelled rather than guessed at.
+    InstructionEntry(  # cvt.frnd3{.satfinite}.ue8m0x2.f32 d, a, b;
+        name="cvt_ue8m0x2_f32",
+        mnemonic="cvt",
+        slots=(
+            ModifierSlot("rnd", ("rz", "rp")),
+            ModifierSlot("satfinite", ("satfinite",), optional=True),
+            ModifierSlot("dtype", ("ue8m0x2",)),
+            ModifierSlot("atype", ("f32",)),
+        ),
+        # bf16x2 / ue8m0x2 conversions are Blackwell lines.
+        cert_arch="sm_100a",
+        operands=(
+            OperandSlot("d", role="dst", dtype="ue8m0x2"),
+            OperandSlot("a", role="value", dtype="f32"),
+            OperandSlot("b", role="value", dtype="f32"),
+        ),
+    ),
+    InstructionEntry(  # cvt.frnd3{.satfinite}.ue8m0x2.bf16x2 d, a;
+        name="cvt_ue8m0x2_bf16x2",
+        mnemonic="cvt",
+        slots=(
+            ModifierSlot("rnd", ("rz", "rp")),
+            ModifierSlot("satfinite", ("satfinite",), optional=True),
+            ModifierSlot("dtype", ("ue8m0x2",)),
+            ModifierSlot("atype", ("bf16x2",)),
+        ),
+        # bf16x2 / ue8m0x2 conversions are Blackwell lines.
+        cert_arch="sm_100a",
+        operands=(
+            OperandSlot("d", role="dst", dtype="ue8m0x2"),
+            OperandSlot("a", role="value", dtype="bf16x2"),
+        ),
+    ),
+    InstructionEntry(  # cvt.rn.bf16x2.ue8m0x2 d, a;
+        name="cvt_bf16x2_ue8m0x2",
+        mnemonic="cvt",
+        slots=(
+            ModifierSlot("rnd", ("rn",)),
+            ModifierSlot("dtype", ("bf16x2",)),
+            ModifierSlot("atype", ("ue8m0x2",)),
+        ),
+        # bf16x2 / ue8m0x2 conversions are Blackwell lines.
+        cert_arch="sm_100a",
+        operands=(
+            OperandSlot("d", role="dst", dtype="bf16x2"),
+            OperandSlot("a", role="value", dtype="ue8m0x2"),
+        ),
+    ),
+    InstructionEntry(  # cvt.rn.satfinite{.relu}.f8x2type.f32 d, a, b;
+        name="cvt_f8x2_f32",
+        mnemonic="cvt",
+        slots=(
+            ModifierSlot("rnd", ("rn",)),
+            ModifierSlot("satfinite", ("satfinite",)),
+            ModifierSlot("relu", ("relu",), optional=True),
+            ModifierSlot("dtype", ("e4m3x2", "e5m2x2")),
+            ModifierSlot("atype", ("f32",)),
+        ),
+        operands=(
+            OperandSlot("d", role="dst", dtype="dtype"),
+            OperandSlot("a", role="value", dtype="f32"),
+            OperandSlot("b", role="value", dtype="f32"),
+        ),
+    ),
+    InstructionEntry(  # cvt.rn.satfinite{.relu}.f8x2type.fp16x2 d, a;
+        name="cvt_f8x2_fp16x2",
+        mnemonic="cvt",
+        slots=(
+            ModifierSlot("rnd", ("rn",)),
+            ModifierSlot("satfinite", ("satfinite",)),
+            ModifierSlot("relu", ("relu",), optional=True),
+            ModifierSlot("dtype", ("e4m3x2", "e5m2x2")),
+            ModifierSlot("atype", ("f16x2", "bf16x2")),
+        ),
+        # bf16x2 / ue8m0x2 conversions are Blackwell lines.
+        cert_arch="sm_100a",
+        operands=(
+            OperandSlot("d", role="dst", dtype="dtype"),
+            OperandSlot("a", role="value", dtype="atype"),
+        ),
+    ),
+    InstructionEntry(  # cvt.rn{.relu}.f16x2.f8x2type d, a;
+        name="cvt_f16x2_f8x2",
+        mnemonic="cvt",
+        slots=(
+            ModifierSlot("rnd", ("rn",)),
+            ModifierSlot("relu", ("relu",), optional=True),
+            ModifierSlot("dtype", ("f16x2",)),
+            ModifierSlot("atype", ("e4m3x2", "e5m2x2")),
+        ),
+        operands=(
+            OperandSlot("d", role="dst", dtype="f16x2"),
+            OperandSlot("a", role="value", dtype="atype"),
+        ),
+    ),
+    InstructionEntry(  # cvt.rn{.relu}{.satfinite}.bf16x2.f8x2type d, a;
+        name="cvt_bf16x2_f8x2",
+        mnemonic="cvt",
+        slots=(
+            ModifierSlot("rnd", ("rn",)),
+            ModifierSlot("relu", ("relu",), optional=True),
+            ModifierSlot("satfinite", ("satfinite",), optional=True),
+            ModifierSlot("dtype", ("bf16x2",)),
+            ModifierSlot("atype", ("e4m3x2", "e5m2x2")),
+        ),
+        # bf16x2 / ue8m0x2 conversions are Blackwell lines.
+        cert_arch="sm_100a",
+        operands=(
+            OperandSlot("d", role="dst", dtype="bf16x2"),
+            OperandSlot("a", role="value", dtype="atype"),
+        ),
     ),
     # cp.async.bulk per PTX ISA 9.7.9.26. One of the ISA's eight syntax lines is
     # registered; unregistered are the .sem/.scope/.type form, .L2::cache_hint,

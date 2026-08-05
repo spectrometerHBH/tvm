@@ -50,7 +50,6 @@ class PTXNamespace:
         self.ldmatrix_legacy = _dtype_forward(_cuda_op.ptx_ldmatrix_legacy)
         self.elect_sync: Callable[..., Any] = _op_wrapper(_cuda_op.ptx_elect_sync)
         # Math operations
-        self.cvt = _dtype_forward(_cuda_op.ptx_cvt)
         # add/sub/mul/fma DPS form: (d_addr, a, b[, c], *, rounding, ftz[, sat])
         self.neg_f32 = _op_wrapper(_cuda_op.ptx_neg_f32)
         self.sub_f16x2 = _op_wrapper(_cuda_op.ptx_sub_f16x2)

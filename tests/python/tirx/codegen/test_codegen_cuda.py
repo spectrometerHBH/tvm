@@ -408,9 +408,9 @@ def test_sparse_decode_conversion_intrinsics_codegen(monkeypatch):
         tx = T.thread_id([32])
         if tx == 0:
             pair: T.let = T.cuda.make_float2(F32[0], F32[1])
-            U16[0] = T.ptx.cvt(F32[1], F32[0], dtype="ue8m0x2", atype="f32", rounding="rz")
-            U32[0] = T.ptx.cvt(U16[0], dtype="bf16x2", atype="ue8m0x2", rounding="rn")
-            U32[1] = T.ptx.cvt(U16[0], dtype="bf16x2", atype="e4m3x2", rounding="rn")
+            T.ptxd.cvt.rz.ue8m0x2.f32(U16[0], F32[1], F32[0])
+            T.ptxd.cvt.rn.bf16x2.ue8m0x2(U32[0], U16[0])
+            T.ptxd.cvt.rn.bf16x2.e4m3x2(U32[1], U16[0])
             T.ptxd.add.f32x2(U64[0], pair, pair)
 
     src, _ = _get_source(main)

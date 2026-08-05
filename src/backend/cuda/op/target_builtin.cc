@@ -235,7 +235,6 @@ const DeviceIntrinsicRegistration kDeviceIntrinsics[] = {
     TIRX_DEVICE_INTRIN_ALIAS(nvshmem_quiet, nvshmem, kOpaque),
     TIRX_DEVICE_INTRIN_ALIAS(nvshmem_signal_op, nvshmem, kOpaque),
     TIRX_DEVICE_INTRIN_ALIAS(nvshmem_wait_until, nvshmem, kOpaque),
-    TIRX_DEVICE_INTRIN_ALIAS(ptx_cvt, ptx, kPure),
     TIRX_DEVICE_INTRIN_ALIAS(ptx_elect_sync, ptx, kOpaque),
     TIRX_DEVICE_INTRIN_ALIAS(ptx_ldmatrix_legacy, ptx, kOpaque),
     TIRX_DEVICE_INTRIN_ALIAS(ptx_mma_legacy, ptx, kOpaque),

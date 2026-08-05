@@ -88,6 +88,32 @@ C_BINDING = {
 }
 
 
+def _helper_name(entry: InstructionEntry, written, imms, dtypes, canonical) -> str:
+    """The helper's C identifier: the instruction's ISA identity, plus a
+    signature discriminator only when it is no longer enough.
+
+    The opcode alone stopped being enough once an operand could take several
+    dtypes; a non-canonical choice then names *every* typed operand,
+    positionally, because naming only the ones that changed collides whenever
+    two operands swap which of them is non-canonical (atom's d and b do
+    exactly that).
+
+    The name keys off the table name rather than the mnemonic. For every
+    single-shape family the two agree (st.bulk normalizes to st_bulk anyway);
+    it matters only where several entries share a mnemonic because PTX puts
+    their difference in the operand list, as `mov`'s pack/unpack shapes do.
+    "m" for minus: wgmma's imm-scale-a/b take the value -1, and "-" cannot
+    appear in a C identifier.
+    """
+    isa_name = [entry.name, *written, *(imms or ())]
+    discriminator = (
+        [] if tuple(dtypes) == tuple(canonical) else [C_BINDING[d].suffix for d in dtypes]
+    )
+    return "tvm_builtin_ptxd_" + "_".join([*isa_name, *discriminator]).replace("::", "__").replace(
+        ".", "_"
+    ).replace("-", "m")
+
+
 def render_variant(entry: InstructionEntry, tokens, predicated=False, dtypes=None, imms=None):
     """Render one variant: ``(opcode, helper_name, helper_source)``.
 
@@ -118,6 +144,13 @@ def render_variant(entry: InstructionEntry, tokens, predicated=False, dtypes=Non
     canonical = canonical_dtypes(entry, tokens)
     if dtypes is None:
         dtypes = canonical
+    if entry.raw_render is not None:
+        # A hand-written body (see InstructionEntry.raw_render). The name is
+        # derived the same way so dispatch, stubs and certification do not
+        # need to know the difference.
+        assert not predicated, f"{opcode}: raw entries have no @p twin"
+        helper = _helper_name(entry, written, imms, dtypes, canonical)
+        return opcode, helper, entry.raw_render(tokens, tuple(dtypes))
     # A helper name is the instruction's ISA identity plus, only when it is no
     # longer enough, a signature discriminator. The opcode alone stopped being
     # enough once an operand could take several dtypes; a non-canonical choice
@@ -125,19 +158,7 @@ def render_variant(entry: InstructionEntry, tokens, predicated=False, dtypes=Non
     # ones that changed collides whenever two operands swap which of them is
     # non-canonical (atom's d and b do exactly that).
     imm_of = dict(zip(imm_slots(entry), imms or (), strict=True))
-    isa_name = [entry.name, *written, *(imms or ())]  # table name, not mnemonic: see below
-    discriminator = (
-        [] if tuple(dtypes) == tuple(canonical) else [C_BINDING[d].suffix for d in dtypes]
-    )
-    # The name keys off the table name rather than the mnemonic. For every
-    # single-shape family the two agree (st.bulk normalizes to st_bulk anyway);
-    # it matters only where several entries share a mnemonic because PTX puts
-    # their difference in the operand list, as `mov`'s pack/unpack shapes do.
-    # "m" for minus: wgmma's imm-scale-a/b take the value -1, and "-" cannot
-    # appear in a C identifier.
-    helper = "tvm_builtin_ptxd_" + "_".join([*isa_name, *discriminator]).replace(
-        "::", "__"
-    ).replace(".", "_").replace("-", "m")
+    helper = _helper_name(entry, written, imms, dtypes, canonical)
     if predicated:
         assert not entry.has_dst, "@p is only supported on instructions without a destination"
         helper += "_pred"
