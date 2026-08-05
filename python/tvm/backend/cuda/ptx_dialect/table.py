@@ -623,12 +623,21 @@ def _check_rcp(m):
 # dialect certifies, and ptxas rejects them at sm_100.
 _MINMAX_INT_PLAIN = ("u16", "u32", "u64", "u16x2", "s16", "s64")
 _MINMAX_INT_RELU = ("s16x2", "s32")
-# The floating-point and half-precision lines (9.7.3.12/9.7.3.13, 9.7.4.8/9.7.4.9).
+# The floating-point and half-precision lines (9.7.3.11/9.7.3.12, 9.7.4.7/9.7.4.8).
 _MINMAX_FP = ("f32", "f64", "f16", "f16x2", "bf16", "bf16x2")
 
 
 def _check_mbarrier_sem_scope(m):
-    """`.sem` and `.scope` are one qualifier pair: both or neither (ISA 9.7.14.9)."""
+    """`.sem` and `.scope` are one qualifier pair: both or neither.
+
+    Stated in so many words by every mbarrier section that has the pair --
+    "Qualifiers .sem and .scope must be specified together." (ISA 9.7.14.16.14
+    expect_tx, .15 complete_tx, .16 arrive, .17 arrive_drop, .19 test_wait /
+    try_wait). The rule is what the sections say, not how they spell it: some
+    lines write the pair as one `{.sem.scope}` group and others as two
+    `{.sem}{.scope}` groups, and `mbarrier.arrive.noComplete` fixes it to
+    `{.release.cta}` outright.
+    """
     if bool(m.get("sem", "")) != bool(m.get("scope", "")):
         return ".sem and .scope go together: write both or neither"
     return None
@@ -649,9 +658,9 @@ def _check_minmax(m):
     """Which qualifiers each min/max syntax line allows.
 
     Integer lines (9.7.1.13/14):  op.type1 d,a,b   |  op{.relu}.type2 d,a,b
-    Floating lines (9.7.3.12/13): op{.ftz}{.NaN}{.xorsign.abs}.f32 d,a,b
+    Floating lines (9.7.3.11/12): op{.ftz}{.NaN}{.xorsign.abs}.f32 d,a,b
                                   op.f64 d,a,b
-    Half lines (9.7.4.8/9):       op{.ftz}{.NaN}{.xorsign.abs}.f16{x2} d,a,b
+    Half lines (9.7.4.7/8):       op{.ftz}{.NaN}{.xorsign.abs}.f16{x2} d,a,b
                                   op{.NaN}{.xorsign.abs}.bf16{x2} d,a,b
     `.xorsign` and `.abs` are one paired qualifier `{.xorsign.abs}` -- two slots
     only because the surface reaches them one attribute at a time.
@@ -683,7 +692,7 @@ def _check_minmax(m):
 
 
 def _check_minmax3(m):
-    """The three-source line: `op{.ftz}{.NaN}{.abs}.f32 d, a, b, c` (9.7.3.12).
+    """The three-source line: `op{.ftz}{.NaN}{.abs}.f32 d, a, b, c` (min 9.7.3.11, max 9.7.3.12).
 
     `.abs` here is standalone -- unlike the two-source line, which pairs it with
     `.xorsign`.
@@ -934,10 +943,10 @@ def _mma_lanes(which):
 def _mma_sp_lanes(which):
     """Like `_mma_lanes`, but A holds half of K -- the structured-sparse half.
 
-    ISA 9.7.15.6.1: "matrix A is stored in a compressed form where only the
-    non-zero elements are stored", two of every four along K, so the A fragment
-    of an MxK sparse line is the dense fragment of MxK/2. The other three groups
-    are unchanged.
+    ISA 9.7.15.6: "For an MxNxK sparse mma.sp{::ordered_metadata} operation,
+    the MxK matrix A is packed into MxK/2 elements" -- two of every four along
+    K, so the A fragment of an MxK sparse line is the dense fragment of MxK/2.
+    The other three groups are unchanged.
     """
 
     def lanes(m):
@@ -952,51 +961,6 @@ def _mma_sp_lanes(which):
         return _mma_regs(m["btype"], kk, nn, threads)
 
     return lanes
-
-
-# cvt's generic scalar lines take the ISA's full dtype list (9.7.9.22).
-_CVT_BASIC = (
-    "u8", "u16", "u32", "u64",
-    "s8", "s16", "s32", "s64",
-    "bf16", "f16", "f32", "f64",
-)  # fmt: skip
-
-
-def _check_cvt_scalar(m):
-    """The generic scalar lines' own rules, per ISA 9.7.9.22.
-
-    Rounding is mandatory exactly where the conversion has to pick a
-    representative -- float to integer, or a narrowing float step -- and
-    illegal where the destination can hold every source value. `.ftz` applies
-    only where an .f32 is involved, and `.sat` clamps to [0.0, 1.0] for
-    floating-point destinations, which the ISA allows only on .f32/.f64.
-    """
-    d, a, rnd, ftz, sat = m["dtype"], m["atype"], m["rnd"], m["ftz"], m["sat"]
-    if d == a:
-        return "a conversion to the same type is a move, not a cvt"
-    fp = ("bf16", "f16", "f32", "f64")
-    d_fp, a_fp = d in fp, a in fp
-    irnd = rnd in ("rni", "rzi", "rmi", "rpi")
-    if irnd != (a_fp and not d_fp):
-        # "cvt{.irnd}" is the float-to-integer line; nothing else takes it.
-        return "integer rounding belongs to the float-to-integer line"
-    if not irnd and rnd:
-        # A float rounding mode is required when narrowing between float
-        # widths and rejected otherwise (ptxas: "rounding modifier required").
-        if not (d_fp and a_fp):
-            return "float rounding applies to float-to-float conversions"
-        if _CVT_FP_BITS[d] >= _CVT_FP_BITS[a]:
-            return "float rounding applies to narrowing conversions"
-    if not irnd and not rnd and d_fp and a_fp and _CVT_FP_BITS[d] < _CVT_FP_BITS[a]:
-        return "a narrowing float conversion requires a rounding modifier"
-    if ftz and "f32" not in (d, a):
-        return ".ftz applies to .f32 operands"
-    if sat and d_fp and d not in ("f32", "f64"):
-        return ".sat on a floating-point destination is .f32/.f64 only"
-    return None
-
-
-_CVT_FP_BITS = {"bf16": 16, "f16": 16, "f32": 32, "f64": 64}
 
 
 # cvt's generic scalar line takes the ISA's twelve-type dtype/atype list.
@@ -1219,8 +1183,8 @@ def _check_mma_int(m):
     return None
 
 
-# wgmma.mma_async register fragments, per ISA 9.7.16.4 (Warpgroup matrix
-# fragments): across the 128-thread warpgroup the accumulator D holds
+# wgmma.mma_async register fragments, per ISA 9.7.16.5.1.1 (Register
+# Fragments): across the 128-thread warpgroup the accumulator D holds
 # M*N/128 = N/2 registers per thread (.f32 and .s32), and M*N/256 = N/4
 # when .dtype is .f16 (two halves per register). The A fragment of the rs
 # form works out to M*K/128/(32/bits) = 4 registers for every (K, type)
@@ -1318,8 +1282,8 @@ _ENTRIES = [
         check=_check_prefetch,
         operands=(OperandSlot("addr", role="addr"),),
     ),
-    # Complete scalar `ld` per PTX ISA 9.7.9.8 + the 9.7.9.9 ld.global.nc
-    # forms. Deliberately excluded (each needs a mechanism this shape lacks):
+    # Complete scalar `ld` per PTX ISA 9.7.9.8 + the 9.7.9.9 ld.global.nc forms.
+    # NOT REGISTERED: each needs a mechanism this shape lacks --
     # - .level::cache_hint + the cache_policy operand (optional operand)
     # - .unified (variable-attribute addressing)
     # - .param/.const spaces (require kernel-parameter / const addresses,
@@ -1356,7 +1320,7 @@ _ENTRIES = [
         ),
     ),
     # Complete scalar `st` per PTX ISA 9.7.9.11, at parity with `ld`.
-    # Deliberately excluded (each needs a mechanism this shape lacks):
+    # NOT REGISTERED: each needs a mechanism this shape lacks --
     # - .level::cache_hint + its trailing cache_policy operand (optional operand)
     # - .param::func (kernel-parameter addresses cannot flow through the
     #   helper-function ABI)
@@ -1478,7 +1442,7 @@ _ENTRIES = [
         ),
     ),
     # red / atom scalar `.op` forms per PTX ISA 9.7.14.6 and 9.7.14.5.
-    # Deliberately excluded (each needs a mechanism this shape lacks):
+    # NOT REGISTERED: each needs a mechanism this shape lacks --
     # - {.level::cache_hint} with its trailing cache_policy operand
     # - the .vec_16_bit/.vec_32_bit vector forms
     # - .f16/.bf16/.f16x2/.bf16x2 (add.noftz), which need half carrier types
@@ -1566,7 +1530,7 @@ _ENTRIES = [
     ),
     # st.bulk per PTX ISA 9.7.9.14:
     #   st.bulk{.weak}{.shared::cta} [a], size, initval;  // initval must be zero
-    # Unregistered: the 32-bit `size` form (ISA: "The 32-bit or 64-bit integer
+    # NOT REGISTERED: the 32-bit `size` form (ISA: "The 32-bit or 64-bit integer
     # operand size ..."), because no modifier token distinguishes the two -- it
     # would be an operand-shape axis, like mov's. Two ISA constraints are also
     # unenforceable here, being properties of a value rather than of the
@@ -1586,11 +1550,13 @@ _ENTRIES = [
             OperandSlot("initval", role="imm", literal="0"),
         ),
     ),
-    # min / max, complete per PTX ISA 9.7.1.13, 9.7.1.14 (integer),
-    # 9.7.3.12, 9.7.3.13 (single/double), 9.7.4.8, 9.7.4.9 (half).
+    # min / max per PTX ISA 9.7.1.13, 9.7.1.14 (integer), 9.7.3.11, 9.7.3.12
+    # (single/double), 9.7.4.7, 9.7.4.8 (half).
     # Each mnemonic gets two entries because the ISA gives it two operand
     # shapes: the usual `d, a, b` and the three-source `d, a, b, c` line.
-    # NOT REGISTERED: nothing -- every syntax line of both families is here.
+    # NOT REGISTERED: only the `.u8x4` and `{.relu}.s8x4` tokens of the integer
+    # lines (reason at the `_MINMAX_INT_PLAIN` note above: sm_120f-only). Every
+    # other syntax line and type token of both families is here.
     *[
         InstructionEntry(
             name=name,
@@ -1665,10 +1631,13 @@ _ENTRIES = [
         # `mul` is the one line with no mixed-precision form (ISA 9.7.5).
         for name, mixed in (("add", True), ("sub", True), ("mul", False))
     ],
-    # Unregistered across this whole arithmetic group: the integer lines
+    # NOT REGISTERED: across this whole arithmetic group, the integer lines
     # (9.7.1.{1,2,3}), extended-precision add.cc/sub.cc (9.7.2.{1,3}), and the
-    # half-precision lines (9.7.4.{1,2,3,4}), which additionally need .relu and
-    # .oob slots.
+    # half-precision lines (9.7.4.{1,2,3,4}). The half lines diverge from the
+    # entries above in three ways: their `.rnd` set is `{.rn}` alone (not
+    # _FRND), their bf16 lines take no `.ftz`/`.sat`, and the fma line
+    # (9.7.4.4) additionally needs `.relu` and `.oob` slots -- `.relu`/`.oob`
+    # appear on no add/sub/mul half line (9.7.4.{1,2,3}).
     #
     # fma differs in shape, so it is its own entry: three sources, and .rnd is
     # mandatory on every line (PTX ISA 9.7.3.6 / 9.7.5.3).
@@ -1758,12 +1727,12 @@ _ENTRIES = [
         )
         for direction, unpack in (("pack", False), ("unpack", True))
     ],
-    # cvta per PTX ISA 9.7.9.7. This entry exists to serve the engine's
+    # cvta per PTX ISA 9.7.9.21. This entry exists to serve the engine's
     # shared-address coercion, so it registers exactly the one combination that
-    # needs: 1 of the 32 legal (direction x space x size) forms. Unregistered:
-    # the whole space->generic direction, seven of the eight state spaces, and
-    # `.u32` -- the last genuinely unusable, since ptxas rejects the 32-bit ABI
-    # on sm_90 and higher.
+    # needs: 1 of the 32 legal (direction x space x size) forms.
+    # NOT REGISTERED: the whole space->generic direction, seven of the eight
+    # state spaces, and `.u32` -- the last genuinely unusable, since ptxas
+    # rejects the 32-bit ABI on sm_90 and higher.
     InstructionEntry(
         name="cvta",
         slots=(
@@ -1922,12 +1891,18 @@ _ENTRIES = [
             OperandSlot("a", role="value", dtype="atype"),
         ),
     ),
-    # cp.async.bulk per PTX ISA 9.7.9.26. One of the ISA's eight syntax lines is
-    # registered; unregistered are the .sem/.scope/.type form, .L2::cache_hint,
-    # .ignore_oob, .multicast::cluster, .cp_mask, and three of the four copy
-    # directions. `{.sem}` is additionally blocked by the toolchain: it is PTX
-    # ISA 9.3 and ptxas 13.2 assembles 9.2, the same situation _check_ld already
-    # records for ld.mmio.acquire.
+    # cp.async.bulk per PTX ISA 9.7.9.26.4.1, which has eight syntax lines (four
+    # copy directions x plain/`.sem.scope...type`). This entry renders exactly
+    # one of them: global -> shared::cta, no optional qualifier written. The
+    # other three directions, plus .L2::cache_hint, .multicast::cluster and
+    # .cp_mask, are registered by the cp_async_bulk_* entries further down, whose
+    # g2s_cta form also subsumes this entry's rendering. For what those entries
+    # do not render, see their NOT REGISTERED note -- it is the authority, and
+    # this comment deliberately makes no completeness claim of its own.
+    # `{.sem}` (`.weak`) is
+    # additionally blocked by the toolchain: it is PTX ISA 9.3 and ptxas 13.2
+    # assembles 9.2, the same situation _check_ld already records for
+    # ld.mmio.acquire.
     #
     # Mixed-space operands: dst/mbar are shared::cta (u32 carriers), src is
     # global (pointer carrier), size is a plain u32 register — each operand
@@ -1948,7 +1923,7 @@ _ENTRIES = [
             OperandSlot("mbar", role="addr", space="shared::cta"),
         ),
     ),
-    # mapa per PTX ISA 9.7.9.6: map a shared address into another CTA of the
+    # mapa per PTX ISA 9.7.9.24: map a shared address into another CTA of the
     # cluster. All four syntax lines differ only in how `a` is spelled at the
     # PTX level (register / variable / variable+imm); through a C helper the
     # operand is always a register, so they collapse to one entry.
@@ -1987,7 +1962,7 @@ _ENTRIES = [
             OperandSlot("b", role="value", dtype="u32"),
         ),
     ),
-    # clusterlaunchcontrol.try_cancel per PTX ISA 9.7.14.15.
+    # clusterlaunchcontrol.try_cancel per PTX ISA 9.7.14.18.
     InstructionEntry(
         name="clusterlaunchcontrol_try_cancel",
         mnemonic="clusterlaunchcontrol",
@@ -2139,7 +2114,7 @@ _ENTRIES = [
         operands=(),
     ),
     # ------------------------------------------------------------------
-    # bar / barrier per PTX ISA 9.7.14.1, barrier.cluster per 9.7.14.2.
+    # bar / barrier per PTX ISA 9.7.14.1, barrier.cluster per 9.7.14.3.
     #
     #   barrier{.cta}.sync{.aligned}   a{, b};    bar{.cta}.sync   a{, b};
     #   barrier{.cta}.arrive{.aligned} a,  b;     bar{.cta}.arrive a,  b;
@@ -2242,7 +2217,9 @@ _ENTRIES = [
         for act in ("arrive", "wait")
     ],
     # ------------------------------------------------------------------
-    # tcgen05 memory-allocation and synchronisation, per PTX ISA 9.7.16.
+    # tcgen05 memory-allocation and synchronisation, per PTX ISA 9.7.17:
+    # alloc / dealloc / relinquish_alloc_permit 9.7.17.7.1, wait 9.7.17.8.5,
+    # fence 9.7.17.11.1, commit 9.7.17.12.1.
     #
     # Every one of these carries `orders_memory=True`: the legacy helpers all
     # had `::: "memory"`, and the waits/fences name no address at all.
@@ -2357,7 +2334,10 @@ _ENTRIES = [
             OperandSlot("mask", role="value", dtype="u16"),
         ),
     ),
-    # cp.async completion tracking, per PTX ISA 9.7.9.13 / 9.7.9.15.
+    # cp.async completion tracking: cp.async.mbarrier.arrive per PTX ISA
+    # 9.7.14.16.18, cp.async.commit_group per 9.7.9.26.3.2, cp.async.wait_group
+    # per 9.7.9.26.3.3, cp.async.bulk.commit_group / .wait_group per
+    # 9.7.9.26.6.1 / 9.7.9.26.6.2.
     #
     # The wait_group counts are caller-chosen immediates: the ISA gives N no
     # register form, so each value is its own helper, and the closed `choices`
@@ -2403,7 +2383,7 @@ _ENTRIES = [
         )
         for bulk in (False, True)
     ],
-    # setmaxnreg per PTX ISA 9.7.17.2: the register count is an immediate the
+    # setmaxnreg per PTX ISA 9.7.20.5: the register count is an immediate the
     # ISA bounds to [24, 256] in steps of 8 -- exactly a closed choices set.
     InstructionEntry(
         name="setmaxnreg",
@@ -2419,7 +2399,7 @@ _ENTRIES = [
             OperandSlot("nreg", role="imm", choices=tuple(str(n) for n in range(24, 257, 8))),
         ),
     ),
-    # wgmma.wait_group per PTX ISA 9.7.15.4, same caller-immediate shape.
+    # wgmma.wait_group per PTX ISA 9.7.16.7.3, same caller-immediate shape.
     InstructionEntry(
         name="wgmma_wait_group",
         mnemonic="wgmma",
@@ -2484,9 +2464,14 @@ _ENTRIES = [
     # cp.async.bulk (non-tensor), per PTX ISA 9.7.9.26.4.1: four directions.
     #
     # NOT REGISTERED:
-    # - the `.sem.scope`/`.type` lines and `.ignore_oob` with its
-    #   `{, ignoreBytesLeft, ignoreBytesRight}` operands: PTX ISA 9.2 in this
-    #   toolchain cannot assemble them, and no call site uses them.
+    # - the `.sem.scope`/`.type` lines: "Support for .weak and .relaxed
+    #   semantics, .scope and .type qualifiers are introduced in PTX ISA version
+    #   9.3", which ptxas 13.2 in this toolchain (9.2) cannot assemble, and no
+    #   call site uses them.
+    # - `.ignore_oob` with its `{, ignoreBytesLeft, ignoreBytesRight}` operands,
+    #   on the two global -> shared::cta lines. This one is an open registration
+    #   gap, NOT a toolchain limit: the ISA introduces .ignore_oob in PTX ISA
+    #   version 9.2 and this ptxas does assemble it (probed at sm_90/sm_100).
     InstructionEntry(  # global -> shared::cta
         name="cp_async_bulk_g2s_cta",
         mnemonic="cp",
@@ -2739,7 +2724,9 @@ _ENTRIES = [
         ),
     ),
     # ------------------------------------------------------------------
-    # mbarrier, per PTX ISA 9.7.14.5-9.7.14.12.
+    # mbarrier, per the PTX ISA 9.7.14.16 chapter: init 9.7.14.16.12, inval
+    # 9.7.14.16.13, expect_tx 9.7.14.16.14, complete_tx 9.7.14.16.15, arrive
+    # 9.7.14.16.16, test_wait / try_wait 9.7.14.16.19.
     #
     # The arrive lines come in a `state`-returning form and a sink form
     # (`_, [addr]`); the sink is what a void helper can express, so `_` is an
@@ -2914,7 +2901,8 @@ _ENTRIES = [
         )
         for act in ("expect_tx", "complete_tx")
     ],
-    # wgmma group synchronisation, per PTX ISA 9.7.15.4. (wait_group's textual
+    # wgmma group synchronisation, per PTX ISA 9.7.16.7: fence 9.7.16.7.1,
+    # commit_group 9.7.16.7.2, wait_group 9.7.16.7.3. (wait_group's textual
     # group count is the `choices` immediate registered above; the mma_async
     # lines are the acc-role entries further down.)
     *[
