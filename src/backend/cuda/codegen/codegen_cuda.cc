@@ -2230,10 +2230,6 @@ ffi::Module BuildCUDA(IRModule mod, Target target) {
   // builds a real CUDAModuleNode.  Otherwise it stores the source in a
   // CUDAFallbackModuleNode for later cross-compile.
   ffi::Map<ffi::String, ffi::String> source_map;
-  // The module factory invokes the Python CUDA compiler synchronously. Keep
-  // the explicit build target current for that callback so frontend options
-  // such as fast-math and the detected architecture reach NVCC/NVRTC.
-  With<Target> target_scope(target);
   return ::tvm::target::CUDAModuleCreateWithFallback(
       ffi::Bytes(code.data(), code.size()), ffi::String("cuda"), ExtractFuncInfo(mod), source_map);
 }

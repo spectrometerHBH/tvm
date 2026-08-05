@@ -18,7 +18,6 @@
 """Utility to invoke nvcc compiler in the system"""
 
 import glob
-import hashlib
 import os
 import platform
 import shlex
@@ -56,20 +55,8 @@ def _ptxas_option_flags():
     return flags
 
 
-def _nvrtc_program_name(target_format, compile_opts):
-    """Make NVRTC's program name sensitive to every compile option."""
-    cache_key = hashlib.sha256(b"\0".join([target_format.encode(), *compile_opts])).hexdigest()
-    return f"tvm_kernels_{cache_key}.cu"
-
-
 def compile_cuda(
-    code,
-    target_format=None,
-    arch=None,
-    options=None,
-    path_target=None,
-    compiler="nvrtc",
-    use_fast_math=None,
+    code, target_format=None, arch=None, options=None, path_target=None, compiler="nvrtc"
 ):
     """Compile CUDA code with NVCC or NVRTC.
 
@@ -94,11 +81,6 @@ def compile_cuda(
         Compiler backend: "nvrtc" (default) or "nvcc".
         This can be set by the TVM_CUDA_COMPILE_MODE environment variable.
 
-    use_fast_math : bool, optional
-        Whether to enable CUDA ``--use_fast_math``. If unset, use the current
-        CUDA target's ``fast-math`` attribute, defaulting to ``True`` for
-        backward compatibility.
-
     Returns
     -------
     res_binary : bytearray
@@ -110,18 +92,11 @@ def compile_cuda(
     - NVRTC requires cuda-bindings: pip install cuda-bindings
     """
     use_nvshmem = "#include <nvshmem.h>" in code or "#include <nvshmemx.h>" in code
-    if use_fast_math is None:
-        target = Target.current(allow_none=True)
-        use_fast_math = bool(target.attrs.get("fast-math", True)) if target is not None else True
 
     if compiler == "nvcc":
-        result = _compile_cuda_nvcc(
-            code, target_format, arch, options, path_target, use_nvshmem, use_fast_math
-        )
+        result = _compile_cuda_nvcc(code, target_format, arch, options, path_target, use_nvshmem)
     elif compiler == "nvrtc":
-        result = _compile_cuda_nvrtc(
-            code, target_format, arch, options, path_target, use_nvshmem, use_fast_math
-        )
+        result = _compile_cuda_nvrtc(code, target_format, arch, options, path_target, use_nvshmem)
     else:
         raise ValueError(f"CUDA compiler must be 'nvcc' or 'nvrtc', got: {compiler}")
 
@@ -135,7 +110,6 @@ def _compile_cuda_nvcc(
     options=None,
     path_target=None,
     use_nvshmem=False,
-    use_fast_math=True,
 ):
     """Compile CUDA code using nvcc.
 
@@ -151,8 +125,6 @@ def _compile_cuda_nvcc(
         Additional nvcc options.
     path_target : str, optional
         Output file path.
-    use_fast_math : bool, optional
-        Whether to enable CUDA ``--use_fast_math``. Default: True.
 
     Returns
     -------
@@ -244,11 +216,7 @@ def _compile_cuda_nvcc(
         "-U__CUDA_NO_BFLOAT162_CONVERSIONS__",
         "--expt-relaxed-constexpr",
         "--expt-extended-lambda",
-        *(
-            ["--use_fast_math"]
-            if use_fast_math and not os.environ.get("TVM_CUDA_NVCC_NO_FAST_MATH")
-            else []
-        ),
+        *([] if os.environ.get("TVM_CUDA_NVCC_NO_FAST_MATH") else ["--use_fast_math"]),
         f"--ptxas-options={','.join(_ptxas_option_flags())}",
     ]
 
@@ -325,13 +293,7 @@ def _compile_cuda_nvcc(
 
 
 def _compile_cuda_nvrtc(
-    code,
-    target_format=None,
-    arch=None,
-    options=None,
-    path_target=None,
-    use_nvshmem=False,
-    use_fast_math=True,
+    code, target_format=None, arch=None, options=None, path_target=None, use_nvshmem=False
 ):
     """Compile CUDA code using NVRTC (NVIDIA Runtime Compilation).
 
@@ -349,8 +311,6 @@ def _compile_cuda_nvrtc(
         Output file path. If provided, the compiled binary is written to this path.
     use_nvshmem : bool, optional
         Whether NVSHMEM is used. Default: False
-    use_fast_math : bool, optional
-        Whether to enable CUDA ``--use_fast_math``. Default: True.
 
     Returns
     -------
@@ -481,6 +441,14 @@ namespace std {
 """
         code_filtered = nvshmem_preamble + code_filtered
 
+    # Create NVRTC program
+    # Use "tvm_kernels.cu" for consistency with nvcc path
+    result, prog = nvrtc.nvrtcCreateProgram(
+        str.encode(code_filtered), b"tvm_kernels.cu", 0, None, None
+    )
+    if result != nvrtc.nvrtcResult.NVRTC_SUCCESS:
+        raise RuntimeError(f"Failed to create NVRTC program: {nvrtc.nvrtcGetErrorString(result)}")
+
     # Prepare compilation options
     cuda_path = find_cuda_path()
     compile_opts = [
@@ -575,10 +543,9 @@ namespace std {
             b"-U__CUDA_NO_BFLOAT16_CONVERSIONS__",
             b"-U__CUDA_NO_BFLOAT162_OPERATORS__",
             b"-U__CUDA_NO_BFLOAT162_CONVERSIONS__",
+            b"--use_fast_math",
         ]
     )
-    if use_fast_math:
-        compile_opts.append(b"--use_fast_math")
 
     # Mirror the nvcc path's ptxas options. register-usage-level drives ptxas
     # register allocation / instruction scheduling and is perf-relevant (FA4 was
@@ -633,20 +600,6 @@ namespace std {
             if skip:
                 continue
             compile_opts.append(opt.encode() if isinstance(opt, str) else opt)
-
-    # CUDA's disk cache can return a cubin produced with different NVRTC options
-    # for otherwise identical source and program name. Include the complete
-    # option set in the program name so toggling frontend or ptxas options cannot
-    # reuse stale code. The source itself stays unchanged to preserve line info.
-    program_name = _nvrtc_program_name(target_format, compile_opts)
-
-    # Create the NVRTC program after all options are known so the cache-safe
-    # program name above describes the exact compilation request.
-    result, prog = nvrtc.nvrtcCreateProgram(
-        str.encode(code_filtered), program_name.encode(), 0, None, None
-    )
-    if result != nvrtc.nvrtcResult.NVRTC_SUCCESS:
-        raise RuntimeError(f"Failed to create NVRTC program: {nvrtc.nvrtcGetErrorString(result)}")
 
     # Compile
     (result,) = nvrtc.nvrtcCompileProgram(prog, len(compile_opts), compile_opts)
