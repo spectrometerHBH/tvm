@@ -52,7 +52,6 @@ class PTXNamespace:
         self.ldmatrix_legacy = _dtype_forward(_cuda_op.ptx_ldmatrix_legacy)
         self.elect_sync: Callable[..., Any] = _op_wrapper(_cuda_op.ptx_elect_sync)
         self.clc_query_cancel = _op_wrapper(_cuda_op.ptx_clc_query_cancel)
-        self.fetch_register: Callable[..., Any] = _op_wrapper(_cuda_op.ptx_fetch_register)
         # Math operations
         self.cvt = _dtype_forward(_cuda_op.ptx_cvt)
         # add/sub/mul/fma DPS form: (d_addr, a, b[, c], *, rounding, ftz[, sat])
@@ -146,6 +145,10 @@ class CUDANamespace:
         self.wgmma = CudaWgmmaNamespace()
         self.tcgen05 = CudaTcgen05Namespace()
         self.any_sync = _op_wrapper(_cuda_op.cuda_any_sync)
+        # `mov.u32 d, %sreg` -- one PTX instruction, but the special-register
+        # name is baked into the asm text, so it is a helper per register
+        # rather than a ptxd entry with a register operand.
+        self.mov_sreg: Callable[..., Any] = _op_wrapper(_cuda_op.cuda_mov_sreg)
         # Spin-until-ready mbarrier waits: label-loop asm blocks, not single
         # PTX instructions -- which is why they live here and not in T.ptxd.
         self.mbarrier_wait = _op_wrapper(_cuda_op.cuda_mbarrier_wait)

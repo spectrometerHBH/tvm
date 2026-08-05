@@ -399,9 +399,9 @@ def test_lower_scope_id():
         cbx: T.let[T.int32] = clusterCtaIdx_x
         cby: T.let[T.int32] = clusterCtaIdx_y
         cbz: T.let[T.int32] = clusterCtaIdx_z
-        clx: T.let[T.int32] = T.ptx.fetch_register(32, "clusterid.x")
-        cly: T.let[T.int32] = T.ptx.fetch_register(32, "clusterid.y")
-        clz: T.let[T.int32] = T.ptx.fetch_register(32, "clusterid.z")
+        clx: T.let[T.int32] = T.cuda.mov_sreg(32, "clusterid.x")
+        cly: T.let[T.int32] = T.cuda.mov_sreg(32, "clusterid.y")
+        clz: T.let[T.int32] = T.cuda.mov_sreg(32, "clusterid.z")
         wg_id: T.let[T.int32] = warp_id_in_cta // 4
         warp_id_in_wg: T.let[T.int32] = warp_id_in_cta % 4
         lane_id: T.let[T.int32] = threadIdx_x % 32

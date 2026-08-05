@@ -85,14 +85,6 @@ OpRegEntry::RegisterOrGet("tirx.ptx.ldg32")
     .set_attr<TIRxOpCategory>("TIRxOpCategory", ffi::String("device_intrin"), 10)
     .set_attr<TDeviceIntrinsicNamespace>("TDeviceIntrinsicNamespace", ffi::String("ptx"), 10);
 
-OpRegEntry::RegisterOrGet("tirx.ptx.fetch_register")
-    .set_name()
-    .set_num_inputs(-1)
-    .set_attr<TCallEffectKind>("TCallEffectKind", static_cast<int64_t>(CallEffectKind::kPure))
-    .set_attr<TIRxOpCategory>("TIRxOpCategory", ffi::String("device_intrin"))
-    .set_attr<TDeviceIntrinsicNamespace>("TDeviceIntrinsicNamespace", ffi::String("ptx"))
-    .set_attr<TScriptPrinterName>("TScriptPrinterName", ffi::String("ptx.fetch_register"));
-
 // Raw legacy cp.async form emitted by InjectPTXAsyncCopy (and round-tripped by
 // the T.ptx.cp_async 6-arg surface). It carries the element dtype in Call.dtype
 // and prints it dtype-first; user-issued copies go through T.ptxd instead.
@@ -205,6 +197,7 @@ const DeviceIntrinsicRegistration kDeviceIntrinsics[] = {
     TIRX_DEVICE_INTRIN_ALIAS(cuda_make_float2, cuda, kOpaque),
     TIRX_DEVICE_INTRIN_ALIAS(cuda_mbarrier_wait, cuda, kOpaque),
     TIRX_DEVICE_INTRIN_ALIAS(cuda_mbarrier_wait_acquire_cluster, cuda, kOpaque),
+    TIRX_DEVICE_INTRIN_ALIAS(cuda_mov_sreg, cuda, kPure),
     TIRX_DEVICE_INTRIN_ALIAS(cuda_nano_sleep, cuda, kOpaque),
     TIRX_DEVICE_INTRIN_ALIAS(cuda_printf, cuda, kOpaque),
     TIRX_DEVICE_INTRIN_ALIAS(cuda_reduce_add_sync_u32, cuda, kOpaque),
@@ -245,7 +238,6 @@ const DeviceIntrinsicRegistration kDeviceIntrinsics[] = {
     TIRX_DEVICE_INTRIN_ALIAS(ptx_clc_query_cancel, ptx, kOpaque),
     TIRX_DEVICE_INTRIN_ALIAS(ptx_cvt, ptx, kPure),
     TIRX_DEVICE_INTRIN_ALIAS(ptx_elect_sync, ptx, kOpaque),
-    TIRX_DEVICE_INTRIN_ALIAS(ptx_fetch_register, ptx, kPure),
     TIRX_DEVICE_INTRIN_ALIAS(ptx_ldmatrix, ptx, kOpaque),
     TIRX_DEVICE_INTRIN_ALIAS(ptx_ldmatrix_legacy, ptx, kOpaque),
     TIRX_DEVICE_INTRIN_ALIAS(ptx_mma, ptx, kOpaque),

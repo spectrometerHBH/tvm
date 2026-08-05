@@ -485,7 +485,7 @@ def ptx_elect_sync():
     return call_intrin("uint32", "tirx.ptx.elect_sync")
 
 
-def ptx_fetch_register(bits, reg_name):
+def cuda_mov_sreg(bits, reg_name):
     """TVM intrinsic to tvm instrinsics to fetch PTX pre-defined registers
 
     Parameters
@@ -501,7 +501,7 @@ def ptx_fetch_register(bits, reg_name):
     call : Expr
         The call expression.
     """
-    return call_intrin("int" + str(bits), "tirx.ptx.fetch_register", bits, reg_name)
+    return call_intrin("int" + str(bits), "tirx.cuda.mov_sreg", bits, reg_name)
 
 
 def ptx_mma(
