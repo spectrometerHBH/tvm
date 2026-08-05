@@ -1269,7 +1269,7 @@ def test_wgmma_rs_nt():
 
 @pytest.mark.gpu
 @pytest.mark.skipif(not env.has_cuda_compute(9), reason="need cuda compute >= 9.0")
-def test_ptx_map_shared_rank():
+def test_mapa():
     @T.prim_func
     def func(A: T.Buffer(1)):
         T.device_entry()

@@ -33,7 +33,7 @@ def _get_source(func: tvm.tirx.PrimFunc) -> str:
 
 
 def test_ptx_cp_async_bulk_s2c_codegen():
-    """Test that T.ptx.cp_async.bulk.s2c emits the correct PTX instruction."""
+    """Test that the ptxd cp.async.bulk s2c chain emits the correct PTX instruction."""
 
     # fmt: off
     @T.prim_func
@@ -94,7 +94,7 @@ def test_ptx_cp_async_bulk_s2c_codegen_address_conversion():
     assert "cp.async.bulk.shared::cluster.shared::cta.mbarrier::complete_tx::bytes" in src
 
 
-def test_ptx_map_shared_rank_pointer_bind_codegen():
+def test_mapa_pointer_bind_codegen():
     ptr_ty = PointerType(PrimType("uint64"), "shared")
 
     # fmt: off
@@ -143,5 +143,5 @@ def test_ptx_map_shared_rank_pointer_bind_codegen():
 if __name__ == "__main__":
     test_ptx_cp_async_bulk_s2c_codegen()
     test_ptx_cp_async_bulk_s2c_codegen_address_conversion()
-    test_ptx_map_shared_rank_pointer_bind_codegen()
+    test_mapa_pointer_bind_codegen()
     print("All codegen tests passed!")

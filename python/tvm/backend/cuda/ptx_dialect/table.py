@@ -1866,7 +1866,12 @@ _ENTRIES = [
         name="mapa_u32",
         mnemonic="mapa",
         slots=(
-            ModifierSlot("space", ("shared::cluster",), optional=True),
+            # Not optional here, unlike the .u64 entry: the ISA says that with
+            # `.space` omitted "both a and d are registers containing generic
+            # addresses", and a generic address does not fit 32 bits on this
+            # target. ptxas tolerates the bare `mapa.u32`, but nothing can
+            # legitimately call it.
+            ModifierSlot("space", ("shared::cluster",)),
             ModifierSlot("type", ("u32",)),
         ),
         asm_volatile=False,
