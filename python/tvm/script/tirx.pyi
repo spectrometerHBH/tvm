@@ -745,7 +745,7 @@ class _Chain_sub:
     def __call__(self, *args: Any) -> None: ...
 
 class _Chain_tcgen05:
-    """`tcgen05` — 16 entries sharing this mnemonic; PTX puts their difference in the operand
+    """`tcgen05` — 18 entries sharing this mnemonic; PTX puts their difference in the operand
     list, so the call selects one. Shapes: (dst, ncols); (taddr, ncols); (); (mbar); (mbar,
     mask); (*__operands); (taddr, s_desc); (d_tmem, a_desc, b_desc, idesc, enable_input_d,
     zero_col_mask); (d_tmem, a_tmem, b_desc, idesc, enable_input_d, zero_col_mask); (d_tmem,

@@ -201,8 +201,18 @@ class OperandSlot:
     role: str
     space: str | None = None
     dtype: str | None = None
-    literal: str | None = None  # role="imm": ISA-fixed value
-    choices: tuple[str, ...] | None = None  # role="imm": caller-chosen value
+    # role="imm" is a value in the instruction *text* (never a C parameter),
+    # in one of three states, by who owns the value:
+    #   literal set   -- the ISA fixed it; invisible to programs.
+    #   choices set   -- the caller picks from this closed set; every value is
+    #                    a certified variant.
+    #   neither set   -- OPEN: the caller passes any compile-time integer
+    #                    constant; the table declares no domain because the ISA
+    #                    declares none (tcgen05.ld/st's immHalfSplitoff).
+    #                    Certification can only sample an open domain -- see
+    #                    imm_combos.
+    literal: str | None = None
+    choices: tuple[str, ...] | None = None
     # A PTX register group: `{%k, %k+1, ...}`. The operand takes `lanes` call
     # arguments and renders as one brace-enclosed vector expression. 1 = a plain
     # scalar operand, which is every operand of every other family.
@@ -345,7 +355,9 @@ def _operand_layout(entry, mod_values):
     mod_map = dict(zip((s.name for s in entry.slots), mod_values))
     rows, i = [], 0
     for slot in entry.operands:
-        if slot.role == "imm" and slot.choices is None:
+        if slot.role == "imm" and slot.literal is not None:
+            # Table-owned value: no call argument. choices/open imms DO occupy
+            # a call-argument position (the engine reads and bakes them).
             continue
         n = lanes_of(slot, mod_map)
         rows.append((slot, i, n))
@@ -453,14 +465,24 @@ def renderings(entry: InstructionEntry):
 
 
 def imm_slots(entry: InstructionEntry) -> tuple[OperandSlot, ...]:
-    """The caller-chosen immediates, in operand order; an imm tuple aligns with these."""
-    return tuple(s for s in entry.operands if s.role == "imm" and s.choices is not None)
+    """The caller-passed immediates (choices or open), in operand order; an imm
+    tuple aligns with these. Literal imms are table-owned and not in it."""
+    return tuple(s for s in entry.operands if s.role == "imm" and s.literal is None)
 
 
-def imm_combos(entry: InstructionEntry) -> tuple[tuple[str, ...], ...]:
-    """Every caller-immediate assignment. The domains are closed on purpose:
-    that is what makes each generated helper certifiable."""
-    axes = [s.choices for s in imm_slots(entry)]
+def imm_combos(
+    entry: InstructionEntry, open_samples: tuple[str, ...] = ("0",)
+) -> tuple[tuple[str, ...], ...]:
+    """Every caller-immediate assignment the enumeration walks.
+
+    A `choices` slot enumerates its whole closed set -- each value is a
+    variant, all pre-certified. An OPEN slot has no domain to enumerate, so it
+    enumerates at ``open_samples`` instead. The samples belong to the
+    enumerating facility (certification, snapshots, stubs), not to the
+    instruction: at a call site the caller passes whatever constant it wants,
+    and certification has only proven the *shape* assembles, at these samples.
+    """
+    axes = [s.choices if s.choices is not None else open_samples for s in imm_slots(entry)]
     return tuple(itertools.product(*axes)) if axes else ((),)
 
 
@@ -959,7 +981,7 @@ def _check_ldmatrix_b8fmt(m):
 def _tcgen05_ldst_lanes(m):
     # ISA 9.7.17.8.3 Table 52 / 9.7.17.8.4 Table 53: the register vector holds
     # `.num` x (shape width / 32b) registers, capped at 128.
-    per_num = {"16x64b": 1, "32x32b": 1, "16x128b": 2, "16x256b": 4}
+    per_num = {"16x64b": 1, "32x32b": 1, "16x128b": 2, "16x256b": 4, "16x32bx2": 1}
     return int(m["num"][1:]) * per_num[m["shape"]]
 
 
@@ -4403,10 +4425,10 @@ _ENTRIES = [
     #
     # Note the operand orders mirror each other.
     #
+    # The `.16x32bx2` shape is the entry pair below: its syntax line carries an
+    # extra `immHalfSplitoff` operand, which is a different operand shape.
+    #
     # NOT REGISTERED:
-    # - The `.16x32bx2` shape, whose extra `immHalfSplitoff` operand is an
-    #   instruction-text immediate the ISA gives no value domain for -- the
-    #   `choices` mechanism needs a closed set, and no call site uses it.
     # - `tcgen05.ld.red`, which is sm_101a-only (not sm_100a, so it cannot be
     #   certified here) and has no call sites.
     InstructionEntry(
@@ -4444,6 +4466,56 @@ _ENTRIES = [
         check=_check_tcgen05_ldst,
         operands=(
             OperandSlot("taddr", role="addr", space="tmem"),
+            OperandSlot("r", role="value", dtype="b32", lanes=_tcgen05_ldst_lanes),
+        ),
+    ),
+    # The `.16x32bx2` lines, ISA 9.7.17.8.3:11 / 9.7.17.8.4:9 --
+    #
+    #   tcgen05.ld.sync.aligned.16x32bx2.num{.pack}.b32   r, [taddr], immHalfSplitoff;
+    #   tcgen05.st.sync.aligned.16x32bx2.num{.unpack}.b32 [taddr], immHalfSplitoff, r;
+    #
+    # One instruction, two half-accesses: "The base address of the first access
+    # is specified by taddr and the base address of the second access is
+    # specified by taddr+immHalfSplitoff, where immHalfSplitoff is an immediate
+    # argument." (:49-51). The immediate is an OPEN imm operand: the ISA gives
+    # it no value domain, so the table declares none and the caller passes any
+    # compile-time constant -- certification proves the shape at sampled
+    # values, not the caller's value.
+    InstructionEntry(
+        name="tcgen05_ld_split",
+        mnemonic="tcgen05",
+        slots=(
+            ModifierSlot("action", ("ld",)),
+            ModifierSlot("sync", ("sync",)),
+            ModifierSlot("aligned", ("aligned",)),
+            ModifierSlot("shape", ("16x32bx2",)),
+            ModifierSlot("num", ("x1", "x2", "x4", "x8", "x16", "x32", "x64", "x128")),
+            ModifierSlot("pack", ("pack::16b",), optional=True),
+            ModifierSlot("type", ("b32",)),
+        ),
+        cert_arch="sm_100a",
+        operands=(
+            OperandSlot("r", role="dst", dtype="b32", lanes=_tcgen05_ldst_lanes),
+            OperandSlot("taddr", role="addr", space="tmem"),
+            OperandSlot("imm_half_splitoff", role="imm"),
+        ),
+    ),
+    InstructionEntry(
+        name="tcgen05_st_split",
+        mnemonic="tcgen05",
+        slots=(
+            ModifierSlot("action", ("st",)),
+            ModifierSlot("sync", ("sync",)),
+            ModifierSlot("aligned", ("aligned",)),
+            ModifierSlot("shape", ("16x32bx2",)),
+            ModifierSlot("num", ("x1", "x2", "x4", "x8", "x16", "x32", "x64", "x128")),
+            ModifierSlot("unpack", ("unpack::16b",), optional=True),
+            ModifierSlot("type", ("b32",)),
+        ),
+        cert_arch="sm_100a",
+        operands=(
+            OperandSlot("taddr", role="addr", space="tmem"),
+            OperandSlot("imm_half_splitoff", role="imm"),
             OperandSlot("r", role="value", dtype="b32", lanes=_tcgen05_ldst_lanes),
         ),
     ),

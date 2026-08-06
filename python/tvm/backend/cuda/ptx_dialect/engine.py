@@ -298,11 +298,15 @@ def _coerce_address(entry, slot, value, mod_map):
 
 
 def _coerce_imm(entry, slot, value):
-    """A caller-chosen immediate: a compile-time constant from the closed set.
+    """A caller-passed immediate: a compile-time constant.
 
     The value lands in the instruction *text* -- the ISA gives these operands
-    no register form -- so a runtime expression has nothing to lower to and is
-    rejected outright rather than silently materialized.
+    no register form (verified for immHalfSplitoff: ptxas answers "Arguments
+    mismatch" to a register there) -- so a runtime expression has nothing to
+    lower to and is rejected outright rather than silently materialized.
+    With `choices` the value is additionally checked against the declared set;
+    an open slot declares no domain because the ISA declares none, so any
+    constant passes.
     """
     if isinstance(value, IntImm):
         value = value.value
@@ -311,7 +315,7 @@ def _coerce_imm(entry, slot, value):
             f"{entry.name}: operand '{slot.name}' is an immediate in the instruction "
             f"text; it needs a compile-time integer constant, got {type(value).__name__}"
         )
-    if str(value) not in slot.choices:
+    if slot.choices is not None and str(value) not in slot.choices:
         raise ValueError(
             f"{entry.name}: operand '{slot.name}' must be one of "
             f"{', '.join(slot.choices)}, got {value}"

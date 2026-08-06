@@ -101,12 +101,33 @@ def _ptx_barrier_cluster_wait(acquire, aligned):
 # label loop (TIRx convention; the magic ``ticks = 0x989680`` is the timeout
 # hint in ns).
 # =============================================================================
+def _mbarrier_wait_parts(barrier, *_rest):
+    """Dispatch on the barrier operand's dtype, as the retired op did.
+
+    A ``uint32`` is already a shared-window address (the caller ran cvta once
+    and carries offsets in integer space); converting it again would corrupt
+    it, so the raw form binds it directly. Anything else is a generic pointer
+    and gets the cvta here.
+    """
+    raw = str(getattr(barrier, "ty", "")) == "uint32"
+    return (
+        ("_raw_u32" if raw else ""),
+        ("(unsigned int barrier, int phase)" if raw else "(void* barrier, int phase)"),
+        (
+            "    unsigned int barrier_addr_int = barrier;\n"
+            if raw
+            else "    unsigned int barrier_addr_int = __cvta_generic_to_shared(barrier);\n"
+        ),
+    )
+
+
 device_intrinsic(
     "cuda_mbarrier_wait",
-    c_signature="(void* barrier, int phase)",
-    body=(
-        "    unsigned int barrier_addr_int = __cvta_generic_to_shared(barrier);\n"
-        "    unsigned int ticks = 0x989680;\n"
+    helper_name=lambda *a: f"tvm_builtin_cuda_mbarrier_wait{_mbarrier_wait_parts(*a)[0]}",
+    c_signature=lambda *a: _mbarrier_wait_parts(*a)[1],
+    body=lambda *a: (
+        _mbarrier_wait_parts(*a)[2]
+        + "    unsigned int ticks = 0x989680;\n"
         "    asm volatile(\n"
         '        "{\\n"\n'
         '        ".reg .pred                P1;\\n"\n'

@@ -174,10 +174,12 @@ def render_variant(entry: InstructionEntry, tokens, predicated=False, dtypes=Non
     for slot in entry.operands:
         pname = f"__{slot.name}"
         if slot.role == "imm":
-            # An immediate lives in the instruction text. Either the ISA fixed
-            # its value (`literal`) or the caller chose it from a closed set
-            # (`choices`); neither is a C parameter.
-            rendered.append((slot.bracket, slot.literal if slot.choices is None else imm_of[slot]))
+            # An immediate lives in the instruction text, never a C parameter.
+            # A literal is table-owned; a choices/open value arrives through
+            # `imms` and is baked here (and into the helper name).
+            rendered.append(
+                (slot.bracket, slot.literal if slot.literal is not None else imm_of[slot])
+            )
             continue
         regs = []
         n_lanes = lanes_of(slot, mod_map)

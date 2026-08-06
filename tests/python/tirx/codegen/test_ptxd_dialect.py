@@ -875,7 +875,7 @@ def test_ptxd_all_variants_render_unique():
                     or f"; {opcode};" in source
                 )
             total += not predicated  # a @p twin is not a separate variant
-    assert total == 110735  # update when the table grows
+    assert total == 110831  # update when the table grows
 
 
 def test_ptxd_stub_up_to_date():
@@ -928,6 +928,13 @@ _CERT_SHARDS = 32
 @pytest.mark.parametrize("shard", range(_CERT_SHARDS))
 def test_ptxd_all_helpers_certify(shard):
     """Certification tier: EVERY legal variant assembles under ptxas.
+
+    One scoped exception: an OPEN immediate operand (role="imm" with neither
+    literal nor choices) has no domain to enumerate, so its entries are
+    certified at the enumeration's sample values (imm_combos' open_samples,
+    default "0"). For those entries this proves the instruction SHAPE
+    assembles, not the caller's particular constant -- a facility limit of
+    sampling an open domain, not a property of the table.
 
     Sharded so pytest-xdist can spread the nvcc work::
 
