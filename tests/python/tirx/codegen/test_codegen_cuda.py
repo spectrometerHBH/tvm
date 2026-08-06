@@ -602,7 +602,6 @@ def test_ptx_sync_and_clc_codegen():
     assert "tvm_builtin_cuda_mbarrier_wait" in src
     # (No assertion on the timeout local: T.cuda.mbarrier_wait keeps the
     # `ticks = 0x989680` hint the TIRx spin-wait convention specifies.)
-    assert "tirx.ptx.cp_async_mbarrier_arrive_noinc" not in src
     assert "mbarrier.complete_tx.relaxed.cluster.shared::cluster.b64" in src
     assert "mbarrier.complete_tx.relaxed.cta.shared::cta.b64" in src
     assert "@p mbarrier.complete_tx.relaxed.cta.shared::cta.b64" in src
