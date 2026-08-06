@@ -1601,7 +1601,7 @@ def test_explicit_gather_selector_encodes_each_map_selects_address_and_issues_on
     # descriptors into a single gather4 issue.
     assert (
         cuda_source.count(
-            "tvm_builtin_ptxd_cp_async_bulk_tensor_g2s_cluster_async_bulk_tensor_2d"
+            "tvm_builtin_ptx_cp_async_bulk_tensor_g2s_cluster_async_bulk_tensor_2d"
             "_shared__cluster_global_tile__gather4_mbarrier__complete_tx__bytes"
             "_cta_group__1("
         )

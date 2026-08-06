@@ -298,7 +298,7 @@ def test_bar_arrive():
         # fmt: on
 
     src, mod = _get_source(func)
-    assert "tvm_builtin_ptxd_bar_arrive_arrive((uint)0, (uint)128)" in src
+    assert "tvm_builtin_ptx_bar_arrive_arrive((uint)0, (uint)128)" in src
     assert 'bar.arrive %0, %1;" :  : "r"(__a), "r"(__b) : "memory"' in src
 
 
@@ -315,7 +315,7 @@ def test_bar_sync():
         # fmt: on
 
     src, mod = _get_source(func)
-    assert "tvm_builtin_ptxd_bar_sync_count_sync((uint)0, (uint)128)" in src
+    assert "tvm_builtin_ptx_bar_sync_count_sync((uint)0, (uint)128)" in src
     assert 'bar.sync %0, %1;" :  : "r"(__a), "r"(__b) : "memory"' in src
 
 
@@ -332,7 +332,7 @@ def test_barrier_sync_unaligned():
         # fmt: on
 
     src, mod = _get_source(func)
-    assert "tvm_builtin_ptxd_barrier_sync_count_sync((uint)0, (uint)128)" in src
+    assert "tvm_builtin_ptx_barrier_sync_count_sync((uint)0, (uint)128)" in src
     assert 'barrier.sync %0, %1;" :  : "r"(__a), "r"(__b) : "memory"' in src
 
 
@@ -1283,7 +1283,7 @@ def test_mapa():
 
     src, mod = _get_source(func)
     print(src)
-    assert "tvm_builtin_ptxd_mapa_u64(" in src
+    assert "tvm_builtin_ptx_mapa_u64(" in src
 
 
 if __name__ == "__main__":

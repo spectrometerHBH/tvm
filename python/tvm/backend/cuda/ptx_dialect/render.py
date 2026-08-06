@@ -109,7 +109,7 @@ def _helper_name(entry: InstructionEntry, written, imms, dtypes, canonical) -> s
     discriminator = (
         [] if tuple(dtypes) == tuple(canonical) else [C_BINDING[d].suffix for d in dtypes]
     )
-    return "tvm_builtin_ptxd_" + "_".join([*isa_name, *discriminator]).replace("::", "__").replace(
+    return "tvm_builtin_ptx_" + "_".join([*isa_name, *discriminator]).replace("::", "__").replace(
         ".", "_"
     ).replace("-", "m")
 

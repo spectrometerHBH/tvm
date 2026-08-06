@@ -167,9 +167,9 @@ def test_mbarrier_remote_view_codegen():
     _assert_remote_mbarrier_ir(test_remote_view, "tirx.ptx.mbarrier_arrive")
     with tvm.target.Target("cuda"):
         src, _ = _get_source(test_remote_view)
-        assert "tvm_builtin_ptxd_mapa_u64" in src
-        assert "tvm_builtin_ptxd_mbarrier_arrive_nocount_arrive_shared__cluster_b64" in src
-        assert "tvm_builtin_ptxd_mbarrier_arrive_arrive_shared__cluster_b64" in src
+        assert "tvm_builtin_ptx_mapa_u64" in src
+        assert "tvm_builtin_ptx_mbarrier_arrive_nocount_arrive_shared__cluster_b64" in src
+        assert "tvm_builtin_ptx_mbarrier_arrive_arrive_shared__cluster_b64" in src
         assert "mbarrier.arrive.shared::cluster.b64" in src
         assert 'asm volatile("mbarrier.arrive.shared.b64' not in src
 
@@ -197,7 +197,7 @@ def test_tma_mbarrier_remote_view_codegen():
     with tvm.target.Target("cuda"):
         src, _ = _get_source(test_remote_view)
         assert (
-            "tvm_builtin_ptxd_mbarrier_arrive_expect_tx_arrive_expect_tx_shared__cluster_b64" in src
+            "tvm_builtin_ptx_mbarrier_arrive_expect_tx_arrive_expect_tx_shared__cluster_b64" in src
         )
         assert "mbarrier.arrive.expect_tx.shared::cluster.b64" in src
         assert 'asm volatile("mbarrier.arrive.expect_tx.shared.b64' not in src
@@ -624,7 +624,7 @@ def test_tcgen05_mma_pred_codegen():
     target = tvm.target.Target("cuda")
     with target:
         src, _ = _get_source(test_mma_pred)
-        assert "tvm_builtin_ptxd_tcgen05_mma_ss_mma_cta_group__1_kind__f16_pred" in src
+        assert "tvm_builtin_ptx_tcgen05_mma_ss_mma_cta_group__1_kind__f16_pred" in src
         # enable-input-d converts in via ps0, the @p guard via p -- two
         # independent setp conversions inside one block.
         assert "setp.ne.b32 ps0" in src

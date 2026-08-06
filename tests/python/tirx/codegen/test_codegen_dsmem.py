@@ -59,7 +59,7 @@ def test_ptx_cp_async_bulk_s2c_codegen():
         # fmt: on
 
     src = _get_source(main)
-    assert "tvm_builtin_ptxd_cp_async_bulk_s2c" in src
+    assert "tvm_builtin_ptx_cp_async_bulk_s2c" in src
     assert "cp.async.bulk.shared::cluster.shared::cta.mbarrier::complete_tx::bytes" in src
 
 
@@ -137,7 +137,7 @@ def test_mapa_pointer_bind_codegen():
     src = _get_source(main)
     assert "uint64_t* remote_ptr" in src
     assert "A_ptr[0] = remote_ptr[0]" in src
-    assert "tvm_builtin_ptxd_mapa_u64" in src
+    assert "tvm_builtin_ptx_mapa_u64" in src
 
 
 if __name__ == "__main__":

@@ -373,7 +373,7 @@ def test_cp_4x256b_compile_emits_shape_and_count():
     mod = _compile(kernel)
     src = mod.mod.imports[0].inspect_source()
     assert "tcgen05.cp.cta_group::1.4x256b" in src, f"cp asm missing; src=\n{src}"
-    helper_refs = src.count("tvm_builtin_ptxd_tcgen05_cp_cp_cta_group__1_4x256b")
+    helper_refs = src.count("tvm_builtin_ptx_tcgen05_cp_cp_cta_group__1_4x256b")
     assert helper_refs - 1 == 2, f"expected 2 cp calls, got {helper_refs - 1}; src=\n{src}"
 
 
@@ -688,7 +688,7 @@ def test_cp_default_32x128b_instruction_sequence_unchanged():
     cp_lines = [
         line
         for line in src.splitlines()
-        if "tvm_builtin_ptxd_tcgen05_cp_cp_cta_group__1_32x128b_warpx4(" in line
+        if "tvm_builtin_ptx_tcgen05_cp_cp_cta_group__1_32x128b_warpx4(" in line
         and "__forceinline__" not in line
     ]
     assert len(cp_lines) == 4, f"expected 4 cp calls, got {len(cp_lines)}"

@@ -79,7 +79,7 @@ def test_ptx_prefetch_codegen():
 
     src = _cuda_source(kernel)
     assert "prefetch.global.L2 [%0];" in src
-    assert "tvm_builtin_ptxd_prefetch_global_L2" in src
+    assert "tvm_builtin_ptx_prefetch_global_L2" in src
 
 
 def test_ptx_ld_st_codegen():
@@ -102,8 +102,8 @@ def test_ptx_ld_st_codegen():
     # regardless of the order they were written in the chain.
     assert "ld.acquire.gpu.global.b32 %0, [%1];" in src
     assert "st.release.gpu.global.b32 [%0], %1;" in src
-    assert "tvm_builtin_ptxd_ld_acquire_gpu_global_b32" in src
-    assert "tvm_builtin_ptxd_st_release_gpu_global_b32" in src
+    assert "tvm_builtin_ptx_ld_acquire_gpu_global_b32" in src
+    assert "tvm_builtin_ptx_st_release_gpu_global_b32" in src
 
 
 def test_ptx_st_shared_coercion():
@@ -140,7 +140,7 @@ def test_ptx_explicit_cvta():
 
     src = _cuda_source(kernel)
     assert "cvta.to.shared.u64 %0, %1;" in src
-    assert "tvm_builtin_ptxd_cvta_to_shared_u64" in src
+    assert "tvm_builtin_ptx_cvta_to_shared_u64" in src
 
 
 def test_ptx_red_codegen():
@@ -172,7 +172,7 @@ def test_ptx_predication_codegen():
         A[tx] = A[tx]
 
     src = _cuda_source(kernel)
-    assert "tvm_builtin_ptxd_red_relaxed_gpu_global_add_u32_pred" in src
+    assert "tvm_builtin_ptx_red_relaxed_gpu_global_add_u32_pred" in src
     assert "setp.ne.b32 p, %2, 0; @p red.relaxed.gpu.global.add.u32 [%0], %1;" in src
 
 
@@ -319,8 +319,8 @@ def test_ptx_register_group_codegen():
     assert "mov.b64 {%0, %1}, %2;" in src
     # Both shapes share the mnemonic; the operand shape picks the entry, which
     # is the same information ptxas resolves them by.
-    assert "tvm_builtin_ptxd_mov_pack_b32x2_b64_u64_f32(" in src
-    assert "tvm_builtin_ptxd_mov_unpack_b32x2_b64_f32_u64(" in src
+    assert "tvm_builtin_ptx_mov_pack_b32x2_b64_u64_f32(" in src
+    assert "tvm_builtin_ptx_mov_unpack_b32x2_b64_f32_u64(" in src
 
 
 def test_ptx_register_group_errors():
@@ -454,9 +454,9 @@ def test_ptx_bit_width_axis():
 
     src = _cuda_source(kernel)
     # One instruction text, three signatures, named by the dtypes they carry.
-    assert "tvm_builtin_ptxd_ld_global_b32_f32(float& __d" in src
-    assert "tvm_builtin_ptxd_ld_global_b32_s32(int32_t& __d" in src
-    assert "tvm_builtin_ptxd_st_global_b32_f32(const void* __addr, float __value" in src
+    assert "tvm_builtin_ptx_ld_global_b32_f32(float& __d" in src
+    assert "tvm_builtin_ptx_ld_global_b32_s32(int32_t& __d" in src
+    assert "tvm_builtin_ptx_st_global_b32_f32(const void* __addr, float __value" in src
     assert '"=f"(__d)' in src and '"=r"(__d)' in src
     assert src.count("ld.global.b32 %0, [%1];") >= 1
     # The float binds "f" directly. Routing it through the canonical uint32_t
@@ -468,7 +468,7 @@ def test_ptx_bit_width_axis():
 
     ld = TABLE["ld"]
     tokens = tokens_for(ld, space="global", type="b32")
-    assert render_variant(ld, tokens)[1] == "tvm_builtin_ptxd_ld_global_b32"
+    assert render_variant(ld, tokens)[1] == "tvm_builtin_ptx_ld_global_b32"
 
 
 def test_ptx_u64_address_handle_is_reinterpreted():
@@ -565,7 +565,7 @@ def test_ptx_helper_source_golden():
         tokens_for(TABLE["ld"], space="global")
 
     assert render("prefetch", space="global", level="L2") == (
-        "__forceinline__ __device__ void tvm_builtin_ptxd_prefetch_global_L2"
+        "__forceinline__ __device__ void tvm_builtin_ptx_prefetch_global_L2"
         "(const void* __addr) {\n"
         '  asm volatile("prefetch.global.L2 [%0];" :  : "l"(__addr) : "memory");\n'
         "}\n"
@@ -573,7 +573,7 @@ def test_ptx_helper_source_golden():
     # A destination is an ordinary operand taken by reference, so the C
     # parameter list is the PTX operand list in order and the helper is void.
     assert render("ld", sem="acquire", scope="gpu", space="global", type="b32") == (
-        "__forceinline__ __device__ void tvm_builtin_ptxd_ld_acquire_gpu_global_b32"
+        "__forceinline__ __device__ void tvm_builtin_ptx_ld_acquire_gpu_global_b32"
         "(uint32_t& __d, const void* __addr) {\n"
         '  asm volatile("ld.acquire.gpu.global.b32 %0, [%1];" : "=r"(__d) : "l"(__addr)'
         ' : "memory");\n'
@@ -583,7 +583,7 @@ def test_ptx_helper_source_golden():
     # carrier register and is narrowed into the reference afterwards. The asm
     # block still holds exactly one instruction.
     assert render("ld", space="global", type="b8") == (
-        "__forceinline__ __device__ void tvm_builtin_ptxd_ld_global_b8"
+        "__forceinline__ __device__ void tvm_builtin_ptx_ld_global_b8"
         "(uint8_t& __d, const void* __addr) {\n"
         "  uint16_t __d_reg;\n"
         '  asm volatile("ld.global.b8 %0, [%1];" : "=h"(__d_reg) : "l"(__addr) : "memory");\n'
@@ -592,7 +592,7 @@ def test_ptx_helper_source_golden():
     )
     # Shared-space addr slot: helper takes uint32_t (post-coercion form), not void*.
     assert render("st", space="shared::cta", type="b32") == (
-        "__forceinline__ __device__ void tvm_builtin_ptxd_st_shared__cta_b32"
+        "__forceinline__ __device__ void tvm_builtin_ptx_st_shared__cta_b32"
         "(uint32_t __addr, uint32_t __value) {\n"
         '  asm volatile("st.shared::cta.b32 [%0], %1;" :  : "r"(__addr), "r"(__value)'
         ' : "memory");\n'
@@ -600,7 +600,7 @@ def test_ptx_helper_source_golden():
     )
     # Register-only op: plain asm (asm_volatile=False), no memory clobber.
     assert render("cvta", dir="to", space="shared", type="u64") == (
-        "__forceinline__ __device__ void tvm_builtin_ptxd_cvta_to_shared_u64"
+        "__forceinline__ __device__ void tvm_builtin_ptx_cvta_to_shared_u64"
         "(uint64_t& __d, const void* __ptr) {\n"
         '  asm("cvta.to.shared.u64 %0, %1;" : "=l"(__d) : "l"(__ptr));\n'
         "}\n"
@@ -610,7 +610,7 @@ def test_ptx_helper_source_golden():
     assert render(
         "red", predicated=True, sem="relaxed", scope="gpu", space="global", op="add", type="u32"
     ) == (
-        "__forceinline__ __device__ void tvm_builtin_ptxd_red_relaxed_gpu_global_add_u32_pred"
+        "__forceinline__ __device__ void tvm_builtin_ptx_red_relaxed_gpu_global_add_u32_pred"
         "(const void* __addr, uint32_t __value, uint32_t __pred) {\n"
         '  asm volatile("{ .reg .pred p; setp.ne.b32 p, %2, 0; '
         '@p red.relaxed.gpu.global.add.u32 [%0], %1; }"'
@@ -627,7 +627,7 @@ def test_ptx_helper_source_golden():
         src_space="global",
         completion="mbarrier::complete_tx::bytes",
     ) == (
-        "__forceinline__ __device__ void tvm_builtin_ptxd_cp_async_bulk_shared__cta_global"
+        "__forceinline__ __device__ void tvm_builtin_ptx_cp_async_bulk_shared__cta_global"
         "_mbarrier__complete_tx__bytes"
         "(uint32_t __dst, const void* __src, uint32_t __size, uint32_t __mbar) {\n"
         '  asm volatile("cp.async.bulk.shared::cta.global.mbarrier::complete_tx::bytes '
@@ -640,13 +640,13 @@ def test_ptx_helper_source_golden():
     # the group is braces in the asm text and flat C parameters around it. An
     # unpack turns that into two "=" outputs.
     assert render("mov_pack_b32x2", type="b64") == (
-        "__forceinline__ __device__ void tvm_builtin_ptxd_mov_pack_b32x2_b64"
+        "__forceinline__ __device__ void tvm_builtin_ptx_mov_pack_b32x2_b64"
         "(uint64_t& __d, uint32_t __a0, uint32_t __a1) {\n"
         '  asm("mov.b64 %0, {%1, %2};" : "=l"(__d) : "r"(__a0), "r"(__a1));\n'
         "}\n"
     )
     assert render("mov_unpack_b32x2", type="b64") == (
-        "__forceinline__ __device__ void tvm_builtin_ptxd_mov_unpack_b32x2_b64"
+        "__forceinline__ __device__ void tvm_builtin_ptx_mov_unpack_b32x2_b64"
         "(uint32_t& __d0, uint32_t& __d1, uint64_t __a) {\n"
         '  asm("mov.b64 {%0, %1}, %2;" : "=r"(__d0), "=r"(__d1) : "l"(__a));\n'
         "}\n"
@@ -654,7 +654,7 @@ def test_ptx_helper_source_golden():
     # 128-bit destination on the "q" constraint, and asm_volatile=False: a
     # register shuffle nvcc is free to common up.
     assert render("mov_pack_b64x2", type="b128") == (
-        "__forceinline__ __device__ void tvm_builtin_ptxd_mov_pack_b64x2_b128"
+        "__forceinline__ __device__ void tvm_builtin_ptx_mov_pack_b64x2_b128"
         "(__uint128_t& __d, uint64_t __a0, uint64_t __a1) {\n"
         '  asm("mov.b128 %0, {%1, %2};" : "=q"(__d) : "l"(__a0), "l"(__a1));\n'
         "}\n"
@@ -663,7 +663,7 @@ def test_ptx_helper_source_golden():
     # moves the lanes to "f", and nothing else moves. This is the shape the
     # packed-f32x2 call sites use.
     assert render("mov_pack_b32x2", type="b64", dtypes=("uint64", "float32")) == (
-        "__forceinline__ __device__ void tvm_builtin_ptxd_mov_pack_b32x2_b64_u64_f32"
+        "__forceinline__ __device__ void tvm_builtin_ptx_mov_pack_b32x2_b64_u64_f32"
         "(uint64_t& __d, float __a0, float __a1) {\n"
         '  asm("mov.b64 %0, {%1, %2};" : "=l"(__d) : "f"(__a0), "f"(__a1));\n'
         "}\n"

@@ -641,7 +641,7 @@ def test_cuda_gemm_mma_codegen_issue_count(Mt, Nt, Kt, kinst):
     src = mod.mod.imports[0].inspect_source()
     assert f"mma.sync.aligned.m16n8k{kinst}" in src
     # mma is emitted as one __device__ helper, invoked once per tile.
-    helper = f"ptxd_mma_sync_aligned_m16n8k{kinst}_row_col"
+    helper = f"ptx_mma_sync_aligned_m16n8k{kinst}_row_col"
     assert src.count(helper) - 1 == Mt * Nt * Kt
 
 

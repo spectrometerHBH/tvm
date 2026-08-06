@@ -1263,7 +1263,7 @@ def test_tcgen05_32x32b_float32_keeps_typed_register_operands():
     call_lines = [
         line
         for line in src.splitlines()
-        if "ptxd_tcgen05_ld_ld_sync_aligned_32x32b_x32_b32_f32(" in line
+        if "ptx_tcgen05_ld_ld_sync_aligned_32x32b_x32_b32_f32(" in line
         and "__forceinline__" not in line
     ]
     assert call_lines
@@ -1312,13 +1312,13 @@ def test_tcgen05_ldst_constant_tmem_address_is_uint32():
     ld_lines = [
         line
         for line in src.splitlines()
-        if "ptxd_tcgen05_ld_ld_sync_aligned_32x32b_x32_b32_f32(" in line
+        if "ptx_tcgen05_ld_ld_sync_aligned_32x32b_x32_b32_f32(" in line
         and "__forceinline__" not in line
     ]
     st_lines = [
         line
         for line in src.splitlines()
-        if "ptxd_tcgen05_st_st_sync_aligned_32x32b_x32_b32_f32(" in line
+        if "ptx_tcgen05_st_st_sync_aligned_32x32b_x32_b32_f32(" in line
         and "__forceinline__" not in line
     ]
     assert ld_lines

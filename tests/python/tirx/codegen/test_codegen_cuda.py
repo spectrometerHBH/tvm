@@ -330,7 +330,7 @@ def test_ptx_ld_acquire_and_volatile_codegen():
     assert "ld.acquire.gpu.global.u64" in src
     assert "ld.acquire.sys.global.s32" in src
     assert "ld.acquire.gpu.global.b32" in src
-    assert "tvm_builtin_ptxd_ld_acquire_gpu_global_b32_s32" in src
+    assert "tvm_builtin_ptx_ld_acquire_gpu_global_b32_s32" in src
     assert "ld.volatile.global.u64" in src
 
 
@@ -350,10 +350,10 @@ def test_ptx_f32x2_value_codegen():
             T.ptx.sub.rn.f32x2(A[1], sum_pair, rhs)
 
     src, _ = _get_source(main)
-    assert "tvm_builtin_ptxd_mul_f32x2" in src
-    assert "tvm_builtin_ptxd_fma_rn_f32x2" in src
-    assert "tvm_builtin_ptxd_add_rn_f32x2" in src
-    assert "tvm_builtin_ptxd_sub_rn_f32x2" in src
+    assert "tvm_builtin_ptx_mul_f32x2" in src
+    assert "tvm_builtin_ptx_fma_rn_f32x2" in src
+    assert "tvm_builtin_ptx_add_rn_f32x2" in src
+    assert "tvm_builtin_ptx_sub_rn_f32x2" in src
     # `.rnd` is optional on add/mul and mandatory on fma; the tokens written at
     # the call site are exactly the tokens emitted.
     assert "mul.f32x2 %0, %1, %2;" in src
@@ -611,8 +611,8 @@ def test_ptx_sync_and_clc_codegen():
     # own rather than something folded into the complete_tx helper.
     assert "mapa.shared::cluster.u32" in src
     for helper in (
-        "tvm_builtin_ptxd_mbarrier_complete_tx_complete_tx_relaxed_cta_shared__cta_b64",
-        "tvm_builtin_ptxd_mbarrier_complete_tx_complete_tx_relaxed_cluster_shared__cluster_b64",
+        "tvm_builtin_ptx_mbarrier_complete_tx_complete_tx_relaxed_cta_shared__cta_b64",
+        "tvm_builtin_ptx_mbarrier_complete_tx_complete_tx_relaxed_cluster_shared__cluster_b64",
     ):
         assert "mapa" not in _helper_source(src, helper)
     assert "mbarrier.complete_tx.shared::cluster.relaxed.cluster.b64" not in src
