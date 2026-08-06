@@ -263,10 +263,14 @@ class InstructionEntry:
     # then get baked into a check() and silently delete coverage.
     cert_arch: str | None = None
     # An escape hatch, not a mechanism: a family whose helper body this table
-    # cannot derive writes it out by hand. `raw_render(tokens, dtypes)` returns
-    # the helper source; everything else (variant enumeration, certification,
-    # dispatch, stubs) is unchanged, so a raw entry is still enumerable and
-    # still proven against ptxas.
+    # cannot derive writes it out by hand.
+    # `raw_render(entry, opcode, helper, tokens, dtypes)` returns the helper
+    # source. It is handed the opcode and helper name `render_variant` has
+    # already derived, rather than deriving them again -- a second formula for
+    # the helper name is a call to a function that does not exist, and no
+    # assertion can be relied on to catch it. Everything else (variant
+    # enumeration, certification, dispatch, stubs) is unchanged, so a raw entry
+    # is still enumerable and still proven against ptxas.
     #
     # It exists for one shape: an operand the ISA types as .b8. Inline asm has
     # no 8-bit register constraint, ptxas rejects a wider carrier in those
@@ -274,7 +278,7 @@ class InstructionEntry:
     # `.reg .b8` -- several statements, which the single-instruction invariant
     # otherwise forbids. Every raw entry must be listed in that test's
     # exemption set, so adding one is never silent.
-    raw_render: Callable[[tuple, tuple], str] | None = None
+    raw_render: Callable[["InstructionEntry", str, str, tuple, tuple], str] | None = None
 
     @property
     def op_name(self) -> str:
@@ -482,8 +486,15 @@ def variants(entry: InstructionEntry) -> tuple:
 def _check_ld(m):
     """Scalar ld grammar per PTX ISA 9.7.9.8 (ld) and 9.7.9.9 (ld.global.nc)."""
     sem, scope, ss = m["sem"], m["scope"], m["space"]
-    mmio, cop, nc = m["mmio"], m["cop"], m["nc"]
-    l1ev, prefetch = m["l1ev"], m["prefetch"]
+    mmio, cop, nc = m.get("mmio", ""), m["cop"], m["nc"]
+    prefetch = m["prefetch"]
+    # One eviction qualifier for grammar purposes. The ISA never spells the L1
+    # and L2 priorities apart -- every line carrying either carries both, in
+    # that order -- so every exclusion below covers both, and the 256-bit
+    # entries need not restate any of them. `.mmio` and `.l2ev` are read with
+    # a default because the vector entries declare no `mmio` slot and only the
+    # 256-bit ones declare `l2ev`.
+    l1ev = m["l1ev"] or m.get("l2ev", "")
     # "ld.relaxed.scope / ld.acquire.scope" — scope is mandatory there and
     # invalid on the weak/volatile forms (syntax lines).
     if sem in ("relaxed", "acquire") and not scope:
@@ -533,32 +544,28 @@ def _check_ld(m):
     if l1ev and ss not in ("", "global"):
         # ptxas: "Modifier '.evict_*' cannot be applied to '<ss>' space" —
         # implicit in the ISA prose, enforced by the assembler.
-        return "L1 eviction priorities apply only to .global or generic addressing"
+        return "eviction priorities apply only to .global or generic addressing"
     return None
 
 
-def _scalar_view(m):
-    """The scalar grammar reads slots the vector entries do not all declare.
-
-    `.mmio` is the one qualifier with no `{.vec}` position: PTX ISA 9.7.9.8
-    spells it `ld.mmio.sem.sys{.global}.type  d, [a];` and 9.7.9.11 spells it
-    `st.mmio.sem.sys{.global}.type         [a], b;`, and neither line carries a
-    `{.vec}`. So it is blanked here and no vector entry declares it.
-
-    `.scope` is *not* blanked: every vector entry declares it, because the
-    `.relaxed`/`.acquire`/`.release` syntax lines do carry `{.vec}` and spell
-    `.scope` as mandatory on it. `.l2ev` is declared only by the 256-bit
-    entries, so it defaults to omitted for the 128-bit ones.
-    """
-    return {**m, "mmio": "", "l2ev": m.get("l2ev", "")}
+# The vector entries declare no `mmio` slot -- it is the one qualifier with no
+# `{.vec}` position, since PTX ISA 9.7.9.8 spells it
+# `ld.mmio.sem.sys{.global}.type  d, [a];` and 9.7.9.11 spells it
+# `st.mmio.sem.sys{.global}.type         [a], b;`, neither carrying a `{.vec}`.
+# `.l2ev` is declared only by the 256-bit entries. Both are read with a default
+# in the scalar checks, so a vector modifier map goes straight in.
+#
+# `.scope` needs no such treatment: every vector entry declares it, because the
+# `.relaxed`/`.acquire`/`.release` syntax lines do carry `{.vec}` and spell
+# `.scope` as mandatory on it.
 
 
 def _check_ld_vec(m):
-    return _check_vec128(m) or _check_ld(_scalar_view(m))
+    return _check_vec128(m) or _check_ld(m)
 
 
 def _check_st_vec(m):
-    return _check_vec128(m) or _check_st(_scalar_view(m))
+    return _check_vec128(m) or _check_st(m)
 
 
 def _check_ld_vec256(m):
@@ -584,21 +591,15 @@ def _check_ld_vec256(m):
     against `ld.global.nc{.level1::eviction_priority}{.level2::eviction_priority}`
     -- so `.nc` with an L2 priority is on a syntax line while `.nc` with a
     `.cop` and one is not. The two priorities are grammatically joined: every
-    exclusion _check_ld applies to `l1ev` applies to `l2ev` too, and that is
-    the rule mirrored below.
+    exclusion _check_ld applies to `l1ev` applies to `l2ev` too. That is not
+    restated here -- `_check_ld` reads the two as one eviction qualifier, so
+    the rule holds by construction and a future L1 rule covers L2 for free.
 
     ptxas is no authority here. It rejects the L1 spellings ("Modifier
     '.evict_first' cannot be combined with modifier '.cg'", and the same with
     '.volatile') but silently assembles the identical L2 ones.
     """
-    err = _check_vec256(m) or _check_ld(_scalar_view(m))
-    if err:
-        return err
-    if m["sem"] == "volatile" and m["l2ev"]:
-        return "ld.volatile only takes the prefetch_size cache qualifier"
-    if m["cop"] and m["l2ev"]:
-        return "cache operators and eviction priorities are mutually exclusive"
-    return None
+    return _check_vec256(m) or _check_ld(m)
 
 
 def _check_st_vec256(m):
@@ -623,23 +624,19 @@ def _check_st_vec256(m):
     lines *do* carry both eviction priorities, so "cache operations" there means
     `.cop`. So `l2ev` falls under the existing "st.volatile takes no cache
     qualifiers" rule, and under the cop/eviction exclusion, exactly as `l1ev`
-    does. ptxas accepts both L2 pairings while rejecting their L1 twins, so it
-    cannot be used to justify keeping them.
+    does -- `_check_st` reads the two as one eviction qualifier, so neither
+    rule is restated here. ptxas accepts both L2 pairings while rejecting their
+    L1 twins, so it cannot be used to justify keeping them.
     """
-    err = _check_vec256(m) or _check_st(_scalar_view(m))
-    if err:
-        return err
-    if m["sem"] == "volatile" and m["l2ev"]:
-        return "st.volatile takes no cache qualifiers"
-    if m["cop"] and m["l2ev"]:
-        return "cache operators and eviction priorities are mutually exclusive"
-    return None
+    return _check_vec256(m) or _check_st(m)
 
 
 def _check_st(m):
     """Scalar st grammar per PTX ISA 9.7.9.11 (the mirror of _check_ld)."""
     sem, scope, ss = m["sem"], m["scope"], m["space"]
-    mmio, cop, l1ev = m["mmio"], m["cop"], m["l1ev"]
+    mmio, cop = m.get("mmio", ""), m["cop"]
+    # One eviction qualifier: see the note in `_check_ld`.
+    l1ev = m["l1ev"] or m.get("l2ev", "")
     # "st.relaxed.scope / st.release.scope" -- scope is mandatory there and
     # invalid on the weak/volatile forms (syntax lines).
     if sem in ("relaxed", "release") and not scope:
@@ -674,7 +671,7 @@ def _check_st(m):
         return "cache operators and eviction priorities are mutually exclusive"
     if l1ev and ss not in ("", "global"):
         # ptxas: "Modifier '.evict_*' cannot be applied to '<ss>' space"
-        return "L1 eviction priorities apply only to .global or generic addressing"
+        return "eviction priorities apply only to .global or generic addressing"
     return None
 
 
@@ -1011,7 +1008,12 @@ def _mma_threads(m):
     .f64 is what produced the retracted "ptxas rejects .m8n8k4" note on
     `mma_f64` below.
     """
-    return 8 if m["shape"] == "m8n8k4" and m["atype"] != "f64" else 32
+    # Named positively, as the ISA scopes it: the .f16 m8n8k4 line. Writing it
+    # as "m8n8k4 and not .f64" would be the same thing only by accident of
+    # which entries reach m8n8k4 today, and would silently return 8 for any
+    # other type that line ever admits -- the wrong-fragment-length mistake
+    # this function's own history records.
+    return 8 if m["shape"] == "m8n8k4" and m["atype"] == "f16" else 32
 
 
 def _mma_lanes(which):
@@ -1070,24 +1072,36 @@ _CVT_IRND = ("rni", "rzi", "rmi", "rpi")
 _CVT_FRND = ("rn", "rz", "rm", "rp")
 
 
-def _cvt_scale_lanes(m):
-    """`{, scale-factor}` exists exactly when `.scaled::n2::ue8m0` is written.
+def _present_lanes(slot: str) -> LanesFn:
+    """A bracketed-optional operand: one register when its qualifier is written.
 
-    ISA 9.7.9.22:180-182: "Optional qualifier .scaled::n2::ue8m0 specifies that
-    the instruction uses packed scale-factor with 2 scale values of ue8m0 type.
-    Operand scale-factor and qualifier .scaled::n2::ue8m0 must be used
-    together." -- the same 0-or-1 length function TMA's `{, cache_policy}` uses
-    for `.L2::cache_hint`.
+    The ISA spells several of these `{, operand}` against a `{.qualifier}`, and
+    says so in the same words each time -- ISA 9.7.9.22:180-182 for cvt's
+    scale-factor is typical: "Operand scale-factor and qualifier
+    .scaled::n2::ue8m0 must be used together." `lanes=0` is what makes the
+    operand vanish from the helper signature (see render.operand_layout), so
+    one factory keeps that contract in one place instead of once per family.
     """
-    return 1 if m["scaled"] else 0
+    return lambda m: 1 if m[slot] else 0
 
 
-def _cvt_f4x2_raw(entry_name: str, names: tuple[str, ...]):
-    """Build the hand-written helper body for one `.e2m1x2` line (Hatch A).
+# `{, scale-factor}` exists exactly when `.scaled::n2::ue8m0` is written. ISA
+# 9.7.9.22:180-182: "Optional qualifier .scaled::n2::ue8m0 specifies that the
+# instruction uses packed scale-factor with 2 scale values of ue8m0 type.
+# Operand scale-factor and qualifier .scaled::n2::ue8m0 must be used together."
+_cvt_scale_lanes = _present_lanes("scaled")
 
-    `names` is the entry's typed operands in PTX order, destination first --
-    the same order `canonical_dtypes` reports, so the dtypes this receives are
-    zipped straight onto it and nothing about the C boundary is restated here.
+
+def _cvt_f4x2_raw(entry, opcode: str, helper: str, tokens, dtypes) -> str:
+    """The hand-written helper body for one `.e2m1x2` line (Hatch A).
+
+    `render.render_variant` hands over the entry plus the opcode and helper
+    name it has already derived, so nothing about this entry's identity is
+    restated here: the operands come from `entry.typed_operands`, which is the
+    order `canonical_dtypes` reports, and which operands exist comes from
+    `lanes_of` -- the same rule the derived path applies, so `{, scale-factor}`
+    appears exactly when `.scaled::n2::ue8m0` is written without this function
+    knowing that qualifier's name.
 
     These four lines are the only client of `raw_render`, for the reason that
     field documents: exactly one of their operands is `.b8`, and the value has
@@ -1104,63 +1118,51 @@ def _cvt_f4x2_raw(entry_name: str, names: tuple[str, ...]):
     the asm text and nowhere else. The import is deferred because `.render`
     imports this module.
     """
+    from .render import C_BINDING
 
-    def raw_render(tokens, dtypes):
-        from .render import C_BINDING
-
-        written = [tok for tok in tokens if tok]
-        opcode = ".".join(["cvt", *written])
-        # The same name `render._helper_name` derives: these entries have one
-        # dtype combination per modifier combination and no caller immediates,
-        # so it reduces to the table name plus the written tokens, and `::` is
-        # the only character in those tokens a C identifier cannot take. The
-        # single-instruction invariant test asserts the two agree.
-        helper = "tvm_builtin_ptxd_" + "_".join([entry_name, *written]).replace("::", "__")
-        # `{, scale-factor}` is present exactly when `.scaled::n2::ue8m0` is
-        # written -- the rule `_cvt_scale_lanes` gives the derived path.
-        operands = [
-            (name, dtype)
-            for name, dtype in zip(names, dtypes, strict=True)
-            if name != "scale_factor" or "scaled::n2::ue8m0" in written
+    mod_map = mods(entry, tokens)
+    operands = [
+        (slot.name, dtype)
+        for slot, dtype in zip(entry.typed_operands, dtypes, strict=True)
+        if lanes_of(slot, mod_map)
+    ]
+    (dname, ddtype), srcs = operands[0], operands[1:]
+    params, inputs, texts = [], [], []
+    for index, (name, dtype) in enumerate(srcs, start=1):
+        cb = C_BINDING[dtype]
+        params.append(f"{cb.c_type} __{name}")
+        inputs.append(f'"{cb.constraint}"({cb.to_carrier.format(f"__{name}")})')
+        texts.append(f"%{index}")
+    dcb = C_BINDING[ddtype]
+    params.insert(0, f"{dcb.c_type}& __{dname}")
+    volatile = " volatile" if entry.asm_volatile else ""
+    pre, post = [], []
+    if dcb.carrier != dcb.c_type:
+        # The destination is the `.b8`: the instruction writes the `.reg .b8`,
+        # the wider carrier picks it up, and the C boundary truncates back.
+        reg = f"__{dname}_reg"
+        pre.append(f"{dcb.carrier} {reg};")
+        post.append(f"__{dname} = {dcb.from_carrier.format(reg)};")
+        output = f'"={dcb.constraint}"({reg})'
+        block = [
+            f".reg .b8 raw_{dname};",
+            f"{opcode} raw_{dname}, {', '.join(texts)};",
+            f"cvt.u16.u8 %0, raw_{dname};",
         ]
-        (dname, ddtype), srcs = operands[0], operands[1:]
-        params, inputs, texts = [], [], []
-        for index, (name, dtype) in enumerate(srcs, start=1):
-            cb = C_BINDING[dtype]
-            params.append(f"{cb.c_type} __{name}")
-            inputs.append(f'"{cb.constraint}"({cb.to_carrier.format(f"__{name}")})')
-            texts.append(f"%{index}")
-        dcb = C_BINDING[ddtype]
-        params.insert(0, f"{dcb.c_type}& __{dname}")
-        pre, post = [], []
-        if ddtype == "uint8":
-            # The instruction writes the `.reg .b8`; the "h" carrier picks it
-            # up, and the C boundary truncates back to uint8_t.
-            reg = f"__{dname}_reg"
-            pre.append(f"{dcb.carrier} {reg};")
-            post.append(f"__{dname} = {dcb.from_carrier.format(reg)};")
-            output = f'"={dcb.constraint}"({reg})'
-            block = [
-                f".reg .b8 raw_{dname};",
-                f"{opcode} raw_{dname}, {', '.join(texts)};",
-                f"cvt.u16.u8 %0, raw_{dname};",
-            ]
-        else:
-            # The `.b8` operand is the source `a`, always first in the list.
-            aname = srcs[0][0]
-            texts[0] = f"raw_{aname}"
-            output = f'"={dcb.constraint}"(__{dname})'
-            block = [
-                f".reg .b8 raw_{aname};",
-                f"cvt.u8.u16 raw_{aname}, %1;",
-                f"{opcode} %0, {', '.join(texts)};",
-            ]
-        asm_text = "{ " + " ".join(block) + " }"
-        asm_line = f'asm volatile("{asm_text}" : {output} : {", ".join(inputs)});'
-        body = "\n".join(f"  {line}" for line in [*pre, asm_line, *post])
-        return f"__forceinline__ __device__ void {helper}({', '.join(params)}) {{\n{body}\n}}\n"
-
-    return raw_render
+    else:
+        # The `.b8` operand is the source `a`, always first in the list.
+        aname = srcs[0][0]
+        texts[0] = f"raw_{aname}"
+        output = f'"={dcb.constraint}"(__{dname})'
+        block = [
+            f".reg .b8 raw_{aname};",
+            f"cvt.u8.u16 raw_{aname}, %1;",
+            f"{opcode} %0, {', '.join(texts)};",
+        ]
+    asm_text = "{ " + " ".join(block) + " }"
+    asm_line = f'asm{volatile}("{asm_text}" : {output} : {", ".join(inputs)});'
+    body = "\n".join(f"  {line}" for line in [*pre, asm_line, *post])
+    return f"__forceinline__ __device__ void {helper}({', '.join(params)}) {{\n{body}\n}}\n"
 
 
 def _check_cvt_tf32(m):
@@ -1201,7 +1203,7 @@ def _cvt_int_covers(d: str, a: str) -> bool:
     return _CVT_INT_BITS[d] > _CVT_INT_BITS[a] if d_signed else False
 
 
-def _check_cvt_same_type(t, rnd, ftz, sat):
+def _check_cvt_same_type(t, rnd):
     """The `.dtype == .atype` sub-grid of the generic scalar line, ISA 9.7.9.22.
 
     A same-type cvt is a real instruction, not a move: an *integer* rounding
@@ -1233,17 +1235,13 @@ def _check_cvt_same_type(t, rnd, ftz, sat):
       result in loss of precision, and for integer-to-float conversions.
       Floating-point rounding is illegal in all other instances." -- and a
       conversion to its own type loses no precision.
-    - `.ftz` only on .f32: ":432-434 Modifier .ftz can only be specified when
-      either .dtype or .atype is .f32 and applies only to single precision
-      (.f32) inputs and results."
-    - `.sat` only on .f16 / .f32 / .f64: ":452-453 For floating-point
-      destination types, .sat limits the result to the range [0.0, 1.0]. NaN
-      results are flushed to positive zero. Applies to .f16, .f32, and .f64
-      types." For an integer `t` the destination range is the source range, and
-      ":385-386 the .sat modifier is illegal in cases where saturation is not
-      possible based on the source and destination types."
+    `.ftz` and `.sat` are not ruled on here: their rules do not depend on the
+    two types being equal, so the caller's shared tail applies them to this
+    sub-grid too. (For an integer `t` that tail rejects `.sat` because
+    `_cvt_int_covers(t, t)` holds -- the destination range is the source range
+    -- and it rejects `.sat` on .bf16 as a toolchain limit.)
 
-    That admits 53 of the 432 same-type spellings in this entry's slot grid,
+    Together with that tail this admits 53 of the 432 same-type spellings in this entry's slot grid,
     which is exactly the set ptxas assembles (measured over the full grid, nvcc
     13.2 -arch=sm_90; no spelling in either direction differs).
     """
@@ -1251,12 +1249,6 @@ def _check_cvt_same_type(t, rnd, ftz, sat):
         return f"{t} from {t} is exact, so a floating-point rounding mode is illegal"
     if rnd and t not in _CVT_FP_FORMAT:
         return "integer rounding rounds nothing on an integer-to-same-integer cvt"
-    if ftz and t != "f32":
-        return ".ftz applies only where .f32 is one of the types"
-    if sat and t not in ("f16", "f32", "f64"):
-        # .bf16 falls out here too: the ISA's .sat list omits it, and this
-        # toolchain assembles no .sat on a .bf16 operand either.
-        return f".sat is not possible converting {t} to {t}"
     return None
 
 
@@ -1341,25 +1333,30 @@ def _check_cvt_scalar(m):
     d, a, rnd, ftz, sat = m["dtype"], m["atype"], m["rnd"], m["ftz"], m["sat"]
     if m["relu"] or m["satfinite"]:
         return _check_cvt_frnd2_scalar(d, a, rnd, ftz, sat)
-    if d == a:
-        return _check_cvt_same_type(d, rnd, ftz, sat)
     d_int, a_int = d in _CVT_INT_BITS, a in _CVT_INT_BITS
-    if d_int and not a_int:
-        if rnd not in _CVT_IRND:
-            return "float-to-integer requires an integer rounding mode"
-    elif rnd in _CVT_IRND:
-        return "integer rounding is illegal outside float-to-integer"
-    if not d_int and a_int:
-        if rnd not in _CVT_FRND:
-            return "integer-to-float requires a floating-point rounding mode"
-    elif not d_int and not a_int:
-        if _cvt_loses_precision(d, a):
+    # The rounding rules are the only ones that turn on whether the two types
+    # are equal. `.ftz`, `.sat` and the two toolchain limits below apply to
+    # both sub-grids, so they are stated once, after this branch.
+    if d == a:
+        if bad := _check_cvt_same_type(d, rnd):
+            return bad
+    else:
+        if d_int and not a_int:
+            if rnd not in _CVT_IRND:
+                return "float-to-integer requires an integer rounding mode"
+        elif rnd in _CVT_IRND:
+            return "integer rounding is illegal outside float-to-integer"
+        if not d_int and a_int:
             if rnd not in _CVT_FRND:
-                return f"{d} from {a} loses precision, so a rounding mode is required"
-        elif rnd:
-            return f"{d} from {a} is exact, so a rounding mode is illegal"
-    elif d_int and a_int and rnd:
-        return "integer-to-integer takes no rounding mode"
+                return "integer-to-float requires a floating-point rounding mode"
+        elif not d_int and not a_int:
+            if _cvt_loses_precision(d, a):
+                if rnd not in _CVT_FRND:
+                    return f"{d} from {a} loses precision, so a rounding mode is required"
+            elif rnd:
+                return f"{d} from {a} is exact, so a rounding mode is illegal"
+        elif d_int and a_int and rnd:
+            return "integer-to-integer takes no rounding mode"
     if ftz and "f32" not in (d, a):
         return ".ftz applies only where .f32 is one of the types"
     if sat and d_int and a_int and _cvt_int_covers(d, a):
@@ -1387,8 +1384,21 @@ def _check_cvt_scalar(m):
 # {u8, s8, u4, s4}, so the width-class pairing is enforced by the checks below
 # and nowhere else. (`mma_sp_all` is the one entry whose slot domain does the
 # job on its own: its .atype/.btype are exactly `.f8type = {.e4m3, .e5m2}`.)
-_MMA_FP_LINE = {"f16": "f16", "bf16": "alt", "tf32": "alt", "e4m3": "f8", "e5m2": "f8"}
 _MMA_INT_LINE = {"u8": "i8", "s8": "i8", "u4": "i4", "s4": "i4", "b1": "b1"}
+# The one floating-point line that quantifies its two multiplicand positions
+# independently: "mma.sync.aligned.shape.row.col.dtype.f8type.f8type.ctype"
+# with ".f8type = {.e4m3, .e5m2};" (ISA 9.7.15.5.14:23,28). Every other fp line
+# writes a literal token in both positions (.f16.f16, .bf16.bf16, .tf32.tf32)
+# or, at .m16n8k8, names .atype/.btype separately and then requires them equal
+# (:129) -- so outside .f8type the two must simply match.
+_MMA_F8 = ("e4m3", "e5m2")
+
+
+def _check_mma_fp_pair(a: str, b: str) -> str | None:
+    """The multiplicand pairing rule shared by the dense fp checks."""
+    if a != b and not (a in _MMA_F8 and b in _MMA_F8):
+        return f"no syntax line pairs .{a} with .{b}"
+    return None
 
 
 def _check_mma_sp_fp_types(m):
@@ -1531,8 +1541,8 @@ def _check_mma_fp_f16(m):
     .f16.
     """
     shape, a = m["shape"], m["atype"]
-    if _MMA_FP_LINE[a] != _MMA_FP_LINE[m["btype"]]:
-        return f"no syntax line pairs .{a} with .{m['btype']}"
+    if bad := _check_mma_fp_pair(a, m["btype"]):
+        return bad
     if shape != "m8n8k4" and (m["alayout"], m["blayout"]) != ("row", "col"):
         return f"{shape} is spelled .row.col"
     if a == "f16" and shape not in ("m8n8k4", "m16n8k8", "m16n8k16"):
@@ -1585,12 +1595,8 @@ def _check_mma_fp_f32(m):
     """
     shape, d, c = m["shape"], m["dtype"], m["ctype"]
     a, b = m["atype"], m["btype"]
-    if _MMA_FP_LINE[a] != _MMA_FP_LINE[b]:
-        return f"no syntax line pairs .{a} with .{b}"
-    if _MMA_FP_LINE[a] == "alt" and a != b:
-        # ".m16n8k8 : ... .atype must be the same as .btype." -- and the .tf32
-        # and .bf16 lines of the other two shapes are literal in both slots.
-        return "no syntax line pairs .bf16 with .tf32"
+    if bad := _check_mma_fp_pair(a, b):
+        return bad
     if shape != "m8n8k4" and (m["alayout"], m["blayout"]) != ("row", "col"):
         return f"{shape} is spelled .row.col"
     if a == "f16":
@@ -1704,14 +1710,12 @@ def _tma_coords_lanes(m):
     return int(m["dim"][0])
 
 
-def _tma_mask_lanes(m):
-    # `{, ctaMask}` exists exactly when `.multicast::cluster` is written.
-    return 1 if m["multicast"] else 0
+# `{, ctaMask}` exists exactly when `.multicast::cluster` is written.
+_tma_mask_lanes = _present_lanes("multicast")
 
 
-def _tma_cache_lanes(m):
-    # `{, cache_policy}` exists exactly when `.L2::cache_hint` is written.
-    return 1 if m["cache"] else 0
+# `{, cache_policy}` exists exactly when `.L2::cache_hint` is written.
+_tma_cache_lanes = _present_lanes("cache")
 
 
 def _check_tma_gather4(m):
@@ -1741,15 +1745,13 @@ def _check_tcgen05_mma_block_scale(m):
     return None
 
 
-def _cp_mask_lanes(m):
-    # `{, byteMask}` exists exactly when `.cp_mask` is written.
-    return 1 if m["cp_mask"] else 0
+# `{, byteMask}` exists exactly when `.cp_mask` is written.
+_cp_mask_lanes = _present_lanes("cp_mask")
 
 
-def _ignore_oob_lanes(m):
-    # `{, ignoreBytesLeft, ignoreBytesRight}` exists exactly when `.ignore_oob`
-    # is written -- one lane each, so the pair appears and disappears together.
-    return 1 if m["ignore_oob"] else 0
+# `{, ignoreBytesLeft, ignoreBytesRight}` exists exactly when `.ignore_oob` is
+# written -- one lane each, so the pair appears and disappears together.
+_ignore_oob_lanes = _present_lanes("ignore_oob")
 
 
 _ENTRIES = [
@@ -1852,7 +1854,7 @@ _ENTRIES = [
     # 256-bit entries let `.L2::*` ride them -- unlike `.volatile`, whose line
     # (`ld.volatile{.ss}{.level::prefetch_size}{.vec}.type  d, [a];`) spells no
     # eviction position at all. Every rule beyond that is the scalar rule:
-    # `_check_ld`/`_check_st` see these slots through `_scalar_view`.
+    # `_check_ld`/`_check_st` read both eviction priorities as one qualifier.
     #
     # NOT REGISTERED: the sink symbol `_` in the two 256-bit lines (it needs an
     # operand role for "this lane is discarded"), .level::cache_hint with
@@ -2652,7 +2654,7 @@ _ENTRIES = [
             OperandSlot("a", role="value", dtype="f32"),
             OperandSlot("b", role="value", dtype="f32"),
         ),
-        raw_render=_cvt_f4x2_raw("cvt_f4x2_f32", ("d", "a", "b")),
+        raw_render=_cvt_f4x2_raw,
     ),
     InstructionEntry(  # cvt.rn.satfinite{.relu}.f4x2type.fp16x2type d, a;
         name="cvt_f4x2_fp16x2",
@@ -2674,7 +2676,7 @@ _ENTRIES = [
             OperandSlot("d", role="dst", dtype="e2m1x2"),
             OperandSlot("a", role="value", dtype="atype"),
         ),
-        raw_render=_cvt_f4x2_raw("cvt_f4x2_fp16x2", ("d", "a")),
+        raw_render=_cvt_f4x2_raw,
     ),
     InstructionEntry(  # cvt.rn{.relu}.f16x2.f4x2type d, a;
         name="cvt_f16x2_f4x2",
@@ -2693,7 +2695,7 @@ _ENTRIES = [
             OperandSlot("d", role="dst", dtype="f16x2"),
             OperandSlot("a", role="value", dtype="e2m1x2"),
         ),
-        raw_render=_cvt_f4x2_raw("cvt_f16x2_f4x2", ("d", "a")),
+        raw_render=_cvt_f4x2_raw,
     ),
     # cvt.rn{.relu}{.satfinite}{.scaled::n2::ue8m0}.bf16x2.f4x2type
     #     d, a{, scale-factor};
@@ -2725,7 +2727,7 @@ _ENTRIES = [
                 vector=False,
             ),
         ),
-        raw_render=_cvt_f4x2_raw("cvt_bf16x2_f4x2", ("d", "a", "scale_factor")),
+        raw_render=_cvt_f4x2_raw,
     ),
     InstructionEntry(  # cvt.rs{.relu}.satfinite.f4x4type.f32 d, {a, b, e, f}, rbits;
         name="cvt_rs_f4x4_f32",

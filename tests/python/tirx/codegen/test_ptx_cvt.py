@@ -19,117 +19,218 @@
 import pytest
 
 from tvm.backend.cuda.ptx_dialect.render import render_variant
-from tvm.backend.cuda.ptx_dialect.table import TABLE, renderings
+from tvm.backend.cuda.ptx_dialect.table import TABLE, renderings, tokens_for
 
-# (entry name, one modifier combination, the instruction that combination emits)
+# (entry name, the modifier slots to write, the instruction that combination emits).
+# Slots are named, not positional: `tokens_for` shifts nothing when a slot is
+# inserted, rejects an unknown slot name, and refuses a combination the entry's
+# own check would reject.
 _FORM_CASES = [
     # generic scalar line: one case per rule the check enforces
-    # (slots: rnd, relu, satfinite, ftz, sat, dtype, atype)
-    ("cvt", ("rzi", "", "", "", "", "s32", "f32"), "cvt.rzi.s32.f32"),
-    ("cvt", ("rn", "", "", "", "", "f32", "s32"), "cvt.rn.f32.s32"),
-    ("cvt", ("rn", "", "", "", "", "f16", "f32"), "cvt.rn.f16.f32"),
-    ("cvt", ("", "", "", "", "", "f32", "f16"), "cvt.f32.f16"),
-    ("cvt", ("", "", "", "", "sat", "s8", "s32"), "cvt.sat.s8.s32"),
-    ("cvt", ("rzi", "", "", "ftz", "", "s32", "f32"), "cvt.rzi.ftz.s32.f32"),
+    ("cvt", dict(rnd="rzi", dtype="s32", atype="f32"), "cvt.rzi.s32.f32"),
+    ("cvt", dict(rnd="rn", dtype="f32", atype="s32"), "cvt.rn.f32.s32"),
+    ("cvt", dict(rnd="rn", dtype="f16", atype="f32"), "cvt.rn.f16.f32"),
+    ("cvt", dict(dtype="f32", atype="f16"), "cvt.f32.f16"),
+    ("cvt", dict(sat="sat", dtype="s8", atype="s32"), "cvt.sat.s8.s32"),
+    ("cvt", dict(rnd="rzi", ftz="ftz", dtype="s32", atype="f32"), "cvt.rzi.ftz.s32.f32"),
     # the two frnd2 scalar lines, which share that entry's shape and types
-    ("cvt", ("rn", "relu", "satfinite", "", "", "f16", "f32"), "cvt.rn.relu.satfinite.f16.f32"),
-    ("cvt", ("rz", "", "satfinite", "", "", "bf16", "f32"), "cvt.rz.satfinite.bf16.f32"),
+    (
+        "cvt",
+        dict(rnd="rn", relu="relu", satfinite="satfinite", dtype="f16", atype="f32"),
+        "cvt.rn.relu.satfinite.f16.f32",
+    ),
+    (
+        "cvt",
+        dict(rnd="rz", satfinite="satfinite", dtype="bf16", atype="f32"),
+        "cvt.rz.satfinite.bf16.f32",
+    ),
     # the frnd2 lines that pack two .f32 sources into one register
-    ("cvt_f16x2_f32", ("rn", "", "", "f16x2", "f32"), "cvt.rn.f16x2.f32"),
+    ("cvt_f16x2_f32", dict(rnd="rn", dtype="f16x2", atype="f32"), "cvt.rn.f16x2.f32"),
     (
         "cvt_f16x2_f32",
-        ("rz", "relu", "satfinite", "f16x2", "f32"),
+        dict(rnd="rz", relu="relu", satfinite="satfinite", dtype="f16x2", atype="f32"),
         "cvt.rz.relu.satfinite.f16x2.f32",
     ),
-    ("cvt_bf16x2_f32", ("rn", "relu", "", "bf16x2", "f32"), "cvt.rn.relu.bf16x2.f32"),
+    (
+        "cvt_bf16x2_f32",
+        dict(rnd="rn", relu="relu", dtype="bf16x2", atype="f32"),
+        "cvt.rn.relu.bf16x2.f32",
+    ),
     # both .tf32 lines
-    ("cvt_tf32_f32", ("rna", "satfinite", "", "tf32", "f32"), "cvt.rna.satfinite.tf32.f32"),
-    ("cvt_tf32_f32", ("rn", "satfinite", "relu", "tf32", "f32"), "cvt.rn.satfinite.relu.tf32.f32"),
+    (
+        "cvt_tf32_f32",
+        dict(rnd="rna", satfinite="satfinite", dtype="tf32", atype="f32"),
+        "cvt.rna.satfinite.tf32.f32",
+    ),
+    (
+        "cvt_tf32_f32",
+        dict(rnd="rn", satfinite="satfinite", relu="relu", dtype="tf32", atype="f32"),
+        "cvt.rn.satfinite.relu.tf32.f32",
+    ),
     # the .rs lines: a trailing rbits operand, and {a, b, e, f} on the x4 forms
-    ("cvt_rs_f16x2_f32", ("rs", "", "", "f16x2", "f32"), "cvt.rs.f16x2.f32"),
+    ("cvt_rs_f16x2_f32", dict(rnd="rs", dtype="f16x2", atype="f32"), "cvt.rs.f16x2.f32"),
     (
         "cvt_rs_bf16x2_f32",
-        ("rs", "relu", "satfinite", "bf16x2", "f32"),
+        dict(rnd="rs", relu="relu", satfinite="satfinite", dtype="bf16x2", atype="f32"),
         "cvt.rs.relu.satfinite.bf16x2.f32",
     ),
-    ("cvt_rs_f8x4_f32", ("rs", "", "satfinite", "e4m3x4", "f32"), "cvt.rs.satfinite.e4m3x4.f32"),
+    (
+        "cvt_rs_f8x4_f32",
+        dict(rnd="rs", satfinite="satfinite", dtype="e4m3x4", atype="f32"),
+        "cvt.rs.satfinite.e4m3x4.f32",
+    ),
     (
         "cvt_rs_f4x4_f32",
-        ("rs", "relu", "satfinite", "e2m1x4", "f32"),
+        dict(rnd="rs", relu="relu", satfinite="satfinite", dtype="e2m1x4", atype="f32"),
         "cvt.rs.relu.satfinite.e2m1x4.f32",
     ),
-    ("cvt_rs_f6x4_f32", ("rs", "", "satfinite", "e2m3x4", "f32"), "cvt.rs.satfinite.e2m3x4.f32"),
-    ("cvt_ue8m0x2_f32", ("rz", "", "ue8m0x2", "f32"), "cvt.rz.ue8m0x2.f32"),
-    ("cvt_ue8m0x2_f32", ("rp", "satfinite", "ue8m0x2", "f32"), "cvt.rp.satfinite.ue8m0x2.f32"),
-    ("cvt_ue8m0x2_bf16x2", ("rz", "", "ue8m0x2", "bf16x2"), "cvt.rz.ue8m0x2.bf16x2"),
-    ("cvt_bf16x2_ue8m0x2", ("rn", "bf16x2", "ue8m0x2"), "cvt.rn.bf16x2.ue8m0x2"),
-    ("cvt_f8x2_f32", ("rn", "satfinite", "", "e4m3x2", "f32"), "cvt.rn.satfinite.e4m3x2.f32"),
+    (
+        "cvt_rs_f6x4_f32",
+        dict(rnd="rs", satfinite="satfinite", dtype="e2m3x4", atype="f32"),
+        "cvt.rs.satfinite.e2m3x4.f32",
+    ),
+    ("cvt_ue8m0x2_f32", dict(rnd="rz", dtype="ue8m0x2", atype="f32"), "cvt.rz.ue8m0x2.f32"),
+    (
+        "cvt_ue8m0x2_f32",
+        dict(rnd="rp", satfinite="satfinite", dtype="ue8m0x2", atype="f32"),
+        "cvt.rp.satfinite.ue8m0x2.f32",
+    ),
+    (
+        "cvt_ue8m0x2_bf16x2",
+        dict(rnd="rz", dtype="ue8m0x2", atype="bf16x2"),
+        "cvt.rz.ue8m0x2.bf16x2",
+    ),
+    (
+        "cvt_bf16x2_ue8m0x2",
+        dict(rnd="rn", dtype="bf16x2", atype="ue8m0x2"),
+        "cvt.rn.bf16x2.ue8m0x2",
+    ),
     (
         "cvt_f8x2_f32",
-        ("rn", "satfinite", "relu", "e5m2x2", "f32"),
+        dict(rnd="rn", satfinite="satfinite", dtype="e4m3x2", atype="f32"),
+        "cvt.rn.satfinite.e4m3x2.f32",
+    ),
+    (
+        "cvt_f8x2_f32",
+        dict(rnd="rn", satfinite="satfinite", relu="relu", dtype="e5m2x2", atype="f32"),
         "cvt.rn.satfinite.relu.e5m2x2.f32",
     ),
     (
         "cvt_f8x2_fp16x2",
-        ("rn", "satfinite", "", "e4m3x2", "f16x2"),
+        dict(rnd="rn", satfinite="satfinite", dtype="e4m3x2", atype="f16x2"),
         "cvt.rn.satfinite.e4m3x2.f16x2",
     ),
-    ("cvt_f16x2_f8x2", ("rn", "", "f16x2", "e4m3x2"), "cvt.rn.f16x2.e4m3x2"),
-    ("cvt_f16x2_f8x2", ("rn", "relu", "f16x2", "e5m2x2"), "cvt.rn.relu.f16x2.e5m2x2"),
-    ("cvt_bf16x2_f8x2", ("rn", "", "", "", "bf16x2", "e4m3x2"), "cvt.rn.bf16x2.e4m3x2"),
+    ("cvt_f16x2_f8x2", dict(rnd="rn", dtype="f16x2", atype="e4m3x2"), "cvt.rn.f16x2.e4m3x2"),
+    (
+        "cvt_f16x2_f8x2",
+        dict(rnd="rn", relu="relu", dtype="f16x2", atype="e5m2x2"),
+        "cvt.rn.relu.f16x2.e5m2x2",
+    ),
+    ("cvt_bf16x2_f8x2", dict(rnd="rn", dtype="bf16x2", atype="e4m3x2"), "cvt.rn.bf16x2.e4m3x2"),
     (
         "cvt_bf16x2_f8x2",
-        ("rn", "relu", "satfinite", "", "bf16x2", "e5m2x2"),
+        dict(rnd="rn", relu="relu", satfinite="satfinite", dtype="bf16x2", atype="e5m2x2"),
         "cvt.rn.relu.satfinite.bf16x2.e5m2x2",
     ),
     (
         "cvt_bf16x2_f8x2",
-        ("rn", "", "satfinite", "scaled::n2::ue8m0", "bf16x2", "e4m3x2"),
+        dict(
+            rnd="rn",
+            satfinite="satfinite",
+            scaled="scaled::n2::ue8m0",
+            dtype="bf16x2",
+            atype="e4m3x2",
+        ),
         "cvt.rn.satfinite.scaled::n2::ue8m0.bf16x2.e4m3x2",
     ),
     # the fp4 lines, whose `.b8` operand puts them on the raw_render path
     (
         "cvt_f4x2_f32",
-        ("rn", "satfinite", "relu", "e2m1x2", "f32"),
+        dict(rnd="rn", satfinite="satfinite", relu="relu", dtype="e2m1x2", atype="f32"),
         "cvt.rn.satfinite.relu.e2m1x2.f32",
     ),
     (
         "cvt_f4x2_fp16x2",
-        ("rn", "satfinite", "", "e2m1x2", "bf16x2"),
+        dict(rnd="rn", satfinite="satfinite", dtype="e2m1x2", atype="bf16x2"),
         "cvt.rn.satfinite.e2m1x2.bf16x2",
     ),
-    ("cvt_f16x2_f4x2", ("rn", "relu", "f16x2", "e2m1x2"), "cvt.rn.relu.f16x2.e2m1x2"),
+    (
+        "cvt_f16x2_f4x2",
+        dict(rnd="rn", relu="relu", dtype="f16x2", atype="e2m1x2"),
+        "cvt.rn.relu.f16x2.e2m1x2",
+    ),
     (
         "cvt_bf16x2_f4x2",
-        ("rn", "", "satfinite", "scaled::n2::ue8m0", "bf16x2", "e2m1x2"),
+        dict(
+            rnd="rn",
+            satfinite="satfinite",
+            scaled="scaled::n2::ue8m0",
+            dtype="bf16x2",
+            atype="e2m1x2",
+        ),
         "cvt.rn.satfinite.scaled::n2::ue8m0.bf16x2.e2m1x2",
     ),
     # the fp6 lines
-    ("cvt_f6x2_f32", ("rn", "satfinite", "", "e2m3x2", "f32"), "cvt.rn.satfinite.e2m3x2.f32"),
+    (
+        "cvt_f6x2_f32",
+        dict(rnd="rn", satfinite="satfinite", dtype="e2m3x2", atype="f32"),
+        "cvt.rn.satfinite.e2m3x2.f32",
+    ),
     (
         "cvt_f6x2_fp16x2",
-        ("rn", "satfinite", "relu", "e3m2x2", "bf16x2"),
+        dict(rnd="rn", satfinite="satfinite", relu="relu", dtype="e3m2x2", atype="bf16x2"),
         "cvt.rn.satfinite.relu.e3m2x2.bf16x2",
     ),
-    ("cvt_f16x2_f6x2", ("rn", "relu", "f16x2", "e2m3x2"), "cvt.rn.relu.f16x2.e2m3x2"),
+    (
+        "cvt_f16x2_f6x2",
+        dict(rnd="rn", relu="relu", dtype="f16x2", atype="e2m3x2"),
+        "cvt.rn.relu.f16x2.e2m3x2",
+    ),
     (
         "cvt_bf16x2_f6x2",
-        ("rn", "", "satfinite", "scaled::n2::ue8m0", "bf16x2", "e3m2x2"),
+        dict(
+            rnd="rn",
+            satfinite="satfinite",
+            scaled="scaled::n2::ue8m0",
+            dtype="bf16x2",
+            atype="e3m2x2",
+        ),
         "cvt.rn.satfinite.scaled::n2::ue8m0.bf16x2.e3m2x2",
     ),
     # the .s2f6x2 lines, with and without the scale-factor operand
-    ("cvt_s2f6x2_f32", ("rn", "satfinite", "", "", "s2f6x2", "f32"), "cvt.rn.satfinite.s2f6x2.f32"),
     (
         "cvt_s2f6x2_f32",
-        ("rn", "satfinite", "relu", "scaled::n2::ue8m0", "s2f6x2", "f32"),
+        dict(rnd="rn", satfinite="satfinite", dtype="s2f6x2", atype="f32"),
+        "cvt.rn.satfinite.s2f6x2.f32",
+    ),
+    (
+        "cvt_s2f6x2_f32",
+        dict(
+            rnd="rn",
+            satfinite="satfinite",
+            relu="relu",
+            scaled="scaled::n2::ue8m0",
+            dtype="s2f6x2",
+            atype="f32",
+        ),
         "cvt.rn.satfinite.relu.scaled::n2::ue8m0.s2f6x2.f32",
     ),
     (
         "cvt_s2f6x2_bf16x2",
-        ("rn", "satfinite", "", "scaled::n2::ue8m0", "s2f6x2", "bf16x2"),
+        dict(
+            rnd="rn",
+            satfinite="satfinite",
+            scaled="scaled::n2::ue8m0",
+            dtype="s2f6x2",
+            atype="bf16x2",
+        ),
         "cvt.rn.satfinite.scaled::n2::ue8m0.s2f6x2.bf16x2",
     ),
-    ("cvt_bf16x2_s2f6x2", ("rn", "", "relu", "", "bf16x2", "s2f6x2"), "cvt.rn.relu.bf16x2.s2f6x2"),
+    (
+        "cvt_bf16x2_s2f6x2",
+        dict(rnd="rn", relu="relu", dtype="bf16x2", atype="s2f6x2"),
+        "cvt.rn.relu.bf16x2.s2f6x2",
+    ),
 ]
 
 # The generic scalar line is one entry named plain "cvt"; the packed lines are
@@ -137,18 +238,18 @@ _FORM_CASES = [
 _CVT_ENTRIES = {name for name in TABLE if name == "cvt" or name.startswith("cvt_")}
 
 
-@pytest.mark.parametrize("entry_name,tokens,instruction", _FORM_CASES)
-def test_cvt_form_renders_its_instruction(entry_name, tokens, instruction):
+@pytest.mark.parametrize("entry_name,slots,instruction", _FORM_CASES)
+def test_cvt_form_renders_its_instruction(entry_name, slots, instruction):
     entry = TABLE[entry_name]
-    opcode, helper, source = render_variant(entry, tokens)
+    opcode, helper, source = render_variant(entry, tokens_for(entry, **slots))
     assert opcode == instruction
-    if entry.raw_render is None:
-        assert f'"{instruction} ' in source
-    else:
-        # The `.e2m1x2` lines stage a `.b8` operand in a block-local `.reg .b8`
-        # (see `_cvt_f4x2_raw`), so the instruction is a statement inside the
-        # block rather than the whole asm text.
-        assert f"; {instruction} " in source
+    # A trailing space, so a shorter opcode cannot match as a prefix. Not
+    # anchored to the opening quote: the `.e2m1x2` lines stage a `.b8` operand
+    # in a block-local `.reg .b8` (see `_cvt_f4x2_raw`), so there the
+    # instruction is a statement inside the block rather than the whole asm
+    # text. That those bodies emit it as their own statement is the
+    # single-instruction invariant's job, not this test's.
+    assert f"{instruction} " in source
     assert helper.startswith("tvm_builtin_ptxd_cvt_")
     # Every ptxd helper is void: the destination is an operand, not a return.
     assert source.startswith("__forceinline__ __device__ void ")
@@ -224,6 +325,21 @@ _CVT_BLACKWELL_TOKENS = {
 }
 
 
+def _needs_sm100a(written: set[str]) -> bool:
+    """Whether one rendering's tokens put it on a Blackwell-floor syntax line.
+
+    `.e4m3x2`/`.e5m2x2` alone are sm_89 lines. Pairing either with `.bf16x2`
+    needs a floor whichever side it sits on: as the destination it is the PTX
+    9.2 line at :634-639, and as the source it is :612-617
+    ("cvt.rn.satfinite{.relu}{.e5m2x2/.e4m3x2}{.bf16x2} is supported on
+    following family-specific architectures:"). The second clause covers both
+    directions.
+    """
+    return bool(written & _CVT_BLACKWELL_TOKENS) or (
+        "bf16x2" in written and bool(written & {"e4m3x2", "e5m2x2"})
+    )
+
+
 def test_cvt_blackwell_lines_carry_their_arch_floor():
     """The Blackwell-only cvt lines must certify at sm_100a; certifying them at
     the sm_90 default would report legal forms as illegal.
@@ -236,20 +352,7 @@ def test_cvt_blackwell_lines_carry_their_arch_floor():
     """
     for name in _CVT_ENTRIES:
         entry = TABLE[name]
-        needs_floor = False
-        for tokens, _, _, _ in renderings(entry):
-            written = set(tokens)
-            if written & _CVT_BLACKWELL_TOKENS:
-                needs_floor = True
-            # `.e4m3x2`/`.e5m2x2` alone are sm_89 lines. Pairing either with
-            # `.bf16x2` needs a floor whichever side it sits on: as the
-            # destination it is the PTX 9.2 line at :634-639, and as the source
-            # it is :612-617 ("cvt.rn.satfinite{.relu}{.e5m2x2/.e4m3x2}
-            # {.bf16x2} is supported on following family-specific
-            # architectures:"). This predicate covers both directions.
-            if "bf16x2" in written and written & {"e4m3x2", "e5m2x2"}:
-                needs_floor = True
-        if needs_floor:
+        if any(_needs_sm100a(set(tokens)) for tokens, _, _, _ in renderings(entry)):
             assert entry.cert_arch == "sm_100a", name
 
 

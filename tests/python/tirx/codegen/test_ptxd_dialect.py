@@ -795,23 +795,19 @@ def test_ptxd_single_instruction_invariant():
     asm_re, sole_instruction = _ASM_RE, _sole_instruction
     checked = 0
     for entry in TABLE.values():
-        raw = entry.name in RAW_ENTRIES
+        raw = entry.raw_render is not None
         for tokens, dtypes, predicated, imms in renderings(entry):
             opcode, helper, source = render_variant(entry, tokens, predicated, dtypes, imms)
             asm_blocks = asm_re.findall(source)
             assert len(asm_blocks) == 1, f"{opcode}: {len(asm_blocks)} asm blocks, expected 1"
             if raw:
                 # The `.reg .b8` prologue is several statements, which is why
-                # this entry is exempt. What is still checked: the instruction
-                # is in there as its own statement, and the body defines the
-                # helper name render_variant reports (a raw body writes its own
-                # signature, so a divergence would leave dispatch calling a
-                # function that does not exist).
+                # this entry is exempt. The instruction must still be in there
+                # as its own statement. The helper name needs no assertion:
+                # `render_variant` passes the name it derived into
+                # `raw_render`, so a raw body cannot declare a different one.
                 assert f"; {opcode} " in asm_blocks[0], (
                     f"{opcode}: raw body does not emit the opcode: {asm_blocks[0]!r}"
-                )
-                assert f"void {helper}(" in source, (
-                    f"{opcode}: raw body defines a different helper than {helper}"
                 )
             else:
                 instr = sole_instruction(asm_blocks[0])

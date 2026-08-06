@@ -150,7 +150,7 @@ def render_variant(entry: InstructionEntry, tokens, predicated=False, dtypes=Non
         # need to know the difference.
         assert not predicated, f"{opcode}: raw entries have no @p twin"
         helper = _helper_name(entry, written, imms, dtypes, canonical)
-        return opcode, helper, entry.raw_render(tokens, tuple(dtypes))
+        return opcode, helper, entry.raw_render(entry, opcode, helper, tokens, tuple(dtypes))
     # A helper name is the instruction's ISA identity plus, only when it is no
     # longer enough, a signature discriminator. The opcode alone stopped being
     # enough once an operand could take several dtypes; a non-canonical choice
