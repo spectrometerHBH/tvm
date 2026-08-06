@@ -166,8 +166,8 @@ Generated CUDA
 .. code-block:: c++
 
     // map local shared addresses into CTA 1's window (mapa)
-    remote_mbar = tvm_builtin_ptx_mapa_u64(&mbar,     /*rank=*/1);   // asm: mapa.u64
-    cluster_dst = tvm_builtin_ptx_mapa_u64(&dst_smem, /*rank=*/1);
+    tvm_builtin_ptx_mapa_shared__cluster_u64(remote_mbar, &mbar,     /*rank=*/1);
+    tvm_builtin_ptx_mapa_shared__cluster_u64(cluster_dst, &dst_smem, /*rank=*/1);
     // bulk-copy 16384 bytes local shared -> CTA 1 shared, signalling its mbarrier
     "cp.async.bulk.shared::cluster.shared::cta.mbarrier::complete_tx::bytes ..."
 

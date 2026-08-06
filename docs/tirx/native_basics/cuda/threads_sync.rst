@@ -62,7 +62,7 @@ The shuffle lowers straight to ``__shfl_xor_sync``:
 
     v_ptr[0] = v_ptr[0] + __shfl_xor_sync(0xFFFFFFFF, v_ptr[0], i_ptr[0], 32);
 
-Other families under ``T.ptx.*`` / ``T.cuda.*``: ``cp_async`` (LDGSTS),
+Other families under ``T.ptx.*`` / ``T.cuda.*``: ``cp.async`` (LDGSTS),
 ``cp_async.bulk.tensor`` (TMA), ``ldmatrix`` / ``stmatrix``, ``tcgen05.*``
 (Blackwell MMA), ``atomic_add``, ``fence`` … See :doc:`../../api/backend` for the
 full ``tvm.backend.cuda`` reference.

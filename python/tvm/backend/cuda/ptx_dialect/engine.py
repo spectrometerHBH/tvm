@@ -14,7 +14,7 @@
 # KIND, either express or implied.  See the License for the
 # specific language governing permissions and limitations
 # under the License.
-"""Generic engine for the ``T.ptx`` table-driven PTX dialect prototype.
+"""Generic engine for the ``T.ptx`` table-driven PTX dialect.
 
 One engine interprets every :class:`~.table.InstructionEntry` — there is no
 per-instruction generated or hand-written code:
@@ -510,7 +510,7 @@ def _narrow(cands, token):
 
 
 class PTXNamespace:
-    """``T.ptx`` — table-driven PTX instruction namespace (prototype)."""
+    """``T.ptx`` — table-driven PTX instruction namespace."""
 
     def __init__(self, table=None):
         if table is None:

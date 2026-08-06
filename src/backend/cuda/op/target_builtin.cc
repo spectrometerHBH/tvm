@@ -86,7 +86,7 @@ OpRegEntry::RegisterOrGet("tirx.s_tir.ldg32")
     .set_attr<TDeviceIntrinsicNamespace>("TDeviceIntrinsicNamespace", ffi::String("s_tir"), 10);
 
 // Raw legacy cp.async form emitted by InjectPTXAsyncCopy (and round-tripped by
-// the T.ptx.cp_async 6-arg surface). It carries the element dtype in Call.dtype
+// the T.s_tir.cp_async_raw.legacy 6-arg surface). It carries the element dtype in Call.dtype
 // and prints it dtype-first; user-issued copies go through T.ptx instead.
 OpRegEntry::RegisterOrGet("tirx.s_tir.cp_async_raw")
     .set_name()

@@ -14,7 +14,7 @@
 # KIND, either express or implied.  See the License for the
 # specific language governing permissions and limitations
 # under the License.
-"""Table-driven PTX dialect prototype (``T.ptx``).
+"""Table-driven PTX dialect (``T.ptx``).
 
 One table (:mod:`.table`), one generic engine (:mod:`.engine`), thin
 generators (:mod:`.gen_helpers``/``gen_stubs`, :mod:`.gen_coverage`). Importing this package

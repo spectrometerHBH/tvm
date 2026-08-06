@@ -14,7 +14,7 @@
 # KIND, either express or implied.  See the License for the
 # specific language governing permissions and limitations
 # under the License.
-"""Instruction table for the ``T.ptx`` table-driven PTX dialect prototype.
+"""Instruction table for the ``T.ptx`` table-driven PTX dialect.
 
 Pure data + pure functions: this module deliberately imports nothing from
 ``tvm`` so the thin generators (``gen_stubs``, ``gen_coverage``,

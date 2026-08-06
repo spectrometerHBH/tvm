@@ -14,7 +14,7 @@
 # KIND, either express or implied.  See the License for the
 # specific language governing permissions and limitations
 # under the License.
-"""Tests for the table-driven PTX dialect prototype (``T.ptx``)."""
+"""Tests for the table-driven PTX dialect (``T.ptx``)."""
 
 import os
 import re

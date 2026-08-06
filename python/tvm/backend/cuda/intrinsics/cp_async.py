@@ -17,7 +17,7 @@
 # pylint: disable=redefined-builtin, invalid-name, too-many-arguments, too-many-locals, too-many-positional-arguments
 """The raw cp.async op behind ``InjectPTXAsyncCopy`` (everything else is ptx).
 
-``tirx.ptx.cp_async_raw`` is constructed by the C++ pass with explicit
+``tirx.s_tir.cp_async_raw`` is constructed by the C++ pass with explicit
 offsets; its codegen emits the scaling helper inline. All user-issued
 cp.async / cp.async.bulk copies go through ``T.ptx`` instead.
 """
