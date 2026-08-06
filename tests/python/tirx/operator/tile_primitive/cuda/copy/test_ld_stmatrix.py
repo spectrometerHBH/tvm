@@ -351,11 +351,9 @@ def test_ldstmatrix(scope, trans, direction, num):
 
 
 # ---------------------------------------------------------------------------
-# Swizzled-S round-trip. Verifies the ldstmatrix dispatch's swizzle fast
-# path (when recognized) and slow path (fallback) both produce correct
-# A == B. The 128b swizzle (p=sw=at=3) is the most common fp16 SMEM
-# swizzle; with it the dispatch's per-tile S offset goes through
-# ``swizzle.apply`` (or its precomputed signed-stride lowering) per mm.
+# Swizzled-S round-trip. The 128b swizzle (p=sw=at=3) is the most common
+# fp16 SMEM swizzle; the dispatch passes the complete structured layout to
+# ComposeLayout for each matrix address.
 # ---------------------------------------------------------------------------
 @pytest.mark.parametrize("scope", ["warp", "warpgroup", "cta"])
 @pytest.mark.parametrize("trans", [False, True])
@@ -386,22 +384,10 @@ def test_ldstmatrix_swizzle(scope, trans, direction, num):
 
 
 # ---------------------------------------------------------------------------
-# Multi-iter outer (m_outer > 1) fast-path round-trip. The existing 128b
-# swizzle tests above all have m_outer = 1 (base_off only). These two cover
-# the non-trivial outer iter case:
-#
-#   pow2 case (32x64):  R outermost mem ext = 4 (pow2).
-#                       m_outer iters on S 6D seg 3 = [(4, 512), (2, 32)].
-#                       Binary split → bjs [7, 6, 2]. All BitIter; each
-#                       shows up as a per-iter XOR constant.
-#
-#   linear case (40x64): R outermost mem ext = 5 (non-pow2). Stride lands
-#                       the outermost S 6D seg 3 iter at (5, 512). 512 is
-#                       exactly 2^(p+at+sw) = swizzle period → Case 1.D pure,
-#                       so the LinearIter relaxation accepts it.
-#                       outer_iters = [LinearIter(5, 512), BitIter(2, ...)].
-#                       the LinearIter contributes ``c * 512`` per mm
-#                       additively; the inner BitIter is the XOR constant.
+# Multi-iter outer (m_outer > 1) round-trip. The existing 128b swizzle tests
+# above all have m_outer = 1. These two cover power-of-two and non-power-of-two
+# outer extents while checking that the emitted matrix addresses use the
+# structured atom-phase form instead of a full address swizzle.
 # ---------------------------------------------------------------------------
 def _build_multi_iter_kernel(outer_ext: int):
     """Warp + R=(outer_ext, 8, 2, 4, 4, 2):(16, 4@laneid, 8, 2, 1@laneid, 1)
@@ -443,22 +429,18 @@ def _build_multi_iter_kernel(outer_ext: int):
 @pytest.mark.gpu
 @pytest.mark.skipif(not env.has_cuda_compute(9), reason="need cuda compute >= 9.0")
 def test_ldstmatrix_swizzle_multi_iter_pow2():
-    """32x64 fp16 warp; outer m_outer split into multiple BitIters (no
-    LinearIter). Fast path must fire in XOR form: swizzled base computed
-    once + per-iter XOR-constant offsets, no signed_strides buffer."""
-    import re
+    """32x64 fp16 warp with a power-of-two outer extent."""
 
     kernel, shape = _build_multi_iter_kernel(outer_ext=4)
     compiled, src = _compile_src(kernel)
     assert "ldmatrix.sync.aligned.m8n8.x4.shared.b16" in src
 
-    # XOR-form fingerprint: swizzle-apply base (shift-and-56 splice) plus
-    # per-iter ``^ CONST`` offsets; no additive signed_strides bit-select.
-    assert "& 56) >> 3" in src, "expected the swizzled base apply"
-    assert re.findall(r"\^ \d+\)", src), "expected per-iter XOR-constant offsets"
-    assert not re.findall(r"& 1\) \* \w+\[", src), (
-        "found additive signed_strides bit-select '(bit & 1) * v_<n>[' — should be gone"
-    )
+    address_lines = [
+        line for line in src.splitlines() if "smem_off_ptr" in line and "[0] =" in line
+    ]
+    assert len(address_lines) == 8
+    assert all("& 7) << 3" in line for line in address_lines)
+    assert all("& 56) >> 3" not in line for line in address_lines)
 
     n_elem = 1
     for e in shape:
@@ -519,23 +501,18 @@ def test_ldstmatrix_tcgen05_warpgroup_atom_emits_ldmatrix():
 @pytest.mark.gpu
 @pytest.mark.skipif(not env.has_cuda_compute(9), reason="need cuda compute >= 9.0")
 def test_ldstmatrix_swizzle_multi_iter_linear():
-    """40x64 fp16 warp; outer ext=5 is non-pow2 but stride lands on swizzle
-    period (Case 1.D pure) so the LinearIter relaxation fires. XOR form:
-    outer LinearIter contributes ``c * 512`` per mm as an additive term,
-    inner BitIter shows up as a per-iter XOR constant."""
-    import re
+    """40x64 fp16 warp with a non-power-of-two outer extent."""
 
     kernel, shape = _build_multi_iter_kernel(outer_ext=5)
     compiled, src = _compile_src(kernel)
     assert "ldmatrix.sync.aligned.m8n8.x4.shared.b16" in src
 
-    # XOR-form fingerprint: swizzled base apply once, additive LinearIter
-    # term, XOR-constant for the inner BitIter; no additive buffer form.
-    assert "& 56) >> 3" in src, "expected the swizzled base apply"
-    assert re.findall(r"\^ \d+\)", src), "expected per-iter XOR-constant offsets"
-    assert not re.findall(r"& 1\) \* \w+\[", src), (
-        "found additive signed_strides bit-select '(bit & 1) * v_<n>[' — should be gone"
-    )
+    address_lines = [
+        line for line in src.splitlines() if "smem_off_ptr" in line and "[0] =" in line
+    ]
+    assert len(address_lines) == 10
+    assert all("& 7) << 3" in line for line in address_lines)
+    assert all("& 56) >> 3" not in line for line in address_lines)
 
     n_elem = 1
     for e in shape:
