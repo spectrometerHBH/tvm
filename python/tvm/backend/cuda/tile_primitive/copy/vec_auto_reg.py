@@ -545,6 +545,10 @@ def _emit_reg(op_call: TilePrimitiveCall, sctx: DispatchContext) -> PrimFunc:
     s_apply_layout, thread_coords, s_apply_shape = _build_s_apply_layout(
         s_buf.layout, r_p, s_p, outer, placeholders, sctx
     )
+    # A plain TileLayout is additive, so keep its loop-invariant thread base
+    # outside the serial copy loop. A real swizzle must still apply to the
+    # complete base + outer coordinate inside each iteration.
+    has_swizzle = isinstance(s_apply_layout, ComposeLayout) and int(s_apply_layout.swizzle_len) > 0
 
     # R-side base offset from slicing (e.g. ``R[i*8:i*8+8]`` ⇒ ``i*8``), from
     # ``r_p.offset``; sum across all axes on R's local stride-1 storage.
@@ -574,15 +578,22 @@ def _emit_reg(op_call: TilePrimitiveCall, sctx: DispatchContext) -> PrimFunc:
 
     @T.prim_func(check_well_formed=False)
     def impl():
+        if not has_swizzle:
+            s_base = _apply_s_layout(
+                s_apply_layout, thread_coords, 0, s_apply_shape, placeholders, sctx
+            )
         r_local = r_buf.local(*per_thread_r_shape)
         # Keep a serial TIR loop and let ptxas unroll; explicit ``T.unroll``
         # replicates per-iter scratch arrays and pressures registers.
         for f in range(total_outer):
-            _ds, dr = _outer_const_offsets(outer, f)
-            s_off = _apply_s_layout(
-                s_apply_layout, thread_coords, f, s_apply_shape, placeholders, sctx
-            )
-            s_ptr = _ptr_off(s_buf.ptr_to(s_zero_indices), s_off)
+            ds, dr = _outer_const_offsets(outer, f)
+            if has_swizzle:
+                s_off = _apply_s_layout(
+                    s_apply_layout, thread_coords, f, s_apply_shape, placeholders, sctx
+                )
+                s_ptr = _ptr_off(s_buf.ptr_to(s_zero_indices), s_off)
+            else:
+                s_ptr = _ptr_off(s_buf.ptr_to(s_zero_indices), s_base + ds)
             r_ptr = _ptr_off(r_local.ptr_to([0]), r_off_base + dr)
             if r_is_src:
                 T.ptx.st(s_ptr, src=r_ptr, space=space, vec=vec, ptx_type=ptx_type)

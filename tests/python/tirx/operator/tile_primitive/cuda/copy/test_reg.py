@@ -398,6 +398,45 @@ def test_vec_auto_reg_honors_cache_nc():
 
 
 @pytest.mark.gpu
+def test_reg_copy_linear_shared_hoists_thread_base():
+    """A linear R→S copy must keep its per-thread base outside the hot loop."""
+    from tvm.tirx.layout import wg_local_layout
+
+    n_threads, width = 128, 64
+    shape = (n_threads, width)
+    linear_layout = TileLayout(S[shape])
+
+    @T.prim_func
+    def kernel(A_ptr: T.handle) -> None:
+        A = T.match_buffer(A_ptr, shape, "float16", layout=linear_layout)
+        T.device_entry()
+        T.cta_id([1])
+        T.thread_id([n_threads])
+        tid = T.thread_id_in_wg([n_threads])
+        reg = T.alloc_buffer(shape, "float16", scope="local", layout=wg_local_layout(width))
+        smem = T.alloc_buffer(shape, "float16", scope="shared", layout=linear_layout)
+
+        reg_local = reg.local(width)
+        for i in T.serial(width):
+            reg_local[i] = A[tid, i]
+        Tx.wg.copy(smem, reg)
+        T.cuda.cta_sync()
+        T.evaluate(smem[tid, 0])
+
+    target = tvm.target.Target("cuda")
+    with target:
+        ex = tvm.compile(tvm.IRModule({"main": kernel}), target=target, tir_pipeline="tirx")
+        src = ex.mod.imports[0].inspect_source()
+
+    base_assignment = "s_base_ptr[0] ="
+    loop = "for (int f = 0; f < 8; ++f)"
+    assert base_assignment in src and loop in src
+    assert src.index(base_assignment) < src.index(loop)
+    assert "(s_base_ptr[0] + ds_ptr[0])" in src
+    assert "s_off_ptr" not in src
+
+
+@pytest.mark.gpu
 def test_reg_copy_wg_local_to_swizzled_shared_uses_structured_compose_apply():
     """Regression: R→S copy where R has a ``wg_local_layout`` (thread iter
     ``1 @ tid_in_wg``) must pick the widest vec PTX ``st.shared.v4`` and lower
