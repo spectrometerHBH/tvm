@@ -498,26 +498,13 @@ def test_layout_permute_copy_preserves_smem_strides():
 
 
 # ----------------------------------------------------------------------------
-# Fast-path firing test (positive). Pairs with the var_bounds wiring inside
-# ``vec_auto_gmem_smem._emit_gmem_smem``.
-#
-# Setup: warp-scope 32x64 fp16 G2S/S2G with 128b swizzled SMEM. The outer
-# iter stride is ``thread_cnt * vec_len = 32 * 8 = 256``, which puts the
-# binary-split bj's at {5, 6, 7} — well above the swizzle XOR region (so
-# Case 1.D, signed_stride = +T). The (C1) analyzer check
-# ``bit_bj(s_off // C) == 0`` needs the placeholder var bounded to
-# laneid ∈ [0, 32); the dispatch passes ``var_bounds`` so it can discharge,
-# recognizer accepts, and emit lowers to the base-once + XOR-constant form.
+# Structured ComposeLayout lowering test. The transformed S TileLayout is
+# recomposed with the original swizzle and applied directly to (f, tid, 0).
 # ----------------------------------------------------------------------------
 @pytest.mark.gpu
 @pytest.mark.skipif(not env.has_cuda_compute(9), reason="need cuda compute >= 9.0")
-def test_gmem_smem_swizzle_fast_path_fires_with_var_bounds():
-    """Warp-scope 32x64 fp16 G2S/S2G with 128b swizzled SMEM. Fast path
-    must fire in XOR form: per-thread swizzled base computed once, per-iter
-    bit-select terms with compile-time constants
-    (``((f >> M) & 1) * CONST``), no per-iter ``swizzle.apply`` XOR splice
-    in the hot path."""
-    import re
+def test_gmem_smem_swizzle_uses_structured_compose_apply():
+    """The hot copy loops use the structured P/XOR-low/ADD-high address form."""
 
     swizzle = ComposeLayout(3, 3, 3, TileLayout(S[(512,)]))
     shape = (32, 64)
@@ -549,21 +536,19 @@ def test_gmem_smem_swizzle_fast_path_fires_with_var_bounds():
         ex = tvm.compile(mod, target=target, tir_pipeline="tirx")
         src = ex.mod.imports[0].inspect_source()
 
-    # XOR-form fingerprint: bit-select * compile-time constant (not a
-    # signed_strides buffer load), with the swizzled per-thread base
-    # computed once.
-    bitsel = re.findall(r"& 1\) \* \d+\)", src)
-    assert bitsel, (
-        "expected fast-path ``(bit & 1) * CONST`` terms; if missing, "
-        "var_bounds wiring may have regressed"
+    s_off_lines = [
+        line
+        for line in src.splitlines()
+        if line.strip().startswith("s_off_ptr") and "[0] =" in line
+    ]
+    assert len(s_off_lines) == 2, "expected one structured S offset in each copy direction"
+    assert all("^" in line for line in s_off_lines)
+    assert all("/" not in line and "%" not in line for line in s_off_lines), (
+        "structured hot-loop offsets must not contain full quotient/mod decomposition"
     )
-    assert not re.findall(r"& 1\) \* \w+\[", src), (
-        "found signed_strides-style buffer bit-select ``(bit & 1) * v_<n>[i]`` "
-        "— the additive path should be gone"
+    assert all("* 256" in line for line in s_off_lines), (
+        "the atom-aligned outer contribution must remain a direct add"
     )
-    assert "(threadIdx.x) ^ (((((int)threadIdx.x) & 56) >> 3)" in src or (
-        "(int)threadIdx.x) & 56) >> 3" in src
-    ), "expected the per-thread swizzled base to be computed once"
 
     # Round-trip correctness.
     A_np = np.arange(32 * 64, dtype="float16").reshape(shape)

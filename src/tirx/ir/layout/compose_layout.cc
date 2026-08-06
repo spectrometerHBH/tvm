@@ -16,6 +16,7 @@
  * specific language governing permissions and limitations
  * under the License.
  */
+#include <algorithm>
 #include <limits>
 #include <optional>
 #include <vector>
@@ -205,7 +206,36 @@ ffi::Map<ffi::String, PrimExpr> ApplyStructured(const ComposeLayoutNode* layout,
     const int64_t* extent = as_const_int(simplified_extent);
     if (extent == nullptr || *extent <= 0) return fallback();
     int64_t term_max;
-    if (!MulWithoutOverflow(*extent - 1, *stride, &term_max) || !add_low(term, term_max)) {
+    if (!MulWithoutOverflow(*extent - 1, *stride, &term_max)) return fallback();
+
+    // A single structured coordinate may span multiple atoms even when its
+    // stride is smaller than one atom.  If the stride divides the atom, split
+    // that term exactly instead of dividing the complete address:
+    //
+    //   coord * stride = (coord / n) * atom + (coord % n) * stride,
+    //   n = atom / stride.
+    //
+    // The first term is atom-aligned and the second is independently bounded
+    // below one atom, so it can continue through the existing carry proof.
+    if (term_max >= atom && *stride > 0 && *stride < atom && atom % *stride == 0) {
+      int64_t n = atom / *stride;
+      PrimExpr n_expr = IntImm(coord[i].ty(), n);
+      PrimExpr high_coord = analyzer->Simplify(floordiv(coord[i], n_expr));
+      PrimExpr low_coord = analyzer->Simplify(floormod(coord[i], n_expr));
+      PrimExpr high_term = analyzer->Simplify(high_coord * IntImm(high_coord.ty(), atom));
+      PrimExpr low_term = analyzer->Simplify(low_coord * iter->stride);
+      add_high(high_term, high_coord);
+
+      int64_t low_extent = std::min(*extent, n);
+      int64_t split_low_max;
+      if (!MulWithoutOverflow(low_extent - 1, *stride, &split_low_max) ||
+          !add_low(low_term, split_low_max)) {
+        return fallback();
+      }
+      continue;
+    }
+
+    if (!add_low(term, term_max)) {
       return fallback();
     }
   }
