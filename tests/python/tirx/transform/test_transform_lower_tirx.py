@@ -545,15 +545,26 @@ def test_lower_layout():
         A_smem = T.alloc_shared((4096,), "float16", layout=None)
         for tile in range(4):
             for vec in T.vectorized(8):
+                # The swizzle lowers to its composition bindings rather than a
+                # folded closed form: compose_m is the flat element index, so
+                # compose_m // 8 is the row and compose_m % 8 the lane, which
+                # substituted back gives the same address.
+                compose_m = T.int32()
+                compose_q = T.int32()
                 A_smem[
-                    T.shift_left(
-                        T.bitwise_xor(
-                            tile * 128 + threadIdx_x,
-                            T.shift_right(T.bitwise_and(tile * 128 + threadIdx_x, 56), 3),
+                    T.Let(
+                        T.Let(
+                            T.shift_left(
+                                T.bitwise_xor(
+                                    compose_q, T.shift_right(T.bitwise_and(compose_q, 56), 3)
+                                ),
+                                3,
+                            )
+                            + compose_m % 8,
+                            where={compose_q: compose_m // 8},
                         ),
-                        3,
+                        where={compose_m: tile * 1024 + threadIdx_x * 8 + vec},
                     )
-                    + vec
                 ] = A_1[tile * 1024 + threadIdx_x * 8 + vec]
 
     compare(before, after, LowerTIRx)
