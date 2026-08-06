@@ -87,7 +87,7 @@ OpRegEntry::RegisterOrGet("tirx.s_tir.ldg32")
 
 // Raw legacy cp.async form emitted by InjectPTXAsyncCopy (and round-tripped by
 // the T.ptx.cp_async 6-arg surface). It carries the element dtype in Call.dtype
-// and prints it dtype-first; user-issued copies go through T.ptxd instead.
+// and prints it dtype-first; user-issued copies go through T.ptx instead.
 OpRegEntry::RegisterOrGet("tirx.s_tir.cp_async_raw")
     .set_name()
     .set_attr<TCallEffectKind>("TCallEffectKind", static_cast<int64_t>(CallEffectKind::kOpaque))

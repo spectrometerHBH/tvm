@@ -86,8 +86,8 @@ shared, then commits and waits before reading it back (from ``test_ldgsts.py``):
         T.device_entry(); T.cta_id([1]); T.warp_id([4]); T.lane_id([32]); tid = T.thread_id([128])
         A_smem = T.alloc_buffer(shape, dtype, scope="shared", layout=s_layout)
         Tx.cta.copy_async(A_smem[full], A[full], dispatch="ldgsts")   # async global -> shared
-        T.ptxd.cp_async.commit_group()                                # caller commits ...
-        T.ptxd.cp_async.wait_group()                                  # ... and waits
+        T.ptx.cp_async.commit_group()                                # caller commits ...
+        T.ptx.cp_async.wait_group()                                  # ... and waits
         T.cuda.cta_sync()
         Tx.cta.copy(B[full], A_smem[full])
 

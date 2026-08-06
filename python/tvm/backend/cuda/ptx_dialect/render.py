@@ -14,7 +14,7 @@
 # KIND, either express or implied.  See the License for the
 # specific language governing permissions and limitations
 # under the License.
-"""Pure CUDA-helper rendering for the ptxd dialect.
+"""Pure CUDA-helper rendering for the ptx dialect.
 
 tvm-free (imports only :mod:`.table`), so it is shared by the codegen engine
 and by :mod:`.gen_helpers`, which dumps the generated helpers for humans to

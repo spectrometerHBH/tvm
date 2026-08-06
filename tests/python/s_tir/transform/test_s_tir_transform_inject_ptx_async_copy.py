@@ -77,8 +77,8 @@ def generate_global_to_shared_vectorized_copy(dtype, vector_size):
                 for j in T.vectorized(vector_size):
                     A_shared[tx, i * vector_size_expr + j] = A[tx, i * vector_size_expr + j]
 
-            T.evaluate(T.ptxd.cp.async_.commit_group())
-            T.evaluate(T.ptxd.cp.async_.wait_group(0))
+            T.evaluate(T.ptx.cp.async_.commit_group())
+            T.evaluate(T.ptx.cp.async_.wait_group(0))
 
             for i in range(128):
                 B[tx, i] = A_shared[tx, i]
@@ -104,8 +104,8 @@ def ptx_global_to_shared_copy_fp32x1(
         for i in T.serial(128):
             A_shared[tx, i] = A[tx, i]
 
-        T.evaluate(T.ptxd.cp.async_.commit_group())
-        T.evaluate(T.ptxd.cp.async_.wait_group(0))
+        T.evaluate(T.ptx.cp.async_.commit_group())
+        T.evaluate(T.ptx.cp.async_.wait_group(0))
 
         for i in range(128):
             B[tx, i] = A_shared[tx, i]
@@ -134,8 +134,8 @@ def ptx_global_to_shared_dyn_copy_fp16x8(
                 A_shared[tx, i * 8 + j] = A[tx, i * 8 + j]
                 B_shared[tx, i * 8 + j] = B[tx, i * 8 + j]
 
-        T.evaluate(T.ptxd.cp.async_.commit_group())
-        T.evaluate(T.ptxd.cp.async_.wait_group(0))
+        T.evaluate(T.ptx.cp.async_.commit_group())
+        T.evaluate(T.ptx.cp.async_.wait_group(0))
 
         for i in range(128):
             C[tx, i] = A_shared[tx, i] + B_shared[tx, i]
@@ -907,8 +907,8 @@ def test_multiplication_nodes_are_inlined():
                 A_shared[T.Ramp(tx * T.int64(128) + cse_v1 * T.int64(8), T.int64(1), 8)] = (
                     A_flattened[T.Ramp(tx * T.int64(128) + cse_v1 * T.int64(8), T.int64(1), 8)]
                 )
-            T.ptxd.cp.async_.commit_group()
-            T.ptxd.cp.async_.wait_group(0)
+            T.ptx.cp.async_.commit_group()
+            T.ptx.cp.async_.wait_group(0)
 
     @I.ir_module(s_tir=True)
     class Expected:
@@ -927,8 +927,8 @@ def test_multiplication_nodes_are_inlined():
                     tx * T.int64(128) + cse_v1 * T.int64(8),
                     16,
                 )
-            T.ptxd.cp.async_.commit_group()
-            T.ptxd.cp.async_.wait_group(0)
+            T.ptx.cp.async_.commit_group()
+            T.ptx.cp.async_.wait_group(0)
 
     After = tvm.s_tir.transform.InjectPTXAsyncCopy()(Before)
     tvm.ir.assert_structural_equal(After, Expected)

@@ -14,7 +14,7 @@
 # KIND, either express or implied.  See the License for the
 # specific language governing permissions and limitations
 # under the License.
-"""The ptxd cvt entries: one case per registered syntax line of ISA 9.7.9.22."""
+"""The ptx cvt entries: one case per registered syntax line of ISA 9.7.9.22."""
 
 import pytest
 
@@ -251,7 +251,7 @@ def test_cvt_form_renders_its_instruction(entry_name, slots, instruction):
     # single-instruction invariant's job, not this test's.
     assert f"{instruction} " in source
     assert helper.startswith("tvm_builtin_ptxd_cvt_")
-    # Every ptxd helper is void: the destination is an operand, not a return.
+    # Every ptx helper is void: the destination is an operand, not a return.
     assert source.startswith("__forceinline__ __device__ void ")
 
 

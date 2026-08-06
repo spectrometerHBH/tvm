@@ -375,7 +375,7 @@ def test_cuda_gemm_mma_lowers_to_mma_sync(dtype):
     the registers laid out in the fixed PTX fragment order."""
     script = _lower(_build_gemm(alpha=1.0, beta=0.0, dtype=dtype))["main"].script()
 
-    assert "T.ptxd.mma(" in script
+    assert "T.ptx.mma(" in script
     assert "m16n8k16" in script
     # beta == 0 clears the accumulator before the K loop.
     assert "T.float32(0" in script
@@ -397,7 +397,7 @@ def test_cuda_gemm_mma_accumulates_c_when_beta_one():
     """beta=1: the accumulator is initialized by copying C instead of zeroing."""
     script = _lower(_build_gemm(alpha=1.0, beta=1.0))["main"].script()
 
-    assert "T.ptxd.mma(" in script
+    assert "T.ptx.mma(" in script
     assert "m16n8k16" in script
     # The init reads C into D; nothing is zeroed.
     assert "c_local[" in script
@@ -611,7 +611,7 @@ def test_cuda_gemm_mma_lowers_tiled(Mt, Nt, Kt, kinst):
     (an extent-1 high-K register group must not be rejected as a thread axis).
     """
     script = _lower(_build_tiled(Mt, Nt, Kt, kinst))["main"].script()
-    assert "T.ptxd.mma(" in script
+    assert "T.ptx.mma(" in script
     assert f"m16n8k{kinst}" in script
 
 
@@ -654,7 +654,7 @@ def test_cuda_gemm_mma_lowers_transpose(transpose_A, transpose_B):
     """All four A/B orientations dispatch to the same m16n8k16. transpose only
     describes the input's logical orientation; the .row.col mma is unchanged."""
     script = _lower(_build_transpose(transpose_A, transpose_B))["main"].script()
-    assert "T.ptxd.mma(" in script
+    assert "T.ptx.mma(" in script
     assert "m16n8k16" in script
 
 

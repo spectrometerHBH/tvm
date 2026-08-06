@@ -33,7 +33,7 @@ def _get_source(func: tvm.tirx.PrimFunc) -> str:
 
 
 def test_ptx_cp_async_bulk_s2c_codegen():
-    """Test that the ptxd cp.async.bulk s2c chain emits the correct PTX instruction."""
+    """Test that the ptx cp.async.bulk s2c chain emits the correct PTX instruction."""
 
     # fmt: off
     @T.prim_func
@@ -46,11 +46,11 @@ def test_ptx_cp_async_bulk_s2c_codegen():
             A_smem[i] = A[i]
                 # Use the raw PTX instruction directly
         mapped = T.alloc_local([2], "uint64")
-        T.ptxd.mapa.u64(mapped[0], A_smem.ptr_to([0]), T.uint32(1))
-        T.ptxd.mapa.u64(mapped[1], A_smem.ptr_to([0]), T.uint32(1))
+        T.ptx.mapa.u64(mapped[0], A_smem.ptr_to([0]), T.uint32(1))
+        T.ptx.mapa.u64(mapped[1], A_smem.ptr_to([0]), T.uint32(1))
         dst_ptr = mapped[0]
         mbar_ptr = mapped[1]
-        T.ptxd["cp.async.bulk.shared::cluster.shared::cta.mbarrier::complete_tx::bytes"](
+        T.ptx["cp.async.bulk.shared::cluster.shared::cta.mbarrier::complete_tx::bytes"](
             T.cast(dst_ptr, "uint32"),
             A_smem.ptr_to([0]),
             T.uint32(256),  # 128 elements * 2 bytes
@@ -76,11 +76,11 @@ def test_ptx_cp_async_bulk_s2c_codegen_address_conversion():
         for i in T.serial(64):
             A_smem[i] = A[i]
         mapped = T.alloc_local([2], "uint64")
-        T.ptxd.mapa.u64(mapped[0], A_smem.ptr_to([0]), T.uint32(0))
-        T.ptxd.mapa.u64(mapped[1], A_smem.ptr_to([0]), T.uint32(0))
+        T.ptx.mapa.u64(mapped[0], A_smem.ptr_to([0]), T.uint32(0))
+        T.ptx.mapa.u64(mapped[1], A_smem.ptr_to([0]), T.uint32(0))
         dst_ptr = mapped[0]
         mbar_ptr = mapped[1]
-        T.ptxd["cp.async.bulk.shared::cluster.shared::cta.mbarrier::complete_tx::bytes"](
+        T.ptx["cp.async.bulk.shared::cluster.shared::cta.mbarrier::complete_tx::bytes"](
             T.cast(dst_ptr, "uint32"),
             A_smem.ptr_to([0]),
             T.uint32(256),  # 64 * 4 bytes
@@ -105,7 +105,7 @@ def test_mapa_pointer_bind_codegen():
         tid = T.thread_id([1])
         mbar = T.alloc_shared([2], "uint64")
         mapped = T.alloc_local([1], "uint64")
-        T.ptxd.mapa.u64(mapped[0], mbar.ptr_to([0]), T.uint32(0))
+        T.ptx.mapa.u64(mapped[0], mbar.ptr_to([0]), T.uint32(0))
         remote_ptr = T.reinterpret(ptr_ty, mapped[0])
         remote_mbar = T.decl_buffer([1], "uint64", data=remote_ptr, scope="shared")
         A[0] = remote_mbar[0]
