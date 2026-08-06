@@ -23,15 +23,14 @@ Regenerate:
 from typing import Any
 
 class _Chain_add:
-    """`add` — rnd∈{rn,rz,rm,rp} (opt); ftz∈{ftz} (opt); sat∈{sat} (opt); type∈{f32,f64,f32x2};
-    srctype∈{f16,bf16} (opt) — Which qualifiers each add/sub/mul/fma syntax line allows (PTX
-    ISA 9.7.3.{3,4,5,6}, 9.7.5).      Same-precision lines:  op{.rnd}{.ftz}{.sat}.f32 |
-    op{.rnd}{.ftz}.f32x2 | op{.rnd}.f64     Mixed-precision lines: op{.rnd}{.sat}.f32.atype
-    (.atype = .f16 | .bf16)
+    """`add` — 2 entries sharing this mnemonic; PTX puts their difference in the operand list,
+    so the call selects one. Shapes: (d, a, b)
     """
 
     bf16: _Chain_add
+    bf16x2: _Chain_add
     f16: _Chain_add
+    f16x2: _Chain_add
     f32: _Chain_add
     f32x2: _Chain_add
     f64: _Chain_add
@@ -41,7 +40,7 @@ class _Chain_add:
     rp: _Chain_add
     rz: _Chain_add
     sat: _Chain_add
-    def __call__(self, d: Any, a: Any, b: Any, *args: Any) -> None: ...
+    def __call__(self, *args: Any) -> None: ...
 
 class _Chain_atom:
     """`atom` — sem∈{relaxed,acquire,release,acq_rel} (opt); scope∈{cta,cluster,gpu,sys} (opt);
@@ -534,13 +533,14 @@ class _Chain_mov:
     def __call__(self, *args: Any) -> None: ...
 
 class _Chain_mul:
-    """`mul` — rnd∈{rn,rz,rm,rp} (opt); ftz∈{ftz} (opt); sat∈{sat} (opt); type∈{f32,f64,f32x2}
-    — Which qualifiers each add/sub/mul/fma syntax line allows (PTX ISA 9.7.3.{3,4,5,6},
-    9.7.5).      Same-precision lines:  op{.rnd}{.ftz}{.sat}.f32 | op{.rnd}{.ftz}.f32x2 |
-    op{.rnd}.f64     Mixed-precision lines: op{.rnd}{.sat}.f32.atype  (.atype = .f16 |
-    .bf16)
+    """`mul` — 2 entries sharing this mnemonic; PTX puts their difference in the operand list,
+    so the call selects one. Shapes: (d, a, b)
     """
 
+    bf16: _Chain_mul
+    bf16x2: _Chain_mul
+    f16: _Chain_mul
+    f16x2: _Chain_mul
     f32: _Chain_mul
     f32x2: _Chain_mul
     f64: _Chain_mul
@@ -550,7 +550,17 @@ class _Chain_mul:
     rp: _Chain_mul
     rz: _Chain_mul
     sat: _Chain_mul
-    def __call__(self, d: Any, a: Any, b: Any, *args: Any) -> None: ...
+    def __call__(self, *args: Any) -> None: ...
+
+class _Chain_neg:
+    """`neg` — ftz∈{ftz} (opt); type∈{f32,f64} — `neg{.ftz}.f32 d, a;` and `neg.f64 d, a;` (ISA
+    9.7.3.10) -- the f64     line spells no `.ftz`.
+    """
+
+    f32: _Chain_neg
+    f64: _Chain_neg
+    ftz: _Chain_neg
+    def __call__(self, d: Any, a: Any, *args: Any) -> None: ...
 
 class _Chain_prefetch:
     """`prefetch` — space∈{global,local,const,param} (opt); level∈{L1,L2} (opt);
@@ -715,15 +725,14 @@ class _Chain_stmatrix:
     def __call__(self, *args: Any, pred: Any = None) -> None: ...
 
 class _Chain_sub:
-    """`sub` — rnd∈{rn,rz,rm,rp} (opt); ftz∈{ftz} (opt); sat∈{sat} (opt); type∈{f32,f64,f32x2};
-    srctype∈{f16,bf16} (opt) — Which qualifiers each add/sub/mul/fma syntax line allows (PTX
-    ISA 9.7.3.{3,4,5,6}, 9.7.5).      Same-precision lines:  op{.rnd}{.ftz}{.sat}.f32 |
-    op{.rnd}{.ftz}.f32x2 | op{.rnd}.f64     Mixed-precision lines: op{.rnd}{.sat}.f32.atype
-    (.atype = .f16 | .bf16)
+    """`sub` — 2 entries sharing this mnemonic; PTX puts their difference in the operand list,
+    so the call selects one. Shapes: (d, a, b)
     """
 
     bf16: _Chain_sub
+    bf16x2: _Chain_sub
     f16: _Chain_sub
+    f16x2: _Chain_sub
     f32: _Chain_sub
     f32x2: _Chain_sub
     f64: _Chain_sub
@@ -733,7 +742,7 @@ class _Chain_sub:
     rp: _Chain_sub
     rz: _Chain_sub
     sat: _Chain_sub
-    def __call__(self, d: Any, a: Any, b: Any, *args: Any) -> None: ...
+    def __call__(self, *args: Any) -> None: ...
 
 class _Chain_tcgen05:
     """`tcgen05` — 16 entries sharing this mnemonic; PTX puts their difference in the operand
@@ -959,6 +968,7 @@ class _PTXD:
     mma: _Chain_mma
     mov: _Chain_mov
     mul: _Chain_mul
+    neg: _Chain_neg
     prefetch: _Chain_prefetch
     rcp: _Chain_rcp
     red: _Chain_red

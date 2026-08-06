@@ -775,6 +775,31 @@ def _check_minmax3(m):
     return None
 
 
+def _check_half_arith(m):
+    """The half-precision add/sub/mul lines, ISA 9.7.4.{1,2,3}.
+
+        sub{.rnd}{.ftz}{.sat}.f16   d, a, b;
+        sub{.rnd}{.ftz}{.sat}.f16x2 d, a, b;
+        sub{.rnd}.bf16   d, a, b;
+        sub{.rnd}.bf16x2 d, a, b;
+
+    Two divergences from the single/double lines, both visible above: `.rnd`
+    is `{.rn}` alone rather than _FRND, and the bf16 lines carry neither
+    `.ftz` nor `.sat`.
+    """
+    if m["type"].startswith("bf16") and (m["ftz"] or m["sat"]):
+        return f".{m['type']} takes no .ftz or .sat"
+    return None
+
+
+def _check_neg(m):
+    """`neg{.ftz}.f32 d, a;` and `neg.f64 d, a;` (ISA 9.7.3.10) -- the f64
+    line spells no `.ftz`."""
+    if m["ftz"] and m["type"] != "f32":
+        return ".ftz appears only on the .f32 line"
+    return None
+
+
 def _check_farith(m):
     """Which qualifiers each add/sub/mul/fma syntax line allows (PTX ISA 9.7.3.{3,4,5,6}, 9.7.5).
 
@@ -2141,13 +2166,46 @@ _ENTRIES = [
         # `mul` is the one line with no mixed-precision form (ISA 9.7.5).
         for name, mixed in (("add", True), ("sub", True), ("mul", False))
     ],
+    # Half-precision add/sub/mul (PTX ISA 9.7.4.{1,2,3}). Same operand shape as
+    # the single/double lines above, so they differ only in their slot domains:
+    #   sub{.rnd}{.ftz}{.sat}.f16 / .f16x2   sub{.rnd}.bf16 / .bf16x2   .rnd = {.rn}
+    *[
+        InstructionEntry(
+            name=f"{name}_half",
+            mnemonic=name,
+            slots=(
+                ModifierSlot("rnd", ("rn",), optional=True),
+                ModifierSlot("ftz", ("ftz",), optional=True),
+                ModifierSlot("sat", ("sat",), optional=True),
+                ModifierSlot("type", ("f16", "f16x2", "bf16", "bf16x2")),
+            ),
+            check=_check_half_arith,
+            operands=(
+                OperandSlot("d", role="dst"),
+                OperandSlot("a", role="value"),
+                OperandSlot("b", role="value"),
+            ),
+        )
+        for name in ("add", "sub", "mul")
+    ],
+    # neg (PTX ISA 9.7.3.10): `neg{.ftz}.f32 d, a;` and `neg.f64 d, a;`.
+    InstructionEntry(
+        name="neg",
+        slots=(
+            ModifierSlot("ftz", ("ftz",), optional=True),
+            ModifierSlot("type", ("f32", "f64")),
+        ),
+        check=_check_neg,
+        operands=(
+            OperandSlot("d", role="dst"),
+            OperandSlot("a", role="value"),
+        ),
+    ),
     # NOT REGISTERED: across this whole arithmetic group, the integer lines
     # (9.7.1.{1,2,3}), extended-precision add.cc/sub.cc (9.7.2.{1,3}), and the
-    # half-precision lines (9.7.4.{1,2,3,4}). The half lines diverge from the
-    # entries above in three ways: their `.rnd` set is `{.rn}` alone (not
-    # _FRND), their bf16 lines take no `.ftz`/`.sat`, and the fma line
-    # (9.7.4.4) additionally needs `.relu` and `.oob` slots -- `.relu`/`.oob`
-    # appear on no add/sub/mul half line (9.7.4.{1,2,3}).
+    # half-precision fma line (9.7.4.4), which needs `.relu` and `.oob` slots.
+    # Those two qualifiers appear on no add/sub/mul half line, which is why
+    # 9.7.4.{1,2,3} are registered above and 9.7.4.4 is not.
     #
     # fma differs in shape, so it is its own entry: three sources, and .rnd is
     # mandatory on every line (PTX ISA 9.7.3.6 / 9.7.5.3).

@@ -362,6 +362,33 @@ def test_ptx_f32x2_value_codegen():
     assert "add.rn.f32x2 %0, %1, %2;" in src
 
 
+def test_ptxd_neg_f32_codegen():
+    """`neg{.ftz}.f32` (ISA 9.7.3.10) -- the exact form, without fast-math .ftz."""
+
+    @T.prim_func
+    def main(A: T.Buffer((2,), "float32")):
+        T.device_entry()
+        tx = T.thread_id([32])
+        if tx == 0:
+            T.ptxd.neg.f32(A[1], A[0])
+
+    src, _ = _get_source(main)
+    assert "neg.f32 %0, %1;" in src
+    assert "neg.ftz.f32" not in src
+
+
+def test_ptxd_sub_f16x2_codegen():
+    """The packed half line `sub{.rnd}{.ftz}{.sat}.f16x2` (ISA 9.7.4.2)."""
+
+    @T.prim_func
+    def main(A: T.Buffer((3,), "uint32")):
+        T.device_entry()
+        tx = T.thread_id([32])
+        if tx == 0:
+            T.ptxd.sub.f16x2(A[2], A[0], A[1])
+
+    src, _ = _get_source(main)
+    assert "sub.f16x2 %0, %1, %2;" in src
 
 
 @pytest.mark.skipif(
@@ -569,8 +596,12 @@ def test_ptx_sync_and_clc_codegen():
     src = mod.mod.imports[0].inspect_source()
     assert "cp.async.mbarrier.arrive.shared.b64" in src
     assert "cp.async.mbarrier.arrive.noinc.shared::cta.b64" in src
-    assert "mbarrier.try_wait.parity.shared::cta.b64 P1, [%0], %1, 10000000;" in src
-    assert "unsigned int ticks =" not in src
+    # The spin-wait moved to T.cuda.mbarrier_wait, which takes its timeout as a
+    # parameter rather than baking 10000000 into the asm text.
+    assert "mbarrier.try_wait.parity.shared::cta.b64 P1, [%0], %1, %2;" in src
+    assert "tvm_builtin_cuda_mbarrier_wait" in src
+    # (No assertion on the timeout local: T.cuda.mbarrier_wait keeps the
+    # `ticks = 0x989680` hint the TIRx spin-wait convention specifies.)
     assert "tirx.ptx.cp_async_mbarrier_arrive_noinc" not in src
     assert "mbarrier.complete_tx.relaxed.cluster.shared::cluster.b64" in src
     assert "mbarrier.complete_tx.relaxed.cta.shared::cta.b64" in src
