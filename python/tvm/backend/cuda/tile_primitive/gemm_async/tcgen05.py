@@ -64,7 +64,7 @@ from ..tma_utils import (
 )
 
 # Mirror of ``format_map`` in the dense ``encode_instr_descriptor`` codegen
-# (``python/tvm/tirx/operator/intrinsics/cuda/tcgen05.py``). Used to fold the
+# (``python/tvm/backend/cuda/cpp/descriptors.py``). Used to fold the
 # runtime-encoded instruction descriptor into a compile-time uint32 when
 # all parameters are dispatch-time constants.
 _INSTR_DESC_FORMAT_MAP = {
@@ -109,7 +109,7 @@ def _encode_instr_descriptor_dense_uint32(
 ):
     """Compile-time port of the dense ``InstrDescriptor`` bitfield packing.
 
-    See ``python/tvm/tirx/operator/intrinsics/cuda/header.py:InstrDescriptor``
+    See ``python/tvm/backend/cuda/codegen/header.py:InstrDescriptor``
     for the bit layout. Lets the dispatcher pass a literal ``uint32`` to
     ``T.ptx["tcgen05.mma..."]`` instead of allocating + encoding a per-dispatch
     local descriptor on every gemm_async call (which forces an inline ``asm``
