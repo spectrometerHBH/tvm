@@ -47,7 +47,7 @@ from tvm.tirx.stmt import AllocBuffer, Evaluate, SeqStmt
 from tvm.tirx.tile_primitive import TilePrimitiveCall
 
 from ...codegen.types import PTXDataType
-from ...intrinsics.tcgen05 import (
+from ...cpp.descriptors import (
     _TCGEN05_MMA_TRANS_DTYPES,
     _check_tcgen05_mma_matrix_shape,
     _get_tcgen05_mma_kind,

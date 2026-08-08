@@ -59,9 +59,9 @@ tvm.backend.cuda.codegen
    :no-index:
    :exclude-members: PrimExpr, Op, Call
 
-tvm.backend.cuda.intrinsics
-***************************
-.. automodule:: tvm.backend.cuda.intrinsics
+tvm.backend.cuda.cpp
+********************
+.. automodule:: tvm.backend.cuda.cpp
    :members:
    :imported-members:
    :no-index:
