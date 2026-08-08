@@ -23,10 +23,10 @@ ld/st register vectors) compute the C signature and body together inside a
 shared parts callable.
 """
 
-from ._schema import device_intrinsic
-from .registry import CODEGEN_REGISTRY, register_codegen
-from .types import PTXDataType
-from .utils import parse_str, validate_cta_group
+from ..codegen.registry import CODEGEN_REGISTRY, register_codegen
+from ..codegen.schema import device_intrinsic
+from ..codegen.types import PTXDataType
+from ..codegen.utils import parse_str, validate_cta_group
 
 
 def _safe(s):

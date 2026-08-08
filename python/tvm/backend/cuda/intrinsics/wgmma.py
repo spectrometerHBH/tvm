@@ -22,9 +22,9 @@ is an empty asm with one inout register operand -- neither maps to a PTX
 instruction, so they stay device_intrinsic registrations.
 """
 
-from ._schema import device_intrinsic
-from .registry import CODEGEN_REGISTRY, register_codegen
-from .types import PTXDataType
+from ..codegen.registry import CODEGEN_REGISTRY, register_codegen
+from ..codegen.schema import device_intrinsic
+from ..codegen.types import PTXDataType
 
 # =============================================================================
 # wgmma noop_barrier / descriptor encode helpers (wait_group is ptx).

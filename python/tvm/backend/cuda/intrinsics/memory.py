@@ -34,9 +34,9 @@ CUDA side:
 from tvm import DataType
 from tvm.backend.cuda.op import cuda_func_call
 
-from ._schema import device_intrinsic
-from .registry import register_codegen
-from .utils import parse_str
+from ..codegen.registry import register_codegen
+from ..codegen.schema import device_intrinsic
+from ..codegen.utils import parse_str
 
 # __ldg — typed read-only cached load. Source is ``void*`` so callers may pass
 # a typed pointer or handle_add_byte_offset result; the helper casts per ``dtype``.

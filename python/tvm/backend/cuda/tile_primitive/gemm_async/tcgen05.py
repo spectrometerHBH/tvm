@@ -46,13 +46,13 @@ from tvm.tirx.operator.tile_primitive import DispatchContext, predicate, registe
 from tvm.tirx.stmt import AllocBuffer, Evaluate, SeqStmt
 from tvm.tirx.tile_primitive import TilePrimitiveCall
 
+from ...codegen.types import PTXDataType
 from ...intrinsics.tcgen05 import (
     _TCGEN05_MMA_TRANS_DTYPES,
     _check_tcgen05_mma_matrix_shape,
     _get_tcgen05_mma_kind,
     _get_tcgen05_mma_scale_vec_size,
 )
-from ...intrinsics.types import PTXDataType
 from ..common import get_st_extent, smem_desc_add_16B_offset
 from ..exec_scope_utils import single_thread
 from ..layout_utils import strip_swizzle_to_tile

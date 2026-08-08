@@ -37,8 +37,8 @@ from tvm.tirx.operator.intrinsics._common import (
     CLUSTER_BARRIER_SEM,
 )
 
-from ._schema import device_intrinsic
-from .utils import parse_str
+from ..codegen.schema import device_intrinsic
+from ..codegen.utils import parse_str
 
 # =============================================================================
 # bar.arrive / bar.sync — aligned named-barrier aliases. 1 form each.

@@ -24,7 +24,7 @@ cp.async / cp.async.bulk copies go through ``T.ptx`` instead.
 
 from tvm.backend.cuda.op import cuda_func_call
 
-from .registry import register_codegen
+from ..codegen.registry import register_codegen
 
 _PREFETCH_CHOICES = ("", "64", "128", "256")
 

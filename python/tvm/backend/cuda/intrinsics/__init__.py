@@ -26,25 +26,12 @@
 - ``nvshmem`` — NVSHMEM RMA / signal / collective.
 - ``misc`` — register-allocation control, profiler timer, debug helpers (printf / trap).
 
-Plus the support modules:
-
-- ``header`` — CUDA header generator and helper-tag table.
-- ``registry`` — codegen registry.
-- ``types`` — PTX dtype enum.
-- ``utils`` — small parsing / validation helpers.
+The shared machinery these modules build on lives in
+:mod:`tvm.backend.cuda.codegen` (registry, ``device_intrinsic`` schema, header
+generator, PTX dtypes, parsing helpers).
 """
 
 # Import op modules to register their codegen functions.
 from . import cp_async, math, memory, misc, nvshmem, sync, tcgen05, wgmma
-from .header import TAGS, header_generator
-from .registry import CODEGEN_REGISTRY, get_codegen, register_codegen
-from .types import PTXDataType
 
-__all__ = [
-    "CODEGEN_REGISTRY",
-    "TAGS",
-    "PTXDataType",
-    "get_codegen",
-    "header_generator",
-    "register_codegen",
-]
+__all__ = []

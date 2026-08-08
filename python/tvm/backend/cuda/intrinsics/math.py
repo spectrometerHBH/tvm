@@ -27,9 +27,9 @@ CUDA side:
 
 from tvm.backend.cuda.op import cuda_func_call
 
-from ._schema import device_intrinsic
-from .registry import register_codegen
-from .utils import parse_str, validate_power_of_two_range
+from ..codegen.registry import register_codegen
+from ..codegen.schema import device_intrinsic
+from ..codegen.utils import parse_str, validate_power_of_two_range
 
 # =============================================================================
 # Inputs are packed into a `.b64` register (low half = elem 0, high half =

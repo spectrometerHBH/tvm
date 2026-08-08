@@ -33,9 +33,9 @@ import json
 import tvm
 from tvm.backend.cuda.op import cuda_func_call
 
-from ._schema import device_intrinsic
-from .registry import CODEGEN_REGISTRY, register_codegen
-from .utils import parse_str
+from ..codegen.registry import CODEGEN_REGISTRY, register_codegen
+from ..codegen.schema import device_intrinsic
+from ..codegen.utils import parse_str
 
 # =============================================================================
 # mov.u32/u64 from special register — 1 PTX form (Form 2 of mov.type d, sreg).
