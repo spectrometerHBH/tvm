@@ -34,9 +34,9 @@ from ..codegen.utils import parse_str
 
 
 # =============================================================================
-# mbarrier.try_wait.parity.acquire.cta.shared::cta.b64 — 1 form. Body wraps the
-# asm in a label loop (TIRx convention; the magic ``ticks = 0x989680`` is the
-# timeout hint in ns).
+# mbarrier waits — ``mbarrier.try_wait`` only polls once, so the body wraps it
+# in a branch loop that retries until the parity flips. The magic
+# ``ticks = 0x989680`` is the per-attempt timeout hint in ns.
 # =============================================================================
 def _mbarrier_wait_parts(barrier, *_rest):
     """Dispatch on the barrier operand's dtype, as the retired op did.
@@ -114,9 +114,9 @@ device_intrinsic(
 
 
 # =============================================================================
-# mov.u32/u64 from special register — 1 PTX form (Form 2 of mov.type d, sreg).
-# Each (bits, reg) emits a distinct helper because the special reg name is
-# baked into the PTX text.
+# mov.u32/u64 from a special register. Each (bits, reg) emits a distinct helper
+# because the register name is baked into the PTX text rather than passed as an
+# operand, so it cannot be a table row parameterized on its operands.
 # =============================================================================
 
 

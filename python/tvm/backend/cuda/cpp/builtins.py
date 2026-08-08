@@ -36,6 +36,9 @@ from ..codegen.registry import register_codegen
 from ..codegen.schema import device_intrinsic
 from ..codegen.utils import parse_str, validate_power_of_two_range
 
+# =============================================================================
+# Scalar float math.
+# =============================================================================
 device_intrinsic(
     "cuda_fdividef",
     helper_name="tvm_builtin_cuda_fdividef",
@@ -126,7 +129,7 @@ def codegen_cuda_cta_reduce(value, op, num_warps, scratch):
 
 
 # =============================================================================
-# Additional FP8/BF16 packing, integer, and activation helpers.
+# FP8 / BF16 packing, integer, and activation helpers.
 # =============================================================================
 device_intrinsic(
     "cuda_ffs_u32",
@@ -274,7 +277,9 @@ device_intrinsic(
 
 
 # =============================================================================
-# __ldg — cache-as-read-only loads, scalar and vector.
+# __ldg — typed read-only cached loads, scalar and vector. Source is ``void*``
+# so callers may pass a typed pointer or handle_add_byte_offset result; the
+# helper casts per ``dtype``.
 # =============================================================================
 
 
@@ -282,8 +287,6 @@ def _int_attr(value):
     return int(value.value) if hasattr(value, "value") else int(value)
 
 
-# __ldg — typed read-only cached load. Source is ``void*`` so callers may pass
-# a typed pointer or handle_add_byte_offset result; the helper casts per ``dtype``.
 _CUDA_LDG_CTYPES = {
     "int8": "signed char",
     "uint8": "unsigned char",
@@ -537,10 +540,8 @@ device_intrinsic(
 
 
 # =============================================================================
-# Additional mbarrier, grid-sync, and warp collective helpers.
+# Warp collectives — ballot and the hardware ``__reduce_*_sync`` reductions.
 # =============================================================================
-
-
 device_intrinsic(
     "cuda_ballot_sync",
     helper_name="tvm_builtin_ballot_sync",
