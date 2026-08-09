@@ -16,8 +16,8 @@
 # under the License.
 """The compile-time tcgen05 descriptor encoders must agree with the C ones.
 
-``_encode_smem_descriptor_base_uint64`` and
-``_encode_instr_descriptor_block_scaled_uint32`` re-derive, in Python, bit
+``encode_smem_descriptor_base_uint64`` and
+``encode_instr_descriptor_block_scaled_uint32`` re-derive, in Python, bit
 layouts that otherwise live only in a C struct (``cuda/cpp/descriptors.py``). A
 kernel whose descriptor inputs are all compile-time constants uses them to bake
 a literal instead of calling the runtime encoder, which is an opaque helper in
@@ -32,9 +32,9 @@ import pytest
 
 import tvm
 import tvm.testing
-from tvm.backend.cuda.tile_primitive.gemm_async.tcgen05 import (
-    _encode_instr_descriptor_block_scaled_uint32,
-    _encode_smem_descriptor_base_uint64,
+from tvm.backend.cuda.cpp.descriptors import (
+    encode_instr_descriptor_block_scaled_uint32,
+    encode_smem_descriptor_base_uint64,
 )
 from tvm.script import tirx as T
 from tvm.testing import env
@@ -88,7 +88,7 @@ def test_smem_descriptor_matches_runtime_encoder(ldo, sdo, swizzle):
             out[1] = T.cast(T.cuda.cvta_generic_to_shared(smem.ptr_to([0])), "uint64")
 
     got = _compile_and_run(kernel, 2)
-    want = _encode_smem_descriptor_base_uint64(ldo, sdo, swizzle) | ((int(got[1]) >> 4) & 0x3FFF)
+    want = encode_smem_descriptor_base_uint64(ldo, sdo, swizzle) | ((int(got[1]) >> 4) & 0x3FFF)
     assert int(got[0]) == want, (
         f"runtime {int(got[0]):#018x} != compile-time {want:#018x} "
         f"for ldo={ldo} sdo={sdo} swizzle={swizzle}"
@@ -137,7 +137,7 @@ def test_instr_descriptor_block_scaled_matches_runtime_encoder(
             out[0] = T.cast(desc, "uint64")
 
     got = _compile_and_run(kernel, 1)
-    want = _encode_instr_descriptor_block_scaled_uint32(
+    want = encode_instr_descriptor_block_scaled_uint32(
         M=m,
         N=n,
         K=k,
