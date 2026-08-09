@@ -160,6 +160,113 @@ def _encode_instr_descriptor_dense_uint32(
     return desc & 0xFFFFFFFF
 
 
+# Scale-factor formats of the block-scaled descriptor, per its `scale_format_`
+# comment: 0 = E4M3, 1 = E8M0.
+_INSTR_DESC_SF_FORMAT_MAP = {
+    "float8_e4m3fn": 0,
+    "float8_e4m3fnuz": 0,
+    "float8_e8m0fnu": 1,
+}
+
+
+def _encode_instr_descriptor_block_scaled_uint32(
+    M,
+    N,
+    K,
+    d_dtype,
+    a_dtype,
+    b_dtype,
+    sf_dtype,
+    trans_a,
+    trans_b,
+    cta_group=1,
+    neg_a=False,
+    neg_b=False,
+    is_sparse=False,
+):
+    """Compile-time port of the block-scaled ``InstrDescriptor`` packing.
+
+    The block-scaled sibling of :func:`_encode_instr_descriptor_dense_uint32`,
+    for the same reason: a kernel whose descriptor inputs are all compile-time
+    constants should pass a literal ``uint32`` rather than call the runtime
+    encoder, which is a pure-C bitfield fill that becomes an opaque helper in
+    the generated CUDA.
+
+    Bit layout: ``InstrDescriptorBlockScaled`` in
+    ``python/tvm/backend/cuda/cpp/descriptors.py``. Validation mirrors the
+    runtime encoder (``codegen_cuda_tcgen05_encode_instr_descriptor_block_scaled``)
+    so the fold rejects exactly what it rejects.
+    """
+    d_name = _dtype_name(d_dtype)
+    a_name = _dtype_name(a_dtype)
+    b_name = _dtype_name(b_dtype)
+    sf_name = _dtype_name(sf_dtype)
+
+    kind = _get_tcgen05_mma_kind(d_name, a_name, b_name, sf_name, sf_name)
+    valid_kinds = {"mxf8f6f4", "mxf4", "mxf4nvf4"}
+    if kind not in valid_kinds:
+        raise ValueError(
+            f"Check failed for Data Type Kind. Expected one of {valid_kinds}, but got "
+            f"'{kind}' for d:{d_name}, a:{a_name}, b:{b_name}, sf:{sf_name}"
+        )
+    _check_tcgen05_mma_matrix_shape(kind, cta_group, int(M), int(N), int(K), is_sparse)
+
+    # mxf4 / mxf4nvf4 pin both operand formats to 1; only mxf8f6f4 reads them
+    # off the dtypes. Same branch as the runtime encoder.
+    if kind == "mxf8f6f4":
+        a_format = _INSTR_DESC_FORMAT_MAP[a_name]
+        b_format = _INSTR_DESC_FORMAT_MAP[b_name]
+    else:
+        a_format = 1
+        b_format = 1
+
+    if trans_a and PTXDataType.from_string(a_name) not in _TCGEN05_MMA_TRANS_DTYPES:
+        raise ValueError(f"Invalid a_dtype for transpose: {a_name}")
+    if trans_b and PTXDataType.from_string(b_name) not in _TCGEN05_MMA_TRANS_DTYPES:
+        raise ValueError(f"Invalid b_dtype for transpose: {b_name}")
+
+    desc = 0
+    desc |= (int(is_sparse) & 0x1) << 2
+    desc |= (a_format & 0x7) << 7
+    desc |= (b_format & 0x7) << 10
+    desc |= (int(neg_a) & 0x1) << 13
+    desc |= (int(neg_b) & 0x1) << 14
+    desc |= (int(trans_a) & 0x1) << 15
+    desc |= (int(trans_b) & 0x1) << 16
+    desc |= ((N >> 3) & 0x3F) << 17
+    desc |= (_INSTR_DESC_SF_FORMAT_MAP[sf_name] & 0x1) << 23
+    desc |= ((M >> 4) & 0x1F) << 24
+    # a_sf_id_/b_sf_id_ stay 0, as the runtime encoder leaves them: callers that
+    # cycle scale-factor ids patch those bits per MMA.
+    return desc & 0xFFFFFFFF
+
+
+# `layout_type_` of SmemDescriptor, keyed by the swizzle enum the runtime
+# encoder switches on (0=none, 1=32B, 2=64B, 3=128B, 4=128B_base32B).
+_SMEM_DESC_LAYOUT_TYPE = {0: 0, 1: 6, 2: 4, 3: 2, 4: 1}
+
+
+def _encode_smem_descriptor_base_uint64(ldo, sdo, swizzle):
+    """Compile-time port of the ``SmemDescriptor`` packing, minus the address.
+
+    Everything but ``start_address_`` is a compile-time constant in a kernel
+    whose tile shape is fixed, so the descriptor splits cleanly into a constant
+    the caller can bake in and a runtime `addr >> 4` it ORs into bits [0,14).
+    Bit layout: ``SmemDescriptor`` in
+    ``python/tvm/backend/cuda/cpp/descriptors.py``.
+
+    ``ldo``/``sdo`` are in 16-byte units, matching what the runtime encoder
+    assigns straight into the two offset fields.
+    """
+    desc = 0
+    desc |= (int(ldo) & 0x3FFF) << 16
+    desc |= (int(sdo) & 0x3FFF) << 32
+    desc |= 1 << 46  # version_
+    # base_offset_ [49,52) and lbo_mode_ [52,53) are zero, as the encoder sets.
+    desc |= (_SMEM_DESC_LAYOUT_TYPE[int(swizzle)] & 0x7) << 61
+    return desc & 0xFFFFFFFFFFFFFFFF
+
+
 def sf_smem_layout(rows, SF_K, sf_per_mma, sf_reuse=1, pipe_depth=None):
     """SMEM-side layout for SF in tcgen05.cp scale-factor copy.
 
