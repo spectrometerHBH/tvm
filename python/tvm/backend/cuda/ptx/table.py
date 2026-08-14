@@ -265,6 +265,10 @@ class OperandSlot:
     space: str | None = None
     dtype: str | DtypeFn | None = None
     dtypes: tuple[str, ...] | DtypesFn | None = None
+    # Whether this independent byte-address operand accepts
+    # ``T.ptx.addr(base, byte_offset)``. Composite address members and tmem
+    # addresses are different PTX operand classes and must leave this false.
+    allow_imm_offset: bool = False
     # kind="imm" is a value in the instruction *text* (never a C parameter),
     # in one of three states, by who owns the value:
     #   literal set   -- the ISA fixed it; invisible to programs.
@@ -3710,7 +3714,7 @@ _ENTRIES = [
         check=_check_ld,
         operands=(
             OperandSlot("d", rw="w", dtypes=_ld_dst_dtypes),
-            OperandSlot("addr", kind="addr"),
+            OperandSlot("addr", kind="addr", allow_imm_offset=True),
             OperandSlot("cache_policy", dtype="u64", lanes=_present_lanes("cache"), vector=False),
         ),
     ),
@@ -3759,7 +3763,7 @@ _ENTRIES = [
         check=_check_ld_vec,
         operands=(
             OperandSlot("d", rw="w", lanes=_vec_lanes),
-            OperandSlot("addr", kind="addr"),
+            OperandSlot("addr", kind="addr", allow_imm_offset=True),
             OperandSlot("cache_policy", dtype="u64", lanes=_present_lanes("cache"), vector=False),
         ),
     ),
@@ -3786,7 +3790,7 @@ _ENTRIES = [
         operands=(
             # `_` means this element is not read from memory.
             OperandSlot("d", rw="w", lanes=_vec_lanes, sinkable=_sink256),
-            OperandSlot("addr", kind="addr"),
+            OperandSlot("addr", kind="addr", allow_imm_offset=True),
         ),
     ),
     # Complete scalar `st` per PTX ISA 9.7.9.11, at parity with `ld`.
@@ -3811,7 +3815,7 @@ _ENTRIES = [
         ),
         check=_check_st,
         operands=(
-            OperandSlot("addr", kind="addr"),
+            OperandSlot("addr", kind="addr", allow_imm_offset=True),
             OperandSlot("value"),
             OperandSlot("cache_policy", dtype="u64", lanes=_present_lanes("cache"), vector=False),
         ),
@@ -3835,7 +3839,7 @@ _ENTRIES = [
         ),
         check=_check_st_vec,
         operands=(
-            OperandSlot("addr", kind="addr"),
+            OperandSlot("addr", kind="addr", allow_imm_offset=True),
             OperandSlot("value", lanes=_vec_lanes),
             OperandSlot("cache_policy", dtype="u64", lanes=_present_lanes("cache"), vector=False),
         ),
@@ -3856,7 +3860,7 @@ _ENTRIES = [
         cert_arch="sm_100",
         check=_check_st_vec256,
         operands=(
-            OperandSlot("addr", kind="addr"),
+            OperandSlot("addr", kind="addr", allow_imm_offset=True),
             # ISA 9.7.9.11 puts the sink in "vector expression b" -- the data
             # being stored -- so here `_` means this element is not written to
             # memory. Sink is not a destination-only spelling.
@@ -3880,7 +3884,7 @@ _ENTRIES = [
             ModifierSlot("space", ("shared::cta",), optional=True),
         ),
         operands=(
-            OperandSlot("addr", kind="addr"),
+            OperandSlot("addr", kind="addr", allow_imm_offset=True),
             OperandSlot("size", dtype="u64"),
             OperandSlot("initval", kind="imm", literal="0"),
         ),
@@ -3899,7 +3903,7 @@ _ENTRIES = [
             ModifierSlot("tensormap", ("tensormap",), optional=True),
         ),
         check=_check_prefetch,
-        operands=(OperandSlot("addr", kind="addr"),),
+        operands=(OperandSlot("addr", kind="addr", allow_imm_offset=True),),
     ),
     # st.async per PTX ISA 9.7.9.12. Two syntax blocks that share nothing but
     # the mnemonic: one signals completion through an mbarrier, the other is a
@@ -3922,12 +3926,12 @@ _ENTRIES = [
             check=_check_st_async if vec else None,
             cert_arch="sm_90",
             operands=(
-                OperandSlot("addr", kind="addr"),
+                OperandSlot("addr", kind="addr", allow_imm_offset=True),
                 OperandSlot("b", lanes=_vec_lanes if vec else 1),
                 # The mbarrier lives in the same state space as the destination
                 # ("`.ss` specifies the state space of the destination operand
                 # a and the mbarrier operand mbar").
-                OperandSlot("mbar", kind="addr"),
+                OperandSlot("mbar", kind="addr", allow_imm_offset=True),
             ),
         )
         for vec in (False, True)
@@ -3945,7 +3949,7 @@ _ENTRIES = [
         check=_check_st_async_rel,
         cert_arch="sm_100",
         operands=(
-            OperandSlot("addr", kind="addr"),
+            OperandSlot("addr", kind="addr", allow_imm_offset=True),
             OperandSlot("b"),
         ),
     ),
@@ -3974,7 +3978,7 @@ _ENTRIES = [
         cert_arch="sm_90",
         operands=(
             OperandSlot("d", rw="w"),
-            OperandSlot("addr", kind="addr"),
+            OperandSlot("addr", kind="addr", allow_imm_offset=True),
         ),
     ),
     InstructionEntry(
@@ -3989,7 +3993,7 @@ _ENTRIES = [
         check=_check_multimem_int,
         cert_arch="sm_90",
         operands=(
-            OperandSlot("addr", kind="addr"),
+            OperandSlot("addr", kind="addr", allow_imm_offset=True),
             OperandSlot("b"),
         ),
     ),
@@ -4009,7 +4013,7 @@ _ENTRIES = [
         check=_check_multimem_int,
         cert_arch="sm_90",
         operands=(
-            OperandSlot("addr", kind="addr"),
+            OperandSlot("addr", kind="addr", allow_imm_offset=True),
             OperandSlot("b"),
         ),
     ),
@@ -4040,11 +4044,11 @@ _ENTRIES = [
                 *(
                     (
                         OperandSlot("d", rw="w", lanes=_vec_lanes if vec else 1),
-                        OperandSlot("addr", kind="addr"),
+                        OperandSlot("addr", kind="addr", allow_imm_offset=True),
                     )
                     if mnem == "ld_reduce"
                     else (
-                        OperandSlot("addr", kind="addr"),
+                        OperandSlot("addr", kind="addr", allow_imm_offset=True),
                         OperandSlot("b", lanes=_vec_lanes if vec else 1),
                     )
                 ),
@@ -4097,7 +4101,7 @@ _ENTRIES = [
                 "createpolicy_range",
                 "range",
                 (
-                    OperandSlot("addr", kind="addr"),
+                    OperandSlot("addr", kind="addr", allow_imm_offset=True),
                     OperandSlot("primary_size", dtype="u32"),
                     OperandSlot("total_size", dtype="u32"),
                 ),
@@ -4138,7 +4142,7 @@ _ENTRIES = [
         ),
         cert_arch="sm_90",
         operands=(
-            OperandSlot("src_mem", kind="addr", space="global"),
+            OperandSlot("src_mem", kind="addr", allow_imm_offset=True, space="global"),
             OperandSlot("size", dtype="u32"),
             OperandSlot("cache_policy", dtype="u64", lanes=_present_lanes("cache"), vector=False),
         ),
@@ -4170,7 +4174,7 @@ _ENTRIES = [
             ),
             cert_arch="sm_90a",
             operands=(
-                OperandSlot("addr", kind="addr"),
+                OperandSlot("addr", kind="addr", allow_imm_offset=True),
                 *ops,
             ),
         )
@@ -4216,7 +4220,7 @@ _ENTRIES = [
             ),
             cert_arch="sm_90a",
             operands=(
-                OperandSlot("addr", kind="addr"),
+                OperandSlot("addr", kind="addr", allow_imm_offset=True),
                 OperandSlot("new_val", kind="imm", choices=values),
             ),
         )
@@ -4275,7 +4279,7 @@ _ENTRIES = [
         ),
         operands=(
             OperandSlot("d", rw="w"),
-            OperandSlot("addr", kind="addr"),
+            OperandSlot("addr", kind="addr", allow_imm_offset=True),
         ),
     ),
     InstructionEntry(
@@ -4293,7 +4297,7 @@ _ENTRIES = [
         check=_check_vec128,
         operands=(
             OperandSlot("d", rw="w", lanes=_vec_lanes),
-            OperandSlot("addr", kind="addr"),
+            OperandSlot("addr", kind="addr", allow_imm_offset=True),
         ),
     ),
     # prefetchu per PTX ISA 9.7.9.16, the fourth line of that subsection: the
@@ -4302,7 +4306,7 @@ _ENTRIES = [
     InstructionEntry(
         name="prefetchu",
         slots=(ModifierSlot("level", ("L1",)),),
-        operands=(OperandSlot("addr", kind="addr"),),
+        operands=(OperandSlot("addr", kind="addr", allow_imm_offset=True),),
     ),
     # applypriority / discard per PTX ISA 9.7.9.17, 9.7.9.18. Same shape: an
     # address range and a cache level, one hinting how to evict it and the
@@ -4320,7 +4324,7 @@ _ENTRIES = [
                 ModifierSlot("level", (level,)),
             ),
             operands=(
-                OperandSlot("addr", kind="addr"),
+                OperandSlot("addr", kind="addr", allow_imm_offset=True),
                 OperandSlot("size", kind="imm", literal="128"),
             ),
         )
@@ -5189,8 +5193,8 @@ _ENTRIES = [
             ),
             cert_arch="sm_90",
             operands=(
-                OperandSlot("dst_mem", kind="addr", space="shared"),
-                OperandSlot("src_mem", kind="addr", space="global"),
+                OperandSlot("dst_mem", kind="addr", allow_imm_offset=True, space="shared"),
+                OperandSlot("src_mem", kind="addr", allow_imm_offset=True, space="global"),
                 OperandSlot(
                     "cp_size", kind="imm", choices=("4", "8", "16") if cop == "ca" else ("16",)
                 ),
@@ -5293,8 +5297,8 @@ _ENTRIES = [
         ),
         cert_arch="sm_90",
         operands=(
-            OperandSlot("dst_mem", kind="addr", space="shared::cta"),
-            OperandSlot("src_mem", kind="addr", space="global"),
+            OperandSlot("dst_mem", kind="addr", allow_imm_offset=True, space="shared::cta"),
+            OperandSlot("src_mem", kind="addr", allow_imm_offset=True, space="global"),
             OperandSlot("size", dtype="u32"),
             OperandSlot(
                 "ignore_bytes_left",
@@ -5308,7 +5312,7 @@ _ENTRIES = [
                 lanes=_ignore_oob_lanes,
                 vector=False,
             ),
-            OperandSlot("mbar", kind="addr", space="shared"),
+            OperandSlot("mbar", kind="addr", allow_imm_offset=True, space="shared"),
             OperandSlot("cache_policy", dtype="u64", lanes=_tma_cache_lanes, vector=False),
         ),
     ),
@@ -5326,10 +5330,10 @@ _ENTRIES = [
         ),
         cert_arch="sm_90",
         operands=(
-            OperandSlot("dst_mem", kind="addr", space="shared::cluster"),
-            OperandSlot("src_mem", kind="addr", space="global"),
+            OperandSlot("dst_mem", kind="addr", allow_imm_offset=True, space="shared::cluster"),
+            OperandSlot("src_mem", kind="addr", allow_imm_offset=True, space="global"),
             OperandSlot("size", dtype="u32"),
-            OperandSlot("mbar", kind="addr", space="shared"),
+            OperandSlot("mbar", kind="addr", allow_imm_offset=True, space="shared"),
             OperandSlot("cta_mask", dtype="u16", lanes=_tma_mask_lanes, vector=False),
             OperandSlot("cache_policy", dtype="u64", lanes=_tma_cache_lanes, vector=False),
         ),
@@ -5346,10 +5350,10 @@ _ENTRIES = [
         ),
         cert_arch="sm_90",
         operands=(
-            OperandSlot("dst_mem", kind="addr", space="shared::cluster"),
-            OperandSlot("src_mem", kind="addr", space="shared::cta"),
+            OperandSlot("dst_mem", kind="addr", allow_imm_offset=True, space="shared::cluster"),
+            OperandSlot("src_mem", kind="addr", allow_imm_offset=True, space="shared::cta"),
             OperandSlot("size", dtype="u32"),
-            OperandSlot("mbar", kind="addr", space="shared"),
+            OperandSlot("mbar", kind="addr", allow_imm_offset=True, space="shared"),
         ),
     ),
     InstructionEntry(  # shared::cta -> global
@@ -5384,8 +5388,8 @@ _ENTRIES = [
         ),
         cert_arch="sm_100a",
         operands=(
-            OperandSlot("dst_mem", kind="addr", space="global"),
-            OperandSlot("src_mem", kind="addr", space="shared::cta"),
+            OperandSlot("dst_mem", kind="addr", allow_imm_offset=True, space="global"),
+            OperandSlot("src_mem", kind="addr", allow_imm_offset=True, space="shared::cta"),
             OperandSlot("size", dtype="u32"),
             OperandSlot("cache_policy", dtype="u64", lanes=_tma_cache_lanes, vector=False),
             # "the 16-bit wide byteMask operand" -- the legacy helper bound it
@@ -5429,10 +5433,10 @@ _ENTRIES = [
         cert_arch="sm_100a",
         check=_check_tma_gather4,
         operands=(
-            OperandSlot("dst_mem", kind="addr", space="shared::cluster"),
+            OperandSlot("dst_mem", kind="addr", allow_imm_offset=True, space="shared::cluster"),
             OperandSlot("tmap", kind="addr", space="global", bracket="src"),
             OperandSlot("coords", dtype="s32", lanes=_tma_coords_lanes, bracket="src"),
-            OperandSlot("mbar", kind="addr", space="shared"),
+            OperandSlot("mbar", kind="addr", allow_imm_offset=True, space="shared"),
             OperandSlot("cta_mask", dtype="u16", lanes=_tma_mask_lanes, vector=False),
             OperandSlot("cache_policy", dtype="u64", lanes=_tma_cache_lanes, vector=False),
         ),
@@ -5455,10 +5459,10 @@ _ENTRIES = [
         cert_arch="sm_100a",
         check=_check_tma_gather4,
         operands=(
-            OperandSlot("dst_mem", kind="addr", space="shared::cta"),
+            OperandSlot("dst_mem", kind="addr", allow_imm_offset=True, space="shared::cta"),
             OperandSlot("tmap", kind="addr", space="global", bracket="src"),
             OperandSlot("coords", dtype="s32", lanes=_tma_coords_lanes, bracket="src"),
-            OperandSlot("mbar", kind="addr", space="shared"),
+            OperandSlot("mbar", kind="addr", allow_imm_offset=True, space="shared"),
             OperandSlot("cache_policy", dtype="u64", lanes=_tma_cache_lanes, vector=False),
         ),
     ),
@@ -5481,7 +5485,7 @@ _ENTRIES = [
         operands=(
             OperandSlot("tmap", kind="addr", space="global", bracket="dst"),
             OperandSlot("coords", dtype="s32", lanes=_tma_coords_lanes, bracket="dst"),
-            OperandSlot("src_mem", kind="addr", space="shared::cta"),
+            OperandSlot("src_mem", kind="addr", allow_imm_offset=True, space="shared::cta"),
             OperandSlot("cache_policy", dtype="u64", lanes=_tma_cache_lanes, vector=False),
         ),
     ),
@@ -5505,7 +5509,7 @@ _ENTRIES = [
         operands=(
             OperandSlot("tmap", kind="addr", space="global", bracket="dst"),
             OperandSlot("coords", dtype="s32", lanes=_tma_coords_lanes, bracket="dst"),
-            OperandSlot("src_mem", kind="addr", space="shared::cta"),
+            OperandSlot("src_mem", kind="addr", allow_imm_offset=True, space="shared::cta"),
             OperandSlot("cache_policy", dtype="u64", lanes=_tma_cache_lanes, vector=False),
         ),
     ),
@@ -5906,7 +5910,7 @@ _ENTRIES = [
         ),
         orders_memory=True,
         operands=(
-            OperandSlot("addr", kind="addr"),
+            OperandSlot("addr", kind="addr", allow_imm_offset=True),
             # "The only supported value for the size operand is 128, which must
             # be a constant integer literal" -- ISA 9.7.14.4.
             OperandSlot("size", kind="imm", literal="128"),
@@ -5928,7 +5932,7 @@ _ENTRIES = [
         check=_check_atomic,
         operands=(
             OperandSlot("d", rw="w"),
-            OperandSlot("addr", kind="addr"),
+            OperandSlot("addr", kind="addr", allow_imm_offset=True),
             OperandSlot("value"),
             OperandSlot("cache_policy", dtype="u64", lanes=_present_lanes("cache"), vector=False),
         ),
@@ -5951,7 +5955,7 @@ _ENTRIES = [
         ),
         operands=(
             OperandSlot("d", rw="w"),
-            OperandSlot("addr", kind="addr"),
+            OperandSlot("addr", kind="addr", allow_imm_offset=True),
             OperandSlot("compare"),
             OperandSlot("value"),
         ),
@@ -5972,7 +5976,7 @@ _ENTRIES = [
         check=_check_cache_hint,
         operands=(
             OperandSlot("d", rw="w"),
-            OperandSlot("addr", kind="addr"),
+            OperandSlot("addr", kind="addr", allow_imm_offset=True),
             OperandSlot("value"),
             OperandSlot("cache_policy", dtype="u64", lanes=_present_lanes("cache"), vector=False),
         ),
@@ -5996,7 +6000,7 @@ _ENTRIES = [
             check=_check_cache_hint,
             operands=(
                 *((OperandSlot("d", rw="w"),) if mnem == "atom" else ()),
-                OperandSlot("addr", kind="addr"),
+                OperandSlot("addr", kind="addr", allow_imm_offset=True),
                 OperandSlot("value"),
                 OperandSlot(
                     "cache_policy", dtype="u64", lanes=_present_lanes("cache"), vector=False
@@ -6030,7 +6034,7 @@ _ENTRIES = [
             check=_check_atom_vec,
             operands=(
                 OperandSlot("d", rw="w", lanes=_vec_lanes),
-                OperandSlot("addr", kind="addr"),
+                OperandSlot("addr", kind="addr", allow_imm_offset=True),
                 OperandSlot("value", lanes=_vec_lanes),
                 OperandSlot(
                     "cache_policy", dtype="u64", lanes=_present_lanes("cache"), vector=False
@@ -6055,7 +6059,7 @@ _ENTRIES = [
         ),
         check=_check_atomic,
         operands=(
-            OperandSlot("addr", kind="addr"),
+            OperandSlot("addr", kind="addr", allow_imm_offset=True),
             OperandSlot("value"),
             OperandSlot("cache_policy", dtype="u64", lanes=_present_lanes("cache"), vector=False),
         ),
@@ -6122,7 +6126,7 @@ _ENTRIES = [
             ModifierSlot("type", ("b64",)),
         ),
         operands=(
-            OperandSlot("addr", kind="addr"),
+            OperandSlot("addr", kind="addr", allow_imm_offset=True),
             OperandSlot("count", dtype="u32"),
         ),
     ),
@@ -6160,7 +6164,7 @@ _ENTRIES = [
             check=_check_mbarrier_sem_scope,
             operands=(
                 OperandSlot("state", kind="imm", literal="_"),
-                OperandSlot("addr", kind="addr"),
+                OperandSlot("addr", kind="addr", allow_imm_offset=True),
             ),
         )
         for act in ("arrive", "arrive_drop")
@@ -6179,7 +6183,7 @@ _ENTRIES = [
             check=_check_mbarrier_sem_scope,
             operands=(
                 OperandSlot("state", kind="imm", literal="_"),
-                OperandSlot("addr", kind="addr"),
+                OperandSlot("addr", kind="addr", allow_imm_offset=True),
                 OperandSlot("count", dtype="u32"),
             ),
         )
@@ -6200,7 +6204,7 @@ _ENTRIES = [
             check=_check_mbarrier_sem_scope,
             operands=(
                 OperandSlot("state", kind="imm", literal="_"),
-                OperandSlot("addr", kind="addr"),
+                OperandSlot("addr", kind="addr", allow_imm_offset=True),
                 OperandSlot("tx_count", dtype="u32"),
             ),
         )
@@ -6230,7 +6234,7 @@ _ENTRIES = [
                 # carrier, and ptxas rejects an .f64 register as the state operand
                 # ("Arguments mismatch for instruction 'mbarrier.arrive'").
                 OperandSlot("state", rw="rw", dtype="b64i"),
-                OperandSlot("addr", kind="addr"),
+                OperandSlot("addr", kind="addr", allow_imm_offset=True),
                 OperandSlot("count", dtype="u32"),
             ),
         )
@@ -6256,7 +6260,7 @@ _ENTRIES = [
             check=_check_mbarrier_sem_scope,
             operands=(
                 OperandSlot("wait_complete", rw="w", dtype="pred"),
-                OperandSlot("addr", kind="addr"),
+                OperandSlot("addr", kind="addr", allow_imm_offset=True),
                 OperandSlot("phase", dtype="u32"),
                 *((OperandSlot("time_hint", dtype="u32"),) if act == "try_wait" else ()),
             ),
@@ -6277,7 +6281,7 @@ _ENTRIES = [
         check=_check_mbarrier_sem_scope,
         operands=(
             OperandSlot("wait_complete", rw="w", dtype="pred"),
-            OperandSlot("addr", kind="addr"),
+            OperandSlot("addr", kind="addr", allow_imm_offset=True),
             OperandSlot("phase", dtype="u32"),
         ),
     ),
@@ -6294,7 +6298,7 @@ _ENTRIES = [
             ),
             check=_check_mbarrier_sem_scope,
             operands=(
-                OperandSlot("addr", kind="addr"),
+                OperandSlot("addr", kind="addr", allow_imm_offset=True),
                 OperandSlot("tx_count", dtype="u32"),
             ),
         )
@@ -6308,7 +6312,7 @@ _ENTRIES = [
             ModifierSlot("space", ("shared", "shared::cta"), optional=True),
             ModifierSlot("type", ("b64",)),
         ),
-        operands=(OperandSlot("addr", kind="addr"),),
+        operands=(OperandSlot("addr", kind="addr", allow_imm_offset=True),),
     ),
     # The state-returning arrive lines (PTX ISA 9.7.14.16.16 / .17). The
     # entries above bake `_` into the text, which is the only spelling the
@@ -6332,7 +6336,7 @@ _ENTRIES = [
                 # integer register of either signedness and rejects a float one
                 # ("Arguments mismatch"), which is what `b64i` names.
                 OperandSlot("state", rw="w", dtype="b64i"),
-                OperandSlot("addr", kind="addr"),
+                OperandSlot("addr", kind="addr", allow_imm_offset=True),
                 *((OperandSlot("count", dtype="u32"),) if count else ()),
             ),
         )
@@ -6363,7 +6367,7 @@ _ENTRIES = [
             check=_check_mbarrier_sem_scope,
             operands=(
                 OperandSlot("wait_complete", rw="w", dtype="pred"),
-                OperandSlot("addr", kind="addr"),
+                OperandSlot("addr", kind="addr", allow_imm_offset=True),
                 OperandSlot("state", dtype="b64i"),  # the token an arrive returned
                 *((OperandSlot("time_hint", dtype="u32"),) if hint else ()),
             ),
@@ -6389,8 +6393,8 @@ _ENTRIES = [
         ),
         cert_arch="sm_90",
         operands=(
-            OperandSlot("dst_mem", kind="addr", space="global"),
-            OperandSlot("src_mem", kind="addr", space="shared::cta"),
+            OperandSlot("dst_mem", kind="addr", allow_imm_offset=True, space="global"),
+            OperandSlot("src_mem", kind="addr", allow_imm_offset=True, space="shared::cta"),
             OperandSlot("size", kind="imm", literal="128"),
         ),
     ),
@@ -6411,9 +6415,9 @@ _ENTRIES = [
         check=_check_red_async,
         cert_arch="sm_90",
         operands=(
-            OperandSlot("addr", kind="addr"),
+            OperandSlot("addr", kind="addr", allow_imm_offset=True),
             OperandSlot("value"),
-            OperandSlot("mbar", kind="addr"),
+            OperandSlot("mbar", kind="addr", allow_imm_offset=True),
         ),
     ),
     # The release line of the same subsection, which reduces straight into
@@ -6435,7 +6439,7 @@ _ENTRIES = [
         check=_check_st_async_rel,
         cert_arch="sm_100",
         operands=(
-            OperandSlot("addr", kind="addr"),
+            OperandSlot("addr", kind="addr", allow_imm_offset=True),
             OperandSlot("value"),
         ),
     ),
@@ -6468,7 +6472,7 @@ _ENTRIES = [
         # sm_90+, so pinning the operand to shared would bind a 32-bit register
         # under the space-omitted spelling. `operand_space` reads the entry's
         # `space` slot instead, so the carrier follows the spelling.
-        operands=(OperandSlot("addr", kind="addr"),),
+        operands=(OperandSlot("addr", kind="addr", allow_imm_offset=True),),
     ),
     InstructionEntry(  # mbarrier.pending_count.b64 count, state;
         # The reader of the `state` result the two `.noComplete` entries above
@@ -6522,8 +6526,8 @@ _ENTRIES = [
         # `operand_space` read the entry's `space` slot gives each variant the
         # carrier its own spelling promises -- the mbarrier-family rule.
         operands=(
-            OperandSlot("addr", kind="addr"),
-            OperandSlot("mbar", kind="addr"),
+            OperandSlot("addr", kind="addr", allow_imm_offset=True),
+            OperandSlot("mbar", kind="addr", allow_imm_offset=True),
         ),
     ),
     # clusterlaunchcontrol.query_cancel per PTX ISA 9.7.14.19: decode the
@@ -6930,7 +6934,7 @@ _ENTRIES = [
         ),
         operands=(
             OperandSlot("r", rw="w", dtype="b32", lanes=_ldmatrix_lanes),
-            OperandSlot("p", kind="addr"),
+            OperandSlot("p", kind="addr", allow_imm_offset=True),
         ),
     ),
     InstructionEntry(  # line 1, .m16n16.b8: "only .x1 and .x2 are valid"
@@ -6952,7 +6956,7 @@ _ENTRIES = [
         cert_arch="sm_100a",
         operands=(
             OperandSlot("r", rw="w", dtype="b32", lanes=_ldmatrix_lanes),
-            OperandSlot("p", kind="addr"),
+            OperandSlot("p", kind="addr", allow_imm_offset=True),
         ),
     ),
     InstructionEntry(  # lines 2+3: the 6/4-bit decompression loads
@@ -6972,7 +6976,7 @@ _ENTRIES = [
         check=_check_ldmatrix_b8fmt,
         operands=(
             OperandSlot("r", rw="w", dtype="b32", lanes=_ldmatrix_lanes),
-            OperandSlot("p", kind="addr"),
+            OperandSlot("p", kind="addr", allow_imm_offset=True),
         ),
     ),
     # stmatrix per PTX ISA 9.7.15.5.16 -- the store mirror of ldmatrix. One
@@ -6998,7 +7002,7 @@ _ENTRIES = [
         ),
         cert_arch="sm_90",  # ISA: "Requires sm_90 or higher."
         operands=(
-            OperandSlot("p", kind="addr"),
+            OperandSlot("p", kind="addr", allow_imm_offset=True),
             OperandSlot("r", dtype="b32", lanes=_matrix_num_lanes),
         ),
     ),
@@ -7017,7 +7021,7 @@ _ENTRIES = [
         ),
         cert_arch="sm_100a",
         operands=(
-            OperandSlot("p", kind="addr"),
+            OperandSlot("p", kind="addr", allow_imm_offset=True),
             OperandSlot("r", dtype="b32", lanes=_matrix_num_lanes),
         ),
     ),
@@ -7453,7 +7457,7 @@ _ENTRIES = [
         cert_arch="sm_100a",
         orders_memory=True,
         operands=(
-            OperandSlot("dst", kind="addr", space="shared::cta"),
+            OperandSlot("dst", kind="addr", allow_imm_offset=True, space="shared::cta"),
             OperandSlot("ncols", dtype="u32"),
         ),
     ),
@@ -7754,7 +7758,9 @@ _ENTRIES = [
         ),
         cert_arch="sm_100a",
         orders_memory=True,
-        operands=(OperandSlot("mbar", kind="addr", space="shared::cluster"),),
+        operands=(
+            OperandSlot("mbar", kind="addr", allow_imm_offset=True, space="shared::cluster"),
+        ),
     ),
     # tcgen05.commit...{.shared::cluster}.multicast::cluster.b64 [mbar], ctaMask;
     # The multicast form: `pred` is keyword-only, so the trailing mask
@@ -7774,7 +7780,7 @@ _ENTRIES = [
         cert_arch="sm_100a",
         orders_memory=True,
         operands=(
-            OperandSlot("mbar", kind="addr", space="shared::cluster"),
+            OperandSlot("mbar", kind="addr", allow_imm_offset=True, space="shared::cluster"),
             OperandSlot("mask", dtype="u16"),
         ),
     ),
@@ -7799,6 +7805,34 @@ _ENTRIES = [
     ),
 ]
 
+
+def _validate_imm_offset_slots(entries) -> None:
+    """Reject capability bits on operand classes that cannot spell ``[addr+imm]``."""
+    errors = []
+    for entry in entries:
+        for slot in entry.operands:
+            if not slot.allow_imm_offset:
+                continue
+            reasons = []
+            if slot.kind != "addr":
+                reasons.append(f"kind={slot.kind!r}, expected 'addr'")
+            if slot.bracket is not None:
+                reasons.append("is a composite bracket member")
+            if slot.space == "tmem" or (
+                slot.space is None
+                and any(
+                    modifier.name == "space" and "tmem" in modifier.choices
+                    for modifier in entry.slots
+                )
+            ):
+                reasons.append("is a tmem address")
+            if reasons:
+                errors.append(f"{entry.name}.{slot.name}: " + "; ".join(reasons))
+    if errors:
+        raise ValueError("invalid allow_imm_offset slots:\n  " + "\n  ".join(errors))
+
+
+_validate_imm_offset_slots(_ENTRIES)
 TABLE: dict[str, InstructionEntry] = {e.name: e for e in _ENTRIES}
 # Keying by name silently drops a duplicate, and a dropped entry is an ISA line
 # that stops being reachable. Two entries never legitimately share a name.
