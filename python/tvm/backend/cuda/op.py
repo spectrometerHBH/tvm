@@ -431,6 +431,27 @@ def cuda_mbarrier_wait_acquire_cluster(bar, phase):
     return call_intrin("", "tirx.cuda.mbarrier_wait_acquire_cluster", bar, phase)
 
 
+def cuda_mbarrier_wait_relaxed(bar):
+    """Retry source-scope ``mbarrier.try_wait.parity.shared`` until ready.
+
+    This is the unqualified wait used by source kernels that do not request an
+    acquire semantic or an explicit CTA/cluster shared-memory view.  Its phase
+    and timeout are fixed to 0 and 10,000,000, respectively, matching the CUDA
+    helper's instruction contract.
+    """
+    return call_intrin("", "tirx.cuda.mbarrier_wait_relaxed", bar)
+
+
+def cuda_cvt_e2m1x8_f32(v0, v1, v2, v3, v4, v5, v6, v7):
+    """Convert eight FP32 values to four packed E2M1x2 bytes in one word.
+
+    The helper emits four native ``cvt.rn.satfinite.e2m1x2.f32`` operations
+    and one ``mov.b32 {b8,b8,b8,b8}``.  Each converter takes the high element
+    first while the returned word keeps ``v0`` in the low nibble.
+    """
+    return call_intrin("uint32", "tirx.cuda.cvt_e2m1x8_f32", v0, v1, v2, v3, v4, v5, v6, v7)
+
+
 def ptx_cp_async_legacy(*all_args):
     """Legacy ``ptx_cp_async`` API taking explicit src/dst offsets.
 

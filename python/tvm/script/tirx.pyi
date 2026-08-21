@@ -1737,8 +1737,8 @@ class _Chain_sqrt:
     ) -> None: ...
 
 class _Chain_st:
-    """`st` — 3 entries sharing this mnemonic; PTX puts their difference in the operand list,
-    so the call selects one. Shapes: (*__operands)
+    """`st` — 4 entries sharing this mnemonic; PTX puts their difference in the operand list,
+    so the call selects one. Shapes: (*__operands); (addr, value)
     """
 
     L1__evict_first: _Chain_st

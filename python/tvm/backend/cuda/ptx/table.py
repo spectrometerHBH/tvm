@@ -3832,6 +3832,21 @@ _ENTRIES = [
             OperandSlot("cache_policy", dtype="u64", lanes=_present_lanes("cache"), vector=False),
         ),
     ),
+    # PTX permits a wider integer carrier for a narrow bit-size store.  Keep
+    # this as a separate operand shape so ``st.global.b8`` can consume the low
+    # byte of a uint32 register without a C++ narrowing conversion.
+    InstructionEntry(
+        name="st_wide_b8",
+        mnemonic="st",
+        slots=(
+            ModifierSlot("space", ("global",)),
+            ModifierSlot("type", ("b8",)),
+        ),
+        operands=(
+            OperandSlot("addr", kind="addr", allow_imm_offset=True),
+            OperandSlot("value", dtype="u32"),
+        ),
+    ),
     InstructionEntry(
         name="st_vec",
         mnemonic="st",

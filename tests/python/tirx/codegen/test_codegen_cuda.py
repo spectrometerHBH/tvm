@@ -238,6 +238,84 @@ def test_tirx_max_registers_rejects_launch_bounds():
         _get_source(main)
 
 
+def test_tirx_required_block_size_emits_cuda_block_size():
+    @T.prim_func
+    def main(A: T.Buffer((8,), "int32")):
+        T.device_entry()
+        T.attr({"tirx.required_block_size": 1})
+        bx, by = T.cta_id([4, 2])
+        _, cy = T.cta_id_in_cluster([1, 2])
+        tx = T.thread_id([128])
+        if tx == 0:
+            A[bx * 2 + by] = cy
+
+    src, _ = _get_source(main)
+    assert 'extern "C" __global__ void __block_size__((128, 1, 1), (1, 2, 1)) main_kernel' in src
+    assert "__launch_bounds__" not in src
+    assert "tirx.required_block_size" not in src
+
+
+def test_tirx_required_block_size_rejects_launch_controls():
+    @T.prim_func
+    def main(A: T.Buffer((4,), "int32")):
+        T.device_entry()
+        T.attr(
+            {
+                "tirx.required_block_size": 1,
+                "tirx.launch_bounds_min_blocks_per_sm": 1,
+            }
+        )
+        bx = T.cta_id([4])
+        tx = T.thread_id([128])
+        if tx == 0:
+            A[bx] = A[bx] + 1
+
+    with pytest.raises(
+        tvm.error.InternalError,
+        match="cannot be combined with CUDA launch bounds or maximum registers",
+    ):
+        _get_source(main)
+
+
+def test_fp4_source_exact_cuda_helpers_codegen():
+    @T.prim_func
+    def convert_and_store(out: T.Buffer((1,), "uint32")):
+        T.device_entry()
+        tx = T.thread_id([32])
+        if tx == 0:
+            packed = T.cuda.cvt_e2m1x8_f32(
+                T.float32(0),
+                T.float32(1),
+                T.float32(2),
+                T.float32(3),
+                T.float32(4),
+                T.float32(5),
+                T.float32(6),
+                T.float32(7),
+            )
+            T.ptx.st.global_.b8(out.ptr_to([0]), packed)
+
+    src, _ = _get_source(convert_and_store)
+    helper = _helper_source(src, "tvm_builtin_cuda_cvt_e2m1x8_f32")
+    assert helper.count("cvt.rn.satfinite.e2m1x2.f32") == 4
+    assert "mov.b32 %0, {byte0, byte1, byte2, byte3};" in helper
+    assert "st.global.b8 [%0], %1;" in src
+    assert "cvt.u8" not in src
+
+    @T.prim_func
+    def wait_relaxed():
+        T.device_entry()
+        T.thread_id([32])
+        bar = T.alloc_buffer((1,), "uint64", scope="shared")
+        T.cuda.mbarrier_wait_relaxed(bar.ptr_to([0]))
+
+    src, _ = _get_source(wait_relaxed)
+    helper = _helper_source(src, "tvm_builtin_cuda_mbarrier_wait_relaxed")
+    assert "mbarrier.try_wait.parity.shared.b64 P1, [%0], 0, 10000000;" in helper
+    assert "@P1 bra.uni DONE_RELAXED;" in helper
+    assert "bra.uni LAB_WAIT_RELAXED;" in helper
+
+
 def test_tirx_cuda_kernel_return_zero_codegen_is_void_early_return():
     @T.prim_func
     def main(A: T.Buffer((4,), "int32")):

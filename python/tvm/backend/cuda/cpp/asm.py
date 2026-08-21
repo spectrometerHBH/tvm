@@ -99,6 +99,54 @@ device_intrinsic(
 )
 
 
+# Source-scope wait used by CuTe helpers that deliberately omit acquire/scope
+# qualifiers.  The phase and timeout are part of this helper's exact contract.
+device_intrinsic(
+    "cuda_mbarrier_wait_relaxed",
+    c_signature="(void* barrier)",
+    body=(
+        "    unsigned int barrier_addr_int = __cvta_generic_to_shared(barrier);\n"
+        "    asm volatile(\n"
+        '        "{\\n"\n'
+        '        ".reg .pred       P1;\\n"\n'
+        '        "LAB_WAIT_RELAXED:\\n"\n'
+        '        "mbarrier.try_wait.parity.shared.b64 P1, [%0], 0, 10000000;\\n"\n'
+        '        "@P1 bra.uni DONE_RELAXED;\\n"\n'
+        '        "bra.uni LAB_WAIT_RELAXED;\\n"\n'
+        '        "DONE_RELAXED:\\n"\n'
+        '        "}\\n"\n'
+        '        :: "r"(barrier_addr_int) : "memory");'
+    ),
+)
+
+
+# Four sub-byte results have no C++ register type.  Keeping all conversions
+# and the b8x4 gather in one asm scope preserves the native register classes.
+device_intrinsic(
+    "cuda_cvt_e2m1x8_f32",
+    c_signature=(
+        "(float v0, float v1, float v2, float v3, float v4, float v5, float v6, float v7)"
+    ),
+    return_type="uint32_t",
+    body=(
+        "    uint32_t packed;\n"
+        "    asm volatile(\n"
+        '        "{\\n"\n'
+        '        ".reg .b8 byte0, byte1, byte2, byte3;\\n"\n'
+        '        "cvt.rn.satfinite.e2m1x2.f32 byte0, %2, %1;\\n"\n'
+        '        "cvt.rn.satfinite.e2m1x2.f32 byte1, %4, %3;\\n"\n'
+        '        "cvt.rn.satfinite.e2m1x2.f32 byte2, %6, %5;\\n"\n'
+        '        "cvt.rn.satfinite.e2m1x2.f32 byte3, %8, %7;\\n"\n'
+        '        "mov.b32 %0, {byte0, byte1, byte2, byte3};\\n"\n'
+        '        "}\\n"\n'
+        '        : "=r"(packed)\n'
+        '        : "f"(v0), "f"(v1), "f"(v2), "f"(v3),\n'
+        '          "f"(v4), "f"(v5), "f"(v6), "f"(v7));\n'
+        "    return packed;"
+    ),
+)
+
+
 # =============================================================================
 # Cluster / warpgroup barriers — open-coded arrive+wait and ``bar.sync``.
 # =============================================================================

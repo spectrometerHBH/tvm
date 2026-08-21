@@ -152,6 +152,8 @@ class CUDANamespace:
         self.mbarrier_wait_acquire_cluster = _op_wrapper(
             _cuda_op.cuda_mbarrier_wait_acquire_cluster
         )
+        self.mbarrier_wait_relaxed = _op_wrapper(_cuda_op.cuda_mbarrier_wait_relaxed)
+        self.cvt_e2m1x8_f32 = _op_wrapper(_cuda_op.cuda_cvt_e2m1x8_f32)
         self.atomic_add = _op_wrapper(_cuda_op.cuda_atomic_add)
         self.thread_fence = _op_wrapper(_cuda_op.cuda_thread_fence)
         self.warpgroup_sync = _op_wrapper(_cuda_op.cuda_warpgroup_sync)
