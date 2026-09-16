@@ -22,6 +22,7 @@
  * \file inject_double_buffer.cc
  */
 #include <tvm/ffi/cast.h>
+#include <tvm/ffi/extra/structural_mutate.h>
 #include <tvm/ffi/function.h>
 #include <tvm/ffi/reflection/registry.h>
 #include <tvm/runtime/logging.h>
@@ -78,21 +79,50 @@ TVM_REGISTER_PASS_CONFIG_OPTION("s_tir.InjectDoubleBuffer", InjectDoubleBufferCo
 // Detect double buffer variables.
 class DoubleBufferDetector : public StmtExprVisitor {
  public:
-  void VisitStmt_(const AttrStmtNode* op) final {
+  using StmtExprVisitor::Visit_;
+  ffi::Optional<VisitInterrupt> Visit_(const AttrStmtNode* op) final {
     if (op->attr_key == s_tir::attr::double_buffer_scope) {
       if (auto buffer = GetBufferDataVar(op->node)) {
         touched_.insert(buffer.value().get());
       }
-      StmtExprVisitor::VisitStmt_(op);
+      TVM_FFI_S_VISIT_MAYBE_EARLY_RETURN(StmtExprVisitor::Visit_(op));
     } else {
-      StmtExprVisitor::VisitStmt_(op);
+      TVM_FFI_S_VISIT_MAYBE_EARLY_RETURN(StmtExprVisitor::Visit_(op));
     }
+    return std::nullopt;
   }
 
-  void VisitExpr_(const VarNode* op) final {
+  // Known loads and stores are not opaque escapes of the buffer variable.
+  ffi::Optional<VisitInterrupt> Visit_(const TensorLoadNode* op) final {
+    for (const auto& index : op->indices) {
+      TVM_FFI_S_VISIT_MAYBE_EARLY_RETURN(Visit(index));
+    }
+    return std::nullopt;
+  }
+
+  ffi::Optional<VisitInterrupt> Visit_(const BufferStoreNode* op) final {
+    TVM_FFI_S_VISIT_MAYBE_EARLY_RETURN(Visit(op->value));
+    for (const auto& index : op->indices) {
+      TVM_FFI_S_VISIT_MAYBE_EARLY_RETURN(Visit(index));
+    }
+    return std::nullopt;
+  }
+
+  // Declared regions carry bounds, not opaque runtime accesses.
+  ffi::Optional<VisitInterrupt> Visit_(const BufferRegionNode* op) final {
+    for (const Range& range : op->region) {
+      TVM_FFI_S_VISIT_MAYBE_EARLY_RETURN(Visit(range->min));
+      TVM_FFI_S_VISIT_MAYBE_EARLY_RETURN(Visit(range->extent));
+    }
+    return std::nullopt;
+  }
+
+  ffi::Optional<VisitInterrupt> Visit_(const VarNode* op) final {
+    if (def_region_kind() != kTVMFFIDefRegionKindNone) return std::nullopt;
     if (touched_.count(op)) {
       touched_.erase(op);
     }
+    return std::nullopt;
   }
   // The set of touched variable.
   std::unordered_set<const VarNode*> touched_;
@@ -114,10 +144,10 @@ class DoubleBufferInjector : public StmtExprMutator {
   explicit DoubleBufferInjector(int split_loop) : split_loop_(split_loop) {}
 
   Stmt Inject(Stmt stmt) {
-    DoubleBufferDetector detector;
-    detector(stmt);
-    if (detector.touched_.empty()) return stmt;
-    for (const VarNode* v : detector.touched_) {
+    auto detector = ffi::make_object<DoubleBufferDetector>();
+    detector->Visit(stmt);
+    if (detector->touched_.empty()) return stmt;
+    for (const VarNode* v : detector->touched_) {
       dbuffer_info_[v] = StorageEntry();
     }
     return ConvertSSA(operator()(std::move(stmt)));
@@ -188,11 +218,17 @@ class DoubleBufferInjector : public StmtExprMutator {
         PrimExpr tail_base = outer_ext * factor;
         Var outer_var(old_loop->loop_var->name + ".outer", old_loop->loop_var.ty());
         std::unordered_map<const VarNode*, PrimExpr> vmap;
+        auto map_var = [&vmap](const Var& var) -> ffi::Expected<ffi::UnchangedOr<ffi::Any>> {
+          if (auto it = vmap.find(var.get()); it != vmap.end()) return ffi::Any(it->second);
+          return ffi::Unchanged();
+        };
         std::vector<Stmt> loop_seq;
         for (int32_t i = 0; i < split_loop_; ++i) {
           vmap[old_loop->loop_var.get()] =
               outer_var.as_or_throw<PrimExpr>() * factor + IntImm(factor.ty(), i);
-          loop_seq.emplace_back(Substitute(old_loop->body, vmap));
+          loop_seq.emplace_back(
+              ffi::StructuralMap<ffi::WalkOrder::kPreOrder>(old_loop->body, map_var)
+                  .as_or_throw<Stmt>());
         }
         Stmt loop = For(outer_var.as_or_throw<PrimVar>(), zero, outer_ext, old_loop->kind,
                         SeqStmt::Flatten(loop_seq));
@@ -202,7 +238,10 @@ class DoubleBufferInjector : public StmtExprMutator {
         for (int32_t i = 0; i < split_loop_; ++i) {
           PrimExpr idx = tail_base + IntImm(tail_base.ty(), i);
           vmap[old_loop->loop_var.get()] = idx;
-          tail_seq.emplace_back(IfThenElse(idx < old_loop->extent, Substitute(tail_body, vmap)));
+          tail_seq.emplace_back(
+              IfThenElse(idx < old_loop->extent,
+                         ffi::StructuralMap<ffi::WalkOrder::kPreOrder>(tail_body, map_var)
+                             .as_or_throw<Stmt>()));
         }
         stmt = SeqStmt::Flatten(loop, tail_seq);
       }
@@ -236,8 +275,8 @@ class DoubleBufferInjector : public StmtExprMutator {
     return node;
   }
 
-  Expr VisitExpr_(const TensorLoadNode* op) final {
-    auto node = StmtExprMutator::VisitExpr_(op).as_or_throw<TensorLoad>();
+  Expr Dispatch_(const TensorLoadNode* op) final {
+    auto node = StmtExprMutator::Dispatch_(op).as_or_throw<TensorLoad>();
     BufferVar buffer = node->source.as_or_throw<tvm::tirx::BufferVar>();
 
     auto it = dbuffer_info_.find(buffer.get());
@@ -280,7 +319,7 @@ class DoubleBufferInjector : public StmtExprMutator {
     return buf;
   }
 
-  Expr VisitExpr_(const VarNode* op) final {
+  Expr Dispatch_(const VarNode* op) final {
     TVM_FFI_ICHECK(!dbuffer_info_.count(op));
     return ffi::GetRef<Var>(op);
   }
@@ -306,12 +345,17 @@ class DoubleBufferInjector : public StmtExprMutator {
     Stmt body = this->VisitStmt(op->body);
     in_double_buffer_scope_ = false;
     std::unordered_map<const VarNode*, PrimExpr> vmap;
+    auto map_var = [&vmap](const Var& var) -> ffi::Expected<ffi::UnchangedOr<ffi::Any>> {
+      if (auto it = vmap.find(var.get()); it != vmap.end()) return ffi::Any(it->second);
+      return ffi::Unchanged();
+    };
     vmap[e.switch_write_var.get()] = zero;
     vmap[e.loop->loop_var.get()] = zero;
-    loop_pre_[e.loop].emplace_back(Substitute(body, vmap));
+    loop_pre_[e.loop].emplace_back(
+        ffi::StructuralMap<ffi::WalkOrder::kPreOrder>(body, map_var).as_or_throw<Stmt>());
     vmap[e.loop->loop_var.get()] = loop_shift;
     vmap[e.switch_write_var.get()] = indexmod(loop_shift, two);
-    body = Substitute(body, vmap);
+    body = ffi::StructuralMap<ffi::WalkOrder::kPostOrder>(body, map_var).as_or_throw<Stmt>();
     body = AttrStmt(GetRemappedBuffer(BufferVar(buffer), e.stride).data(),
                     s_tir::attr::double_buffer_write, 1, body);
     body = IfThenElse(loop_shift < e.loop->extent, body);

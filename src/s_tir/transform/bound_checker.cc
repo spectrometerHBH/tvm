@@ -38,8 +38,6 @@
 #include <utility>
 #include <vector>
 
-#include "../../arith/unwrap_vector_expr.h"
-
 namespace tvm {
 namespace s_tir {
 using namespace tvm::prim;
@@ -48,11 +46,16 @@ using namespace tvm::tirx;
 // TODO(Lunderberg): Move this pass to be before
 // FlattenBuffer.  That will simplify this pass,
 // because it can check directly against the buffer limits.
-class BoundCollector : public StmtVisitor {
+class BoundCollector : public StmtExprVisitor {
  public:
+  using StmtExprVisitor::Visit_;
+  ffi::Optional<VisitInterrupt> Visit(ffi::AnyView value) override {
+    if (value.as<ExprNode>()) return std::nullopt;
+    return StmtExprVisitor::Visit(value);
+  }
   BoundCollector() {}
 
-  void VisitStmt_(const AttrStmtNode* op) final {
+  ffi::Optional<VisitInterrupt> Visit_(const AttrStmtNode* op) final {
     if (op->attr_key == s_tir::attr::buffer_bound) {
       const VarNode* key = op->node.as<VarNode>();
       const CallNode* container = op->value.as<CallNode>();
@@ -61,7 +64,7 @@ class BoundCollector : public StmtVisitor {
         mem_to_shape[key] = shape;
       }
     }
-    StmtVisitor::VisitStmt_(op);
+    return StmtExprVisitor::Visit_(op);
   }
   // Hashtable which maps buffer_var to shape.
   std::unordered_map<const VarNode*, ffi::Array<PrimExpr>> mem_to_shape;
@@ -80,11 +83,11 @@ class BoundChecker : public StmtExprMutator {
     return StmtExprMutator::VisitStmt_(op);
   }
 
-  Expr VisitExpr_(const CallNode* op) final {
+  Expr Dispatch_(const CallNode* op) final {
     if (process_store_ && op->op.same_as(prim::builtin::if_then_else())) {
       unsafe_rewritten_ = true;
     }
-    return StmtExprMutator::VisitExpr_(op);
+    return StmtExprMutator::Dispatch_(op);
   }
 
   Stmt VisitStmt_(const BufferStoreNode* op) final {
@@ -110,11 +113,11 @@ class BoundChecker : public StmtExprMutator {
     return ffi::GetRef<Stmt>(op);
   }
 
-  Expr VisitExpr_(const TensorLoadNode* op) final {
+  Expr Dispatch_(const TensorLoadNode* op) final {
     if (CanInstrument(op->indices, op->source.as_or_throw<tvm::tirx::BufferVar>().var())) {
       Collect(op->indices, op->source.as_or_throw<tvm::tirx::BufferVar>().var());
     }
-    return StmtExprMutator::VisitExpr_(op);
+    return StmtExprMutator::Dispatch_(op);
   }
 
  private:
@@ -209,7 +212,7 @@ class BoundChecker : public StmtExprMutator {
         PrimExpr upper_bound = shape[i];
 
         if (const RampNode* ramp_index = index.as<RampNode>()) {
-          index = arith::UnwrapVectorExpr(ffi::GetRef<Ramp>(ramp_index), ramp_index->lanes);
+          index = ramp_index->base + ramp_index->lanes * ramp_index->stride;
         }
 
         // Try to simplify index and bound.
@@ -245,10 +248,10 @@ class BoundChecker : public StmtExprMutator {
 };
 
 Stmt InstrumentBoundCheckers(Stmt stmt) {
-  BoundCollector bound_collector;
+  auto bound_collector = ffi::make_object<BoundCollector>();
   // At first walk recursively and collect bound attributes.
-  bound_collector(stmt);
-  return BoundChecker(bound_collector.mem_to_shape)(std::move(stmt));
+  bound_collector->Visit(stmt);
+  return BoundChecker(bound_collector->mem_to_shape)(std::move(stmt));
 }
 
 namespace transform {
@@ -256,10 +259,10 @@ namespace transform {
 Pass InstrumentBoundCheckers() {
   auto pass_func = [](PrimFunc f, IRModule m, PassContext ctx) {
     auto* n = f.CopyOnWrite();
-    BoundCollector bound_collector;
+    auto bound_collector = ffi::make_object<BoundCollector>();
     // At first walk recursively and collect bound attributes.
-    bound_collector(n->body);
-    n->body = BoundChecker(bound_collector.mem_to_shape)(std::move(n->body));
+    bound_collector->Visit(n->body);
+    n->body = BoundChecker(bound_collector->mem_to_shape)(std::move(n->body));
     return f;
   };
   return CreatePrimFuncPass(pass_func, 0, "s_tir.InstrumentBoundCheckers", {});

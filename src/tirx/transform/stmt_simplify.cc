@@ -26,6 +26,7 @@
 
 #include <tvm/arith/analyzer.h>
 #include <tvm/ffi/cast.h>
+#include <tvm/ffi/extra/structural_mutate.h>
 #include <tvm/ffi/function.h>
 #include <tvm/ffi/reflection/registry.h>
 #include <tvm/ir/prim/builtin.h>
@@ -35,7 +36,7 @@
 #include <tvm/tirx/op.h>
 #include <tvm/tirx/transform.h>
 
-#include "../../arith/ir_mutator_with_analyzer.h"
+#include "../ir_mutator_with_analyzer.h"
 
 namespace tvm {
 namespace arith {
@@ -115,15 +116,15 @@ class StmtSimplifier : public IRMutatorWithAnalyzer {
       : IRMutatorWithAnalyzer(analyzer), config_(config) {}
 
   using Parent = IRMutatorWithAnalyzer;
-  using Parent::VisitExpr_;
+  using Parent::Dispatch_;
   using Parent::VisitStmt;
   using Parent::VisitStmt_;
 
   // Do not simplify buffer definition fields (shape, strides, elem_offset).
   //
-  // The simplifier's VisitExpr override calls analyzer_->Simplify() directly,
+  // The simplifier's Dispatch override calls analyzer_->Simplify() directly,
   // bypassing the normal ExprMutator dispatch. This means TensorLoad expressions
-  // inside values (e.g., BufferStore value) skip VisitExpr_(TensorLoadNode*) and
+  // inside values (e.g., BufferStore value) skip Dispatch_(TensorLoadNode*) and
   // thus skip VisitBufferUse. If VisitBufferDef remaps buffers at DeclBuffer sites,
   // the TensorLoad use sites won't pick up the remap, causing DeclBuffer/BufferLoad
   // buffer identity divergence and well-formedness violations.
@@ -132,11 +133,11 @@ class StmtSimplifier : public IRMutatorWithAnalyzer {
   // to prevent inlining LetStmt vars that appear in buffer definitions.
   BufferVar VisitBufferDef(const BufferVar& buffer, bool alloc_data) override { return buffer; }
 
-  Expr VisitExpr(const Expr& expr) final {
+  Expr Dispatch(const Expr& expr) final {
     if (auto prim_expr = expr.as<PrimExpr>()) {
       return analyzer_->Simplify(prim_expr.value());
     }
-    return Parent::VisitExpr(expr);
+    return Parent::Dispatch(expr);
   }
 
   Stmt Simplify(Stmt stmt) { return operator()(std::move(stmt)); }
@@ -193,20 +194,20 @@ class StmtSimplifier : public IRMutatorWithAnalyzer {
     }
   }
 
-  Expr VisitExpr_(const CallNode* op) override {
+  Expr Dispatch_(const CallNode* op) override {
     if (op->op.same_as(prim::builtin::if_then_else())) {
       if (ffi::Optional<bool> cond = ProveCondition(op->args[0].as_or_throw<PrimExpr>())) {
         if (cond.value()) {
-          return this->VisitExpr(op->args[1]);
+          return this->Dispatch(op->args[1]);
         } else {
-          return this->VisitExpr(op->args[2]);
+          return this->Dispatch(op->args[2]);
         }
       }
     }
-    return Parent::VisitExpr_(op);
+    return Parent::Dispatch_(op);
   }
 
-  Expr VisitExpr_(const TensorLoadNode* op) override { return Parent::VisitExpr_(op); }
+  Expr Dispatch_(const TensorLoadNode* op) override { return Parent::Dispatch_(op); }
 
   // eliminate useless stores
   Stmt VisitStmt_(const BufferStoreNode* op) override {
@@ -214,7 +215,7 @@ class StmtSimplifier : public IRMutatorWithAnalyzer {
     if (const TensorLoadNode* load = store->value.as<TensorLoadNode>()) {
       BufferVar buffer = load->source.as_or_throw<tvm::tirx::BufferVar>();
       if (buffer.same_as(store->buffer) && ArrayDeepEqual(load->indices, store->indices) &&
-          tirx::ExprDeepEqual()(buffer->elem_offset, store->buffer->elem_offset) &&
+          prim::ExprDeepEqual()(buffer->elem_offset, store->buffer->elem_offset) &&
           ArrayDeepEqual(buffer->shape, store->buffer->shape) &&
           ArrayDeepEqual(buffer->strides, store->buffer->strides)) {
         return Evaluate(0);
@@ -229,7 +230,7 @@ class StmtSimplifier : public IRMutatorWithAnalyzer {
       return false;
     }
     for (size_t i = 0; i < lhs.size(); i++) {
-      if (!tirx::ExprDeepEqual()(lhs[i], rhs[i])) {
+      if (!prim::ExprDeepEqual()(lhs[i], rhs[i])) {
         return false;
       }
     }
@@ -241,7 +242,12 @@ class StmtSimplifier : public IRMutatorWithAnalyzer {
    * Substitutes any known Bind values and then simplifies with the analyzer.
    */
   ffi::Optional<bool> ProveCondition(PrimExpr condition) const {
-    condition = Substitute(condition, non_inlined_bindings_);
+    auto f_substitute = [this](const Var& var) -> ffi::Expected<ffi::UnchangedOr<ffi::Any>> {
+      if (auto repl = non_inlined_bindings_.Get(var)) return ffi::Any(*std::move(repl));
+      return ffi::Unchanged();
+    };
+    condition = ffi::StructuralMap<ffi::WalkOrder::kPreOrder>(condition, f_substitute)
+                    .as_or_throw<PrimExpr>();
     condition = analyzer_->Simplify(condition);
     if (const int64_t* as_int = as_const_int(condition)) {
       return *as_int != 0;

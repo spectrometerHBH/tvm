@@ -32,7 +32,7 @@
 #include <tvm/ir/attrs.h>
 #include <tvm/ir/cow.h>
 #include <tvm/ir/expr.h>
-#include <tvm/ir/node_functor.h>
+#include <tvm/ir/object_functor.h>
 #include <tvm/ir/prim/vector_expr.h>
 #include <tvm/runtime/base.h>
 
@@ -545,8 +545,7 @@ class LetNode : public ExprNode {
   static void RegisterReflection() {
     namespace refl = tvm::ffi::reflection;
     refl::ObjectDef<LetNode>()
-        // TODO(tqchen): use SEqHashDefNonRecursive after the next pypi tvm-ffi release
-        .def_ro("var", &LetNode::var, refl::AttachFieldFlag::SEqHashDefRecursive())
+        .def_ro("var", &LetNode::var, refl::AttachFieldFlag::SEqHashDefSimple())
         .def_ro("value", &LetNode::value)
         .def_ro("body", &LetNode::body);
   }
@@ -581,6 +580,27 @@ inline std::unordered_map<K, V> as_unordered_map(const ffi::Map<K, V>& dmap) {
   }
   return ret;
 }
+
+/*!
+ * \brief Compare two expressions recursively and check if they are equal
+ *        to each other without var remapping.
+ *
+ *  This function does not remap variable bindings, it will not
+ *  return true for (let x = 1 in x + 1) vs (let y = 1 in y + 1), unless x.same_as(y).
+ *
+ *  Use StructuralEqual for such cases.
+ *
+ *  Due to the restriction of not remapping variables, this function can run
+ *  faster than StructuralEqual and can be used as a utility function during arithmetic
+ *  simplifications.
+ *
+ * \sa StructuralEqual
+ */
+struct ExprDeepEqual {
+ public:
+  TVM_DLL bool operator()(const PrimExpr& lhs, const PrimExpr& rhs) const;
+};
+
 }  // namespace prim
 
 namespace ffi {

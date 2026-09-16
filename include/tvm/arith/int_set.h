@@ -33,10 +33,6 @@
 namespace tvm {
 namespace arith {
 
-using tirx::IterVar;
-using tirx::Var;
-using tirx::VarNode;
-
 class AnalyzerObj;
 class Analyzer;
 
@@ -178,15 +174,6 @@ class IntSet : public ffi::ObjectRef {
 ffi::Map<Var, IntSet> ConvertDomMap(const std::unordered_map<const VarNode*, IntSet>& dom_map);
 /*!
  * \brief Find an symbolic integer set that contains all possible values of
- *  e given the domain of each iteration variables.
- *
- * \param e The expression to be evaluated.
- * \param dom_map The domain of each variable.
- * \return An integer set that can cover all the possible values of e.
- */
-IntSet EvalSet(PrimExpr e, const ffi::Map<IterVar, IntSet>& dom_map);
-/*!
- * \brief Find an symbolic integer set that contains all possible values of
  *  e given the domain of each variables.
  *
  * \param e The expression to be evaluated.
@@ -201,16 +188,7 @@ IntSet EvalSet(PrimExpr e, const ffi::Map<Var, IntSet>& dom_map);
  * \param dom_map The domain of each variable.
  * \return An integer set that can cover all the possible values of e.
  */
-IntSet EvalSet(PrimExpr e, const std::unordered_map<const tirx::VarNode*, IntSet>& dom_map);
-/*!
- * \brief Find an symbolic integer set that contains is union over
- *  all the possible conditional values in dom_map.
- *
- * \param r The initial range.
- * \param dom_map The domain of each variable.
- * \return An integer set that can cover all the possible values.
- */
-IntSet EvalSet(Range r, const ffi::Map<IterVar, IntSet>& dom_map);
+IntSet EvalSet(PrimExpr e, const std::unordered_map<const VarNode*, IntSet>& dom_map);
 
 /*!
  * \brief Find an symbolic integer set that contains is union over

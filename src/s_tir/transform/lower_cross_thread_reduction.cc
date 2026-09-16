@@ -22,6 +22,8 @@
  */
 #include <tvm/arith/analyzer.h>
 #include <tvm/ffi/cast.h>
+#include <tvm/ffi/extra/structural_mutate.h>
+#include <tvm/ffi/extra/structural_visit.h>
 #include <tvm/ffi/reflection/registry.h>
 #include <tvm/s_tir/stmt.h>
 #include <tvm/s_tir/transform.h>
@@ -80,15 +82,13 @@ bool IsBoundToThreadIdx(const ForNode* loop) {
 bool IsDominantBlock(const SBlock& scope_block, const SBlock& block) {
   // Step 1. Count the number of writers for each buffer written by the scope block.
   std::unordered_map<const VarNode*, int> buffer_writer_cnt;
-  PreOrderVisit(scope_block->body, [&buffer_writer_cnt](const ffi::ObjectRef& obj) {
-    if (const auto* block = obj.as<SBlockNode>()) {
-      for (const BufferRegion& buffer_region : block->writes) {
-        ++buffer_writer_cnt[buffer_region->buffer.get()];
-      }
-      return false;
+  auto walk_fn = [&buffer_writer_cnt](const SBlock& block) -> ffi::Expected<ffi::WalkResult> {
+    for (const BufferRegion& buffer_region : block->writes) {
+      ++buffer_writer_cnt[buffer_region->buffer.get()];
     }
-    return true;
-  });
+    return ffi::WalkResult::Skip();
+  };
+  ffi::StructuralWalk<ffi::WalkOrder::kPreOrder>(scope_block->body, walk_fn);
   // Step 2. Check whether `block` is the only writer of its outputs.
   for (const BufferRegion& buffer_region : block->writes) {
     TVM_FFI_ICHECK(buffer_writer_cnt.count(buffer_region->buffer.get()));
@@ -180,7 +180,7 @@ class BufferReplacer : private StmtExprMutator {
   explicit BufferReplacer(ffi::Map<BufferVar, BufferVar> buffer_map)
       : buffer_map_(std::move(buffer_map)) {}
 
-  Expr VisitExpr_(const TensorLoadNode* load) final {
+  Expr Dispatch_(const TensorLoadNode* load) final {
     auto it = buffer_map_.find(load->source.as_or_throw<tvm::tirx::BufferVar>());
     return it != buffer_map_.end() ? BufferLoad((*it).second, {0}) : ffi::GetRef<TensorLoad>(load);
   }
@@ -207,28 +207,33 @@ class InThreadReducerMaker : private StmtMutator {
   /*!
    * \brief Visitor class to collect all reduction block variables under a loop.
    */
-  class UnderLoopReductionBlockVarCollector : public StmtVisitor {
+  class UnderLoopReductionBlockVarCollector : public StmtExprVisitor {
    public:
+    using StmtExprVisitor::Visit_;
+    ffi::Optional<VisitInterrupt> Visit(ffi::AnyView value) override {
+      if (value.as<ExprNode>()) return std::nullopt;
+      return StmtExprVisitor::Visit(value);
+    }
     /*!
      * \brief Check if the given statement has any reduction blocks.
      * \param stmt The statement to check.
      * \return True if the statement has reduction blocks, false otherwise.
      */
     static bool CheckHasReductionBlocks(const Stmt& stmt) {
-      UnderLoopReductionBlockVarCollector collector;
-      collector(stmt);
-      return collector.reduction_block_vars_.size() > 0;
+      auto collector = ffi::make_object<UnderLoopReductionBlockVarCollector>();
+      collector->Visit(stmt);
+      return collector->reduction_block_vars_.size() > 0;
     }
 
    private:
-    void VisitStmt_(const SBlockNode* block) final {
+    ffi::Optional<VisitInterrupt> Visit_(const SBlockNode* block) final {
       ffi::Array<IterVar> iter_vars = block->iter_vars;
       for (const IterVar& iter_var : block->iter_vars) {
         if (iter_var->iter_type == kCommReduce) {
           reduction_block_vars_.push_back(iter_var);
         }
       }
-      StmtVisitor::VisitStmt_(block);
+      return StmtExprVisitor::Visit_(block);
     }
 
     /*! \brief the map from thread tag to its extent */
@@ -257,8 +262,8 @@ class InThreadReducerMaker : private StmtMutator {
     if (std::optional<For> opt_res = StmtMutator::VisitStmt_(loop).as<For>()) {
       For res = *opt_res;
       if (res->thread_binding.has_value()) {
-        UnderLoopReductionBlockVarCollector collector;
-        if (!res->body.defined() || collector.CheckHasReductionBlocks(res)) {
+        if (!res->body.defined() ||
+            UnderLoopReductionBlockVarCollector::CheckHasReductionBlocks(res)) {
           return res->body;
         }
         return res;
@@ -458,11 +463,24 @@ Stmt TransformReductionBlock(const SBlockRealizeNode* realize,                  
     wb_updates.reserve(n_buffers);
     wb_regions.reserve(n_buffers);
     int n_dim = static_cast<int>(old_wb_indices.size());
-    ffi::Array<Range> region = Substitute(block->writes[0]->region, var_map);
+    auto map_var = [&var_map](const Var& var) -> ffi::Expected<ffi::UnchangedOr<ffi::Any>> {
+      if (auto repl = var_map.Get(var)) {
+        return ffi::Any((*std::move(repl)).as_or_throw<PrimExpr>());
+      }
+      return ffi::Unchanged();
+    };
+    ffi::Array<Range> region = block->writes[0]->region.Map([&map_var](const Range& range) {
+      PrimExpr min = ffi::StructuralMap<ffi::WalkOrder::kPreOrder>(range->min, map_var)
+                         .as_or_throw<PrimExpr>();
+      PrimExpr extent = ffi::StructuralMap<ffi::WalkOrder::kPreOrder>(range->extent, map_var)
+                            .as_or_throw<PrimExpr>();
+      return Range::FromMinExtent(min, extent);
+    });
     ffi::Array<PrimExpr> wb_indices;
     wb_indices.reserve(n_dim);
     for (int d = 0; d < n_dim; ++d) {
-      wb_indices.push_back(Substitute(old_wb_indices[d], var_map));
+      wb_indices.push_back(ffi::StructuralMap<ffi::WalkOrder::kPreOrder>(old_wb_indices[d], map_var)
+                               .as_or_throw<PrimExpr>());
     }
     for (int i = 0; i < n_buffers; ++i) {
       wb_updates.push_back(
@@ -479,31 +497,33 @@ Stmt TransformReductionBlock(const SBlockRealizeNode* realize,                  
     for (const ForNode* reduction_loop : reduction_loops) {
       reduction_loop_vars.insert(reduction_loop->loop_var.get());
     }
-    PostOrderVisit(realize->predicate,
-                   [&wb_predicate, &reduction_loop_vars](const ffi::ObjectRef& obj) {
-                     if (const auto* and_node = obj.as<AndNode>()) {
-                       ffi::Array<PrimExpr> sub_exprs = {and_node->a, and_node->b};
-                       for (PrimExpr sub_expr : sub_exprs) {
-                         if (sub_expr->IsInstance<AndNode>()) {
-                           continue;
-                         }
-                         bool is_reduction = [sub_expr, &reduction_loop_vars]() {
-                           ffi::Array<Var> vars = UndefinedVars(sub_expr);
-                           for (Var var : vars) {
-                             if (reduction_loop_vars.find(var.get()) != reduction_loop_vars.end()) {
-                               return true;
-                             }
-                           }
-                           return false;
-                         }();
-                         if (!is_reduction) {
-                           wb_predicate = wb_predicate && sub_expr;
-                         }
-                       }
-                       return true;
-                     }
-                     return false;
-                   });
+    std::unordered_set<const ffi::Object*> visited_predicate_nodes;
+    auto walk_fn = [&wb_predicate, &reduction_loop_vars, &visited_predicate_nodes](
+                       const And& and_expr) -> ffi::Expected<ffi::WalkResult> {
+      if (!visited_predicate_nodes.insert(and_expr.get()).second) {
+        return ffi::WalkResult::Advance();
+      }
+      ffi::Array<PrimExpr> sub_exprs = {and_expr->a, and_expr->b};
+      for (PrimExpr sub_expr : sub_exprs) {
+        if (sub_expr->IsInstance<AndNode>()) {
+          continue;
+        }
+        bool is_reduction = [sub_expr, &reduction_loop_vars]() {
+          ffi::Array<Var> vars = UndefinedVars(sub_expr);
+          for (Var var : vars) {
+            if (reduction_loop_vars.find(var.get()) != reduction_loop_vars.end()) {
+              return true;
+            }
+          }
+          return false;
+        }();
+        if (!is_reduction) {
+          wb_predicate = wb_predicate && sub_expr;
+        }
+      }
+      return ffi::WalkResult::Advance();
+    };
+    ffi::StructuralWalk<ffi::WalkOrder::kPostOrder>(realize->predicate, walk_fn);
     if (wb_buffers[0].scope() != "local") {
       for (const ForNode* loop : reduction_loops) {
         if (loop->thread_binding.has_value()) {
@@ -711,18 +731,16 @@ class CrossThreadReductionTransformer : public StmtMutator {
 
     // Condition 5. The block should be the last block under the first reduction-related loop.
     bool visit = false;
-    PreOrderVisit(ffi::GetRef<For>(reduction_loops[0]), [block, &visit](const ffi::ObjectRef& obj) {
-      if (const auto* realize = obj.as<SBlockRealizeNode>()) {
-        TVM_FFI_CHECK(!visit, ValueError)
-            << "Cross-thread reduction cannot be applied when the reduction "
-               "block isn't the last block under its first reduction-related loop";
-        if (realize->block.get() == block) {
-          visit = true;
-        }
-        return false;
+    auto walk_fn = [block, &visit](const SBlockRealize& realize) -> ffi::Expected<ffi::WalkResult> {
+      TVM_FFI_CHECK(!visit, ValueError)
+          << "Cross-thread reduction cannot be applied when the reduction "
+             "block isn't the last block under its first reduction-related loop";
+      if (realize->block.get() == block) {
+        visit = true;
       }
-      return true;
-    });
+      return ffi::WalkResult::Skip();
+    };
+    ffi::StructuralWalk<ffi::WalkOrder::kPreOrder>(ffi::GetRef<For>(reduction_loops[0]), walk_fn);
     return std::make_tuple(n_bound_reduction_loops,       //
                            std::move(reducer),            //
                            std::move(reduction_buffers),  //

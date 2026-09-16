@@ -28,6 +28,7 @@
 #include <tvm/arith/analyzer.h>
 #include <tvm/arith/pattern.h>
 #include <tvm/ffi/cast.h>
+#include <tvm/ffi/extra/structural_visit.h>
 #include <tvm/ffi/function.h>
 #include <tvm/ffi/reflection/registry.h>
 #include <tvm/ir/op.h>
@@ -117,19 +118,19 @@ const VarNode* GetBufferVar(const Expr& expr) {
   return nullptr;
 }
 
-class WarpStoreCoeffFinder : private StmtExprVisitor {
+class WarpStoreCoeffFinder : public StmtExprVisitor {
  public:
   WarpStoreCoeffFinder(const VarNode* buffer, Var warp_index, arith::AnalyzerObj* analyzer)
       : buffer_(buffer), warp_index_(warp_index), analyzer_(analyzer) {}
   // find the warp co-efficient in the statement given the warp size
   int Find(const Stmt& stmt) {
-    this->VisitStmt(stmt);
+    this->Visit(stmt);
     return warp_coeff_;
   }
 
  private:
   /// Visitor implementation
-  void VisitExpr_(const CallNode* op) final {
+  ffi::Optional<VisitInterrupt> Visit_(const CallNode* op) final {
     static const Op& mma_fill_op = Op::Get("tirx.mma_fill");
     static const Op& ptx_ldmatrix_legacy_op = Op::Get("tirx.ptx_legacy.ldmatrix");
     static const Op& mma_fill_legacy_op = Op::Get("tirx.mma_fill_legacy");
@@ -151,13 +152,12 @@ class WarpStoreCoeffFinder : private StmtExprVisitor {
     // (read+rewrite); WarpStoreCoeffFinder relies on ldmatrix/mma_fill
     // (the actual stores) for the warp coefficient.
 
-    StmtExprVisitor::VisitExpr_(op);
+    return StmtExprVisitor::Visit_(op);
   }
 
-  void VisitStmt_(const BufferStoreNode* op) final {
+  ffi::Optional<VisitInterrupt> Visit_(const BufferStoreNode* op) final {
     if (op->buffer.get() != buffer_) {
-      StmtVisitor::VisitStmt_(op);
-      return;
+      return StmtExprVisitor::Visit_(op);
     }
 
     TVM_FFI_ICHECK_EQ(op->indices.size(), 1) << "Expected flat memory to use as warp memory.  "
@@ -176,6 +176,7 @@ class WarpStoreCoeffFinder : private StmtExprVisitor {
     }
 
     UpdatePattern(index);
+    return std::nullopt;
   }
 
   void UpdatePattern(const PrimExpr& index) {
@@ -212,12 +213,16 @@ class WarpStoreCoeffFinder : private StmtExprVisitor {
 };
 
 // Visitor to find the warp index
-class WarpIndexFinder : private StmtVisitor {
+class WarpIndexFinder : public StmtExprVisitor {
  public:
+  ffi::Optional<VisitInterrupt> Visit(ffi::AnyView value) override {
+    if (value.as<ExprNode>()) return std::nullopt;
+    return StmtExprVisitor::Visit(value);
+  }
   explicit WarpIndexFinder(int warp_size) : warp_size_(warp_size) {}
   // find the warp co-efficient and the shuffle width in the statement
   std::pair<Var, int> Find(const Stmt& stmt) {
-    this->VisitStmt(stmt);
+    this->Visit(stmt);
     TVM_FFI_ICHECK(warp_index_.defined())
         << "Cannot find warp index(threadIdx.x) within the scope of warp memory";
     return std::make_pair(warp_index_->var, width_);
@@ -225,7 +230,7 @@ class WarpIndexFinder : private StmtVisitor {
 
  private:
   /// Visitor implementation
-  void VisitStmt_(const AttrStmtNode* op) final {
+  ffi::Optional<VisitInterrupt> Visit_(const AttrStmtNode* op) final {
     if (op->attr_key == attr::thread_extent) {
       IterVar iv = op->node.as_or_throw<IterVar>();
       if (iv->thread_tag == "threadIdx.x") {
@@ -247,7 +252,7 @@ class WarpIndexFinder : private StmtVisitor {
         }
       }
     }
-    StmtVisitor::VisitStmt_(op);
+    return StmtExprVisitor::Visit_(op);
   }
   // warp size
   int warp_size_{0};
@@ -277,8 +282,9 @@ class WarpAccessRewriter : protected StmtExprMutator {
     }
     TVM_FFI_ICHECK_GT(alloc_size, 0) << "warp memory only support constant alloc size";
     alloc_size *= op->buffer->dtype.lanes();
-    std::tie(warp_index_, width_) = WarpIndexFinder(warp_size_).Find(body);
-    warp_coeff_ = WarpStoreCoeffFinder(buffer_, warp_index_, analyzer_).Find(body);
+    std::tie(warp_index_, width_) = ffi::make_object<WarpIndexFinder>(warp_size_)->Find(body);
+    warp_coeff_ =
+        ffi::make_object<WarpStoreCoeffFinder>(buffer_, warp_index_, analyzer_)->Find(body);
 
     // Align the local memory size. The number of elements may not
     // be a multiple of width_ * warp_coeff_; round it up.
@@ -312,7 +318,7 @@ class WarpAccessRewriter : protected StmtExprMutator {
     return Call(op->ty, op->op, new_args, op->attrs, {}, op->span);
   }
 
-  Expr VisitExpr_(const CallNode* op) override {
+  Expr Dispatch_(const CallNode* op) override {
     static const Op& mma_store_op = Op::Get("tirx.mma_store");
     static const Op& mma_fill_op = Op::Get("tirx.mma_fill");
     static const Op& ptx_mma_legacy_op = Op::Get("tirx.ptx_legacy.mma");
@@ -346,12 +352,12 @@ class WarpAccessRewriter : protected StmtExprMutator {
       return RewriteIndicesAt(op, {1});
     }
 
-    return StmtExprMutator::VisitExpr_(op);
+    return StmtExprMutator::Dispatch_(op);
   }
 
-  Expr VisitExpr_(const VarNode* op) override {
+  Expr Dispatch_(const VarNode* op) override {
     TVM_FFI_ICHECK(op != buffer_) << "Cannot access address of warp memory directly";
-    return StmtExprMutator::VisitExpr_(op);
+    return StmtExprMutator::Dispatch_(op);
   }
 
   Stmt VisitStmt_(const BufferStoreNode* op) override {
@@ -372,8 +378,8 @@ class WarpAccessRewriter : protected StmtExprMutator {
     return store;
   }
 
-  Expr VisitExpr_(const TensorLoadNode* op) override {
-    auto load = StmtExprMutator::VisitExpr_(op).as_or_throw<TensorLoad>();
+  Expr Dispatch_(const TensorLoadNode* op) override {
+    auto load = StmtExprMutator::Dispatch_(op).as_or_throw<TensorLoad>();
 
     if (load->source.as_or_throw<tvm::tirx::BufferVar>().get() != buffer_) {
       return load;
@@ -384,8 +390,11 @@ class WarpAccessRewriter : protected StmtExprMutator {
 
     auto [local_index, group] = SplitIndexByGroup(op->indices[0]);
     // invariance: local index must do not contain warp id
-    TVM_FFI_ICHECK(
-        !UsesVar(local_index, [this](const VarNode* var) { return var == warp_index_.get(); }))
+    auto walkfn = [this](const Var& var) -> ffi::Expected<ffi::WalkResult> {
+      return var.get() == warp_index_.get() ? ffi::WalkResult::Interrupt(ffi::VisitInterrupt(var))
+                                            : ffi::WalkResult::Advance();
+    };
+    TVM_FFI_ICHECK(!ffi::StructuralWalk<ffi::WalkOrder::kPreOrder>(local_index, walkfn).has_value())
         << "LowerWarpMemory failed to rewrite load to shuffle for index " << op->indices[0]
         << " local_index=" << local_index;
 
@@ -455,17 +464,21 @@ class WarpAccessRewriter : protected StmtExprMutator {
 // Bind bound information of variables to make analyzer more effective
 // TODO(tqchen): consider a pass to inline the bound info into the expr
 // so analysis can be context independent.
-class BindVarBoundInfo : public StmtVisitor {
+class BindVarBoundInfo : public StmtExprVisitor {
  public:
+  ffi::Optional<VisitInterrupt> Visit(ffi::AnyView value) override {
+    if (value.as<ExprNode>()) return std::nullopt;
+    return StmtExprVisitor::Visit(value);
+  }
   explicit BindVarBoundInfo(arith::AnalyzerObj* analyzer) : analyzer_(analyzer) {}
 
-  void VisitStmt_(const ForNode* op) final {
+  ffi::Optional<VisitInterrupt> Visit_(const ForNode* op) final {
     const Var& loop_var = op->loop_var;
     analyzer_->Bind(loop_var, Range::FromMinExtent(op->min, op->extent));
-    StmtVisitor::VisitStmt_(op);
+    return StmtExprVisitor::Visit_(op);
   }
 
-  void VisitStmt_(const AttrStmtNode* op) {
+  ffi::Optional<VisitInterrupt> Visit_(const AttrStmtNode* op) {
     if (op->attr_key == attr::thread_extent || op->attr_key == s_tir::attr::virtual_thread) {
       IterVar iv = op->node.as_or_throw<IterVar>();
       TVM_FFI_ICHECK_NE(iv->thread_tag.length(), 0U);
@@ -475,7 +488,7 @@ class BindVarBoundInfo : public StmtVisitor {
         analyzer_->Bind(iv->var, dom);
       }
     }
-    StmtVisitor::VisitStmt_(op);
+    return StmtExprVisitor::Visit_(op);
   }
 
  protected:
@@ -492,13 +505,14 @@ class WarpMemoryRewriter : private StmtMutator {
 
   Stmt Rewrite(Stmt stmt) {
     if (warp_size_ == 1) return stmt;
-    BindVarBoundInfo binder(analyzer_.get());
-    binder(stmt);
+    auto binder = ffi::make_object<BindVarBoundInfo>(analyzer_.get());
+    binder->Visit(stmt);
     stmt = operator()(std::move(stmt));
     return stmt;
   }
 
-  std::unordered_map<const VarNode*, ffi::String> new_storage_scopes_;
+  // Keep the old variables alive until UpdatePointerStorageScope reads their types.
+  std::unordered_map<Var, ffi::String, ffi::ObjectPtrHash, ffi::ObjectPtrEqual> new_storage_scopes_;
 
  private:
   Stmt VisitStmt_(const SeqStmtNode* op) {
@@ -508,7 +522,7 @@ class WarpMemoryRewriter : private StmtMutator {
     for (size_t i = 0; i < op->seq.size(); ++i) {
       const auto* alloc = op->seq[i].as<AllocBufferNode>();
       if (alloc && alloc->buffer.scope() == "warp") {
-        new_storage_scopes_[alloc->buffer.get()] = "local";
+        new_storage_scopes_[alloc->buffer.var()] = "local";
         // Gather remaining siblings as the "body" for rewriting.
         ffi::Array<Stmt> remaining;
         for (size_t j = i + 1; j < op->seq.size(); ++j) {

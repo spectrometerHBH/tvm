@@ -25,6 +25,7 @@
  */
 
 #include <tvm/ffi/cast.h>
+#include <tvm/ffi/extra/structural_mutate.h>
 #include <tvm/ffi/reflection/registry.h>
 #include <tvm/relax/analysis.h>
 #include <tvm/relax/expr.h>
@@ -76,7 +77,7 @@ class SymbolicVarCanonicalizer : public ExprMutator {
     bool has_runtime_use = false;
     for (const auto& [var, value] : tir_var_map) {
       if (var.same_as(binding->var)) continue;
-      auto tir_var = var.as<tirx::PrimVar>();
+      auto tir_var = var.as<PrimVar>();
       if (!tir_var) continue;
       has_runtime_use = has_runtime_use || runtime_prim_var_uses_.count(*tir_var);
       PrimExpr prim_expr = value.as_or_throw<PrimExpr>();
@@ -165,7 +166,7 @@ class SymbolicVarCanonicalizer : public ExprMutator {
 
     void VisitExpr_(const VarNode* op) final {
       Var var = ffi::GetRef<Var>(op);
-      if (auto prim_var = var.as<tirx::PrimVar>()) {
+      if (auto prim_var = var.as<PrimVar>()) {
         uses_.insert(*prim_var);
       }
     }
@@ -175,13 +176,15 @@ class SymbolicVarCanonicalizer : public ExprMutator {
   };
 
   PrimExpr CanonicalizeShapeValue(const PrimExpr& expr) {
-    PrimExpr output = tirx::Substitute(expr, [this](const Var& var) -> ffi::Optional<Expr> {
-      auto prim_var = var.as<tirx::PrimVar>();
-      if (!prim_var) return std::nullopt;
+    auto f_substitute = [this](const Var& var) -> ffi::Expected<ffi::UnchangedOr<ffi::Any>> {
+      auto prim_var = var.as<PrimVar>();
+      if (!prim_var) return ffi::Unchanged();
       auto it = known_values_.find(*prim_var);
-      if (it == known_values_.end()) return std::nullopt;
-      return it->second.expr;
-    });
+      if (it == known_values_.end()) return ffi::Unchanged();
+      return ffi::Any(it->second.expr);
+    };
+    PrimExpr output =
+        ffi::StructuralMap<ffi::WalkOrder::kPreOrder>(expr, f_substitute).as_or_throw<PrimExpr>();
     return output.same_as(expr) ? expr : builder_->GetAnalyzer()->Simplify(output);
   }
 

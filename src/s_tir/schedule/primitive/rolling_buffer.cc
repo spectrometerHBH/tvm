@@ -17,6 +17,7 @@
  * under the License.
  */
 #include <tvm/ffi/cast.h>
+#include <tvm/ffi/extra/structural_mutate.h>
 
 #include <functional>
 
@@ -43,8 +44,19 @@ struct RollingBufferInfo {
 
 BufferRegion GetRelaxedBufferRegion(const SBlockRealize& realize, const BufferRegion& buffer_region,
                                     const ffi::Map<Var, arith::IntSet>& dom_map) {
-  ffi::Array<arith::IntSet> relaxed_intsets =
-      arith::EvalSet(Substitute(buffer_region->region, GetBindings(realize)), dom_map);
+  ffi::Map<Var, PrimExpr> bindings = GetBindings(realize);
+  auto f_substitute = [&bindings](const Var& var) -> ffi::Expected<ffi::UnchangedOr<ffi::Any>> {
+    if (auto repl = bindings.Get(var)) return ffi::Any(*std::move(repl));
+    return ffi::Unchanged();
+  };
+  ffi::Array<Range> mapped_region = buffer_region->region.Map([&f_substitute](const Range& range) {
+    PrimExpr min = ffi::StructuralMap<ffi::WalkOrder::kPreOrder>(range->min, f_substitute)
+                       .as_or_throw<PrimExpr>();
+    PrimExpr extent = ffi::StructuralMap<ffi::WalkOrder::kPreOrder>(range->extent, f_substitute)
+                          .as_or_throw<PrimExpr>();
+    return Range::FromMinExtent(min, extent);
+  });
+  ffi::Array<arith::IntSet> relaxed_intsets = arith::EvalSet(mapped_region, dom_map);
   Region relaxed_region;
   relaxed_region.reserve(relaxed_intsets.size());
   for (size_t i = 0; i < relaxed_intsets.size(); ++i) {
@@ -54,7 +66,7 @@ BufferRegion GetRelaxedBufferRegion(const SBlockRealize& realize, const BufferRe
   return BufferRegion(buffer_region->buffer, relaxed_region);
 }
 
-class RollingBufferDependencyError : public ScheduleError {
+class RollingBufferDependencyError : public ScheduleErrorContextObj {
  public:
   explicit RollingBufferDependencyError(IRModule mod, SBlock block)
       : mod_(mod), block_(std::move(block)) {}
@@ -83,13 +95,15 @@ class RollingBufferDependencyError : public ScheduleError {
     for (const Dependency& producers : scope->GetDepsByDst(block_sref)) {
       if (!(producers->kind == DepKind::kRAW)) {
         const SBlockNode* block = TVM_SREF_TO_SBLOCK(block_sref);
-        throw RollingBufferDependencyError(self->mod, ffi::GetRef<SBlock>(block));
+        throw MakeScheduleError<RollingBufferDependencyError>(self->mod,
+                                                              ffi::GetRef<SBlock>(block));
       }
     }
     for (const Dependency& consumers : scope->GetDepsBySrc(block_sref)) {
       if (!(consumers->kind == DepKind::kRAW)) {
         const SBlockNode* block = TVM_SREF_TO_SBLOCK(block_sref);
-        throw RollingBufferDependencyError(self->mod, ffi::GetRef<SBlock>(block));
+        throw MakeScheduleError<RollingBufferDependencyError>(self->mod,
+                                                              ffi::GetRef<SBlock>(block));
       }
     }
   }
@@ -99,7 +113,7 @@ class RollingBufferDependencyError : public ScheduleError {
   SBlock block_;
 };
 
-class RollingBufferMatchError : public ScheduleError {
+class RollingBufferMatchError : public ScheduleErrorContextObj {
  public:
   RollingBufferMatchError(IRModule mod, SBlock block, BufferRegion buffer_region)
       : mod_(mod), block_(block), buffer_region_(buffer_region) {}
@@ -125,7 +139,7 @@ class RollingBufferMatchError : public ScheduleError {
   BufferRegion buffer_region_;
 };
 
-class RollingBufferInsertionError : public ScheduleError {
+class RollingBufferInsertionError : public ScheduleErrorContextObj {
  public:
   RollingBufferInsertionError(IRModule mod, BufferVar buffer, SBlock block)
       : mod_(mod), buffer_(std::move(buffer)), block_(block) {}
@@ -158,7 +172,8 @@ class RollingBufferInfoCollector {
     RollingBufferInfoCollector collector;
     if (!collector.MatchRollingBuffer(block_sref, buffer_region)) {
       const SBlockNode* block = TVM_SREF_TO_SBLOCK(block_sref);
-      throw RollingBufferMatchError(mod, ffi::GetRef<SBlock>(block), buffer_region);
+      throw MakeScheduleError<RollingBufferMatchError>(mod, ffi::GetRef<SBlock>(block),
+                                                       buffer_region);
     }
     return collector.info_;
   }
@@ -376,8 +391,8 @@ class RollingBufferRewriter : public StmtExprMutator {
     return stmt;
   }
 
-  Expr VisitExpr_(const TensorLoadNode* op) final {
-    TensorLoad stmt = StmtExprMutator::VisitExpr_(op).as_or_throw<TensorLoad>();
+  Expr Dispatch_(const TensorLoadNode* op) final {
+    TensorLoad stmt = StmtExprMutator::Dispatch_(op).as_or_throw<TensorLoad>();
     if (stmt->source.as_or_throw<tvm::tirx::BufferVar>().same_as(info_->old_buffer)) {
       BufferVar buffer = stmt->source.as_or_throw<tvm::tirx::BufferVar>();
       ffi::Array<PrimExpr> indices = stmt->indices;
@@ -426,7 +441,7 @@ void RollingBuffer(ScheduleState self, const StmtSRef& block_sref, int write_buf
   consumers_sref.push_back(block_sref);
   StmtSRef lca = GetSRefLowestCommonAncestor(consumers_sref);
   if (!lca->StmtAs<ForNode>()) {
-    throw RollingBufferInsertionError(self->mod, buffer_region->buffer, block);
+    throw MakeScheduleError<RollingBufferInsertionError>(self->mod, buffer_region->buffer, block);
   }
 
   for (auto it = loop_srefs.rbegin(); it != loop_srefs.rend(); ++it) {

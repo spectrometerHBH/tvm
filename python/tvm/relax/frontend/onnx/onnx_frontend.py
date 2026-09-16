@@ -608,7 +608,7 @@ class BinaryBase(OnnxOpConverter):
                 if hasattr(output, "item"):
                     output = output.item()
                 return relax.prim_value(output)
-            if x.dtype == y.dtype:
+            if x.dtype == y.dtype and not _np.issubdtype(output.dtype, _np.bool_):
                 # no numpy precision widening
                 output = output.astype(x.dtype)
             if all([isinstance(inp, relax.Constant) for inp in inputs]):
@@ -674,6 +674,15 @@ class Div(BinaryBase):
             return int(expr.value) == 0
         return False
 
+    @staticmethod
+    def _numpy_integer_divide(lhs, rhs, signed):
+        quotient, remainder = _np.divmod(lhs, rhs)
+        if signed:
+            signs_differ = _np.signbit(lhs) != _np.signbit(rhs)
+            adjust_toward_zero = _np.logical_and(signs_differ, remainder != 0)
+            quotient = quotient + adjust_toward_zero.astype(quotient.dtype)
+        return quotient
+
     @classmethod
     def _impl_v7(cls, bb, inputs, attr, params):
         try:
@@ -699,6 +708,12 @@ class Div(BinaryBase):
 
         if cls._is_zero(inputs[1]):
             raise ValueError("ONNX Div with integer inputs encountered divisor value 0.")
+
+        if all(isinstance(inp, relax.Constant) for inp in inputs):
+            lhs = inputs[0].data.numpy()
+            rhs = inputs[1].data.numpy()
+            output = cls._numpy_integer_divide(lhs, rhs, lhs_code == DataTypeCode.INT)
+            return relax.const(output, lhs_dtype)
 
         has_prim_expr = any(tvm.ir.is_prim_expr(inp) for inp in inputs)
         lhs = cls._as_scalar_prim_expr(inputs[0], lhs_dtype)
@@ -1263,6 +1278,7 @@ class Cast(OnnxOpConverter):
             if all([isinstance(x, tirx.IntImm) for x in shape]):
                 shape = [int(x) for x in shape]
                 return relax.const(shape, to_type)
+            inputs = [bb.normalize(relax.op.shape_to_tensor(shape))]
         if isinstance(inputs[0], relax.Constant):
             output = inputs[0].data.numpy().astype(to_type)
             return relax.const(output, to_type)
@@ -1328,6 +1344,24 @@ class Cast(OnnxOpConverter):
                 return relax.op.astype(wrapped, to_type)
 
         return relax.op.astype(inputs[0], to_type)
+
+
+class CastLike(OnnxOpConverter):
+    """Convert an onnx CastLike node into an equivalent Relax expression."""
+
+    @classmethod
+    def _impl_v15(cls, bb, inputs, attr, params):
+        data = inputs[0]
+        target = inputs[1]
+        if isinstance(target, relax.ShapeExpr):
+            target_dtype = "int64"
+        else:
+            target_dtype = getattr(getattr(target, "ty", None), "dtype", None) or getattr(
+                target, "dtype", None
+            )
+        if target_dtype is None:
+            raise ValueError(f"CastLike: unable to determine dtype from target {target}")
+        return Cast._impl_v13(bb, [data], {"to": str(target_dtype)}, params)
 
 
 def _normalize_negative_indices(bb, indices, axis_extent):
@@ -1858,21 +1892,39 @@ class Trilu(OnnxOpConverter):
     def _impl_v14(cls, bb, inputs, attr, params):
         upper = attr.get("upper", True)
         x = inputs[0]
-        k = inputs[1] if len(inputs) > 1 else 0
+        k = inputs[1] if len(inputs) > 1 else None
 
-        if len(inputs) > 1:
-            k = get_constant(inputs[1], params)
-            if isinstance(k, relax.Constant):
-                k = int(k.data.numpy().item())
-            else:
-                raise ValueError("Currently only support constant k for Trilu op.")
-        else:
+        if k is None:
             k = 0
-
-        if upper:
-            return relax.op.triu(x, k)
         else:
+            k = get_constant(k, params)
+        if isinstance(k, relax.Constant):
+            k = int(k.data.numpy().item())
+        if isinstance(k, tirx.IntImm):
+            k = int(k)
+        if isinstance(k, int):
+            if upper:
+                return relax.op.triu(x, k)
             return relax.op.tril(x, k)
+
+        # Dynamic k: build the mask explicitly so it works with any scalar k.
+        shape = x.ty.shape
+        m, n = shape[-2], shape[-1]
+        row_idx = relax.op.reshape(relax.op.arange(0, m, dtype="int64"), (m, 1))
+        col_idx = relax.op.reshape(relax.op.arange(0, n, dtype="int64"), (1, n))
+        diff = relax.op.subtract(col_idx, row_idx)
+        if tvm.ir.is_prim_expr(k):
+            shape_value = k if str(k.ty) == "int64" else k.astype("int64")
+            k_int64 = bb.normalize(relax.op.shape_to_tensor(relax.ShapeExpr([shape_value])))
+            k_int64 = bb.normalize(relax.op.squeeze(k_int64, axis=[0]))
+        else:
+            k_int64 = relax.op.astype(k, "int64")
+        if upper:
+            mask = relax.op.greater_equal(diff, k_int64)
+        else:
+            mask = relax.op.less_equal(diff, k_int64)
+        mask = relax.op.broadcast_to(mask, shape)
+        return relax.op.where(mask, x, relax.const(0, x.ty.dtype.dtype))
 
 
 class Relu(OnnxOpConverter):
@@ -2697,6 +2749,25 @@ class MultiInputBase(OnnxOpConverter):
 
     numpy_op: Callable = None
     relax_op: Callable = None
+    # Pairwise equivalent, used when no static broadcast shape can be computed.
+    binary_op: Callable = None
+
+    @classmethod
+    def _impl_dynamic(cls, bb, inputs):
+        """Fold the inputs pairwise, letting the binary op broadcast.
+
+        ONNX defines Min, Max, Sum and Mean as elementwise with multidirectional
+        broadcasting, so the pairwise form is equivalent to the stack-and-reduce
+        form and does not need a shape known at import time.
+        """
+        if cls.binary_op is None:
+            raise NotImplementedError(
+                f"{cls.__name__} cannot import an input whose static shape is unknown"
+            )
+        return functools.reduce(
+            lambda lhs, rhs: bb.normalize(cls.binary_op(lhs, rhs)),  # pylint: disable=not-callable
+            inputs,
+        )
 
     @classmethod
     def _impl_v1(cls, bb, inputs, attr, params):
@@ -2718,6 +2789,15 @@ class MultiInputBase(OnnxOpConverter):
             return relax.const(output, output.dtype)
 
         input_shapes = [inp.ty.shape for inp in inputs]
+        if any(shape is None for shape in input_shapes):
+            # Relax spells an unknown static shape R.Tensor(dtype=..., ndim=k),
+            # whose struct info carries shape None. R.dynamic_strided_slice
+            # produces exactly that, so a plain ONNX Slice with runtime
+            # starts/ends reaches here and compute_broadcast_shape raised
+            # `object of type 'NoneType' has no len()` on a model onnx.checker
+            # accepts and onnxruntime runs.
+            return cls._impl_dynamic(bb, inputs)
+
         target_shape = functools.reduce(compute_broadcast_shape, input_shapes)
 
         # broadcast_to, stack them, then perform minimum over the new axis.
@@ -2731,6 +2811,7 @@ class Min(MultiInputBase):
 
     numpy_op = _np.min
     relax_op = relax.op.min
+    binary_op = relax.op.minimum
 
 
 class Max(MultiInputBase):
@@ -2738,6 +2819,7 @@ class Max(MultiInputBase):
 
     numpy_op = _np.max
     relax_op = relax.op.max
+    binary_op = relax.op.maximum
 
 
 class Mean(MultiInputBase):
@@ -2745,6 +2827,12 @@ class Mean(MultiInputBase):
 
     numpy_op = _np.mean
     relax_op = relax.op.mean
+    binary_op = relax.op.add
+
+    @classmethod
+    def _impl_dynamic(cls, bb, inputs):
+        total = super()._impl_dynamic(bb, inputs)
+        return relax.op.divide(total, relax.const(len(inputs), inputs[0].ty.dtype))
 
 
 class Sum(MultiInputBase):
@@ -2752,6 +2840,7 @@ class Sum(MultiInputBase):
 
     numpy_op = _np.sum
     relax_op = relax.op.sum
+    binary_op = relax.op.add
 
 
 class Log(OnnxOpConverter):
@@ -6047,6 +6136,7 @@ def _get_convert_map():
         "Max": Max,
         "Mean": Mean,
         "Cast": Cast,
+        "CastLike": CastLike,
         "Gemm": Gemm,
         "MatMul": MatMul,
         "MatMulInteger": MatMulInteger,
@@ -6264,7 +6354,7 @@ class ONNXGraphImporter:
             # Create variables for constants.
             if self._keep_params_in_input:
                 # Pytorch sometimes inserts silly weight prefix. Remove it.
-                var_name = init_tensor.name.strip("onnx::")
+                var_name = init_tensor.name.removeprefix("onnx::")
                 init_var = self._new_var(var_name, shape=array.shape, dtype=array.dtype)
                 self._nodes[init_tensor.name] = init_var
                 # We need to keep track of both the real value and variable for this variable.
@@ -6403,6 +6493,7 @@ class ONNXGraphImporter:
                 "Equal",
                 "Where",
                 "Cast",
+                "CastLike",
                 "Squeeze",
             ]
             return_tuple_ops = [

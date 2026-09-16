@@ -26,8 +26,8 @@
 #include <tvm/tirx/analysis.h>
 #include <tvm/tirx/stmt_functor.h>
 
-#include "../../../arith/ir_mutator_with_analyzer.h"
 #include "../../../backend/opencl/runtime/texture.h"
+#include "../../../tirx/ir_mutator_with_analyzer.h"
 #include "../../../tirx/transform/ir_utils.h"
 
 namespace tvm {
@@ -43,7 +43,7 @@ using runtime::IsTextureStorage;
 /*!
  * \brief Inject Texture Alloc Intrinsic right after AllocBufferNode are realized.
  */
-class TextureAllocInjector : public arith::IRMutatorWithAnalyzer {
+class TextureAllocInjector : public tirx::IRMutatorWithAnalyzer {
  public:
   static PrimFunc Inject(PrimFunc func) {
     arith::Analyzer ana;
@@ -55,8 +55,8 @@ class TextureAllocInjector : public arith::IRMutatorWithAnalyzer {
   }
 
  private:
-  using IRMutatorWithAnalyzer::VisitExpr;
-  using IRMutatorWithAnalyzer::VisitExpr_;
+  using IRMutatorWithAnalyzer::Dispatch;
+  using IRMutatorWithAnalyzer::Dispatch_;
   using IRMutatorWithAnalyzer::VisitStmt;
   using IRMutatorWithAnalyzer::VisitStmt_;
 

@@ -24,6 +24,7 @@
  * \note Update this file when you added a new Type.
  */
 #include <tvm/ffi/cast.h>
+#include <tvm/ffi/extra/structural_mutate.h>
 #include <tvm/ffi/extra/visit_error_context.h>
 #include <tvm/ffi/reflection/registry.h>
 #include <tvm/relax/analysis.h>
@@ -188,23 +189,27 @@ class WellDefinedEraser : public TypeMutator, public ExprMutatorBase {
   using relax::ExprMutatorBase::VisitExpr_;
 
   PrimExpr VisitPrimitiveExpr(const PrimExpr& expr) {
-    PrimExpr val = tirx::Substitute(expr, [this](const Var& var) -> ffi::Optional<Expr> {
+    auto f_substitute = [this](const Var& var) -> ffi::Expected<ffi::UnchangedOr<ffi::Any>> {
       if (var.as<DataflowVarNode>()) {
         has_undefined_ = true;
-        return std::nullopt;
+        return ffi::Unchanged();
       }
       ffi::Optional<Expr> ret = f_var_map_ == nullptr ? std::nullopt : f_var_map_(var);
       has_undefined_ = has_undefined_ || !ret.has_value();
-      if (!ret.has_value()) return std::nullopt;
+      if (!ret.has_value()) return ffi::Unchanged();
 
       PrimExpr value = ret.value().as_or_throw<PrimExpr>();
       if (value->IsInstance<IntImmNode>()) {
-        return tvm::cast(PrimType::Int(64), value);
+        return ffi::Any(tvm::cast(PrimType::Int(64), value));
       }
       TVM_FFI_ICHECK(value.ty().MatchesElementType(DLDataTypeCode::kDLInt, 64))
           << "Can only provide i64 expressions in shape";
-      return value;
-    });
+      return ffi::Any(value);
+    };
+    // A well-definedness map may intentionally be self-referential (for example m -> m + 1).
+    // Post-order preserves the old substitution behavior by not re-entering that replacement.
+    PrimExpr val =
+        ffi::StructuralMap<ffi::WalkOrder::kPostOrder>(expr, f_substitute).as_or_throw<PrimExpr>();
     if (!val.same_as(expr)) {
       return ana_->Simplify(val);
     } else {
@@ -281,7 +286,7 @@ TVM_FFI_STATIC_INIT_BLOCK() {
                         [](const Type& info, ffi::Map<tirx::Var, PrimExpr> shape_var_map,
                            ffi::Map<Var, Expr> var_map) {
                           for (const auto& [var, value] : shape_var_map) {
-                            TVM_FFI_CHECK(var.as<tirx::PrimVar>(), TypeError)
+                            TVM_FFI_CHECK(var.as<PrimVar>(), TypeError)
                                 << "Expected an exact primitive Var, but received " << var;
                             var_map.Set(var, value);
                           }
@@ -877,7 +882,7 @@ class CallRetTypeDeriver : public TypeBaseChecker {
       return TypeBaseChecker::PrimExprMatchCheck(param, arg);
     }
 
-    if (auto var = param.as<tirx::PrimVar>()) {
+    if (auto var = param.as<PrimVar>()) {
       auto it = var_map_.find(var.value());
       // not populated
       if (it == var_map_.end()) {
@@ -903,8 +908,7 @@ class CallRetTypeDeriver : public TypeBaseChecker {
       return TypeBaseChecker::ShapeMatchCheck(lhs, rhs);
     }
 
-    if (auto* ptr = lhs.as<VarNode>();
-        ptr && !lhs.as<DataflowVarNode>() && !lhs.as<tirx::PrimVar>()) {
+    if (auto* ptr = lhs.as<VarNode>(); ptr && !lhs.as<DataflowVarNode>() && !lhs.as<PrimVar>()) {
       auto var = ffi::GetRef<Var>(ptr);
       auto it = var_map_.find(var);
       // not populated
@@ -1179,12 +1183,12 @@ class TIRVarsDetector : public TypeVisitor {
  private:
   void VisitTypePrimExprField(PrimExpr expr) {
     if (collection_type == VarType::Definition) {
-      if (auto opt = expr.as<tirx::PrimVar>()) {
+      if (auto opt = expr.as<PrimVar>()) {
         RecordTIRVar(opt.value());
       }
     } else if (collection_type == VarType::Usage) {
       for (const tirx::Var& tir_var : tirx::UndefinedVars(expr)) {
-        if (auto prim_var = tir_var.as<tirx::PrimVar>()) {
+        if (auto prim_var = tir_var.as<PrimVar>()) {
           RecordTIRVar(prim_var.value());
         }
       }
@@ -1397,7 +1401,7 @@ class SymbolicVarCollector : public relax::ExprVisitor, public relax::TypeVisito
 
   void VisitTypeExprField(const PrimExpr& expr) final {
     if (mode_ & VisitMode::kProvideDefinition) {
-      if (auto var = expr.as<tirx::PrimVar>()) {
+      if (auto var = expr.as<PrimVar>()) {
         defined_symbolic_var_.insert(var.value());
       }
     }
@@ -1410,7 +1414,7 @@ class SymbolicVarCollector : public relax::ExprVisitor, public relax::TypeVisito
     if (!op->ty.as<PrimTypeNode>()) {
       return;
     }
-    tirx::PrimVar var = ffi::GetRef<Var>(op).as_or_throw<tirx::PrimVar>();
+    PrimVar var = ffi::GetRef<Var>(op).as_or_throw<PrimVar>();
     // default mode, check defined.
     if (defined_symbolic_var_.count(var) == 0) {
       free_symbolic_var_.insert(var);
@@ -1421,7 +1425,7 @@ class SymbolicVarCollector : public relax::ExprVisitor, public relax::TypeVisito
 
   void VisitVarDef_(const VarNode* op) final {
     if (op->ty.as<PrimTypeNode>()) {
-      defined_symbolic_var_.insert(ffi::GetRef<Var>(op).as_or_throw<tirx::PrimVar>());
+      defined_symbolic_var_.insert(ffi::GetRef<Var>(op).as_or_throw<PrimVar>());
     }
     relax::ExprVisitor::VisitVarDef_(op);
   }

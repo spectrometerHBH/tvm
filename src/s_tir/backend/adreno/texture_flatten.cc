@@ -33,9 +33,9 @@
 
 #include <unordered_map>
 
-#include "../../../arith/ir_visitor_with_analyzer.h"
 #include "../../../backend/opencl/runtime/texture.h"
 #include "../../../runtime/thread_storage_scope.h"
+#include "../../../tirx/ir_visitor_with_analyzer.h"
 
 namespace tvm {
 namespace s_tir {
@@ -43,7 +43,6 @@ using namespace tvm::prim;
 namespace backend {
 namespace adreno {
 using namespace tvm::tirx;
-using arith::IRVisitorWithAnalyzer;
 using runtime::ApplyTexture2DFlattening;
 using runtime::DefaultTextureLayoutSeparator;
 using runtime::IsTextureStorage;
@@ -104,8 +103,8 @@ class TextureFlattener : public TextureLoweringBase {
     return stmt;
   }
 
-  Expr VisitExpr_(const TensorLoadNode* op) final {
-    PrimExpr expr = StmtExprMutator::VisitExpr_(op).as_or_throw<PrimExpr>();
+  Expr Dispatch_(const TensorLoadNode* op) final {
+    PrimExpr expr = StmtExprMutator::Dispatch_(op).as_or_throw<PrimExpr>();
     op = expr.as<TensorLoadNode>();
     // Lower to two dimensional access
     std::string storage_scope = GetStorageScope(op->source.as_or_throw<tvm::tirx::BufferVar>());
@@ -162,9 +161,9 @@ class TextureFlattener : public TextureLoweringBase {
 
 PrimFunc TextureFlattenHandler(PrimFunc func) {
   auto fptr = func.CopyOnWrite();
-  IRVisitorWithAnalyzer bound_analyzer;
-  bound_analyzer(fptr->body);
-  fptr->body = TextureFlattener(fptr->params, &bound_analyzer)(std::move(fptr->body));
+  auto bound_analyzer = ffi::make_object<IRVisitorWithAnalyzer>();
+  bound_analyzer->Visit(fptr->body);
+  fptr->body = TextureFlattener(fptr->params, bound_analyzer.get())(std::move(fptr->body));
   return func;
 }
 

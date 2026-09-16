@@ -40,7 +40,7 @@ using namespace tvm::tirx;
  */
 class OpaqueBlockConverter : public StmtExprMutator {
  public:
-  static Stmt Substitute(const PrimFunc& f) {
+  static Stmt Convert(const PrimFunc& f) {
     OpaqueBlockConverter substituter;
     return substituter.VisitStmt(f->body);
   }
@@ -48,7 +48,7 @@ class OpaqueBlockConverter : public StmtExprMutator {
  private:
   OpaqueBlockConverter() = default;
 
-  Expr VisitExpr_(const VarNode* var) final {
+  Expr Dispatch_(const VarNode* var) final {
     TVM_FFI_ICHECK(!forbidden_iter_vars_.count(var))
         << "Variable " << var->name << " occurs in the predicate or iter_values of a block, "
         << "but isn't defined until the body of the block";
@@ -116,7 +116,7 @@ namespace transform {
 Pass ConvertBlocksToOpaque() {
   auto pass_func = [=](PrimFunc f, IRModule m, PassContext ctx) {
     PrimFuncNode* fptr = f.CopyOnWrite();
-    fptr->body = OpaqueBlockConverter::Substitute(f);
+    fptr->body = OpaqueBlockConverter::Convert(f);
     return f;
   };
   return CreatePrimFuncPass(pass_func, 0, "s_tir.ConvertBlocksToOpaque", {});

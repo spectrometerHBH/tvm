@@ -49,7 +49,7 @@
 #include <unordered_map>
 
 #include "../../arith/constraint_extract.h"
-#include "../../arith/ir_mutator_with_analyzer.h"
+#include "../../tirx/ir_mutator_with_analyzer.h"
 #include "tvm/ir/expr.h"
 namespace tvm {
 namespace s_tir {
@@ -59,21 +59,24 @@ using namespace tvm::tirx;
 using namespace arith;
 
 class AssumeChecker : public StmtExprVisitor {
+ public:
+  using StmtExprVisitor::Visit_;
+
   /* This class checks if the primfunc has assume statement.
   If yes, then only the FuncAnanlyzerMutator class runs. This is to ensure speedup in the pass.*/
- public:
   bool has_assume = false;
 
-  void VisitStmt(const Stmt& stmt) final {
+  ffi::Optional<VisitInterrupt> Visit(ffi::AnyView stmt) final {
     if (has_assume) {
-      return;
+      return std::nullopt;
     }
-    StmtVisitor::VisitStmt(stmt);
+    return StmtExprVisitor::Visit(stmt);
   }
-  void VisitExpr_(const CallNode* op) override {
+  ffi::Optional<VisitInterrupt> Visit_(const CallNode* op) override {
     if (op->op.same_as(tirx::builtin::assume())) {
       has_assume = true;
     }
+    return std::nullopt;
   }
 };
 
@@ -120,7 +123,7 @@ class ParseAssumeAndOvercompute : public IRMutatorWithAnalyzer {
   explicit ParseAssumeAndOvercompute(const Analyzer& analyzer) : Parent(analyzer) {}
 
  private:
-  using Parent::VisitExpr_;
+  using Parent::Dispatch_;
   using Parent::VisitStmt;
   using Parent::VisitStmt_;
 
@@ -148,10 +151,10 @@ class ParseAssumeAndOvercompute : public IRMutatorWithAnalyzer {
         : self(self), analyzer_context(self->analyzer_, constraint) {
       old_num_constraints = self->conditions_.size();
 
-      auto side_effect = tirx::SideEffect(constraint);
-      if (side_effect <= tirx::CallEffectKind::kPure) {
+      auto side_effect = SideEffect(constraint);
+      if (side_effect <= CallEffectKind::kPure) {
         self->conditions_.push_back(constraint);
-      } else if (side_effect <= tirx::CallEffectKind::kReadState) {
+      } else if (side_effect <= CallEffectKind::kReadState) {
         assume = constraint;
       }
 
@@ -198,7 +201,7 @@ class ParseAssumeAndOvercompute : public IRMutatorWithAnalyzer {
     return Parent::VisitStmt_(op);
   }
 
-  Expr VisitExpr_(const TensorLoadNode* op) override {
+  Expr Dispatch_(const TensorLoadNode* op) override {
     if (map_buffer_assumption.find(op->source.as_or_throw<tvm::tirx::BufferVar>()) !=
         map_buffer_assumption.end()) {
       PrimExpr buf_value;
@@ -273,11 +276,11 @@ class ParseAssumeAndOvercompute : public IRMutatorWithAnalyzer {
     return Parent::VisitStmt_(op);
   }
 
-  Expr VisitExpr_(const CallNode* op) override {
+  Expr Dispatch_(const CallNode* op) override {
     if (op->op.same_as(tirx::builtin::assume())) {
       Assume(op->args[0].as_or_throw<PrimExpr>());
     }
-    return Parent::VisitExpr_(op);
+    return Parent::Dispatch_(op);
   }
 
   void Assume(PrimExpr assumption) {
@@ -292,8 +295,8 @@ class ParseAssumeAndOvercompute : public IRMutatorWithAnalyzer {
 
     std::vector<PrimExpr> buffer_exprs;
     for (const auto& expr : arith::ExtractComponents(assumption)) {
-      auto side_effect = tirx::SideEffect(expr);
-      if (side_effect <= tirx::CallEffectKind::kPure) {
+      auto side_effect = SideEffect(expr);
+      if (side_effect <= CallEffectKind::kPure) {
         // Pulling out portions of the assumption that do not depend
         // on a buffer value allows the following two forms to be
         // treated identically.
@@ -301,7 +304,7 @@ class ParseAssumeAndOvercompute : public IRMutatorWithAnalyzer {
         // Option 1: if i < 3: T.assume(buf[i] == value)
         // Option 2: T.assume(i>=3 or buf[i] == value)
         additional_predicate = additional_predicate && logical_not(expr);
-      } else if (side_effect == tirx::CallEffectKind::kReadState) {
+      } else if (side_effect == CallEffectKind::kReadState) {
         buffer_exprs.push_back(expr);
       } else {
         TVM_FFI_THROW(InternalError)
@@ -354,7 +357,7 @@ class ParseAssumeAndOvercompute : public IRMutatorWithAnalyzer {
     map_buffer_assumption[buf_data.buffer_load->source.as_or_throw<tvm::tirx::BufferVar>()] =
         buf_data;
 
-    auto has_side_effect = tirx::SideEffect(value) > tirx::CallEffectKind::kPure;
+    auto has_side_effect = SideEffect(value) > CallEffectKind::kPure;
     TVM_FFI_ICHECK(!has_side_effect)
         << "BufferVar value in constraint must be pure expression, but was " << value;
     if (has_side_effect) {
@@ -382,10 +385,10 @@ Pass UseAssumeToReduceBranches() {
         if (pattern == relax::OpPatternKind::kElemWise ||
             pattern == relax::OpPatternKind::kBroadcast) {
           // If the primfunc contains assume statement then, run the mutator pass.
-          AssumeChecker assume_checker;
-          assume_checker(std::move(n->body));
+          auto assume_checker = ffi::make_object<AssumeChecker>();
+          assume_checker->Visit(std::move(n->body));
 
-          if (assume_checker.has_assume) {
+          if (assume_checker->has_assume) {
             // Leverage from assume and eliminate the branch
             ParseAssumeAndOvercompute func_analyzer_mutator(analyzer);
             n->body = func_analyzer_mutator(std::move(n->body));

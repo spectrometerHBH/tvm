@@ -84,7 +84,7 @@ class ForMatcher : public TensorizeComparator {
   std::vector<BufferVar> evaluated_buffers;
 
  private:
-  using ExprComparator::VisitExpr_;
+  using ExprComparator::Dispatch_;
 
   ffi::Optional<PrimExpr> QueryEvaluatedSymbols(const Var& var) {
     for (const SymbolMap& symbol_map : evaluated_symbols) {
@@ -96,7 +96,7 @@ class ForMatcher : public TensorizeComparator {
     return std::nullopt;
   }
 
-  bool VisitExpr(const Expr& expr, const PrimExpr& rhs) final {
+  bool Dispatch(const Expr& expr, const PrimExpr& rhs) final {
     PrimExpr lhs = expr.as_or_throw<PrimExpr>();
     if (auto rhs_prim_var = rhs.as<PrimVar>()) {
       Var rhs_var = rhs_prim_var.value();
@@ -125,7 +125,7 @@ class ForMatcher : public TensorizeComparator {
         Var pattern_var = operand_a.value();
         // pattern var is on the left
         evaluated_symbols.push_back(SymbolMap());
-        bool match = VisitExpr(lhs, rhs_ptr->b);
+        bool match = Dispatch(lhs, rhs_ptr->b);
         SymbolMap symbol_map = std::move(evaluated_symbols.back());
         evaluated_symbols.pop_back();
         if (match) {
@@ -138,7 +138,7 @@ class ForMatcher : public TensorizeComparator {
         Var pattern_var = operand_b.value();
         // pattern var is on the right
         evaluated_symbols.push_back(SymbolMap());
-        bool match = VisitExpr(lhs, rhs_ptr->a);
+        bool match = Dispatch(lhs, rhs_ptr->a);
         SymbolMap symbol_map = std::move(evaluated_symbols.back());
         evaluated_symbols.pop_back();
         if (match) {
@@ -156,7 +156,7 @@ class ForMatcher : public TensorizeComparator {
         Var pattern_var = operand_a.value();
         // pattern var is on the left
         evaluated_symbols.push_back(SymbolMap());
-        bool match = VisitExpr(lhs, rhs_ptr->b);
+        bool match = Dispatch(lhs, rhs_ptr->b);
         SymbolMap symbol_map = std::move(evaluated_symbols.back());
         evaluated_symbols.pop_back();
         if (match) {
@@ -169,7 +169,7 @@ class ForMatcher : public TensorizeComparator {
         Var pattern_var = operand_b.value();
         // pattern var is on the right
         evaluated_symbols.push_back(SymbolMap());
-        bool match = VisitExpr(lhs, rhs_ptr->a);
+        bool match = Dispatch(lhs, rhs_ptr->a);
         SymbolMap symbol_map = std::move(evaluated_symbols.back());
         evaluated_symbols.pop_back();
         if (match) {
@@ -179,15 +179,15 @@ class ForMatcher : public TensorizeComparator {
         }
       }
     }
-    return TensorizeComparator::VisitExpr(lhs, rhs);
+    return TensorizeComparator::Dispatch(lhs, rhs);
   }
 
-  bool VisitExpr_(const prim::AddNode* add, const PrimExpr& other) final {
+  bool Dispatch_(const prim::AddNode* add, const PrimExpr& other) final {
     const auto* rhs = other.as<prim::AddNode>();
     if (rhs == nullptr) return false;
     {
       this->evaluated_symbols.push_back(SymbolMap());
-      bool match = VisitExpr(add->a, rhs->a) && VisitExpr(add->b, rhs->b);
+      bool match = Dispatch(add->a, rhs->a) && Dispatch(add->b, rhs->b);
       SymbolMap symbol_map = std::move(evaluated_symbols.back());
       this->evaluated_symbols.pop_back();
       if (match) {
@@ -197,7 +197,7 @@ class ForMatcher : public TensorizeComparator {
     }
     {
       this->evaluated_symbols.push_back(SymbolMap());
-      bool match = VisitExpr(add->a, rhs->b) && VisitExpr(add->b, rhs->a);
+      bool match = Dispatch(add->a, rhs->b) && Dispatch(add->b, rhs->a);
       SymbolMap symbol_map = std::move(evaluated_symbols.back());
       this->evaluated_symbols.pop_back();
       if (match) {
@@ -208,12 +208,12 @@ class ForMatcher : public TensorizeComparator {
     return false;
   }
 
-  bool VisitExpr_(const prim::MulNode* mul, const PrimExpr& other) final {
+  bool Dispatch_(const prim::MulNode* mul, const PrimExpr& other) final {
     const auto* rhs = other.as<prim::MulNode>();
     if (rhs == nullptr) return false;
     {
       this->evaluated_symbols.push_back(SymbolMap());
-      bool match = VisitExpr(mul->a, rhs->a) && VisitExpr(mul->b, rhs->b);
+      bool match = Dispatch(mul->a, rhs->a) && Dispatch(mul->b, rhs->b);
       SymbolMap symbol_map = std::move(evaluated_symbols.back());
       this->evaluated_symbols.pop_back();
       if (match) {
@@ -223,7 +223,7 @@ class ForMatcher : public TensorizeComparator {
     }
     {
       this->evaluated_symbols.push_back(SymbolMap());
-      bool match = VisitExpr(mul->a, rhs->b) && VisitExpr(mul->b, rhs->a);
+      bool match = Dispatch(mul->a, rhs->b) && Dispatch(mul->b, rhs->a);
       SymbolMap symbol_map = std::move(evaluated_symbols.back());
       this->evaluated_symbols.pop_back();
       if (match) {
@@ -234,7 +234,7 @@ class ForMatcher : public TensorizeComparator {
     return false;
   }
 
-  bool VisitExpr_(const CallNode* call, const PrimExpr& other) final {
+  bool Dispatch_(const CallNode* call, const PrimExpr& other) final {
     const auto* rhs = other.as<CallNode>();
     if (rhs == nullptr) return false;
     const auto* lhs_op = call->op.as<OpNode>();
@@ -267,7 +267,7 @@ class ForMatcher : public TensorizeComparator {
     if (op->kind != ForKind::kSerial || op->kind != rhs->kind) return false;
     if (!op->annotations.empty() || !rhs->annotations.empty()) return false;
     // Match the extents of loops
-    if (!VisitExpr(op->extent, rhs->extent)) return false;
+    if (!Dispatch(op->extent, rhs->extent)) return false;
     return VisitStmt(op->body, rhs->body);
   }
 
@@ -316,10 +316,10 @@ class ForMatcher : public TensorizeComparator {
 
   bool VisitStmt_(const BufferStoreNode* op, const Stmt& other) {
     const auto* rhs = other.as<BufferStoreNode>();
-    return CompareBufferAccess(op, rhs) && VisitExpr(op->value, rhs->value);
+    return CompareBufferAccess(op, rhs) && Dispatch(op->value, rhs->value);
   }
 
-  bool VisitExpr_(const TensorLoadNode* op, const PrimExpr& other) {
+  bool Dispatch_(const TensorLoadNode* op, const PrimExpr& other) {
     const auto* rhs = other.as<TensorLoadNode>();
     return CompareBufferAccess(op, rhs);
   }
@@ -334,7 +334,7 @@ class ForMatcher : public TensorizeComparator {
       // Compare shape
       if (lhs->shape.size() != rhs->shape.size()) return false;
       for (size_t i = 0; i < lhs->shape.size(); ++i) {
-        if (!VisitExpr(lhs->shape[i], rhs->shape[i])) return false;
+        if (!Dispatch(lhs->shape[i], rhs->shape[i])) return false;
       }
       equal =
           DefEqual(lhs.var(), rhs.var()) && lhs->dtype == rhs->dtype && lhs.scope() == rhs.scope();
@@ -355,7 +355,7 @@ class ForMatcher : public TensorizeComparator {
   template <typename T>
   bool CompareBufferAccess(const T* lhs, const T* rhs) {
     if (!CompareBuffer(lhs->buffer, rhs->buffer)) return false;
-    return CompareArray(lhs->indices, rhs->indices, &ForMatcher::VisitExpr);
+    return CompareArray(lhs->indices, rhs->indices, &ForMatcher::Dispatch);
   }
 
   bool CompareBufferAccess(const TensorLoadNode* lhs, const TensorLoadNode* rhs) {
@@ -364,7 +364,7 @@ class ForMatcher : public TensorizeComparator {
                        rhs->source.as_or_throw<BufferVar>())) {
       return false;
     }
-    return CompareArray(lhs->indices, rhs->indices, &ForMatcher::VisitExpr);
+    return CompareArray(lhs->indices, rhs->indices, &ForMatcher::Dispatch);
   }
 
   template <typename T, typename Self, typename F>
@@ -478,7 +478,7 @@ class FunctionPartitioner : public StmtExprVisitor {
   bool fail = false;
 
  private:
-  void VisitStmt_(const SBlockNode* op) final {
+  ffi::Optional<VisitInterrupt> Visit_(const SBlockNode* op) final {
     block_counter_++;
     bool is_matching_ = block_counter_ <= num_matched_ops_;
     if (block_counter_ == num_matched_ops_) {
@@ -496,7 +496,7 @@ class FunctionPartitioner : public StmtExprVisitor {
         allocs1.insert(write->buffer);
       } else if (allocs1.count(write->buffer)) {
         fail = true;
-        return;
+        return std::nullopt;
       } else {
         allocs2.insert(write->buffer);
       }
@@ -507,6 +507,8 @@ class FunctionPartitioner : public StmtExprVisitor {
       }
     }
     block_partition.Set(ffi::GetRef<SBlock>(op), is_matching_);
+
+    return std::nullopt;
   }
   // The number of matched ops in the function
   size_t num_matched_ops_;
@@ -599,13 +601,13 @@ std::pair<PrimFunc, ffi::Optional<PrimFunc>> SplitFunctions(
   if (num_matched_ops == 0) {
     return {func, std::nullopt};
   }
-  FunctionPartitioner partitioner(num_matched_ops);
-  partitioner(body);
-  if (partitioner.fail) {
+  auto partitioner = ffi::make_object<FunctionPartitioner>(num_matched_ops);
+  partitioner->Visit(body);
+  if (partitioner->fail) {
     return {func, std::nullopt};
   }
   bool has_second_func = false;
-  for (const auto& pr : partitioner.block_partition) {
+  for (const auto& pr : partitioner->block_partition) {
     if (!pr.second) {
       has_second_func = true;
       break;
@@ -616,16 +618,16 @@ std::pair<PrimFunc, ffi::Optional<PrimFunc>> SplitFunctions(
     return {WithAttr(func, kLibraryKernel, library_code), std::nullopt};
   }
   // Step 2. Split the function into two functions.
-  Stmt body1 = BlockRemover::RemoveBlockByPartition(func->body, partitioner.block_partition,
-                                                    partitioner.allocs1, true);
-  Stmt body2 = BlockRemover::RemoveBlockByPartition(func->body, partitioner.block_partition,
-                                                    partitioner.allocs2, false);
+  Stmt body1 = BlockRemover::RemoveBlockByPartition(func->body, partitioner->block_partition,
+                                                    partitioner->allocs1, true);
+  Stmt body2 = BlockRemover::RemoveBlockByPartition(func->body, partitioner->block_partition,
+                                                    partitioner->allocs2, false);
   // Step 3. Craft the first function.
   ffi::Array<Var> new_params1;
   std::vector<int> arg_partition1;
-  TVM_FFI_ICHECK_LE(func1_args.size(), partitioner.input1.size());
+  TVM_FFI_ICHECK_LE(func1_args.size(), partitioner->input1.size());
   for (const auto& buffer : func1_args) {
-    TVM_FFI_ICHECK(partitioner.input1.find(buffer) != partitioner.input1.end());
+    TVM_FFI_ICHECK(partitioner->input1.find(buffer) != partitioner->input1.end());
     for (size_t i = 0; i < func->params.size(); i++) {
       auto param_buffer = func->params[i].as<tirx::BufferVar>();
       if (param_buffer.has_value() && param_buffer.value().same_as(buffer)) {
@@ -636,17 +638,17 @@ std::pair<PrimFunc, ffi::Optional<PrimFunc>> SplitFunctions(
     }
   }
   arg_partition->push_back(arg_partition1);
-  new_params1.push_back(partitioner.intermediate_buffer.var());
+  new_params1.push_back(partitioner->intermediate_buffer.var());
   PrimFunc func1 = PrimFunc(new_params1, body1, func->ret_type, func->attrs);
   func1 = WithAttr(func1, kLibraryKernel, library_code);
   // Step 4. Craft the second function.
   ffi::Array<Var> new_params2;
   std::vector<int> arg_partition2;
-  new_params2.push_back(partitioner.intermediate_buffer.var());
+  new_params2.push_back(partitioner->intermediate_buffer.var());
   for (int i = 0; i < static_cast<int>(func->params.size()); i++) {
     Var param = func->params[i];
     auto param_buffer = param.as<tirx::BufferVar>();
-    if (param_buffer.has_value() && partitioner.input2.count(param_buffer.value())) {
+    if (param_buffer.has_value() && partitioner->input2.count(param_buffer.value())) {
       new_params2.push_back(param);
       if (i != static_cast<int>(func->params.size()) - 1) {
         arg_partition2.push_back(i);

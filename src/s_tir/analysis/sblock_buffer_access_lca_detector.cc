@@ -23,6 +23,7 @@
  */
 
 #include <tvm/ffi/cast.h>
+#include <tvm/ffi/extra/structural_visit.h>
 #include <tvm/ffi/reflection/registry.h>
 #include <tvm/tirx/analysis.h>
 #include <tvm/tirx/stmt_functor.h>
@@ -43,11 +44,13 @@ namespace tirx {
  */
 class LCADetector : public StmtExprVisitor {
  public:
+  using StmtExprVisitor::Visit_;
+
   static ffi::Map<BufferVar, ffi::Optional<Stmt>> Detect(const PrimFunc& func) {
-    LCADetector detector;
+    auto detector = ffi::make_object<LCADetector>();
     for (const Var& param : func->params) {
       if (auto buffer = param.as<BufferVar>()) {
-        detector.buffer_var_map_.emplace(buffer.value().get(), buffer.value().get());
+        detector->buffer_var_map_.emplace(buffer.value().get(), buffer.value().get());
       }
     }
 
@@ -56,14 +59,14 @@ class LCADetector : public StmtExprVisitor {
     // node, as that is also used to represent a scope that hasn't
     // been observed before.
     ScopeInfo root(nullptr, nullptr, 0);
-    detector.ancestor_scopes_.push_back(&root);
+    detector->ancestor_scopes_.push_back(&root);
 
-    detector(func->body);
-    detector.UpdateWithBlockidx();
+    detector->Visit(func->body);
+    detector->UpdateWithBlockidx();
 
     // Prepare the return
     ffi::Map<BufferVar, ffi::Optional<Stmt>> buffer_lca;
-    for (const auto& kv : detector.buffer_lca_) {
+    for (const auto& kv : detector->buffer_lca_) {
       BufferVar buffer(ffi::GetRef<Var>(kv.first));
       const ffi::Optional<Stmt> stmt =
           kv.second ? ffi::Optional<Stmt>(ffi::GetRef<Stmt>(kv.second->stmt)) : std::nullopt;
@@ -89,7 +92,7 @@ class LCADetector : public StmtExprVisitor {
         : parent_scope_info(parent_info), stmt(stmt), depth(depth) {}
   };
 
-  void VisitStmt_(const ForNode* op) final {
+  ffi::Optional<VisitInterrupt> Visit_(const ForNode* op) final {
     int n = ancestor_scopes_.size();
     const ScopeInfo* parent_scope = ancestor_scopes_.back();
     auto* current_scope = arena_.make<ScopeInfo>(parent_scope, op, n);
@@ -104,12 +107,13 @@ class LCADetector : public StmtExprVisitor {
 
     ancestor_scopes_.push_back(current_scope);
     loop_scope_map_.insert({op->loop_var.get(), current_scope});
-    StmtExprVisitor::VisitStmt_(op);
+    TVM_FFI_S_VISIT_MAYBE_EARLY_RETURN(StmtExprVisitor::Visit_(op));
     ancestor_scopes_.pop_back();
     loop_scope_map_.erase(op->loop_var.get());
+    return std::nullopt;
   }
 
-  void VisitStmt_(const SBlockRealizeNode* op) final {
+  ffi::Optional<VisitInterrupt> Visit_(const SBlockRealizeNode* op) final {
     const SBlockNode* block = op->block.get();
     int n = ancestor_scopes_.size();
     for (const BufferVar& buf : block->alloc_buffers) {
@@ -135,8 +139,9 @@ class LCADetector : public StmtExprVisitor {
       match_buffers_.insert(match_buffer->buffer.get());
     }
 
-    StmtExprVisitor::VisitStmt_(op);
+    TVM_FFI_S_VISIT_MAYBE_EARLY_RETURN(StmtExprVisitor::Visit_(op));
     ancestor_scopes_.pop_back();
+    return std::nullopt;
   }
 
   void UpdateDominateScopeOfNonDataParIter(const SBlockRealizeNode* block_realize) {
@@ -150,12 +155,12 @@ class LCADetector : public StmtExprVisitor {
     auto do_collect_itervar_scope = [this](const IterVar& itervar,
                                            const PrimExpr& binding) -> const ScopeInfo* {
       const ScopeInfo* highest_scope = nullptr;
-      PostOrderVisit(binding, [this, &highest_scope](const ffi::ObjectRef& obj) {
-        if (auto var = obj.as<PrimVar>()) {
-          const VarNode* loop_var = var.value().get();
+      auto walk_fn = [this, &highest_scope](const Var& var) -> ffi::Expected<ffi::WalkResult> {
+        if (auto prim_var = var.as<PrimVar>()) {
+          const VarNode* loop_var = prim_var.value().get();
           auto it = loop_scope_map_.find(loop_var);
           if (it == loop_scope_map_.end()) {
-            return;
+            return ffi::WalkResult::Advance();
           }
           const ScopeInfo* scope = it->second->parent_scope_info;
           if (highest_scope == nullptr) {
@@ -164,7 +169,9 @@ class LCADetector : public StmtExprVisitor {
             highest_scope = scope;
           }
         }
-      });
+        return ffi::WalkResult::Advance();
+      };
+      ffi::StructuralWalk<ffi::WalkOrder::kPostOrder>(binding, walk_fn);
       return highest_scope;
     };
 
@@ -200,12 +207,13 @@ class LCADetector : public StmtExprVisitor {
       const BufferVar& buffer = region->buffer;
       const ScopeInfo* scope = ancestor_scopes_.back();
 
-      auto handle_itervar = [&opaque_var_scope, &scope](const ffi::ObjectRef& obj) {
-        if (auto var = obj.as<PrimVar>()) {
-          const VarNode* iter_var = var.value().get();
+      auto handle_itervar = [&opaque_var_scope,
+                             &scope](const Var& var) -> ffi::Expected<ffi::WalkResult> {
+        if (auto prim_var = var.as<PrimVar>()) {
+          const VarNode* iter_var = prim_var.value().get();
           auto dom_scope_it = opaque_var_scope.find(iter_var);
           if (dom_scope_it == opaque_var_scope.end()) {
-            return;
+            return ffi::WalkResult::Advance();
           }
           // find the highest loop scope the accessed buffer index has
           // loop carried dependencies to (via opaque iter var binding).
@@ -213,12 +221,14 @@ class LCADetector : public StmtExprVisitor {
             scope = dom_scope_it->second;
           }
         }
+        return ffi::WalkResult::Advance();
       };
 
       // visit region min and max to find the lowest legal lca scope
       for (const Range& range : region->region) {
-        PostOrderVisit(range->min, handle_itervar);
-        PostOrderVisit(range->min + range->extent - 1, handle_itervar);
+        ffi::StructuralWalk<ffi::WalkOrder::kPostOrder>(range->min, handle_itervar);
+        ffi::StructuralWalk<ffi::WalkOrder::kPostOrder>(range->min + range->extent - 1,
+                                                        handle_itervar);
       }
 
       // the scope should be above `highest_reduce_scope` for reduce output buffer.
@@ -243,7 +253,7 @@ class LCADetector : public StmtExprVisitor {
     }
   }
 
-  void VisitStmt_(const AttrStmtNode* op) final {
+  ffi::Optional<VisitInterrupt> Visit_(const AttrStmtNode* op) final {
     if (op->attr_key == attr::thread_extent) {
       const auto* iter = op->node.as<IterVarNode>();
       TVM_FFI_ICHECK_NOTNULL(iter);
@@ -252,21 +262,41 @@ class LCADetector : public StmtExprVisitor {
         blockidx_scopes_.push_back(ancestor_scopes_.back());
       }
     }
-    StmtExprVisitor::VisitStmt_(op);
+    return StmtExprVisitor::Visit_(op);
   }
 
-  void VisitExpr_(const TensorLoadNode* op) final {
+  // Declared regions carry bounds, not opaque runtime accesses.
+  ffi::Optional<VisitInterrupt> Visit_(const BufferRegionNode* op) final {
+    for (const Range& range : op->region) {
+      TVM_FFI_S_VISIT_MAYBE_EARLY_RETURN(Visit(range->min));
+      TVM_FFI_S_VISIT_MAYBE_EARLY_RETURN(Visit(range->extent));
+    }
+    return std::nullopt;
+  }
+
+  ffi::Optional<VisitInterrupt> Visit_(const TensorLoadNode* op) final {
     UpdateBufferLCA(op->source.as_or_throw<tvm::tirx::BufferVar>().get(), ancestor_scopes_.back());
-    StmtExprVisitor::VisitExpr_(op);
+    for (const auto& index : op->indices) {
+      TVM_FFI_S_VISIT_MAYBE_EARLY_RETURN(Visit(index));
+    }
+    return std::nullopt;
   }
 
-  void VisitStmt_(const BufferStoreNode* op) final {
+  ffi::Optional<VisitInterrupt> Visit_(const BufferStoreNode* op) final {
     UpdateBufferLCA(op->buffer.get(), ancestor_scopes_.back());
-    StmtExprVisitor::VisitStmt_(op);
+    TVM_FFI_S_VISIT_MAYBE_EARLY_RETURN(Visit(op->value));
+    for (const auto& index : op->indices) {
+      TVM_FFI_S_VISIT_MAYBE_EARLY_RETURN(Visit(index));
+    }
+    return std::nullopt;
   }
 
   // Works for Load/Store and opaque access.
-  void VisitExpr_(const VarNode* op) final { VisitBufferVar(op); }
+  ffi::Optional<VisitInterrupt> Visit_(const VarNode* op) final {
+    if (def_region_kind() != kTVMFFIDefRegionKindNone) return std::nullopt;
+    VisitBufferVar(op);
+    return std::nullopt;
+  }
 
   void VisitBufferVar(const VarNode* op) {
     auto it = buffer_var_map_.find(op);

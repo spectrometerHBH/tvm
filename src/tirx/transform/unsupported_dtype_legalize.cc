@@ -79,7 +79,7 @@ class ComputeLegalizePlanner : public StmtExprVisitor {
 
   // run planning to populate buffer remap and var remap.
   void Plan(PrimFunc func) {
-    this->VisitStmt(func->body);
+    this->Visit(func->body);
     // if there are opaque var access, then we cannot
     // do remap of var and buffer, post-hoc remove these items.
     for (Var var : opaque_var_access_) {
@@ -103,17 +103,19 @@ class ComputeLegalizePlanner : public StmtExprVisitor {
 
   virtual bool MatchType(const Type& type) const = 0;
 
-  void VisitStmt_(const BufferStoreNode* op) final {
-    StmtExprVisitor::VisitStmt_(op);
+  ffi::Optional<VisitInterrupt> Visit_(const BufferStoreNode* op) final {
+    TVM_FFI_S_VISIT_MAYBE_EARLY_RETURN(StmtExprVisitor::Visit_(op));
     this->PopulateBufferRemap(op->buffer);
+    return std::nullopt;
   }
 
-  void VisitExpr_(const TensorLoadNode* op) final {
-    StmtExprVisitor::VisitExpr_(op);
+  ffi::Optional<VisitInterrupt> Visit_(const TensorLoadNode* op) final {
+    TVM_FFI_S_VISIT_MAYBE_EARLY_RETURN(StmtExprVisitor::Visit_(op));
     this->PopulateBufferRemap(op->source.as_or_throw<tvm::tirx::BufferVar>());
+    return std::nullopt;
   }
 
-  void VisitStmt_(const AllocBufferNode* op) final {
+  ffi::Optional<VisitInterrupt> Visit_(const AllocBufferNode* op) final {
     // remap all intermediate constant buffer to promote data types (fp16/fp32)
     if (MatchType(op->buffer->dtype)) {
       PrimType dtype = promote_dtype_.WithLanes(op->buffer->dtype.lanes());
@@ -122,31 +124,32 @@ class ComputeLegalizePlanner : public StmtExprVisitor {
       BufferVar buffer_var = RebuildBufferVar(op->buffer, std::move(type));
       (*var_remap_)[op->buffer.var()] = buffer_var.var();
     }
-    return StmtExprVisitor::VisitStmt_(op);
+    return StmtExprVisitor::Visit_(op);
   }
 
-  void VisitStmt_(const DeclBufferNode* op) final {
-    StmtExprVisitor::VisitStmt_(op);
+  ffi::Optional<VisitInterrupt> Visit_(const DeclBufferNode* op) final {
+    TVM_FFI_S_VISIT_MAYBE_EARLY_RETURN(StmtExprVisitor::Visit_(op));
     this->PopulateBufferRemap(op->buffer);
+    return std::nullopt;
   }
 
-  void VisitExpr_(const CallNode* op) final {
+  ffi::Optional<VisitInterrupt> Visit_(const CallNode* op) final {
     if (op->op.same_as(builtin::buffer_data()) && op->args.size() == 1) {
       if (auto buffer = op->args[0].as<Var>()) {
         opaque_var_access_.insert(buffer.value());
       }
     }
-    StmtExprVisitor::VisitExpr_(op);
+    return StmtExprVisitor::Visit_(op);
   }
 
-  void VisitExpr_(const VarNode* op) final {
-    StmtExprVisitor::VisitExpr_(op);
+  ffi::Optional<VisitInterrupt> Visit_(const VarNode* op) final {
     Var buffer_var = ffi::GetRef<Var>(op);
     if (buffer_var->ty.as<BufferTypeNode>()) {
       this->PopulateBufferRemap(BufferVar(buffer_var));
     } else if (buffer_var->ty.as<PointerTypeNode>()) {
       opaque_var_access_.insert(buffer_var);
     }
+    return std::nullopt;
   }
 
  private:
@@ -189,7 +192,7 @@ class FP8ComputeLegalizePlanner : public ComputeLegalizePlanner {
 };
 
 #define DEFINE_BIOP_EXPR_LEGALIZE(OP, FUNC)                          \
-  Expr VisitExpr_(const OP* op) final {                              \
+  Expr Dispatch_(const OP* op) final {                               \
     PrimExpr origin_a = PromoteToTarget(this->VisitPrimExpr(op->a)); \
     PrimExpr origin_b = PromoteToTarget(this->VisitPrimExpr(op->b)); \
                                                                      \
@@ -221,7 +224,7 @@ class ComputeLegalizer : public StmtExprMutator {
   virtual bool MatchType(const Type& type) const = 0;
 
  protected:
-  Expr VisitExpr_(const prim::CastNode* op) final {
+  Expr Dispatch_(const prim::CastNode* op) final {
     auto op_val = PromoteToTarget(this->VisitPrimExpr(op->value));
 
     // all casts to matched data type (fp8/bf16) becomes f32
@@ -237,7 +240,7 @@ class ComputeLegalizer : public StmtExprMutator {
     }
   }
 
-  Expr VisitExpr_(const prim::SelectNode* op) final {
+  Expr Dispatch_(const prim::SelectNode* op) final {
     PrimExpr condition = this->VisitPrimExpr(op->condition);
     PrimExpr true_value = PromoteToTarget(this->VisitPrimExpr(op->true_value));
     PrimExpr false_value = PromoteToTarget(this->VisitPrimExpr(op->false_value));
@@ -249,7 +252,7 @@ class ComputeLegalizer : public StmtExprMutator {
     }
   }
 
-  Expr VisitExpr_(const prim::BroadcastNode* op) final {
+  Expr Dispatch_(const prim::BroadcastNode* op) final {
     PrimExpr value = PromoteToTarget(this->VisitPrimExpr(op->value));
     if (value.same_as(op->value)) {
       return ffi::GetRef<PrimExpr>(op);
@@ -258,7 +261,7 @@ class ComputeLegalizer : public StmtExprMutator {
     }
   }
 
-  Expr VisitExpr_(const prim::ShuffleNode* op) final {
+  Expr Dispatch_(const prim::ShuffleNode* op) final {
     auto fexpr = [this](const PrimExpr& e) { return PromoteToTarget(this->VisitPrimExpr(e)); };
     auto vectors = op->vectors.Map(fexpr);
     if (vectors.same_as(op->vectors)) {
@@ -268,7 +271,7 @@ class ComputeLegalizer : public StmtExprMutator {
     }
   }
 
-  Expr VisitExpr_(const CallNode* op) final {
+  Expr Dispatch_(const CallNode* op) final {
     if (op->op.same_as(builtin::masked_load()) || op->op.same_as(builtin::masked_store())) {
       bool is_load = op->op.same_as(builtin::masked_load());
       BufferVar original(op->args[0].as_or_throw<Var>());
@@ -303,18 +306,18 @@ class ComputeLegalizer : public StmtExprMutator {
       return Call(PrimType::Void(), op->op, args, op->attrs, op->ty_args, op->span);
     }
     if (!op->ty.as<PrimTypeNode>()) {
-      return StmtExprMutator::VisitExpr_(op);
+      return StmtExprMutator::Dispatch_(op);
     }
     // presertve reinterpret<bf16>() behavior.
     if (op->op.same_as(builtin::reinterpret())) {
-      return StmtExprMutator::VisitExpr_(op);
+      return StmtExprMutator::Dispatch_(op);
     }
     // update normal computations to return f32 instead.
     auto fmutate = [this](const Expr& e) -> Expr {
       if (auto prim = e.as<PrimExpr>()) {
         return PromoteToTarget(this->VisitPrimExpr(prim.value()));
       }
-      return this->VisitExpr(e);
+      return this->Dispatch(e);
     };
     ffi::Array<Expr> args = op->args.Map(fmutate);
     PrimType op_ty = op->ty.as_or_throw<PrimType>();
@@ -330,14 +333,14 @@ class ComputeLegalizer : public StmtExprMutator {
     }
   }
 
-  Expr VisitExpr_(const FloatImmNode* op) final {
+  Expr Dispatch_(const FloatImmNode* op) final {
     if (MatchType(op->ty.as_or_throw<PrimType>())) {
       return FloatImm(promote_dtype_, op->value);
     }
     return ffi::GetRef<PrimExpr>(op);
   }
 
-  Expr VisitExpr_(const VarNode* op) final {
+  Expr Dispatch_(const VarNode* op) final {
     Var var = ffi::GetRef<Var>(op);
 
     auto itr = var_remap_.find(var);
@@ -348,7 +351,7 @@ class ComputeLegalizer : public StmtExprMutator {
     }
   }
 
-  Expr VisitExpr_(const prim::LetNode* op) final {
+  Expr Dispatch_(const prim::LetNode* op) final {
     PrimExpr value = PromoteToTarget(op->value);
     Var var = op->var;
     if (value.ty() != op->value.ty()) {
@@ -476,7 +479,7 @@ class ComputeLegalizer : public StmtExprMutator {
   }
 
   Stmt VisitStmt_(const DeclBufferNode* op) final {
-    Expr data = VisitExpr(op->data);
+    Expr data = Dispatch(op->data);
     BufferVar new_buf = GetRemappedBuffer(op->buffer);
     if (new_buf.same_as(op->buffer) && data.same_as(op->data)) {
       return ffi::GetRef<Stmt>(op);
@@ -498,8 +501,8 @@ class ComputeLegalizer : public StmtExprMutator {
     }
   }
 
-  Expr VisitExpr_(const TensorLoadNode* op) final {
-    PrimExpr ret = StmtExprMutator::VisitExpr_(op).as_or_throw<PrimExpr>();
+  Expr Dispatch_(const TensorLoadNode* op) final {
+    PrimExpr ret = StmtExprMutator::Dispatch_(op).as_or_throw<PrimExpr>();
     op = ret.as<TensorLoadNode>();
 
     BufferVar new_buf = GetRemappedBuffer(op->source.as_or_throw<tvm::tirx::BufferVar>());
@@ -556,8 +559,9 @@ class BF16ComputeLegalizer : public ComputeLegalizer {
  public:
   BF16ComputeLegalizer() : ComputeLegalizer(PrimType::Float(32)) {}
   PrimFunc Legalize(PrimFunc func) {
-    BF16ComputeLegalizePlanner planner(&buffer_remap_, &var_remap_, promote_dtype_);
-    return LegalizeWithPlanner(func, &planner);
+    auto planner =
+        ffi::make_object<BF16ComputeLegalizePlanner>(&buffer_remap_, &var_remap_, promote_dtype_);
+    return LegalizeWithPlanner(func, planner.get());
   }
   bool MatchType(const Type& type) const {
     return MatchPrimType(type, [](const PrimType& prim_type) { return IsBFloat16Type(prim_type); });
@@ -568,8 +572,9 @@ class FP8ComputeLegalizer : public ComputeLegalizer {
  public:
   explicit FP8ComputeLegalizer(PrimType promote_dtype) : ComputeLegalizer(promote_dtype) {}
   PrimFunc Legalize(PrimFunc func) {
-    FP8ComputeLegalizePlanner planner(&buffer_remap_, &var_remap_, promote_dtype_);
-    return LegalizeWithPlanner(func, &planner);
+    auto planner =
+        ffi::make_object<FP8ComputeLegalizePlanner>(&buffer_remap_, &var_remap_, promote_dtype_);
+    return LegalizeWithPlanner(func, planner.get());
   }
   bool MatchType(const Type& type) const {
     return MatchPrimType(type, [](const PrimType& prim_type) { return IsFloat8Type(prim_type); });
@@ -597,7 +602,7 @@ class StorageLegalizer : public StmtExprMutator {
   }
 
  private:
-  Expr VisitExpr_(const VarNode* op) final {
+  Expr Dispatch_(const VarNode* op) final {
     Var var = ffi::GetRef<Var>(op);
     auto itr = var_remap_.find(var);
     if (itr != var_remap_.end()) {
@@ -632,7 +637,7 @@ class StorageLegalizer : public StmtExprMutator {
 
   Stmt VisitStmt_(const DeclBufferNode* op) final {
     BufferVar buf = GetRemappedBuffer(op->buffer, /*allow_definition=*/true);
-    Expr data = VisitExpr(op->data);
+    Expr data = Dispatch(op->data);
     // in a rare case the buffer didn't get remapped
     // because the original var is not bfloat*
     // force remap here
@@ -650,7 +655,7 @@ class StorageLegalizer : public StmtExprMutator {
     return DeclBuffer(buf, std::move(data), op->span);
   }
 
-  Expr VisitExpr_(const prim::LetNode* op) final {
+  Expr Dispatch_(const prim::LetNode* op) final {
     PrimExpr value = VisitPrimExpr(op->value);
     Var var = RemapVarDef(op->var);
     PrimExpr body = VisitPrimExpr(op->body);
@@ -663,7 +668,7 @@ class StorageLegalizer : public StmtExprMutator {
   }
 
   Stmt VisitStmt_(const BindNode* op) final {
-    Expr value = VisitExpr(op->value);
+    Expr value = Dispatch(op->value);
     Var var = RemapVarDef(op->var);
 
     if (value.same_as(op->value) && var.same_as(op->var)) {
@@ -705,8 +710,8 @@ class StorageLegalizer : public StmtExprMutator {
     return ret;
   }
 
-  Expr VisitExpr_(const TensorLoadNode* op) final {
-    PrimExpr ret = StmtExprMutator::VisitExpr_(op).as_or_throw<PrimExpr>();
+  Expr Dispatch_(const TensorLoadNode* op) final {
+    PrimExpr ret = StmtExprMutator::Dispatch_(op).as_or_throw<PrimExpr>();
     op = ret.as<TensorLoadNode>();
     BufferVar new_buf = GetRemappedBuffer(op->source.as_or_throw<tvm::tirx::BufferVar>());
     if (new_buf.same_as(op->source.as_or_throw<tvm::tirx::BufferVar>())) {
@@ -716,7 +721,7 @@ class StorageLegalizer : public StmtExprMutator {
     }
   }
 
-  Expr VisitExpr_(const CallNode* op) final {
+  Expr Dispatch_(const CallNode* op) final {
     if (op->op.same_as(builtin::masked_load()) || op->op.same_as(builtin::masked_store())) {
       bool is_load = op->op.same_as(builtin::masked_load());
       BufferVar buffer = GetRemappedBuffer(BufferVar(op->args[0].as_or_throw<Var>()));
@@ -736,7 +741,7 @@ class StorageLegalizer : public StmtExprMutator {
         indices.push_back(index);
         args.push_back(index);
       }
-      args.push_back(this->VisitExpr(op->args.back()));
+      args.push_back(this->Dispatch(op->args.back()));
       if (is_load) {
         Type type = BufferLoad(buffer, indices).ty();
         return Call(type, op->op, args, op->attrs, op->ty_args, op->span);
@@ -745,7 +750,7 @@ class StorageLegalizer : public StmtExprMutator {
       }
     }
     if (const auto* pointer_type = op->ty.as<PointerTypeNode>()) {
-      Expr ret = StmtExprMutator::VisitExpr_(op);
+      Expr ret = StmtExprMutator::Dispatch_(op);
       const auto* element_type = pointer_type->element_type.as<PrimTypeNode>();
       if (!element_type || !MatchType(ffi::GetRef<PrimType>(element_type))) {
         return ret;
@@ -756,7 +761,7 @@ class StorageLegalizer : public StmtExprMutator {
                   call->attrs, call->ty_args, call->span);
     }
     if (!op->ty.as<PrimTypeNode>()) {
-      return StmtExprMutator::VisitExpr_(op);
+      return StmtExprMutator::Dispatch_(op);
     }
     // remap re-interpret so un-necessary reinterpret can be skipped.
     if (op->op.same_as(builtin::reinterpret())) {
@@ -773,7 +778,7 @@ class StorageLegalizer : public StmtExprMutator {
         return reinterpret(op_dtype, value);
       }
     }
-    return StmtExprMutator::VisitExpr_(op);
+    return StmtExprMutator::Dispatch_(op);
   }
 
   virtual bool MatchType(const Type& type) const = 0;

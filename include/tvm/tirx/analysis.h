@@ -40,26 +40,6 @@ namespace tvm {
 namespace tirx {
 
 /*!
- * \brief Compare two expressions recursively and check if they are equal
- *        to each other without var remapping.
- *
- *  This function does not remap variable bindings, it will not
- *  return true for (let x = 1 in x + 1) vs (let y = 1 in y + 1), unless x.same_as(y).
- *
- *  Use StructuralEqual for such cases.
- *
- *  Due to the restriction of not remapping variables, this function can run
- *  faster than StructuralEqual and can be used as a utility function during arithmetic
- *  simplifications.
- *
- * \sa StructuralEqual
- */
-struct ExprDeepEqual {
- public:
-  TVM_DLL bool operator()(const PrimExpr& lhs, const PrimExpr& rhs) const;
-};
-
-/*!
  * \brief Visit the PrimFuncs in the IRModule
  * \tparam FLambda The type of the PrimFunc visitor
  * \param mod The IRModule to be visited
@@ -97,30 +77,6 @@ TVM_DLL ffi::Array<Var> UndefinedVars(const PrimExpr& expr);
  * \return Array of undefined vars.
  */
 TVM_DLL ffi::Array<Var> UndefinedVars(const PrimExpr& expr, const ffi::Array<Var>& defs);
-
-/*!
- * \brief Analyze the side effect of an expression
- * \param expr The expression to be checked.
- *
- * \return CallEffectKind, can be kPure, kReadState or kUpdateState
- */
-TVM_DLL CallEffectKind SideEffect(const PrimExpr& expr);
-
-/*!
- * \brief Whether the given Stmt uses any var in the given variable set.
- * \param stmt The Stmt to be checked.
- * \param vset_contains The check function to see if a var is in the variable set.
- * \return Whether `stmt` uses any var in the given variable set.
- */
-TVM_DLL bool UsesVar(const Stmt& stmt, std::function<bool(const VarNode*)> vset_contains);
-
-/*!
- * \brief Whether the given PrimExpr uses any var in the given variable set.
- * \param expr The PrimExpr to be checked.
- * \param vset_contains The check function to see if var is in the variable set.
- * \return Whether `expr` uses any var in the given variable set.
- */
-TVM_DLL bool UsesVar(const PrimExpr& expr, std::function<bool(const VarNode*)> vset_contains);
 
 /*!
  * \brief Verifies whether the IR stmt or Expr is in SSA form.

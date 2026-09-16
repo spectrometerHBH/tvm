@@ -24,8 +24,8 @@
 #include "ir_utils.h"
 
 #include <tvm/arith/analyzer.h>
-#include <tvm/arith/int_solver.h>
 #include <tvm/ffi/cast.h>
+#include <tvm/ffi/extra/structural_visit.h>
 #include <tvm/ffi/reflection/registry.h>
 #include <tvm/ir/scope_stack.h>
 #include <tvm/s_tir/stmt.h>
@@ -129,10 +129,12 @@ class IRConvertSSA final : public StmtExprMutator {
             defined_.insert(var_ptr);
           }
         };
+        auto walk_fn = [&](const Var& var) -> ffi::Expected<ffi::WalkResult> {
+          check_var(var);
+          return ffi::WalkResult::Advance();
+        };
         for (const auto& dim : buffer.value()->shape) {
-          PostOrderVisit(dim, [&](const ffi::ObjectRef& obj) {
-            if (auto var = obj.as<Var>()) check_var(var.value());
-          });
+          ffi::StructuralWalk<ffi::WalkOrder::kPostOrder>(dim, walk_fn);
         }
         for (const auto& stride : buffer.value()->strides) {
           if (auto var = stride.as<Var>()) check_var(var.value());
@@ -200,8 +202,8 @@ class IRConvertSSA final : public StmtExprMutator {
   // undefined SSA-renamed variables.
   BufferVar VisitBufferDef(const BufferVar& buffer, bool alloc_data) override { return buffer; }
 
-  Expr VisitExpr_(const VarNode* op) final { return GetRemappedVar(ffi::GetRef<Var>(op)); }
-  Expr VisitExpr_(const prim::LetNode* op) final {
+  Expr Dispatch_(const VarNode* op) final { return GetRemappedVar(ffi::GetRef<Var>(op)); }
+  Expr Dispatch_(const prim::LetNode* op) final {
     const Var& v = op->var;
     if (defined_.count(v.get())) {
       PrimExpr value = this->VisitPrimExpr(op->value);
@@ -212,12 +214,12 @@ class IRConvertSSA final : public StmtExprMutator {
       return prim::Let(new_var, value, body);
     } else {
       defined_.insert(v.get());
-      return StmtExprMutator::VisitExpr_(op);
+      return StmtExprMutator::Dispatch_(op);
     }
   }
 
-  Expr VisitExpr_(const TensorLoadNode* op) final {
-    auto node = StmtExprMutator::VisitExpr_(op).as_or_throw<TensorLoad>();
+  Expr Dispatch_(const TensorLoadNode* op) final {
+    auto node = StmtExprMutator::Dispatch_(op).as_or_throw<TensorLoad>();
     auto output = VisitBufferAccess(std::move(node));
     return output;
   }
@@ -408,7 +410,7 @@ class IRConvertSSA final : public StmtExprMutator {
     // body-carrying statement's scope exits.
     const Var& v = op->var;
     if (defined_.count(v.get())) {
-      Expr value = this->VisitExpr(op->value);
+      Expr value = this->Dispatch(op->value);
       Var new_var = MakeNewVar(v);
       PushVarRemap(v, new_var);
       return Bind(new_var, value);
@@ -566,7 +568,12 @@ class IRConvertSSA final : public StmtExprMutator {
     if (buffer.get() == var) return true;
 
     auto uses_var = [var](const PrimExpr& expr) {
-      return expr.defined() && UsesVar(expr, [var](const VarNode* node) { return node == var; });
+      auto walkfn = [var](const Var& candidate) -> ffi::Expected<ffi::WalkResult> {
+        return candidate.get() == var ? ffi::WalkResult::Interrupt(ffi::VisitInterrupt(candidate))
+                                      : ffi::WalkResult::Advance();
+      };
+      return expr.defined() &&
+             ffi::StructuralWalk<ffi::WalkOrder::kPreOrder>(expr, walkfn).has_value();
     };
     if (uses_var(buffer->elem_offset)) return true;
     for (const PrimExpr& dim : buffer->shape) {
@@ -777,147 +784,6 @@ Region ConvertRegion(const MatchBufferRegion& match_buffer, const Region& region
   return result;
 }
 
-ffi::Optional<arith::IntConstraints> ConditionalBoundsContext::TrySolveCondition() {
-  // extract equations and related vars from condition expression.
-  // currently only extract simple integral equations which could be solvable.
-  arith::Analyzer analyzer;
-  PrimExpr condition = analyzer->Simplify(condition_);
-  if (is_const_int(condition)) {
-    return std::nullopt;
-  }
-  ffi::Array<PrimExpr> equations;
-  ffi::Array<PrimVar> vars;
-  std::function<void(const PrimExpr&)> fvisit = [&equations, &vars, &fvisit](const PrimExpr& e) {
-    if (e->IsInstance<prim::GENode>() || e->IsInstance<prim::GTNode>() ||
-        e->IsInstance<prim::LENode>() || e->IsInstance<prim::LTNode>() ||
-        e->IsInstance<prim::EQNode>() || e->IsInstance<prim::NENode>()) {
-      bool is_simple = true;
-      std::vector<PrimVar> cand_vars;
-      PostOrderVisit(e, [&cand_vars, &is_simple, &e](const ffi::ObjectRef& obj) {
-        if (obj.same_as(e)) {
-          return;
-        } else if (const VarNode* var = obj.as<VarNode>()) {
-          PrimType var_ty = var->ty.as_or_throw<PrimType>();
-          if (var_ty.MatchesCode(DLDataTypeCode::kDLInt, DLDataTypeCode::kDLUInt)) {
-            cand_vars.push_back(ffi::GetRef<Var>(var).as_or_throw<PrimVar>());
-          }
-        } else {
-          is_simple &= obj->IsInstance<prim::AddNode>() || obj->IsInstance<prim::SubNode>() ||
-                       obj->IsInstance<prim::MulNode>() || obj->IsInstance<prim::FloorDivNode>() ||
-                       obj->IsInstance<prim::FloorModNode>() || obj->IsInstance<IntImmNode>();
-        }
-      });
-      if (is_simple && !cand_vars.empty()) {
-        for (const PrimVar& new_var : cand_vars) {
-          if (!std::any_of(vars.begin(), vars.end(),
-                           [&new_var](const PrimVar& v) { return v.same_as(new_var); })) {
-            vars.push_back(new_var);
-          }
-        }
-        equations.push_back(e.as_or_throw<PrimExpr>());
-      }
-    } else if (e->IsInstance<prim::AndNode>()) {
-      prim::And op = e.as_or_throw<prim::And>();
-      fvisit(op->a);
-      fvisit(op->b);
-    } else if (e->IsInstance<CallNode>()) {
-      Call op = e.as_or_throw<Call>();
-      if (op->op.same_as(prim::builtin::likely())) {
-        fvisit(op->args[0].as_or_throw<PrimExpr>());
-      }
-    }
-  };
-  fvisit(condition);
-  if (equations.empty() || vars.empty()) {
-    return std::nullopt;
-  }
-  // build dom ranges for related vars
-  ffi::Map<Var, Range> ranges;
-  for (const Var& v : vars) {
-    arith::IntSet dom;
-    auto relax_it = relax_map_->find(v.get());
-    if (relax_it != relax_map_->end()) {
-      dom = relax_it->second;
-    } else {
-      auto hint_it = hint_map_->find(v.get());
-      if (hint_it != hint_map_->end()) {
-        dom = hint_it->second;
-      }
-    }
-    if (dom.defined()) {
-      ranges.Set(v, Range::FromMinExtent(dom.min(), analyzer->Simplify(dom.max() - dom.min() + 1)));
-    }
-  }
-  // solve constraints
-  arith::IntConstraints constraint(vars, ranges, equations);
-  arith::IntConstraints result = arith::SolveInequalitiesToRange(constraint);
-  if (!result->relations.empty()) {
-    return std::nullopt;
-  }
-  return result;
-}
-
-ConditionalBoundsContext::ConditionalBoundsContext(
-    const PrimExpr& condition, std::unordered_map<const VarNode*, arith::IntSet>* relax_map,
-    std::unordered_map<const VarNode*, arith::IntSet>* hint_map,
-    std::vector<PrimExpr>* pending_conditions)
-    : condition_(condition),
-      relax_map_(relax_map),
-      hint_map_(hint_map),
-      pending_conditions_(pending_conditions),
-      origin_pending_conditions_num_(pending_conditions->size()) {}
-
-void ConditionalBoundsContext::EnterWithScope() {
-  ffi::Optional<arith::IntConstraints> constraints = TrySolveCondition();
-  if (!constraints.has_value()) {
-    // fail to process the condition, add to unresolved
-    pending_conditions_->push_back(condition_);
-    return;
-  }
-  // update solved var ranges
-  for (const auto& kv : constraints.value()->ranges) {
-    const VarNode* var = kv.first.get();
-    arith::IntSet new_dom = arith::IntSet::FromRange(kv.second);
-    auto relax_it = relax_map_->find(var);
-    if (relax_it != relax_map_->end()) {
-      // this is a bound for relaxed var
-      origin_map_.emplace(var, relax_it->second);
-      relax_it->second = arith::Intersect({relax_it->second, new_dom});
-    } else {
-      // this is a bound for free var
-      auto hint_it = hint_map_->find(var);
-      if (hint_it != hint_map_->end()) {
-        origin_map_.emplace(var, hint_it->second);
-        hint_it->second = arith::Intersect({hint_it->second, new_dom});
-      } else {
-        origin_map_.emplace(var, arith::IntSet::Nothing());
-        hint_map_->insert(hint_it, {var, new_dom});
-      }
-    }
-  }
-}
-
-void ConditionalBoundsContext::ExitWithScope() {
-  pending_conditions_->resize(origin_pending_conditions_num_);
-  for (const auto& p : origin_map_) {
-    const auto* var = p.first;
-    auto relax_it = relax_map_->find(var);
-    if (relax_it != relax_map_->end()) {
-      // recover bound for relaxed var
-      relax_it->second = p.second;
-    } else {
-      // recover bound for free var
-      auto hint_it = hint_map_->find(var);
-      TVM_FFI_ICHECK(hint_it != hint_map_->end());
-      if (p.second.IsNothing()) {
-        hint_map_->erase(hint_it);
-      } else {
-        hint_it->second = p.second;
-      }
-    }
-  }
-}
-
 std::pair<PrimExpr, PrimExpr> GetAsyncWaitAttributes(const AttrStmtNode* op) {
   TVM_FFI_ICHECK(op && op->attr_key == s_tir::attr::async_wait_queue_scope);
   auto inner = op->body.as<AttrStmtNode>();
@@ -926,13 +792,19 @@ std::pair<PrimExpr, PrimExpr> GetAsyncWaitAttributes(const AttrStmtNode* op) {
 }
 
 /*! \brief Collect storage alignment information from annotations. */
-class StorageAlignCollector : public StmtVisitor {
+class StorageAlignCollector : public StmtExprVisitor {
+ public:
+  ffi::Optional<VisitInterrupt> Visit(ffi::AnyView value) override {
+    if (value.as<ExprNode>()) return std::nullopt;
+    return StmtExprVisitor::Visit(value);
+  }
+
  private:
   friend std::unordered_map<Var, StorageAlignAnnotation> CollectStorageAlignAnnotation(
       const Stmt& body);
 
   /*! \brief For s-stir, the alignment annotations reside in block annotations. */
-  void VisitStmt_(const SBlockNode* op) final {
+  ffi::Optional<VisitInterrupt> Visit_(const SBlockNode* op) final {
     auto it = op->annotations.find(s_tir::attr::buffer_dim_align);
     if (it != op->annotations.end()) {
       auto storage_align_annotation = (*it).second.as_or_throw<StorageAlignAnnotation>();
@@ -942,11 +814,11 @@ class StorageAlignCollector : public StmtVisitor {
         storage_align_[buffer.var()].push_back(storage_align_tuple);
       }
     }
-    StmtVisitor::VisitStmt_(op);
+    return StmtExprVisitor::Visit_(op);
   }
 
   /*! \brief AllocBuffer: check for buffer_dim_align annotations. */
-  void VisitStmt_(const AllocBufferNode* op) final {
+  ffi::Optional<VisitInterrupt> Visit_(const AllocBufferNode* op) final {
     auto it = op->annotations.find(s_tir::attr::buffer_dim_align);
     if (it != op->annotations.end()) {
       auto storage_align_annotation = (*it).second.as_or_throw<StorageAlignAnnotation>();
@@ -958,7 +830,7 @@ class StorageAlignCollector : public StmtVisitor {
         storage_align_[op->buffer.var()].push_back(storage_align_tuple);
       }
     }
-    StmtVisitor::VisitStmt_(op);
+    return StmtExprVisitor::Visit_(op);
   }
 
   /*! \brief The map from buffer var to its storage alignment information. */
@@ -966,9 +838,9 @@ class StorageAlignCollector : public StmtVisitor {
 };
 
 std::unordered_map<Var, StorageAlignAnnotation> CollectStorageAlignAnnotation(const Stmt& body) {
-  StorageAlignCollector collector;
-  collector(body);
-  return std::move(collector.storage_align_);
+  auto collector = ffi::make_object<StorageAlignCollector>();
+  collector->Visit(body);
+  return std::move(collector->storage_align_);
 }
 
 int Stoi(const std::string& str) {

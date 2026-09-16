@@ -20,6 +20,7 @@
 /*!
  * \file thread_storage_sync.cc
  */
+#include <tvm/ffi/extra/structural_visit.h>
 #include <tvm/ffi/function.h>
 #include <tvm/ffi/reflection/registry.h>
 #include <tvm/ir/prim/builtin.h>
@@ -43,6 +44,7 @@ using namespace tvm::tirx;
 
 class ThreadSyncPlanner : public StorageAccessVisitor {
  public:
+  using StorageAccessVisitor::Visit_;
   explicit ThreadSyncPlanner(StorageScope sync_scope) : sync_scope_(sync_scope) {}
 
   // The syncs inserted before each statement
@@ -232,14 +234,20 @@ class ThreadSyncPlanner : public StorageAccessVisitor {
       if (prev_intset.IsSinglePoint() && curr_intset.IsSinglePoint()) {
         PrimExpr prev_index = prev_intset.PointValue();
         PrimExpr curr_index = curr_intset.PointValue();
-        has_same_index = ExprDeepEqual()(prev_index, curr_index);
+        has_same_index = prim::ExprDeepEqual()(prev_index, curr_index);
         if (thread_index_var != nullptr) {
           auto f_uses_thread_index = [=](const tvm::tirx::VarNode* parameter) {
             return parameter == thread_index_var;
           };
-          depends_on_thread_index = depends_on_thread_index &&
-                                    UsesVar(curr_index, f_uses_thread_index) &&
-                                    UsesVar(prev_index, f_uses_thread_index);
+          auto walkfn = [&](const Var& var) -> ffi::Expected<ffi::WalkResult> {
+            return f_uses_thread_index(var.get())
+                       ? ffi::WalkResult::Interrupt(ffi::VisitInterrupt(var))
+                       : ffi::WalkResult::Advance();
+          };
+          depends_on_thread_index =
+              depends_on_thread_index &&
+              ffi::StructuralWalk<ffi::WalkOrder::kPreOrder>(curr_index, walkfn).has_value() &&
+              ffi::StructuralWalk<ffi::WalkOrder::kPreOrder>(prev_index, walkfn).has_value();
         }
       } else {
         has_same_index = false;
@@ -342,9 +350,9 @@ Stmt ThreadSync(Stmt stmt, std::string storage_scope) {
   if (sync_scope.rank == StorageRank::kShared && sync_scope.tag == "") {
     stmt = ThreadSyncAfterWaitQueueInserter(sync_scope)(stmt);
   }
-  ThreadSyncPlanner planner(sync_scope);
-  planner(stmt);
-  return ThreadSyncInserter(sync_scope, planner.syncs_inserted_)(std::move(stmt));
+  auto planner = ffi::make_object<ThreadSyncPlanner>(sync_scope);
+  planner->Visit(stmt);
+  return ThreadSyncInserter(sync_scope, planner->syncs_inserted_)(std::move(stmt));
 }
 
 namespace transform {

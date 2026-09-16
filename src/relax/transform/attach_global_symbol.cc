@@ -57,9 +57,9 @@ struct TirxGvarMutator : tirx::StmtExprMutator {
   explicit TirxGvarMutator(ffi::Map<GlobalVar, GlobalVar> replacements)
       : replacements(replacements) {}
 
-  using tirx::StmtExprMutator::VisitExpr_;
-  Expr VisitExpr_(const CallNode* node) override {
-    auto call = tirx::StmtExprMutator::VisitExpr_(node).as_or_throw<tvm::Call>();
+  using tirx::StmtExprMutator::Dispatch_;
+  Expr Dispatch_(const CallNode* node) override {
+    auto call = tirx::StmtExprMutator::Dispatch_(node).as_or_throw<tvm::Call>();
     if (auto old_gvar = call->op.as<GlobalVar>()) {
       if (auto new_gvar = replacements.Get(old_gvar.value())) {
         call.CopyOnWrite()->op = new_gvar.value();
@@ -70,7 +70,7 @@ struct TirxGvarMutator : tirx::StmtExprMutator {
 };
 
 // Replace GlobalVar references across all functions in the module.
-// Direct dispatch on function type — no NodeFunctor indirection needed
+// Direct dispatch on function type — no ObjectFunctor indirection needed
 // since this file already includes the relax + tirx headers.
 IRModule ReplaceGlobalVarsInModule(IRModule mod, ffi::Map<GlobalVar, GlobalVar> replacements) {
   if (replacements.empty()) {

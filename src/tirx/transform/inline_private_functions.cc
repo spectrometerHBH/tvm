@@ -48,22 +48,23 @@ PMap<GlobalVar, PSet<GlobalVar>> CollectCallMap(const IRModule& mod) {
     GlobalVar current;
     PMap<GlobalVar, PSet<GlobalVar>> caller_lookup;
 
-    void VisitExpr_(const CallNode* op) {
+    ffi::Optional<VisitInterrupt> Visit_(const CallNode* op) final {
       if (auto gvar = op->op.as<GlobalVar>()) {
         caller_lookup[gvar.value()].insert(current);
       }
-      StmtExprVisitor::VisitExpr_(op);
+      return StmtExprVisitor::Visit_(op);
     }
-  } visitor;
+  };
+  auto visitor = ffi::make_object<Visitor>();
 
   for (const auto& [gvar, base_func] : mod->functions) {
     if (auto prim_func = base_func.as<PrimFuncNode>()) {
-      visitor.current = gvar;
-      visitor(prim_func->body);
+      visitor->current = gvar;
+      visitor->Visit(prim_func->body);
     }
   }
 
-  return visitor.caller_lookup;
+  return visitor->caller_lookup;
 }
 
 PSet<GlobalVar> CollectRecursiveFunctions(const IRModule& mod) {
@@ -203,7 +204,7 @@ class PrimFuncInliner : StmtExprMutator {
     return VisitStmt(inlined);
   }
 
-  Expr VisitExpr_(const CallNode* call) override {
+  Expr Dispatch_(const CallNode* call) override {
     // Because the current implementation inlines a subroutine inserts
     // the `tirx::Stmt` body at the point of use, replacement must
     // occur in a context where a `tirx::Stmt` can be returned. Support
@@ -221,7 +222,7 @@ class PrimFuncInliner : StmtExprMutator {
     if (auto gvar = call->op.as<GlobalVar>()) {
       removable_funcs_.erase(gvar.value());
     }
-    return StmtExprMutator::VisitExpr_(call);
+    return StmtExprMutator::Dispatch_(call);
   }
 
   Stmt InlineArguments(const GlobalVar& gvar, PrimFunc callee, const ffi::Array<Expr>& args) const {

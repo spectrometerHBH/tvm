@@ -17,6 +17,8 @@
  * under the License.
  */
 #include <tvm/ffi/cast.h>
+#include <tvm/ffi/extra/structural_mutate.h>
+#include <tvm/ffi/extra/structural_visit.h>
 #include <tvm/ffi/reflection/registry.h>
 #include <tvm/te/operation.h>
 
@@ -108,7 +110,7 @@ class DecomposeReductionBlockReplacer : public StmtMutator {
   SBlock new_reduction_block_;
 };
 
-class LoopHeightError : public ScheduleError {
+class LoopHeightError : public ScheduleErrorContextObj {
  public:
   static void CheckLoopHigherThanReduceLoops(const IRModule& mod, const SBlockNode* block,
                                              const SBlockRealizeNode* realize,
@@ -128,9 +130,14 @@ class LoopHeightError : public ScheduleError {
         }
         // loop_var of a higher loop shouldn't contain loop var
         const Var& loop_var = higher_loop->StmtAs<ForNode>()->loop_var;
-        if (UsesVar(binding, [v = loop_var.get()](const VarNode* var) { return var == v; })) {
+        auto walkfn = [v = loop_var.get()](const Var& var) -> ffi::Expected<ffi::WalkResult> {
+          return var.get() == v ? ffi::WalkResult::Interrupt(ffi::VisitInterrupt(var))
+                                : ffi::WalkResult::Advance();
+        };
+        if (ffi::StructuralWalk<ffi::WalkOrder::kPreOrder>(binding, walkfn).has_value()) {
           const ForNode* loop = TVM_SREF_TO_FOR(loop_sref);
-          throw LoopHeightError(mod, ffi::GetRef<For>(loop), ffi::GetRef<SBlock>(block));
+          throw MakeScheduleError<LoopHeightError>(mod, ffi::GetRef<For>(loop),
+                                                   ffi::GetRef<SBlock>(block));
         }
       }
     }
@@ -169,7 +176,13 @@ PrimExpr RewriteInitPredicate(PrimExpr pred,
   auto uses_discarded_loop = [&discarded_loops](const VarNode* var) {
     return discarded_loops.count(var);
   };
-  return UsesVar(pred, uses_discarded_loop) ? IntImm::Bool(true) : pred;
+  auto walkfn = [&](const Var& var) -> ffi::Expected<ffi::WalkResult> {
+    return uses_discarded_loop(var.get()) ? ffi::WalkResult::Interrupt(ffi::VisitInterrupt(var))
+                                          : ffi::WalkResult::Advance();
+  };
+  return ffi::StructuralWalk<ffi::WalkOrder::kPreOrder>(pred, walkfn).has_value()
+             ? IntImm::Bool(true)
+             : pred;
 }
 
 StmtSRef DecomposeReduction(ScheduleState self, const StmtSRef& block_sref,
@@ -193,8 +206,8 @@ StmtSRef DecomposeReduction(ScheduleState self, const StmtSRef& block_sref,
   if (self->enable_check) {
     // Cond 0. Check loop_sref is an ancestor of block_sref
     if (std::find(loops.begin(), loops.end(), loop_sref) == loops.end()) {
-      throw LoopPositionError(self->mod, ffi::GetRef<For>(loop), ffi::GetRef<SBlock>(block),
-                              "decompose_reduction");
+      throw MakeScheduleError<LoopPositionError>(self->mod, ffi::GetRef<For>(loop),
+                                                 ffi::GetRef<SBlock>(block), "decompose_reduction");
     }
     // Cond 1. Check block is reduction
     CheckReductionBlock(self, block_sref, scope_root_sref);
@@ -231,10 +244,27 @@ StmtSRef DecomposeReduction(ScheduleState self, const StmtSRef& block_sref,
     block_var_map[iter_var->var] = new_iter_var->var;
   }
   // Step 2. After copying block vars, substitute them in init block
-  init_block->body = Substitute(block->init.value(), block_var_map);
+  auto map_block_var = [&block_var_map](
+                           const Var& var,
+                           TVMFFIDefRegionKind kind) -> ffi::Expected<ffi::UnchangedOr<ffi::Any>> {
+    if (kind != kTVMFFIDefRegionKindNone) return ffi::Unchanged();
+    if (auto it = block_var_map.find(var); it != block_var_map.end()) {
+      return ffi::Any(it->second);
+    }
+    return ffi::Unchanged();
+  };
+  init_block->body =
+      ffi::StructuralMap<ffi::WalkOrder::kPreOrder>(block->init.value(), map_block_var)
+          .as_or_throw<Stmt>();
   for (const BufferRegion& write : block->writes) {
-    init_block->writes.push_back(
-        BufferRegion(write->buffer, Substitute(write->region, block_var_map)));
+    ffi::Array<Range> mapped_region = write->region.Map([&map_block_var](const Range& range) {
+      PrimExpr min = ffi::StructuralMap<ffi::WalkOrder::kPreOrder>(range->min, map_block_var)
+                         .as_or_throw<PrimExpr>();
+      PrimExpr extent = ffi::StructuralMap<ffi::WalkOrder::kPreOrder>(range->extent, map_block_var)
+                            .as_or_throw<PrimExpr>();
+      return Range::FromMinExtent(min, extent);
+    });
+    init_block->writes.push_back(BufferRegion(write->buffer, mapped_region));
   }
   // Step 3. Scan loops not higher than the specified loop above the reduction block.
   //         If the loop is used in the init block binding, then it is chosen.
@@ -244,8 +274,12 @@ StmtSRef DecomposeReduction(ScheduleState self, const StmtSRef& block_sref,
   for (int i = static_cast<int>(loops.size()) - 1; i >= 0; --i) {
     const VarNode* loop_var = loops[i]->StmtAs<ForNode>()->loop_var.get();
     bool discarded = true;
+    auto walkfn = [v = loop_var](const Var& var) -> ffi::Expected<ffi::WalkResult> {
+      return var.get() == v ? ffi::WalkResult::Interrupt(ffi::VisitInterrupt(var))
+                            : ffi::WalkResult::Advance();
+    };
     for (const PrimExpr& expr : init_realize->iter_values) {
-      if (!UsesVar(expr, [v = loop_var](const VarNode* var) { return var == v; })) {
+      if (!ffi::StructuralWalk<ffi::WalkOrder::kPreOrder>(expr, walkfn).has_value()) {
         continue;
       }
       // The loop is related to init block bindings;
@@ -286,7 +320,16 @@ StmtSRef DecomposeReduction(ScheduleState self, const StmtSRef& block_sref,
     new_loop->body = body;
     body = ffi::GetRef<For>(new_loop);
   }
-  body = Substitute(body, loop_var_map);
+  auto f_substitute = [&loop_var_map](
+                          const Var& var,
+                          TVMFFIDefRegionKind kind) -> ffi::Expected<ffi::UnchangedOr<ffi::Any>> {
+    if (kind != kTVMFFIDefRegionKindNone) return ffi::Unchanged();
+    if (auto it = loop_var_map.find(var); it != loop_var_map.end()) {
+      return ffi::Any(it->second);
+    }
+    return ffi::Unchanged();
+  };
+  body = ffi::StructuralMap<ffi::WalkOrder::kPreOrder>(body, f_substitute).as_or_throw<Stmt>();
   // Step 6. Mutate IR
   const SBlockNode* old_scope_root = TVM_SREF_TO_SBLOCK(scope_root_sref);
   auto [new_scope_root, new_reduction_block] = DecomposeReductionBlockReplacer::Replace(
@@ -420,6 +463,44 @@ struct ReducerRegistry {
                 [](const ffi::Array<PrimExpr>& values) {
                   return ffi::Array<PrimExpr>{MakeConst(values[0].ty(), -1),
                                               max_value(values[1].ty())};
+                }),
+            // argmax with `lhs_val > rhs_val` and tie-break `lhs_idx > rhs_idx`, which corresponds
+            // to topi.argmax with `select_last_index=True` (preferring the last occurrence).
+            CreateReducerGetter(
+                /*n_buffers=*/2,
+                [](const ffi::Array<Var>& x, const ffi::Array<Var>& y) {
+                  PrimExpr idx = Select(
+                      Or(greater(x[1].as_or_throw<PrimExpr>(), y[1].as_or_throw<PrimExpr>()),
+                         And(equal(x[1].as_or_throw<PrimExpr>(), y[1].as_or_throw<PrimExpr>()),
+                             greater(x[0].as_or_throw<PrimExpr>(), y[0].as_or_throw<PrimExpr>()))),
+                      x[0].as_or_throw<PrimExpr>(), y[0].as_or_throw<PrimExpr>());
+                  PrimExpr val =
+                      Select(greater(x[1].as_or_throw<PrimExpr>(), y[1].as_or_throw<PrimExpr>()),
+                             x[1].as_or_throw<PrimExpr>(), y[1].as_or_throw<PrimExpr>());
+                  return ffi::Array<PrimExpr>{idx, val};
+                },
+                [](const ffi::Array<PrimExpr>& values) {
+                  return ffi::Array<PrimExpr>{MakeConst(values[0].ty(), -1),
+                                              min_value(values[1].ty())};
+                }),
+            // argmin with `lhs_val < rhs_val` and tie-break `lhs_idx > rhs_idx`, which corresponds
+            // to topi.argmin with `select_last_index=True` (preferring the last occurrence).
+            CreateReducerGetter(
+                /*n_buffers=*/2,
+                [](const ffi::Array<Var>& x, const ffi::Array<Var>& y) {
+                  PrimExpr idx = Select(
+                      Or(less(x[1].as_or_throw<PrimExpr>(), y[1].as_or_throw<PrimExpr>()),
+                         And(equal(x[1].as_or_throw<PrimExpr>(), y[1].as_or_throw<PrimExpr>()),
+                             greater(x[0].as_or_throw<PrimExpr>(), y[0].as_or_throw<PrimExpr>()))),
+                      x[0].as_or_throw<PrimExpr>(), y[0].as_or_throw<PrimExpr>());
+                  PrimExpr val =
+                      Select(less(x[1].as_or_throw<PrimExpr>(), y[1].as_or_throw<PrimExpr>()),
+                             x[1].as_or_throw<PrimExpr>(), y[1].as_or_throw<PrimExpr>());
+                  return ffi::Array<PrimExpr>{idx, val};
+                },
+                [](const ffi::Array<PrimExpr>& values) {
+                  return ffi::Array<PrimExpr>{MakeConst(values[0].ty(), -1),
+                                              max_value(values[1].ty())};
                 })} {}
 
   static void RegisterReducer(
@@ -473,7 +554,7 @@ GetReducerGetters() {
   return ReducerRegistry::Global()->reducer_getters;
 }
 
-class NotSerialLoopKindError : public ScheduleError {
+class NotSerialLoopKindError : public ScheduleErrorContextObj {
  public:
   explicit NotSerialLoopKindError(IRModule mod, For loop)
       : mod_(std::move(mod)), loop_(std::move(loop)) {}
@@ -498,7 +579,7 @@ class NotSerialLoopKindError : public ScheduleError {
   For loop_;
 };
 
-class FactorAxisOutOfRangeError : public ScheduleError {
+class FactorAxisOutOfRangeError : public ScheduleErrorContextObj {
  public:
   explicit FactorAxisOutOfRangeError(IRModule mod, BufferVar buffer, int factor_axis)
       : mod_(std::move(mod)), buffer_(std::move(buffer)), factor_axis_(factor_axis) {}
@@ -524,7 +605,7 @@ class FactorAxisOutOfRangeError : public ScheduleError {
   static int CheckAndUpdate(const IRModule& mod, const BufferVar& buffer, int factor_axis) {
     int ndim = static_cast<int>(buffer->shape.size());
     if (factor_axis < -(ndim + 1) || factor_axis > ndim) {
-      throw FactorAxisOutOfRangeError(mod, buffer, factor_axis);
+      throw MakeScheduleError<FactorAxisOutOfRangeError>(mod, buffer, factor_axis);
     }
     // If factor_axis is negative, convert it to a non-negative one.
     if (factor_axis < 0) {
@@ -538,7 +619,7 @@ class FactorAxisOutOfRangeError : public ScheduleError {
   int factor_axis_;
 };
 
-class LoopPropertyError : public ScheduleError {
+class LoopPropertyError : public ScheduleErrorContextObj {
  public:
   enum ErrorType {
     kDataParIterTouchRFactorLoop = 0,
@@ -598,7 +679,8 @@ class LoopPropertyError : public ScheduleError {
     ffi::Array<SBlockRealize> children_of_outermost_loop =
         GetChildBlockRealizeOnSRefTree(self->stmt2ref.at(loops[0].get()));
     if (!children_of_outermost_loop[0]->block.same_as(block)) {
-      throw LoopPropertyError(self->mod, loops[0], kNotFirstChildBlockOfOutermostLoop);
+      throw MakeScheduleError<LoopPropertyError>(self->mod, loops[0],
+                                                 kNotFirstChildBlockOfOutermostLoop);
     }
 
     bool meet_reduction_loop = false;
@@ -607,10 +689,11 @@ class LoopPropertyError : public ScheduleError {
       bool reduction_touched = reduce_loop_vars.count(loop->loop_var.get());
 
       if (data_par_touched && reduction_touched) {
-        throw LoopPropertyError(self->mod, loop, kLoopTouchedByBothKindsOfBlockIters);
+        throw MakeScheduleError<LoopPropertyError>(self->mod, loop,
+                                                   kLoopTouchedByBothKindsOfBlockIters);
       } else if (data_par_touched) {
         if (loop.get() == rf_loop) {
-          throw LoopPropertyError(self->mod, loop, kDataParIterTouchRFactorLoop);
+          throw MakeScheduleError<LoopPropertyError>(self->mod, loop, kDataParIterTouchRFactorLoop);
         }
         continue;
       } else if (reduction_touched) {
@@ -620,7 +703,7 @@ class LoopPropertyError : public ScheduleError {
         }
         continue;
       } else if (meet_reduction_loop && !is_one(loop->extent)) {
-        throw LoopPropertyError(self->mod, loop, kUnboundLoopUnderReductionLoop);
+        throw MakeScheduleError<LoopPropertyError>(self->mod, loop, kUnboundLoopUnderReductionLoop);
       }
     }
   }
@@ -713,10 +796,17 @@ class BaseBlockCreator {
     // The pre-processing finds out the buffers written in the block, the indices of the buffer
     // accesses, and the reduction LHS and RHS of the stored values.
     PreProcess();
-    Stmt block_body = Substitute(CreateBlockBody(has_reduce_iter), var_map_);
+    auto map_block_var = [this](const Var& var) -> ffi::Expected<ffi::UnchangedOr<ffi::Any>> {
+      if (auto repl = var_map_.Get(var)) return ffi::Any(*std::move(repl));
+      return ffi::Unchanged();
+    };
+    Stmt block_body = ffi::StructuralMap<ffi::WalkOrder::kPreOrder>(
+                          CreateBlockBody(has_reduce_iter), map_block_var)
+                          .as_or_throw<Stmt>();
     ffi::Optional<Stmt> block_init = CreateBlockInit(has_reduce_iter);
     if (block_init.has_value()) {
-      block_init = Substitute(block_init.value(), var_map_);
+      block_init = ffi::StructuralMap<ffi::WalkOrder::kPreOrder>(block_init.value(), map_block_var)
+                       .as_or_throw<Stmt>();
     }
     CreateReadWriteRegions();
 
@@ -896,9 +986,12 @@ class RFactorBlockCreator : public BaseBlockCreator {
   void CreateNormalIters(int idx) final {
     IterVar old_iter = old_block_realize_->block->iter_vars[idx];
     PrimExpr old_binding = old_block_realize_->iter_values[idx];
+    auto walkfn = [v = rf_loop_->loop_var.get()](const Var& var) -> ffi::Expected<ffi::WalkResult> {
+      return var.get() == v ? ffi::WalkResult::Interrupt(ffi::VisitInterrupt(var))
+                            : ffi::WalkResult::Advance();
+    };
     if (old_iter->iter_type == IterVarType::kDataPar ||
-        !UsesVar(old_binding,
-                 [v = rf_loop_->loop_var.get()](const VarNode* var) { return var == v; })) {
+        !ffi::StructuralWalk<ffi::WalkOrder::kPreOrder>(old_binding, walkfn).has_value()) {
       // The old block iter is either a data parallel block iter, or a reduction block iter that
       // doesn't touch the rfactor loop. In this case reuse the old reduction block iter and its
       // corresponding binding.
@@ -929,7 +1022,15 @@ class RFactorBlockCreator : public BaseBlockCreator {
     }
     // Substitute the original binding with new block iters. Store the result expression
     // in `rf_var_map` for future substitution.
-    var_map_.Set(old_iter->var, Substitute(old_binding, loop_var2block_binding_));
+    auto f_substitute = [this](const Var& var) -> ffi::Expected<ffi::UnchangedOr<ffi::Any>> {
+      if (auto it = loop_var2block_binding_.find(var.get()); it != loop_var2block_binding_.end()) {
+        return ffi::Any(it->second);
+      }
+      return ffi::Unchanged();
+    };
+    var_map_.Set(old_iter->var,
+                 ffi::StructuralMap<ffi::WalkOrder::kPreOrder>(old_binding, f_substitute)
+                     .as_or_throw<PrimExpr>());
   }
 
   void PreProcess() final {
@@ -951,10 +1052,21 @@ class RFactorBlockCreator : public BaseBlockCreator {
       buffer_map.Set(old_reduction_updates_[i]->buffer, rf_buffers_[i]);
     }
     const SBlock& old_block = old_block_realize_->block;
+    auto map_block_var = [this](const Var& var) -> ffi::Expected<ffi::UnchangedOr<ffi::Any>> {
+      if (auto repl = var_map_.Get(var)) return ffi::Any(*std::move(repl));
+      return ffi::Unchanged();
+    };
     read_regions_.reserve(old_block->reads.size());
     for (const BufferRegion& read_region : old_block->reads) {
-      read_regions_.push_back(
-          BufferRegion(read_region->buffer, Substitute(read_region->region, var_map_)));
+      ffi::Array<Range> region = read_region->region.Map([&map_block_var](const Range& range) {
+        PrimExpr min = ffi::StructuralMap<ffi::WalkOrder::kPreOrder>(range->min, map_block_var)
+                           .as_or_throw<PrimExpr>();
+        PrimExpr extent =
+            ffi::StructuralMap<ffi::WalkOrder::kPreOrder>(range->extent, map_block_var)
+                .as_or_throw<PrimExpr>();
+        return Range::FromMinExtent(min, extent);
+      });
+      read_regions_.push_back(BufferRegion(read_region->buffer, region));
     }
     write_regions_.reserve(old_block->writes.size());
     for (const BufferRegion& write_region : old_block->writes) {
@@ -964,7 +1076,15 @@ class RFactorBlockCreator : public BaseBlockCreator {
           Range::FromMinExtent(additional_iter_->var, IntImm(additional_iter_->var.ty(), 1)));
       ffi::Optional<BufferVar> rf_buffer = buffer_map.Get(write_region->buffer);
       TVM_FFI_ICHECK(rf_buffer.has_value());
-      write_regions_.push_back(BufferRegion(rf_buffer.value(), Substitute(region, var_map_)));
+      region.MutateByApply([&map_block_var](const Range& range) {
+        PrimExpr min = ffi::StructuralMap<ffi::WalkOrder::kPreOrder>(range->min, map_block_var)
+                           .as_or_throw<PrimExpr>();
+        PrimExpr extent =
+            ffi::StructuralMap<ffi::WalkOrder::kPreOrder>(range->extent, map_block_var)
+                .as_or_throw<PrimExpr>();
+        return Range::FromMinExtent(min, extent);
+      });
+      write_regions_.push_back(BufferRegion(rf_buffer.value(), region));
     }
   }
 
@@ -1032,12 +1152,20 @@ class WriteBackBlockCreator : public BaseBlockCreator {
   }
 
   void PreProcess() final {
+    auto map_block_var = [this](const Var& var) -> ffi::Expected<ffi::UnchangedOr<ffi::Any>> {
+      if (auto repl = var_map_.Get(var)) return ffi::Any(*std::move(repl));
+      return ffi::Unchanged();
+    };
     for (int i = 0; i < n_buffers_; ++i) {
       PrimExpr rhs = BufferLoad(rf_buffers_[i], rf_buf_access_indices_);
       update_buffers_.push_back(old_reduction_updates_[i]->buffer);
       update_indices_.push_back(old_reduction_updates_[i]->indices);
-      update_lhs_.push_back(Substitute(combiner_lhs_[i], var_map_));
-      update_rhs_.push_back(Substitute(std::move(rhs), var_map_));
+      update_lhs_.push_back(
+          ffi::StructuralMap<ffi::WalkOrder::kPreOrder>(combiner_lhs_[i], map_block_var)
+              .as_or_throw<PrimExpr>());
+      update_rhs_.push_back(
+          ffi::StructuralMap<ffi::WalkOrder::kPreOrder>(std::move(rhs), map_block_var)
+              .as_or_throw<PrimExpr>());
     }
   }
 
@@ -1089,15 +1217,25 @@ Stmt CreateLoopOutsideRfactorBlock(SBlockRealize rf_block_realize, const ffi::Ar
   }
 
   // Step 2. Update the iter bindings and predicate of the rfactor block.
+  auto map_loop_var =
+      [&new_loop_var_map](const Var& var) -> ffi::Expected<ffi::UnchangedOr<ffi::Any>> {
+    if (auto it = new_loop_var_map.find(var.get()); it != new_loop_var_map.end()) {
+      return ffi::Any(it->second);
+    }
+    return ffi::Unchanged();
+  };
   ffi::Array<PrimExpr> new_bindings;
   new_bindings.reserve(rf_block_realize->iter_values.size());
   for (const PrimExpr& old_binding : rf_block_realize->iter_values) {
-    new_bindings.push_back(Substitute(old_binding, new_loop_var_map));
+    new_bindings.push_back(ffi::StructuralMap<ffi::WalkOrder::kPreOrder>(old_binding, map_loop_var)
+                               .as_or_throw<PrimExpr>());
   }
   {
     SBlockRealizeNode* p_rf_block_realize = rf_block_realize.CopyOnWrite();
     p_rf_block_realize->iter_values = new_bindings;
-    p_rf_block_realize->predicate = Substitute(rf_block_realize->predicate, new_loop_var_map);
+    p_rf_block_realize->predicate =
+        ffi::StructuralMap<ffi::WalkOrder::kPreOrder>(rf_block_realize->predicate, map_loop_var)
+            .as_or_throw<PrimExpr>();
   }
 
   // Step 3. Wrap `rf_block_realize` with outer loops.
@@ -1233,7 +1371,7 @@ StmtSRef RFactor(ScheduleState self, const StmtSRef& rf_loop_sref, int factor_ax
   }
   const ForNode* rf_loop = TVM_SREF_TO_FOR(rf_loop_sref);
   if (rf_loop->kind != ForKind::kSerial) {
-    throw NotSerialLoopKindError(self->mod, ffi::GetRef<For>(rf_loop));
+    throw MakeScheduleError<NotSerialLoopKindError>(self->mod, ffi::GetRef<For>(rf_loop));
   }
 
   // Step 2. Collect loop vars that are touched by data parallel block iters and reduction block

@@ -17,6 +17,7 @@
  * under the License.
  */
 #include <tvm/ffi/cast.h>
+#include <tvm/ffi/extra/structural_mutate.h>
 #include <tvm/ffi/reflection/registry.h>
 
 #include "../../../tirx/transform/ir_utils.h"
@@ -39,7 +40,7 @@ struct PaddingSBlockInfo {
   PrimExpr pad_value;
 };
 
-class PaddingPatternMatchError : public ScheduleError {
+class PaddingPatternMatchError : public ScheduleErrorContextObj {
  public:
   PaddingPatternMatchError(IRModule mod, SBlock block, const std::string& error_msg)
       : mod_(std::move(mod)), block_(std::move(block)), error_msg_(error_msg) {}
@@ -75,7 +76,8 @@ class PaddingInfoAnalyzer {
                                                   arith::AnalyzerObj* analyzer) {
     PaddingInfoAnalyzer padding_analyzer(analyzer);
     if (!padding_analyzer.MatchPadding(realize, dom_map)) {
-      throw PaddingPatternMatchError(mod, realize->block, padding_analyzer.error_msg_);
+      throw MakeScheduleError<PaddingPatternMatchError>(mod, realize->block,
+                                                        padding_analyzer.error_msg_);
     }
     return padding_analyzer.info_;
   }
@@ -103,7 +105,16 @@ class PaddingInfoAnalyzer {
       SetError("Value of BufferStore expect to be constrained by a padding predicate");
       return false;
     }
-    PrimExpr pad_predicate = Substitute(if_then_else->args[0].as_or_throw<PrimExpr>(), iter_values);
+    auto f_substitute =
+        [&iter_values](const Var& var) -> ffi::Expected<ffi::UnchangedOr<ffi::Any>> {
+      if (auto it = iter_values.find(var.get()); it != iter_values.end()) {
+        return ffi::Any(it->second);
+      }
+      return ffi::Unchanged();
+    };
+    PrimExpr pad_predicate = ffi::StructuralMap<ffi::WalkOrder::kPreOrder>(
+                                 if_then_else->args[0].as_or_throw<PrimExpr>(), f_substitute)
+                                 .as_or_throw<PrimExpr>();
     PrimExpr in_bound_value = if_then_else->args[1].as_or_throw<PrimExpr>();
     PrimExpr pad_value = if_then_else->args[2].as_or_throw<PrimExpr>();
     if (!is_const_number(pad_value)) {
@@ -215,9 +226,15 @@ static std::pair<Stmt, SBlockRealize> CreateConstBlock(const SBlockRealizeNode* 
     repl_dict.Set(origin_iter->var, new_var);
   }
 
+  auto f_substitute = [&repl_dict](const Var& var) -> ffi::Expected<ffi::UnchangedOr<ffi::Any>> {
+    if (auto repl = repl_dict.Get(var)) return ffi::Any(*std::move(repl));
+    return ffi::Unchanged();
+  };
   // rewrite expr helper
-  auto rewrite_expr = [&repl_dict, analyzer](const PrimExpr& e) {
-    return analyzer->Simplify(Substitute(e, repl_dict));
+  auto rewrite_expr = [&f_substitute, analyzer](const PrimExpr& e) {
+    // The replacement map contains only fresh variables, so pre-order is safe here.
+    return analyzer->Simplify(
+        ffi::StructuralMap<ffi::WalkOrder::kPreOrder>(e, f_substitute).as_or_throw<PrimExpr>());
   };
 
   // create new write region
@@ -311,9 +328,15 @@ static std::pair<Stmt, SBlockRealize> CreateInBoundBlock(const SBlockRealizeNode
     }
   }
 
+  auto f_substitute = [&repl_dict](const Var& var) -> ffi::Expected<ffi::UnchangedOr<ffi::Any>> {
+    if (auto repl = repl_dict.Get(var)) return ffi::Any(*std::move(repl));
+    return ffi::Unchanged();
+  };
   // rewrite helpers
-  auto rewrite_expr = [&repl_dict, analyzer](const PrimExpr& e) {
-    return analyzer->Simplify(Substitute(e, repl_dict));
+  auto rewrite_expr = [&f_substitute, analyzer](const PrimExpr& e) {
+    // The map is self-referential, so post-order must not revisit replacement expressions.
+    return analyzer->Simplify(
+        ffi::StructuralMap<ffi::WalkOrder::kPostOrder>(e, f_substitute).as_or_throw<PrimExpr>());
   };
   auto rewrite_region = [rewrite_expr](const Region& region) {
     return region.Map([rewrite_expr](const Range& r) {
@@ -458,8 +481,8 @@ StmtSRef DecomposePaddingImpl(ScheduleState self, const StmtSRef& block_sref,
   }
   TVM_FFI_ICHECK(in_bound_filling_pos.defined());
   if (!found_const_filling_pos) {
-    throw LoopPositionError(self->mod, const_filling_pos, ffi::GetRef<SBlock>(block),
-                            "decompose_padding");
+    throw MakeScheduleError<LoopPositionError>(self->mod, const_filling_pos,
+                                               ffi::GetRef<SBlock>(block), "decompose_padding");
   }
 
   // Check 3. match padding pattern and return padding operation info.

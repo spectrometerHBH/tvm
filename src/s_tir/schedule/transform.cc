@@ -138,7 +138,7 @@ ReplaceBufferMutator::ReplaceBufferMutator(const ffi::Map<BufferVar, BufferVar>&
   }
 }
 
-Expr ReplaceBufferMutator::VisitExpr_(const VarNode* var) {
+Expr ReplaceBufferMutator::Dispatch_(const VarNode* var) {
   auto it = buffer_var_map_.find(var);
   return it != buffer_var_map_.end() ? it->second.var() : ffi::GetRef<Var>(var);
 }
@@ -148,8 +148,8 @@ Stmt ReplaceBufferMutator::VisitStmt_(const BufferStoreNode* op) {
   return VisitBufferAccess(std::move(node));
 }
 
-Expr ReplaceBufferMutator::VisitExpr_(const TensorLoadNode* op) {
-  auto node = StmtExprMutator::VisitExpr_(op).as_or_throw<TensorLoad>();
+Expr ReplaceBufferMutator::Dispatch_(const TensorLoadNode* op) {
+  auto node = StmtExprMutator::Dispatch_(op).as_or_throw<TensorLoad>();
   return VisitBufferAccess(std::move(node));
 }
 
@@ -237,7 +237,7 @@ Stmt ReplaceBufferMutator::VisitStmt_(const SBlockNode* block) {
 
 void LeafBlockRemovalPlan(const ScheduleState& self, const StmtSRef& leaf_block_sref,
                           Stmt* src_stmt, Stmt* tgt_stmt) {
-  class OnlyLeafError : public ScheduleError {
+  class OnlyLeafError : public ScheduleErrorContextObj {
    public:
     explicit OnlyLeafError(IRModule mod, SBlock leaf_block, SBlock scope_root)
         : mod_(mod), leaf_block_(leaf_block), scope_root_(scope_root) {}
@@ -300,7 +300,8 @@ void LeafBlockRemovalPlan(const ScheduleState& self, const StmtSRef& leaf_block_
   TVM_FFI_ICHECK(sref != nullptr && sref->stmt != nullptr);
   const auto* leaf_block = TVM_SREF_TO_SBLOCK(leaf_block_sref);
   const auto* scope_block = TVM_SREF_TO_SBLOCK(sref);
-  throw OnlyLeafError(self->mod, ffi::GetRef<SBlock>(leaf_block), ffi::GetRef<SBlock>(scope_block));
+  throw MakeScheduleError<OnlyLeafError>(self->mod, ffi::GetRef<SBlock>(leaf_block),
+                                         ffi::GetRef<SBlock>(scope_block));
 }
 
 ffi::Optional<LoopRV> TileWithTensorIntrin(const s_tir::Schedule& sch,
@@ -458,7 +459,7 @@ void BlockBufferAccessSimplifier::SimplifyBufferIndices(ffi::Array<PrimExpr>* in
 }
 
 Stmt BlockBufferAccessSimplifier::VisitStmt_(const SBlockNode* op) {
-  SBlock block = arith::IRMutatorWithAnalyzer::VisitStmt_(op).as_or_throw<SBlock>();
+  SBlock block = tirx::IRMutatorWithAnalyzer::VisitStmt_(op).as_or_throw<SBlock>();
   auto* n = block.CopyOnWrite();
   SimplifyAccessRegion(&n->reads);
   SimplifyAccessRegion(&n->writes);
@@ -466,13 +467,13 @@ Stmt BlockBufferAccessSimplifier::VisitStmt_(const SBlockNode* op) {
 }
 
 Stmt BlockBufferAccessSimplifier::VisitStmt_(const BufferStoreNode* op) {
-  BufferStore node = arith::IRMutatorWithAnalyzer::VisitStmt_(op).as_or_throw<BufferStore>();
+  BufferStore node = tirx::IRMutatorWithAnalyzer::VisitStmt_(op).as_or_throw<BufferStore>();
   SimplifyBufferIndices(&node.CopyOnWrite()->indices);
   return node;
 }
 
-Expr BlockBufferAccessSimplifier::VisitExpr_(const TensorLoadNode* op) {
-  TensorLoad node = arith::IRMutatorWithAnalyzer::VisitExpr_(op).as_or_throw<TensorLoad>();
+Expr BlockBufferAccessSimplifier::Dispatch_(const TensorLoadNode* op) {
+  TensorLoad node = tirx::IRMutatorWithAnalyzer::Dispatch_(op).as_or_throw<TensorLoad>();
   SimplifyBufferIndices(&node.CopyOnWrite()->indices);
   return node;
 }

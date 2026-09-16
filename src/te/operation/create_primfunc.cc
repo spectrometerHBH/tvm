@@ -21,6 +21,7 @@
 
 #include <tvm/arith/analyzer.h>
 #include <tvm/ffi/cast.h>
+#include <tvm/ffi/extra/structural_mutate.h>
 #include <tvm/ffi/extra/structural_visit.h>
 #include <tvm/ffi/function.h>
 #include <tvm/ffi/reflection/registry.h>
@@ -75,11 +76,11 @@ class TensorLoadToBufferTransformer : public StmtExprMutator {
       const std::unordered_map<te::Tensor, BufferVar>& tensor2buffers)
       : tensor2buffers_(tensor2buffers) {}
 
-  Expr VisitExpr_(const OpaqueExprNode* op) final {
+  Expr Dispatch_(const OpaqueExprNode* op) final {
     const auto* reduce =
         op->IsInstance<te::ReduceNode>() ? static_cast<const te::ReduceNode*>(op) : nullptr;
     if (reduce == nullptr) {
-      return StmtExprMutator::VisitExpr_(op);
+      return StmtExprMutator::Dispatch_(op);
     }
 
     auto fitervar = [this](const IterVar& iter_var) {
@@ -107,8 +108,8 @@ class TensorLoadToBufferTransformer : public StmtExprMutator {
                       reduce->span);
   }
 
-  Expr VisitExpr_(const CallNode* op) final {
-    Call call = StmtExprMutator::VisitExpr_(op).as_or_throw<Call>();
+  Expr Dispatch_(const CallNode* op) final {
+    Call call = StmtExprMutator::Dispatch_(op).as_or_throw<Call>();
     if (!te::IsTensorLoad(call)) {
       return call;
     }
@@ -131,16 +132,16 @@ class BufferSubstituter : public StmtExprMutator {
                              const std::unordered_map<const VarNode*, BufferVar>& buffer_map)
       : var_map_(var_map), buffer_map_(buffer_map) {}
 
-  Expr VisitExpr_(const VarNode* op) final {
+  Expr Dispatch_(const VarNode* op) final {
     auto it = var_map_.find(op);
     if (it != var_map_.end()) {
       return it->second;
     }
-    return StmtExprMutator::VisitExpr_(op);
+    return StmtExprMutator::Dispatch_(op);
   }
 
-  Expr VisitExpr_(const TensorLoadNode* op) final {
-    auto load = StmtExprMutator::VisitExpr_(op).as_or_throw<TensorLoad>();
+  Expr Dispatch_(const TensorLoadNode* op) final {
+    auto load = StmtExprMutator::Dispatch_(op).as_or_throw<TensorLoad>();
     auto it = buffer_map_.find(load->source.as_or_throw<tvm::tirx::BufferVar>().get());
     if (it != buffer_map_.end()) {
       return BufferLoad(it->second, load->indices, load->span);
@@ -393,9 +394,15 @@ ffi::Map<ffi::String, ffi::Any> GenerateBlockAnnotations(const te::ComputeOp& co
 Stmt GenerateInitStmt(const ffi::Array<PrimExpr>& indices, const ffi::Array<BufferVar>& buffers,
                       const te::ReduceNode* reduce, const ffi::Map<Var, PrimExpr>& var_map,
                       CreateFuncInfo* info) {
+  auto f_substitute = [&var_map](const Var& var) -> ffi::Expected<ffi::UnchangedOr<ffi::Any>> {
+    if (auto repl = var_map.Get(var)) return ffi::Any(*std::move(repl));
+    return ffi::Unchanged();
+  };
   // helper to transform the expr and remap iters to the block domain
   auto f_transform_and_remap = [&](const PrimExpr& e) {
-    return Substitute(info->transformer(e).as_or_throw<PrimExpr>(), var_map);
+    return ffi::StructuralMap<ffi::WalkOrder::kPreOrder>(
+               info->transformer(e).as_or_throw<PrimExpr>(), f_substitute)
+        .as_or_throw<PrimExpr>();
   };
   ffi::Optional<Stmt> init = std::nullopt;
   Stmt body;
@@ -423,9 +430,15 @@ Stmt GenerateInitStmt(const ffi::Array<PrimExpr>& indices, const ffi::Array<Buff
 Stmt GenerateBodyStmt(const ffi::Array<PrimExpr>& indices, const ffi::Array<BufferVar>& buffers,
                       const ffi::Map<Var, PrimExpr>& var_map, PrimExpr expr_body,
                       CreateFuncInfo* info, arith::AnalyzerObj* analyzer) {
+  auto f_substitute = [&var_map](const Var& var) -> ffi::Expected<ffi::UnchangedOr<ffi::Any>> {
+    if (auto repl = var_map.Get(var)) return ffi::Any(*std::move(repl));
+    return ffi::Unchanged();
+  };
   // helper to transform the expr and remap iters to the block domain
   auto f_transform_and_remap = [&](const PrimExpr& e) {
-    return Substitute(info->transformer(e).as_or_throw<PrimExpr>(), var_map);
+    return ffi::StructuralMap<ffi::WalkOrder::kPreOrder>(
+               info->transformer(e).as_or_throw<PrimExpr>(), f_substitute)
+        .as_or_throw<PrimExpr>();
   };
   Stmt body;
   if (const auto* reduce = expr_body.as<te::ReduceNode>()) {
@@ -567,8 +580,15 @@ Stmt GenerateStmtFromCompute(const te::ComputeOp& compute_op, CreateFuncInfo* in
         PrimExpr extent = axis->dom->extent;
         if (i > 0) {
           const auto& scope_repl = scopes[i - 1].axes_remap;
-          min = Substitute(min, scope_repl);
-          extent = Substitute(extent, scope_repl);
+          auto f_substitute =
+              [&scope_repl](const Var& var) -> ffi::Expected<ffi::UnchangedOr<ffi::Any>> {
+            if (auto repl = scope_repl.Get(var)) return ffi::Any(*std::move(repl));
+            return ffi::Unchanged();
+          };
+          min = ffi::StructuralMap<ffi::WalkOrder::kPreOrder>(min, f_substitute)
+                    .as_or_throw<PrimExpr>();
+          extent = ffi::StructuralMap<ffi::WalkOrder::kPreOrder>(extent, f_substitute)
+                       .as_or_throw<PrimExpr>();
         }
         Range dom = Range::FromMinExtent(analyzer->Simplify(min), analyzer->Simplify(extent));
         IterVar new_block_iter(dom, block_var.as_or_throw<PrimVar>(), axis->iter_type,
@@ -884,7 +904,7 @@ PrimFunc GenerateAndCompletePrimFunc(const ffi::Array<ffi::ObjectRef>& arg_tir_v
       auto it = info->tensor2buffers.find(tensor);
       TVM_FFI_ICHECK(it != info->tensor2buffers.end());
       parameters.push_back(it->second.var());
-    } else if (auto var = arg.as<tirx::PrimVar>()) {
+    } else if (auto var = arg.as<PrimVar>()) {
       parameters.push_back(var.value());
     }
   }

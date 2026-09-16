@@ -17,6 +17,7 @@
  * under the License.
  */
 #include <tvm/ffi/cast.h>
+#include <tvm/ffi/extra/structural_visit.h>
 #include <tvm/ffi/reflection/registry.h>
 #include <tvm/ir/op.h>
 #include <tvm/s_tir/stmt.h>
@@ -63,7 +64,7 @@ const PrimFuncNode* GetRootPrimFunc(const IRModule& mod, const StmtNode* root_bl
 
 StmtSRef GetScopeRoot(const ScheduleState& self, const StmtSRef& sref,
                       bool require_stage_pipeline) {
-  class RootBlockError : public ScheduleError {
+  class RootBlockError : public ScheduleErrorContextObj {
    public:
     explicit RootBlockError(IRModule mod) : mod_(mod) {}
     IRModule mod() const final { return mod_; }
@@ -77,7 +78,7 @@ StmtSRef GetScopeRoot(const ScheduleState& self, const StmtSRef& sref,
     IRModule mod_;
   };
 
-  class NotStagePipelineError : public ScheduleError {
+  class NotStagePipelineError : public ScheduleErrorContextObj {
    public:
     explicit NotStagePipelineError(IRModule mod, SBlock block) : mod_(mod), block_(block) {}
     IRModule mod() const final { return mod_; }
@@ -112,7 +113,7 @@ Definition of a scope that is a stage pipeline:
       }
     }
     if (p == nullptr) {
-      throw RootBlockError(self->mod);
+      throw MakeScheduleError<RootBlockError>(self->mod);
     }
   }
   // Step 2. Handle `require_stage_pipeline`
@@ -120,15 +121,22 @@ Definition of a scope that is a stage pipeline:
     bool stage_pipeline = self->GetSBlockInfo(scope_root_sref).stage_pipeline;
     if (stage_pipeline == false) {
       const SBlockNode* block = TVM_SREF_TO_SBLOCK(scope_root_sref);
-      throw NotStagePipelineError(self->mod, ffi::GetRef<SBlock>(block));
+      throw MakeScheduleError<NotStagePipelineError>(self->mod, ffi::GetRef<SBlock>(block));
     }
   }
   return scope_root_sref;
 }
 
 ScopeBlockLoopInfo GetScopeBlockLoopInfo(const SBlock& scope_block) {
-  struct Collector : public StmtVisitor {
-    void VisitStmt_(const SBlockRealizeNode* realize) final {
+  struct Collector : public StmtExprVisitor {
+    using StmtExprVisitor::Visit_;
+
+    ffi::Optional<VisitInterrupt> Visit(ffi::AnyView value) override {
+      if (value.as<ExprNode>()) return std::nullopt;
+      return StmtExprVisitor::Visit(value);
+    }
+
+    ffi::Optional<VisitInterrupt> Visit_(const SBlockRealizeNode* realize) final {
       result.realizes.push_back(ffi::GetRef<SBlockRealize>(realize));
       const ffi::Array<IterVar>& iter_vars = realize->block->iter_vars;
       const ffi::Array<PrimExpr>& iter_values = realize->iter_values;
@@ -143,18 +151,22 @@ ScopeBlockLoopInfo GetScopeBlockLoopInfo(const SBlock& scope_block) {
         } else {
           vars = &result.non_spatial_vars;
         }
-        PostOrderVisit(iter_value, [vars](const ffi::ObjectRef& obj) {
-          if (auto var = obj.as<PrimVar>()) {
-            vars->insert(var.value().get());
+        auto walk_fn = [vars](const Var& var) -> ffi::Expected<ffi::WalkResult> {
+          if (auto prim_var = var.as<PrimVar>()) {
+            vars->insert(prim_var.value().get());
           }
-        });
+          return ffi::WalkResult::Advance();
+        };
+        ffi::StructuralWalk<ffi::WalkOrder::kPostOrder>(iter_value, walk_fn);
       }
+      return std::nullopt;
     }
 
     ScopeBlockLoopInfo result;
-  } visitor;
-  visitor(scope_block->body);
-  return std::move(visitor.result);
+  };
+  auto visitor = ffi::make_object<Collector>();
+  visitor->Visit(scope_block->body);
+  return std::move(visitor->result);
 }
 
 /*!
@@ -279,7 +291,7 @@ bool IsCompleteBlock(const ScheduleState& self, const StmtSRef& block_sref,
 
 void CheckCompleteBlock(const ScheduleState& self, const StmtSRef& block_sref,
                         const StmtSRef& scope_root_sref) {
-  class IncompleteBlockError : public ScheduleError {
+  class IncompleteBlockError : public ScheduleErrorContextObj {
    public:
     explicit IncompleteBlockError(IRModule mod, SBlock block, int violated_cond)
         : mod_(std::move(mod)), block_(std::move(block)), violated_cond_(violated_cond) {}
@@ -300,7 +312,8 @@ void CheckCompleteBlock(const ScheduleState& self, const StmtSRef& block_sref,
   int error_code = CheckCompleteBlockErrorCode(self, block_sref, scope_root_sref);
   if (error_code != 0) {
     const SBlockNode* block = TVM_SREF_TO_SBLOCK(block_sref);
-    throw IncompleteBlockError(self->mod, ffi::GetRef<SBlock>(block), error_code);
+    throw MakeScheduleError<IncompleteBlockError>(self->mod, ffi::GetRef<SBlock>(block),
+                                                  error_code);
   }
 }
 
@@ -353,7 +366,7 @@ TVM_FFI_STATIC_INIT_BLOCK() {
 
 void CheckReductionBlock(const ScheduleState& self, const StmtSRef& block_sref,
                          const StmtSRef& scope_root_sref) {
-  class NotReductionBlockError : public ScheduleError {
+  class NotReductionBlockError : public ScheduleErrorContextObj {
    public:
     explicit NotReductionBlockError(IRModule mod, SBlock block, int violated_cond)
         : mod_(std::move(mod)), block_(std::move(block)), violated_cond_(violated_cond) {}
@@ -374,13 +387,14 @@ void CheckReductionBlock(const ScheduleState& self, const StmtSRef& block_sref,
   int error_code = CheckReductionBlockErrorCode(self, block_sref, scope_root_sref);
   if (error_code != 0) {
     const SBlockNode* block = TVM_SREF_TO_SBLOCK(block_sref);
-    throw NotReductionBlockError(self->mod, ffi::GetRef<SBlock>(block), error_code);
+    throw MakeScheduleError<NotReductionBlockError>(self->mod, ffi::GetRef<SBlock>(block),
+                                                    error_code);
   }
 }
 
 void CheckCompleteOrReductionBlock(const ScheduleState& self, const StmtSRef& block_sref,
                                    const StmtSRef& scope_root_sref) {
-  class NotCompleteOrReductionBlockError : public ScheduleError {
+  class NotCompleteOrReductionBlockError : public ScheduleErrorContextObj {
    public:
     explicit NotCompleteOrReductionBlockError(IRModule mod, SBlock block,
                                               int complete_block_error_code,
@@ -421,12 +435,12 @@ void CheckCompleteOrReductionBlock(const ScheduleState& self, const StmtSRef& bl
     return;
   }
   const SBlockNode* block = TVM_SREF_TO_SBLOCK(block_sref);
-  throw NotCompleteOrReductionBlockError(self->mod, ffi::GetRef<SBlock>(block),
-                                         complete_block_error_code, reduction_block_error_code);
+  throw MakeScheduleError<NotCompleteOrReductionBlockError>(
+      self->mod, ffi::GetRef<SBlock>(block), complete_block_error_code, reduction_block_error_code);
 }
 
 void CheckSubtreeCompactDataflow(const ScheduleState& self, const StmtSRef& subtree_root) {
-  class NotCompactDataFlowError : public ScheduleError {
+  class NotCompactDataFlowError : public ScheduleErrorContextObj {
    public:
     explicit NotCompactDataFlowError(IRModule mod, Stmt subtree_root, SBlock violate_block,
                                      int local_complete_block_code, int local_reduction_block_code)
@@ -474,9 +488,9 @@ void CheckSubtreeCompactDataflow(const ScheduleState& self, const StmtSRef& subt
         local_reduction_block_code = CheckReductionBlockErrorCode(self, block_sref, subtree_root);
     if (local_complete_block_code != 0 && local_reduction_block_code != 0) {
       const SBlockNode* block = TVM_SREF_TO_SBLOCK(block_sref);
-      throw NotCompactDataFlowError(self->mod, ffi::GetRef<Stmt>(subtree_root->stmt),
-                                    ffi::GetRef<SBlock>(block), local_complete_block_code,
-                                    local_reduction_block_code);
+      throw MakeScheduleError<NotCompactDataFlowError>(
+          self->mod, ffi::GetRef<Stmt>(subtree_root->stmt), ffi::GetRef<SBlock>(block),
+          local_complete_block_code, local_reduction_block_code);
     }
   }
 }
@@ -500,7 +514,7 @@ bool IsOutputBlock(const ScheduleState& self, const StmtSRef& block_sref,
 
 void CheckNotOutputBlock(const ScheduleState& self, const StmtSRef& block_sref,
                          const StmtSRef& scope_root_sref) {
-  class OutputBlockError : public ScheduleError {
+  class OutputBlockError : public ScheduleErrorContextObj {
    public:
     explicit OutputBlockError(IRModule mod, SBlock block) : mod_(mod), block_(block) {}
     ffi::String FastErrorString() const final {
@@ -515,7 +529,7 @@ void CheckNotOutputBlock(const ScheduleState& self, const StmtSRef& block_sref,
   };
   if (IsOutputBlock(self, block_sref, scope_root_sref)) {
     const SBlockNode* block = TVM_SREF_TO_SBLOCK(block_sref);
-    throw OutputBlockError(self->mod, ffi::GetRef<SBlock>(block));
+    throw MakeScheduleError<OutputBlockError>(self->mod, ffi::GetRef<SBlock>(block));
   }
 }
 
@@ -586,7 +600,7 @@ bool IsAffineBinding(const SBlockRealize& realize, const ffi::Map<Var, Range>& l
 
 void CheckPartialAffineBinding(const ScheduleState& self, SBlock block,
                                const ffi::Optional<StmtSRef>& high_exclusive) {
-  class NotAffineBindingError : public ScheduleError {
+  class NotAffineBindingError : public ScheduleErrorContextObj {
    public:
     explicit NotAffineBindingError(IRModule mod, SBlock block,
                                    ffi::Optional<StmtSRef> high_exclusive)
@@ -636,7 +650,7 @@ void CheckPartialAffineBinding(const ScheduleState& self, SBlock block,
       return;
     }
   }
-  throw NotAffineBindingError(self->mod, std::move(block), high_exclusive);
+  throw MakeScheduleError<NotAffineBindingError>(self->mod, std::move(block), high_exclusive);
 }
 
 void CheckAffineBinding(const ScheduleState& self, SBlock block) {
@@ -644,7 +658,7 @@ void CheckAffineBinding(const ScheduleState& self, SBlock block) {
 }
 
 void CheckBlockHasTrivialBinding(const ScheduleState& self, const StmtSRef& block_sref) {
-  class NotTrivialBindingError : public ScheduleError {
+  class NotTrivialBindingError : public ScheduleErrorContextObj {
    public:
     explicit NotTrivialBindingError(IRModule mod, SBlock block)
         : mod_(std::move(mod)), block_(std::move(block)) {}
@@ -668,7 +682,8 @@ void CheckBlockHasTrivialBinding(const ScheduleState& self, const StmtSRef& bloc
   };
 
   if (!IsTrivialBinding(self, block_sref)) {
-    throw NotTrivialBindingError(self->mod, ffi::GetRef<SBlock>(block_sref->StmtAs<SBlockNode>()));
+    throw MakeScheduleError<NotTrivialBindingError>(
+        self->mod, ffi::GetRef<SBlock>(block_sref->StmtAs<SBlockNode>()));
   }
 }
 
@@ -753,7 +768,7 @@ bool GetVarsTouchedByBlockIters(const SBlockRealize& block_realize,
 
 void CheckLoopStartsWithZero(const ScheduleState& self, const StmtSRef& loop_sref,
                              arith::AnalyzerObj* analyzer) {
-  class LoopNotStartWithZeroError : public ScheduleError {
+  class LoopNotStartWithZeroError : public ScheduleErrorContextObj {
    public:
     explicit LoopNotStartWithZeroError(IRModule mod, For loop)
         : mod_(mod), loop_(std::move(loop)) {}
@@ -774,7 +789,7 @@ void CheckLoopStartsWithZero(const ScheduleState& self, const StmtSRef& loop_sre
   };
   const ForNode* loop = TVM_SREF_TO_FOR(loop_sref);
   if (!analyzer->CanProve(loop->min == 0)) {
-    throw LoopNotStartWithZeroError(self->mod, ffi::GetRef<For>(loop));
+    throw MakeScheduleError<LoopNotStartWithZeroError>(self->mod, ffi::GetRef<For>(loop));
   }
 }
 
@@ -793,15 +808,23 @@ ffi::Array<StmtSRef> GetChildBlockSRefOnSRefTree(const ScheduleState& self,
 }
 
 ffi::Array<SBlockRealize> GetChildBlockRealizeOnSRefTree(const StmtSRef& parent_sref) {
-  struct Collector : public StmtVisitor {
-    static ffi::Array<SBlockRealize> Collect(const Stmt& stmt) {
-      Collector collector;
-      collector(stmt);
-      return std::move(collector.result_);
+  struct Collector : public StmtExprVisitor {
+    using StmtExprVisitor::Visit_;
+
+    ffi::Optional<VisitInterrupt> Visit(ffi::AnyView value) override {
+      if (value.as<ExprNode>()) return std::nullopt;
+      return StmtExprVisitor::Visit(value);
     }
 
-    void VisitStmt_(const SBlockRealizeNode* block_realize) final {
+    static ffi::Array<SBlockRealize> Collect(const Stmt& stmt) {
+      auto collector = ffi::make_object<Collector>();
+      collector->Visit(stmt);
+      return std::move(collector->result_);
+    }
+
+    ffi::Optional<VisitInterrupt> Visit_(const SBlockRealizeNode* block_realize) final {
       result_.push_back(ffi::GetRef<SBlockRealize>(block_realize));
+      return std::nullopt;
     }
 
     ffi::Array<SBlockRealize> result_;
@@ -820,7 +843,7 @@ ffi::Array<SBlockRealize> GetChildBlockRealizeOnSRefTree(const StmtSRef& parent_
 
 SBlockRealize CheckGetSingleChildBlockRealizeOnSRefTree(const ScheduleState& self,
                                                         const StmtSRef& parent_sref) {
-  class NonSingleChildBlockError : public ScheduleError {
+  class NonSingleChildBlockError : public ScheduleErrorContextObj {
    public:
     explicit NonSingleChildBlockError(IRModule mod, const StmtSRef& sref)
         : mod_(std::move(mod)), stmt_(ffi::GetRef<Stmt>(sref->stmt)) {
@@ -849,28 +872,32 @@ SBlockRealize CheckGetSingleChildBlockRealizeOnSRefTree(const ScheduleState& sel
 
   ffi::Array<SBlockRealize> child_block_realize = GetChildBlockRealizeOnSRefTree(parent_sref);
   if (child_block_realize.size() != 1) {
-    throw NonSingleChildBlockError(self->mod, parent_sref);
+    throw MakeScheduleError<NonSingleChildBlockError>(self->mod, parent_sref);
   }
   return child_block_realize[0];
 }
 
 SBlockRealize GetSBlockRealize(const ScheduleState& self, const StmtSRef& block_sref) {
-  struct BlockRealizeFinder : public StmtVisitor {
+  struct BlockRealizeFinder : public StmtExprVisitor {
+    using StmtExprVisitor::Visit_;
+
     explicit BlockRealizeFinder(const SBlockNode* target_sblock)
         : target_sblock(target_sblock), result(nullptr) {}
 
-    void VisitStmt(const Stmt& stmt) final {
+    ffi::Optional<VisitInterrupt> Visit(ffi::AnyView stmt) final {
+      if (stmt.as<ExprNode>()) return std::nullopt;
       if (result != nullptr) {
-        return;
+        return std::nullopt;
       }
-      StmtVisitor::VisitStmt(stmt);
+      return StmtExprVisitor::Visit(stmt);
     }
 
-    void VisitStmt_(const SBlockRealizeNode* block_realize) final {
+    ffi::Optional<VisitInterrupt> Visit_(const SBlockRealizeNode* block_realize) final {
       if (block_realize->block.get() == target_sblock) {
         result = block_realize;
       }
       // No need to visit recursively, since the deeper BlockRealizes must not be the result.
+      return std::nullopt;
     }
 
     const SBlockNode* target_sblock;
@@ -882,11 +909,11 @@ SBlockRealize GetSBlockRealize(const ScheduleState& self, const StmtSRef& block_
     const PrimFuncNode* func = GetRootPrimFunc(self->mod, block, nullptr);
     return func->body.as_or_throw<SBlockRealize>();
   } else {
-    BlockRealizeFinder finder(block);
-    finder(ffi::GetRef<Stmt>(block_sref->parent->stmt));
-    TVM_FFI_CHECK(finder.result != nullptr, InternalError)
+    auto finder = ffi::make_object<BlockRealizeFinder>(block);
+    finder->Visit(ffi::GetRef<Stmt>(block_sref->parent->stmt));
+    TVM_FFI_CHECK(finder->result != nullptr, InternalError)
         << "Cannot find the BlockRealize of block " << ffi::GetRef<SBlock>(block);
-    return ffi::GetRef<SBlockRealize>(finder.result);
+    return ffi::GetRef<SBlockRealize>(finder->result);
   }
 }
 
@@ -903,36 +930,36 @@ IterVarType GetLoopIterType(const StmtSRef& loop_sref) {
   int n_spatial = 0;
   int n_reduce = 0;
   int n_other = 0;
-  auto f_visit = [&loop_var, &n_spatial, &n_reduce, &n_other](const ffi::ObjectRef& obj) -> bool {
-    if (const auto* realize = obj.as<SBlockRealizeNode>()) {
-      const SBlockNode* block = realize->block.get();
-      // Number of block vars and their bindings
-      TVM_FFI_ICHECK_EQ(realize->iter_values.size(), block->iter_vars.size());
-      size_t n = realize->iter_values.size();
-      for (size_t i = 0; i < n; ++i) {
-        const IterVar& iter_var = block->iter_vars[i];
-        const PrimExpr& binding = realize->iter_values[i];
-        // Categorize the current block var
-        int* ref = nullptr;
-        if (iter_var->iter_type == IterVarType::kDataPar) {
-          ref = &n_spatial;
-        } else if (iter_var->iter_type == IterVarType::kCommReduce) {
-          ref = &n_reduce;
-        } else {
-          ref = &n_other;
-        }
-        // Visit the binding to see if `loop_var` appears
-        PostOrderVisit(binding, [&ref, &loop_var](const ffi::ObjectRef& obj) -> void {
-          if (obj.same_as(loop_var)) {
-            (*ref) += 1;
-          }
-        });
+  auto f_visit = [&loop_var, &n_spatial, &n_reduce,
+                  &n_other](const SBlockRealize& realize) -> ffi::Expected<ffi::WalkResult> {
+    const SBlockNode* block = realize->block.get();
+    // Number of block vars and their bindings
+    TVM_FFI_ICHECK_EQ(realize->iter_values.size(), block->iter_vars.size());
+    size_t n = realize->iter_values.size();
+    for (size_t i = 0; i < n; ++i) {
+      const IterVar& iter_var = block->iter_vars[i];
+      const PrimExpr& binding = realize->iter_values[i];
+      // Categorize the current block var
+      int* ref = nullptr;
+      if (iter_var->iter_type == IterVarType::kDataPar) {
+        ref = &n_spatial;
+      } else if (iter_var->iter_type == IterVarType::kCommReduce) {
+        ref = &n_reduce;
+      } else {
+        ref = &n_other;
       }
-      return false;
+      // Visit the binding to see if `loop_var` appears
+      auto walk_fn = [&ref, &loop_var](const Var& var) -> ffi::Expected<ffi::WalkResult> {
+        if (var.same_as(loop_var)) {
+          (*ref) += 1;
+        }
+        return ffi::WalkResult::Advance();
+      };
+      ffi::StructuralWalk<ffi::WalkOrder::kPostOrder>(binding, walk_fn);
     }
-    return true;
+    return ffi::WalkResult::Skip();
   };
-  PreOrderVisit(loop->body, f_visit);
+  ffi::StructuralWalk<ffi::WalkOrder::kPreOrder>(loop->body, f_visit);
   if (n_other) {
     return IterVarType::kOpaque;
   } else if (n_spatial && n_reduce) {
@@ -1083,10 +1110,17 @@ ffi::Array<StmtSRef> GetConsumers(const StmtSRef& block_sref, const SBlockScope&
 }
 
 ffi::Array<StmtSRef> GetOutputBlocks(const ScheduleState& self, const SBlockNode* scope_block) {
-  struct OutputSBlockCollector : public StmtVisitor {
+  struct OutputSBlockCollector : public StmtExprVisitor {
+    using StmtExprVisitor::Visit_;
+
+    ffi::Optional<VisitInterrupt> Visit(ffi::AnyView value) override {
+      if (value.as<ExprNode>()) return std::nullopt;
+      return StmtExprVisitor::Visit(value);
+    }
+
     explicit OutputSBlockCollector(const ScheduleState& self) : self_(self) {}
 
-    void VisitStmt_(const SBlockNode* block) override {
+    ffi::Optional<VisitInterrupt> Visit_(const SBlockNode* block) override {
       auto it = self_->stmt2ref.find(block);
       TVM_FFI_ICHECK(it != self_->stmt2ref.end());
       auto block_sref = it->second;
@@ -1097,15 +1131,15 @@ ffi::Array<StmtSRef> GetOutputBlocks(const ScheduleState& self, const SBlockNode
           results_.push_back(block_sref);
         }
       }
-      StmtVisitor::VisitStmt_(block);
+      return StmtExprVisitor::Visit_(block);
     }
 
     const ScheduleState& self_;
     ffi::Array<StmtSRef> results_;
   };
-  OutputSBlockCollector collector(self);
-  collector(scope_block->body);
-  auto results = collector.results_;
+  auto collector = ffi::make_object<OutputSBlockCollector>(self);
+  collector->Visit(scope_block->body);
+  auto results = collector->results_;
   return results;
 }
 
@@ -1114,7 +1148,7 @@ ProducerConsumerSplit ProducerConsumerSplit::Find(
     const ffi::Array<StmtSRef>& producer_block_srefs,
     const ffi::Array<StmtSRef>& consumer_block_srefs,
     std::unordered_map<const SBlockNode*, const SBlockRealizeNode*>* block2realize) {
-  class InsertionPointNotFoundError : public ScheduleError {
+  class InsertionPointNotFoundError : public ScheduleErrorContextObj {
    public:
     explicit InsertionPointNotFoundError(IRModule mod, int last_producer_position,
                                          int first_consumer_position)
@@ -1145,9 +1179,16 @@ ProducerConsumerSplit ProducerConsumerSplit::Find(
     int first_consumer_position_;
   };
 
-  class Finder : public StmtVisitor {
+  class Finder : public StmtExprVisitor {
    public:
-    void VisitStmt_(const SBlockRealizeNode* realize) final {
+    using StmtExprVisitor::Visit_;
+
+    ffi::Optional<VisitInterrupt> Visit(ffi::AnyView value) override {
+      if (value.as<ExprNode>()) return std::nullopt;
+      return StmtExprVisitor::Visit(value);
+    }
+
+    ffi::Optional<VisitInterrupt> Visit_(const SBlockRealizeNode* realize) final {
       const SBlockNode* block = realize->block.get();
       if (block2realize_) {
         block2realize_->emplace(block, realize);
@@ -1158,6 +1199,7 @@ ProducerConsumerSplit ProducerConsumerSplit::Find(
       if (consumer_blocks_.count(block)) {
         ++this->n_consumers_visited_;
       }
+      return std::nullopt;
     }
 
     std::unordered_map<const SBlockNode*, const SBlockRealizeNode*>* block2realize_;
@@ -1167,51 +1209,52 @@ ProducerConsumerSplit ProducerConsumerSplit::Find(
     int n_consumers_visited_ = 0;
   };
 
-  Finder finder;
-  finder.block2realize_ = block2realize;
+  auto finder = ffi::make_object<Finder>();
+  finder->block2realize_ = block2realize;
   // Set up the lookup table for producers
-  finder.producer_blocks_.reserve(producer_block_srefs.size());
+  finder->producer_blocks_.reserve(producer_block_srefs.size());
   for (const StmtSRef& block_sref : producer_block_srefs) {
-    finder.producer_blocks_.insert(block_sref->stmt);
+    finder->producer_blocks_.insert(block_sref->stmt);
   }
   // Set up the lookup table for consumers
-  finder.consumer_blocks_.reserve(consumer_block_srefs.size());
+  finder->consumer_blocks_.reserve(consumer_block_srefs.size());
   for (const StmtSRef& block_sref : consumer_block_srefs) {
-    finder.consumer_blocks_.insert(block_sref->stmt);
+    finder->consumer_blocks_.insert(block_sref->stmt);
   }
   // Visit the subtrees
   int n = subtrees.size();
   int last_producer_position = -1;
   int first_consumer_position = n;
   for (int i = 0; i < n; ++i) {
-    int n_producers_visited_before = finder.n_producers_visited_;
-    int n_consumers_visited_before = finder.n_consumers_visited_;
-    finder(subtrees[i]);
+    int n_producers_visited_before = finder->n_producers_visited_;
+    int n_consumers_visited_before = finder->n_consumers_visited_;
+    finder->Visit(subtrees[i]);
     // Check if the subtree contains at least a producer
-    if (finder.n_producers_visited_ != n_producers_visited_before) {
+    if (finder->n_producers_visited_ != n_producers_visited_before) {
       last_producer_position = i;
     }
     // Check if the subtree contains at least a consumer
-    if (finder.n_consumers_visited_ != n_consumers_visited_before) {
+    if (finder->n_consumers_visited_ != n_consumers_visited_before) {
       if (first_consumer_position == n) {
         first_consumer_position = i;
       }
     }
   }
   if (last_producer_position >= first_consumer_position) {
-    throw InsertionPointNotFoundError(self->mod, last_producer_position, first_consumer_position);
+    throw MakeScheduleError<InsertionPointNotFoundError>(self->mod, last_producer_position,
+                                                         first_consumer_position);
   }
-  return ProducerConsumerSplit{last_producer_position,       //
-                               first_consumer_position,      //
-                               finder.n_producers_visited_,  //
-                               finder.n_consumers_visited_};
+  return ProducerConsumerSplit{last_producer_position,        //
+                               first_consumer_position,       //
+                               finder->n_producers_visited_,  //
+                               finder->n_consumers_visited_};
 }
 
 /******** Block-buffer relation ********/
 
 BufferRegion GetNthAccessBufferRegion(const ScheduleState& self, const SBlock& block, int n,
                                       BufferIndexType index_type) {
-  class BufferIndexOutOfRangeError : public ScheduleError {
+  class BufferIndexOutOfRangeError : public ScheduleErrorContextObj {
    public:
     explicit BufferIndexOutOfRangeError(IRModule mod, SBlock block, int buffer_index,
                                         BufferIndexType index_type)
@@ -1259,7 +1302,7 @@ BufferRegion GetNthAccessBufferRegion(const ScheduleState& self, const SBlock& b
       index_type == BufferIndexType::kWrite ? block->writes : block->reads;
 
   if (n < 0 || static_cast<int>(access_region.size()) <= n) {
-    throw BufferIndexOutOfRangeError(self->mod, block, n, index_type);
+    throw MakeScheduleError<BufferIndexOutOfRangeError>(self->mod, block, n, index_type);
   }
   return access_region[n];
 }
@@ -1332,47 +1375,39 @@ bool HasOp(const Stmt& stmt, const ffi::Array<Op>& ops) {
   for (const Op& op : ops) {
     op_set.insert(op.operator->());
   }
-  bool found = false;
-  PreOrderVisit(stmt, [&found, &op_set](const ffi::ObjectRef& obj) -> bool {
-    if (found) {
-      return false;
+  auto walk_fn = [&op_set](const Call& call) -> ffi::Expected<ffi::WalkResult> {
+    if (op_set.count(call->op.operator->())) {
+      return ffi::WalkResult::Interrupt(ffi::VisitInterrupt(true));
     }
-    if (const auto* call = obj.as<CallNode>()) {
-      if (op_set.count(call->op.operator->())) {
-        found = true;
-      }
-    }
-    return !found;
-  });
-  return found;
+    return ffi::WalkResult::Advance();
+  };
+  auto result = ffi::StructuralWalk<ffi::WalkOrder::kPreOrder>(stmt, walk_fn);
+  return result.has_value() ? result.value()->value.cast<bool>() : false;
 }
 
 bool HasIfThenElse(const Stmt& stmt) {
-  bool has_branch = false;
-  auto f_visit = [&has_branch](const ffi::ObjectRef& obj) -> bool {
-    if (has_branch) {
-      // stop visiting
-      return false;
+  auto visit_realize = [](const SBlockRealize& realize) -> ffi::Expected<ffi::WalkResult> {
+    if (!is_one(realize->predicate)) {
+      return ffi::WalkResult::Interrupt(ffi::VisitInterrupt(true));
     }
-    if (const auto* realize = obj.as<SBlockRealizeNode>()) {
-      // Case 1: BlockRealize
-      if (!is_one(realize->predicate)) {
-        has_branch = true;
-      }
-    } else if (obj->IsInstance<IfThenElseNode>() || obj->IsInstance<SelectNode>()) {
-      // Case 2: IfThenElse / Select
-      has_branch = true;
-    } else if (const auto* call = obj.as<CallNode>()) {
-      // Case 3: Call the `if_then_else` operator
-      static const Op& if_then_else_op = Op::Get("ir.prim.if_then_else");
-      if (call->op.same_as(if_then_else_op)) {
-        has_branch = true;
-      }
-    }
-    return !has_branch;
+    return ffi::WalkResult::Advance();
   };
-  PreOrderVisit(stmt, f_visit);
-  return has_branch;
+  auto visit_branch = [](const IfThenElse&) -> ffi::Expected<ffi::WalkResult> {
+    return ffi::WalkResult::Interrupt(ffi::VisitInterrupt(true));
+  };
+  auto visit_select = [](const Select&) -> ffi::Expected<ffi::WalkResult> {
+    return ffi::WalkResult::Interrupt(ffi::VisitInterrupt(true));
+  };
+  auto visit_call = [](const Call& call) -> ffi::Expected<ffi::WalkResult> {
+    static const Op& if_then_else_op = Op::Get("ir.prim.if_then_else");
+    if (call->op.same_as(if_then_else_op)) {
+      return ffi::WalkResult::Interrupt(ffi::VisitInterrupt(true));
+    }
+    return ffi::WalkResult::Advance();
+  };
+  auto result = ffi::StructuralWalk<ffi::WalkOrder::kPreOrder>(stmt, visit_realize, visit_branch,
+                                                               visit_select, visit_call);
+  return result.has_value() ? result.value()->value.cast<bool>() : false;
 }
 
 std::tuple</*exists=*/bool,
@@ -1460,7 +1495,7 @@ AnalyzeReadWritePattern(const BufferRegion& read_region, const BufferRegion& wri
 /******** Storage Scope ********/
 
 void CheckStorageScope(const ScheduleState& self, ffi::String storage_scope) {
-  class InvalidStorageScopeError : public ScheduleError {
+  class InvalidStorageScopeError : public ScheduleErrorContextObj {
    public:
     explicit InvalidStorageScopeError(IRModule mod, ffi::String storage_scope)
         : mod_(std::move(mod)), storage_scope_(std::move(storage_scope)) {}
@@ -1484,7 +1519,7 @@ void CheckStorageScope(const ScheduleState& self, ffi::String storage_scope) {
   try {
     runtime::StorageScope::Create(std::string(storage_scope));
   } catch (...) {
-    throw InvalidStorageScopeError(self->mod, std::move(storage_scope));
+    throw MakeScheduleError<InvalidStorageScopeError>(self->mod, std::move(storage_scope));
   }
 }
 
@@ -1583,22 +1618,16 @@ bool NeedsMultiLevelTiling(const ScheduleState& self, const StmtSRef& block_sref
 }
 
 bool IsSpatialPrimFunc(const PrimFunc& func) {
-  bool result = true;
-  PreOrderVisit(func->body, [&result](const ffi::ObjectRef& obj) {
-    if (result == false) {
-      return false;
-    }
-    if (const auto* block = obj.as<SBlockNode>()) {
-      for (const IterVar& iter_var : block->iter_vars) {
-        if (iter_var->iter_type != IterVarType::kDataPar) {
-          result = false;
-          return false;
-        }
+  auto walk_fn = [](const SBlock& block) -> ffi::Expected<ffi::WalkResult> {
+    for (const IterVar& iter_var : block->iter_vars) {
+      if (iter_var->iter_type != IterVarType::kDataPar) {
+        return ffi::WalkResult::Interrupt(ffi::VisitInterrupt(false));
       }
     }
-    return true;
-  });
-  return result;
+    return ffi::WalkResult::Advance();
+  };
+  auto result = ffi::StructuralWalk<ffi::WalkOrder::kPreOrder>(func->body, walk_fn);
+  return result.has_value() ? result.value()->value.cast<bool>() : true;
 }
 
 std::pair<int64_t, int64_t> GetCumulativeSpaceAndReductionLength(const s_tir::ScheduleState& self,
@@ -1738,23 +1767,20 @@ TensorIntrinDescInfo ExtractTensorIntrinDescInfo(arith::AnalyzerObj* analyzer,
   const auto* desc_scope_realize = desc_func->body.as<SBlockRealizeNode>();
   TVM_FFI_ICHECK(desc_scope_realize);
   {
-    auto f_visit = [&](const ffi::ObjectRef& obj) -> bool {
-      // Extract the block
-      if (const auto* block = obj.as<SBlockRealizeNode>()) {
-        info.desc_block = block;
-        return false;
-      }
-      // Extract the loops
-      if (const auto* loop = obj.as<ForNode>()) {
-        info.desc_loops.push_back(loop);
-        info.desc_loop_vars.insert(loop->loop_var.get());
-        if (!analyzer->CanProve(loop->min == 0)) {
-          return false;
-        }
-      }
-      return true;
+    auto visit_block = [&](const SBlockRealize& block) -> ffi::Expected<ffi::WalkResult> {
+      info.desc_block = block.get();
+      return ffi::WalkResult::Advance();
     };
-    tirx::PostOrderVisit(desc_scope_realize->block->body, f_visit);
+    auto visit_loop = [&](const For& loop) -> ffi::Expected<ffi::WalkResult> {
+      info.desc_loops.push_back(loop.get());
+      info.desc_loop_vars.insert(loop->loop_var.get());
+      if (!analyzer->CanProve(loop->min == 0)) {
+        return ffi::WalkResult::Advance();
+      }
+      return ffi::WalkResult::Advance();
+    };
+    ffi::StructuralWalk<ffi::WalkOrder::kPostOrder>(desc_scope_realize->block->body, visit_block,
+                                                    visit_loop);
     std::reverse(info.desc_loops.begin(), info.desc_loops.end());
     TVM_FFI_ICHECK(info.desc_block);
   }
@@ -1826,6 +1852,14 @@ ffi::Optional<TensorizeInfo> GetTensorizeLoopMapping(const s_tir::ScheduleState&
   //       C[i, j] += A[i, k] * B[k, j]
 
   int next_block_ind = block_loops.size() - 1;
+  auto desc_walkfn = [&desc_loop_vars](const Var& var) -> ffi::Expected<ffi::WalkResult> {
+    return desc_loop_vars.count(var.get()) ? ffi::WalkResult::Interrupt(ffi::VisitInterrupt(var))
+                                           : ffi::WalkResult::Advance();
+  };
+  auto block_walkfn = [&block_loop_vars](const Var& var) -> ffi::Expected<ffi::WalkResult> {
+    return block_loop_vars.count(var.get()) ? ffi::WalkResult::Interrupt(ffi::VisitInterrupt(var))
+                                            : ffi::WalkResult::Advance();
+  };
   for (int i_desc = n_desc_vars - 1; i_desc >= 0; --i_desc) {
     // Step 3.1. Find the corresponding loop of the i_desc-th block var of desc
     const PrimExpr& desc_bind = desc_block->iter_values[i_desc];
@@ -1834,8 +1868,7 @@ ffi::Optional<TensorizeInfo> GetTensorizeLoopMapping(const s_tir::ScheduleState&
     for (int i = 0, n = desc_loops.size(); i < n; ++i) {
       // Check if desc_bind = loops[i]->loop_var + stuff-irrelevant-of-loop-vars
       PrimExpr residual = analyzer->Simplify(desc_bind - desc_loops[i]->loop_var);
-      if (!UsesVar(residual,
-                   [&desc_loop_vars](const VarNode* var) { return desc_loop_vars.count(var); })) {
+      if (!ffi::StructuralWalk<ffi::WalkOrder::kPreOrder>(residual, desc_walkfn).has_value()) {
         desc_loop = desc_loops[i];
         iter_type_desc = iter_types_desc[i];
         break;
@@ -1869,8 +1902,7 @@ ffi::Optional<TensorizeInfo> GetTensorizeLoopMapping(const s_tir::ScheduleState&
       if (ret->loop_map.find(block_loop_sref) != ret->loop_map.end()) continue;
 
       PrimExpr residual = analyzer->Simplify(block_bind - block_loops[i]->loop_var);
-      if (UsesVar(residual,
-                  [&block_loop_vars](const VarNode* var) { return block_loop_vars.count(var); })) {
+      if (ffi::StructuralWalk<ffi::WalkOrder::kPreOrder>(residual, block_walkfn).has_value()) {
         continue;
       }
       // padding is allowed only when the block has trivial bindings
@@ -2016,13 +2048,14 @@ class AutoTensorizeMappingProposer {
       auto lhs_buffer_it = extractor_->rhs_buffer_map_.find(rhs_buffer);
       TVM_FFI_ICHECK(lhs_buffer_it != extractor_->rhs_buffer_map_.end());
       const BufferVar& lhs_buffer = lhs_buffer_it->second;
+      auto walk_fn = [&](const Var& var) -> ffi::Expected<ffi::WalkResult> {
+        if (auto prim_var = var.as<PrimVar>()) {
+          update_mask(prim_var.value().get(), &lhs_buffer_masks, lhs_buffer_index.at(lhs_buffer));
+        }
+        return ffi::WalkResult::Advance();
+      };
       for (const PrimExpr& index : extractor_->lhs_buffer_indices_map_.at(lhs_buffer)) {
-        PreOrderVisit(index, [&](const ffi::ObjectRef& obj) -> bool {
-          if (auto var = obj.as<PrimVar>()) {
-            update_mask(var.value().get(), &lhs_buffer_masks, lhs_buffer_index.at(lhs_buffer));
-          }
-          return true;
-        });
+        ffi::StructuralWalk<ffi::WalkOrder::kPreOrder>(index, walk_fn);
       }
     }
 

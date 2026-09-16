@@ -17,6 +17,7 @@
  * under the License.
  */
 #include <tvm/ffi/cast.h>
+#include <tvm/ffi/extra/structural_visit.h>
 #include <tvm/ffi/reflection/registry.h>
 #include <tvm/s_tir/transform.h>
 #include <tvm/tirx/transform.h>
@@ -155,22 +156,24 @@ IntVec RelaxAndUnion(const std::vector<MultiIndex>& multi_indices, int64_t* nume
  */
 int64_t GetVarStride(const std::vector<MultiIndex>& multi_indices, const IntVec& buffer_stride,
                      const Var& var) {
-  class CoefficientExtractor : private ExprVisitor {
+  class CoefficientExtractor : public StmtExprVisitor {
    public:
+    using StmtExprVisitor::Visit_;
+
     static int64_t Extract(const PrimExpr& expr, const Var& var) {
-      CoefficientExtractor extractor(var);
-      extractor.VisitExpr(expr);
-      return (extractor.visited_var && !extractor.visited_mul && !extractor.visited_add)
+      auto extractor = ffi::make_object<CoefficientExtractor>(var);
+      extractor->Visit(expr);
+      return (extractor->visited_var && !extractor->visited_mul && !extractor->visited_add)
                  ? 1
-                 : (extractor.visited_var ? extractor.stride : 0);
+                 : (extractor->visited_var ? extractor->stride : 0);
     }
 
-   private:
     explicit CoefficientExtractor(const Var& var)
         : var(var), stride(0), visited_var(false), visited_add(false), visited_mul(false) {}
 
-    void VisitExpr_(const MulNode* node) override {
-      ExprVisitor::VisitExpr_(node);
+   private:
+    ffi::Optional<VisitInterrupt> Visit_(const MulNode* node) override {
+      TVM_FFI_S_VISIT_MAYBE_EARLY_RETURN(StmtExprVisitor::Visit_(node));
       if (visited_var && !visited_add) {
         if (const auto* a = node->a.as<IntImmNode>()) {
           visited_mul = true;
@@ -180,21 +183,24 @@ int64_t GetVarStride(const std::vector<MultiIndex>& multi_indices, const IntVec&
           stride = b->value;
         }
       }
+      return std::nullopt;
     }
 
-    void VisitExpr_(const AddNode* node) override {
-      ExprVisitor::VisitExpr_(node);
+    ffi::Optional<VisitInterrupt> Visit_(const AddNode* node) override {
+      TVM_FFI_S_VISIT_MAYBE_EARLY_RETURN(StmtExprVisitor::Visit_(node));
       if (visited_var && !visited_mul) {
         visited_add = true;
         stride = 1;
       }
+      return std::nullopt;
     }
 
-    void VisitExpr_(const VarNode* node) override {
+    ffi::Optional<VisitInterrupt> Visit_(const VarNode* node) override {
       if (node == var.get()) {
         visited_var = true;
         stride = 2;
       }
+      return std::nullopt;
     }
 
     const Var& var;
@@ -262,16 +268,14 @@ Pass SimplifyForFeatureExtraction() {
 
    private:
     static bool HasBufferLoad(const PrimExpr& expr) {
-      bool found = false;
-      PostOrderVisit(expr, [&found](const ffi::ObjectRef& node) {
-        if (node->IsInstance<TensorLoadNode>()) {
-          found = true;
-        }
-      });
-      return found;
+      auto walk_fn = [](const TensorLoad&) -> ffi::Expected<ffi::WalkResult> {
+        return ffi::WalkResult::Interrupt(ffi::VisitInterrupt(true));
+      };
+      auto result = ffi::StructuralWalk<ffi::WalkOrder::kPostOrder>(expr, walk_fn);
+      return result.has_value() ? result.value()->value.cast<bool>() : false;
     }
 
-    Expr VisitExpr_(const SelectNode* node) final {
+    Expr Dispatch_(const SelectNode* node) final {
       if (HasBufferLoad(node->true_value) || HasBufferLoad(node->false_value) ||
           HasBufferLoad(node->condition)) {
         return ffi::GetRef<Select>(node);
@@ -279,7 +283,7 @@ Pass SimplifyForFeatureExtraction() {
       return MakeConst(node->ty.as_or_throw<PrimType>(), 1.0);
     }
 
-    Expr VisitExpr_(const VarNode* var) final {
+    Expr Dispatch_(const VarNode* var) final {
       if (unit_vars_.count(ffi::GetRef<Var>(var))) {
         return MakeConst(var->ty.as_or_throw<PrimType>(), 0.0);
       }
@@ -547,21 +551,23 @@ struct Feature {
 };
 
 Feature::ArithOps::ArithOps(const BufferStoreNode* store, int64_t prod_loop_extent) {
-  class ArithOpCounter : public ExprVisitor {
+  class ArithOpCounter : public StmtExprVisitor {
    public:
-#define TVM_FEATURE_SIMPLE(Type, Counter)       \
-  void VisitExpr_(const Type* op) final {       \
-    result_.Counter += this->prod_loop_extent_; \
-    ExprVisitor::VisitExpr_(op);                \
+    using StmtExprVisitor::Visit_;
+
+#define TVM_FEATURE_SIMPLE(Type, Counter)                      \
+  ffi::Optional<VisitInterrupt> Visit_(const Type* op) final { \
+    result_.Counter += this->prod_loop_extent_;                \
+    return StmtExprVisitor::Visit_(op);                        \
   }
 #define TVM_FEATURE_BINARY(Type, FloatCounter, IntCounter)                      \
-  void VisitExpr_(const Type* op) final {                                       \
+  ffi::Optional<VisitInterrupt> Visit_(const Type* op) final {                  \
     if (op->ty.as_or_throw<PrimType>().MatchesCode(DLDataTypeCode::kDLFloat)) { \
       result_.FloatCounter += this->prod_loop_extent_;                          \
     } else {                                                                    \
       result_.IntCounter += this->prod_loop_extent_;                            \
     }                                                                           \
-    ExprVisitor::VisitExpr_(op);                                                \
+    return StmtExprVisitor::Visit_(op);                                         \
   }
     TVM_FEATURE_SIMPLE(AndNode, bool_op);
     TVM_FEATURE_SIMPLE(OrNode, bool_op);
@@ -585,11 +591,10 @@ Feature::ArithOps::ArithOps(const BufferStoreNode* store, int64_t prod_loop_exte
 #undef TVM_FEATURE_BINARY
 #undef TVM_FEATURE_SIMPLE
 
-    void VisitExpr_(const CallNode* op) final {
+    ffi::Optional<VisitInterrupt> Visit_(const CallNode* op) final {
       auto result_type = op->ty.as<PrimType>();
       if (!result_type) {
-        ExprVisitor::VisitExpr_(op);
-        return;
+        return StmtExprVisitor::Visit_(op);
       }
       static auto op_call_effect_ = Op::GetAttrMap<TCallEffectKind>("TCallEffectKind");
       CallEffectKind effect_kind =
@@ -609,16 +614,16 @@ Feature::ArithOps::ArithOps(const BufferStoreNode* store, int64_t prod_loop_exte
           result_.int_other_func += prod_loop_extent_;
         }
       }
-      ExprVisitor::VisitExpr_(op);
+      return StmtExprVisitor::Visit_(op);
     }
 
     int64_t prod_loop_extent_;
     ArithOps result_;
   };
-  ArithOpCounter counter;
-  counter.prod_loop_extent_ = prod_loop_extent;
-  counter(store->value);
-  *this = counter.result_;
+  auto counter = ffi::make_object<ArithOpCounter>();
+  counter->prod_loop_extent_ = prod_loop_extent;
+  counter->Visit(store->value);
+  *this = counter->result_;
 }
 
 Feature::ForKindFeature::ForKindFeature(const ForVec& loops) {
@@ -798,28 +803,28 @@ void Feature::Init(const BufferStoreNode* store, int n_loops) {
     info.access_type = AccessType::kWrite;
     info.multi_indices.push_back({store->indices.begin(), store->indices.end()});
   }
-  PostOrderVisit(store->value, [&buffer_info](const ffi::ObjectRef& obj) -> void {
-    if (const TensorLoadNode* load = obj.as<TensorLoadNode>()) {
-      BufferVar buffer = load->source.as_or_throw<tvm::tirx::BufferVar>();
-      Info& info = buffer_info[buffer];
-      switch (info.access_type) {
-        case AccessType::kRead:
-          break;
-        case AccessType::kWrite:
-          info.access_type = AccessType::kReadWrite;
-          break;
-        case AccessType::kReadWrite:
-          break;
-        case AccessType::kUnknownRW:
-        default:
-          info.access_type = AccessType::kRead;
-          break;
-      }
-      if (info.access_type != AccessType::kReadWrite) {
-        info.multi_indices.push_back({load->indices.begin(), load->indices.end()});
-      }
+  auto walk_fn = [&buffer_info](const TensorLoad& load) -> ffi::Expected<ffi::WalkResult> {
+    BufferVar buffer = load->source.as_or_throw<tvm::tirx::BufferVar>();
+    Info& info = buffer_info[buffer];
+    switch (info.access_type) {
+      case AccessType::kRead:
+        break;
+      case AccessType::kWrite:
+        info.access_type = AccessType::kReadWrite;
+        break;
+      case AccessType::kReadWrite:
+        break;
+      case AccessType::kUnknownRW:
+      default:
+        info.access_type = AccessType::kRead;
+        break;
     }
-  });
+    if (info.access_type != AccessType::kReadWrite) {
+      info.multi_indices.push_back({load->indices.begin(), load->indices.end()});
+    }
+    return ffi::WalkResult::Advance();
+  };
+  ffi::StructuralWalk<ffi::WalkOrder::kPostOrder>(store->value, walk_fn);
   this->sub_features.reserve(buffer_info.size());
   for (const auto& kv : buffer_info) {
     this->sub_features.emplace_back(kv.first, kv.second.access_type,
@@ -920,13 +925,15 @@ void Feature::SubFeature::SetReuse(const LoopNest& loop_nest, int64_t top_loop_t
   BufferVar buffer = this->buffer;
   // Step 3.1. Collect all `Var`s that appears in the buffer region
   std::unordered_set<const VarNode*> region_vars;
+  auto walk_fn = [&region_vars](const Var& var) -> ffi::Expected<ffi::WalkResult> {
+    if (auto prim_var = var.as<PrimVar>()) {
+      region_vars.insert(prim_var.value().get());
+    }
+    return ffi::WalkResult::Advance();
+  };
   for (const MultiIndex& multi_index : this->multi_indices) {
     for (const PrimExpr& index : multi_index) {
-      PostOrderVisit(index, [&region_vars](const ffi::ObjectRef& obj) -> void {
-        if (auto var = obj.as<PrimVar>()) {
-          region_vars.insert(var.value().get());
-        }
-      });
+      ffi::StructuralWalk<ffi::WalkOrder::kPostOrder>(index, walk_fn);
     }
   }
   // Default case: no reuse
@@ -1210,21 +1217,28 @@ struct Feature {
 namespace group6 {
 
 /*! \brief The auxiliary feature extractor for workloads */
-class WorkloadEmbeddingExtractor : private StmtVisitor {
+class WorkloadEmbeddingExtractor : public StmtExprVisitor {
  public:
+  using StmtExprVisitor::Visit_;
+
+  ffi::Optional<VisitInterrupt> Visit(ffi::AnyView value) override {
+    if (value.as<ExprNode>()) return std::nullopt;
+    return StmtExprVisitor::Visit(value);
+  }
+
   static std::vector<double> Extract(const IRModule& mod) {
-    WorkloadEmbeddingExtractor self;
+    auto self = ffi::make_object<WorkloadEmbeddingExtractor>();
     for (const auto& kv : mod->functions) {
       if (const PrimFuncNode* func = kv.second.as<PrimFuncNode>()) {
-        self(func->body);
+        self->Visit(func->body);
       }
     }
-    return self.embedding;
+    return self->embedding;
   }
 
  private:
-  void VisitStmt_(const SBlockNode* block) final {
-    StmtVisitor::VisitStmt_(block);
+  ffi::Optional<VisitInterrupt> Visit_(const SBlockNode* block) final {
+    TVM_FFI_S_VISIT_MAYBE_EARLY_RETURN(StmtExprVisitor::Visit_(block));
     std::string name = block->name_hint;
     std::for_each(name.begin(), name.end(), [](char& c) { c = ::tolower(c); });
     if (name.find("softmax") != std::string::npos) {
@@ -1244,6 +1258,7 @@ class WorkloadEmbeddingExtractor : private StmtVisitor {
     } else if (name.find("conv2d") != std::string::npos) {
       embedding[7] = 1.0;
     }
+    return std::nullopt;
   }
 
   std::vector<double> embedding = std::vector<double>(8, 0.0);
@@ -1280,25 +1295,33 @@ struct Feature {
 };
 
 /*! \brief The main feature extractor */
-class PerStoreFeatureCollector : private StmtVisitor {
+class PerStoreFeatureCollector : public StmtExprVisitor {
  public:
+  using StmtExprVisitor::Visit_;
+
+  ffi::Optional<VisitInterrupt> Visit(ffi::AnyView value) override {
+    if (value.as<ExprNode>()) return std::nullopt;
+    return StmtExprVisitor::Visit(value);
+  }
+
   static std::vector<Feature> Collect(bool is_gpu, int64_t cache_line_bytes,
                                       int64_t arith_intensity_curve_num_samples,
                                       const IRModule& mod) {
-    PerStoreFeatureCollector collector(is_gpu, cache_line_bytes, arith_intensity_curve_num_samples);
+    auto collector = ffi::make_object<PerStoreFeatureCollector>(is_gpu, cache_line_bytes,
+                                                                arith_intensity_curve_num_samples);
     for (const auto& kv : mod->functions) {
       if (const PrimFuncNode* func = kv.second.as<PrimFuncNode>()) {
-        collector(func->body);
+        collector->Visit(func->body);
         for (const Var& param : func->params) {
           if (auto buffer = param.as<BufferVar>()) {
-            collector.HandleBufferAlloc(buffer.value());
+            collector->HandleBufferAlloc(buffer.value());
           }
         }
       }
     }
     std::vector<Feature> result;
-    result.reserve(collector.buffer_features_.size());
-    for (auto& it : collector.buffer_features_) {
+    result.reserve(collector->buffer_features_.size());
+    for (auto& it : collector->buffer_features_) {
       Feature& feature = it.second;
       if (feature.buffer != nullptr) {
         TVM_FFI_ICHECK(feature.group1);
@@ -1316,16 +1339,17 @@ class PerStoreFeatureCollector : private StmtVisitor {
   }
 
  private:
-  void VisitStmt_(const ForNode* loop) final {
+  ffi::Optional<VisitInterrupt> Visit_(const ForNode* loop) final {
     int64_t auto_unroll;
     ForVec* for_vec = loop_nest_.Push(loop, &auto_unroll);
-    StmtVisitor::VisitStmt_(loop);
+    TVM_FFI_S_VISIT_MAYBE_EARLY_RETURN(StmtExprVisitor::Visit_(loop));
     loop_nest_.Pop(loop, for_vec, auto_unroll);
+    return std::nullopt;
   }
 
-  void VisitStmt_(const BufferStoreNode* store) final {
+  ffi::Optional<VisitInterrupt> Visit_(const BufferStoreNode* store) final {
     if (store->value->IsInstance<IntImmNode>() || store->value->IsInstance<FloatImmNode>()) {
-      return;
+      return std::nullopt;
     }
     const VarNode* buffer = store->buffer.get();
     Feature& feature = buffer_features_[buffer];
@@ -1341,13 +1365,15 @@ class PerStoreFeatureCollector : private StmtVisitor {
         std::make_unique<group3::Feature>(arith_intensity_curve_num_samples_, loop_nest_,
                                           for_touched_bytes_, feature.group1->arith_ops);
     feature.group5 = std::make_unique<group5::Feature>(loop_nest_);
+    return std::nullopt;
   }
 
-  void VisitStmt_(const SBlockNode* block) final {
-    StmtVisitor::VisitStmt_(block);
+  ffi::Optional<VisitInterrupt> Visit_(const SBlockNode* block) final {
+    TVM_FFI_S_VISIT_MAYBE_EARLY_RETURN(StmtExprVisitor::Visit_(block));
     for (const BufferVar& buffer : block->alloc_buffers) {
       HandleBufferAlloc(buffer);
     }
+    return std::nullopt;
   }
 
   void HandleBufferAlloc(const BufferVar& buffer) {
@@ -1355,12 +1381,14 @@ class PerStoreFeatureCollector : private StmtVisitor {
     feature.group4 = std::make_unique<group4::Feature>(loop_nest_, buffer, analyzer_.get());
   }
 
+ public:
   explicit PerStoreFeatureCollector(bool is_gpu, int64_t cache_line_bytes,
                                     int64_t arith_intensity_curve_num_samples)
       : is_gpu_(is_gpu),
         cache_line_bytes_(cache_line_bytes),
         arith_intensity_curve_num_samples_(arith_intensity_curve_num_samples) {}
 
+ private:
   bool is_gpu_;
   int64_t cache_line_bytes_;
   int64_t arith_intensity_curve_num_samples_;

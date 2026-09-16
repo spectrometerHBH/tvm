@@ -23,6 +23,7 @@
  */
 
 #include <tvm/ffi/cast.h>
+#include <tvm/ffi/extra/structural_visit.h>
 #include <tvm/ffi/reflection/registry.h>
 #include <tvm/s_tir/transform.h>
 #include <tvm/tirx/stmt_functor.h>
@@ -59,14 +60,14 @@ class RenewDefMutator : public StmtExprMutator {
     for (const auto& param : func->params) {
       if (auto opt_buffer = param.as<BufferVar>()) {
         const BufferVar& buffer = opt_buffer.value();
+        auto walk_fn = [&generator](const Var& var) -> ffi::Expected<ffi::WalkResult> {
+          if (generator.remap_.count(var) == 0) {
+            generator.ReDefineVar(var);
+          }
+          return ffi::WalkResult::Advance();
+        };
         for (const PrimExpr& e : buffer->shape) {
-          PostOrderVisit(e, [&generator](const ffi::ObjectRef& obj) {
-            if (auto var = obj.as<Var>()) {
-              if (generator.remap_.count(var.value()) == 0) {
-                generator.ReDefineVar(var.value());
-              }
-            }
-          });
+          ffi::StructuralWalk<ffi::WalkOrder::kPostOrder>(e, walk_fn);
         }
       }
     }
@@ -77,7 +78,7 @@ class RenewDefMutator : public StmtExprMutator {
       if (auto opt_buffer = param.as<BufferVar>()) {
         params.push_back(generator.DefineBuffer(opt_buffer.value()));
       } else {
-        params.push_back(generator.VisitExpr(param).as_or_throw<Var>());
+        params.push_back(generator.Dispatch(param).as_or_throw<Var>());
       }
     }
     // Visit body
@@ -94,12 +95,12 @@ class RenewDefMutator : public StmtExprMutator {
     return VisitStmt(stmt);
   }
 
-  Expr VisitExpr(const Expr& expr) final {
+  Expr Dispatch(const Expr& expr) final {
     auto it = remap_.find(expr);
     if (it != remap_.end()) {
       return (*it).second.as_or_throw<Expr>();
     } else {
-      return ExprMutator::VisitExpr(expr);
+      return ExprMutator::Dispatch(expr);
     }
   }
 
@@ -182,12 +183,12 @@ class RenewDefMutator : public StmtExprMutator {
       } else if (auto var = expr.as<Var>()) {
         return this->ReDefineVar(var.value());
       } else {
-        return ExprMutator::VisitExpr(expr);
+        return ExprMutator::Dispatch(expr);
       }
     };
 
     // shape is USED (references existing definitions like buffer-parameter shape vars),
-    // remap via VisitExpr to avoid creating spurious new var definitions
+    // remap via Dispatch to avoid creating spurious new var definitions
     auto visit_expr = [this](const PrimExpr& e) -> PrimExpr { return this->VisitPrimExpr(e); };
     ffi::Array<PrimExpr> shape = buffer->shape.Map(visit_expr);
     // strides/elem_offset may define NEW vars (e.g. in match_buffer),

@@ -24,6 +24,7 @@
 // Unrolls the loop as in Halide pipeline.
 #include <tvm/arith/analyzer.h>
 #include <tvm/ffi/cast.h>
+#include <tvm/ffi/extra/structural_mutate.h>
 #include <tvm/ffi/function.h>
 #include <tvm/ffi/reflection/registry.h>
 #include <tvm/ir/prim/expr.h>
@@ -77,12 +78,15 @@ TVM_FFI_STATIC_INIT_BLOCK() { UnrollLoopConfigNode::RegisterReflection(); }
 
 TVM_REGISTER_PASS_CONFIG_OPTION("tirx.UnrollLoop", UnrollLoopConfig);
 
-class VarLocalAccessMarker : public ExprVisitor {
+class VarLocalAccessMarker : public StmtExprVisitor {
  public:
   explicit VarLocalAccessMarker(std::unordered_set<Var>* var_touched_local)
       : var_touched_local_(var_touched_local) {}
 
-  void VisitExpr_(const VarNode* op) final { var_touched_local_->insert(ffi::GetRef<Var>(op)); }
+  ffi::Optional<VisitInterrupt> Visit_(const VarNode* op) final {
+    var_touched_local_->insert(ffi::GetRef<Var>(op));
+    return std::nullopt;
+  }
 
  private:
   std::unordered_set<Var>* var_touched_local_;
@@ -165,15 +169,15 @@ class LoopUnroller : public StmtExprMutator {
     }
   }
 
-  Expr VisitExpr_(const TensorLoadNode* op) final {
+  Expr Dispatch_(const TensorLoadNode* op) final {
     if (unroll_local_access_) {
       auto storage_scope =
           runtime::StorageScope::Create(op->source.as_or_throw<tvm::tirx::BufferVar>().scope());
       if (storage_scope.rank == runtime::StorageRank::kLocal ||
           storage_scope.rank == runtime::StorageRank::kWarp) {
-        VarLocalAccessMarker marker(&var_touched_local_);
+        auto marker = ffi::make_object<VarLocalAccessMarker>(&var_touched_local_);
         for (PrimExpr e : op->indices) {
-          marker(e);
+          marker->Visit(e);
         }
       }
     }
@@ -186,9 +190,9 @@ class LoopUnroller : public StmtExprMutator {
       auto storage_scope = runtime::StorageScope::Create(op->buffer.scope());
       if (storage_scope.rank == runtime::StorageRank::kLocal ||
           storage_scope.rank == runtime::StorageRank::kWarp) {
-        VarLocalAccessMarker marker(&var_touched_local_);
+        auto marker = ffi::make_object<VarLocalAccessMarker>(&var_touched_local_);
         for (PrimExpr e : op->indices) {
-          marker(e);
+          marker->Visit(e);
         }
       }
     }
@@ -225,9 +229,17 @@ class LoopUnroller : public StmtExprMutator {
     Stmt body = op->body;
     ffi::Map<Var, PrimExpr> vmap;
     ffi::Array<Stmt> unrolled;
+    auto f_substitute = [&vmap](
+                            const Var& var,
+                            TVMFFIDefRegionKind kind) -> ffi::Expected<ffi::UnchangedOr<ffi::Any>> {
+      if (kind != kTVMFFIDefRegionKindNone) return ffi::Unchanged();
+      if (auto repl = vmap.Get(var)) return ffi::Any(*std::move(repl));
+      return ffi::Unchanged();
+    };
     for (int i = 0; i < value; ++i) {
       vmap.Set(op->loop_var, op->min + IntImm(op->loop_var.ty(), i));
-      Stmt step = Substitute(body, vmap);
+      Stmt step =
+          ffi::StructuralMap<ffi::WalkOrder::kPreOrder>(body, f_substitute).as_or_throw<Stmt>();
       unrolled.push_back(step);
     }
     return SeqStmt::Flatten(unrolled);

@@ -194,9 +194,15 @@ void CodeGenCUDA::PrintFunctionSignature(const ffi::String& function_name, const
   CodeGenC::PrintFunctionSignature(function_name, func, os);
 }
 
-class ThreadIdxExtractor : public tirx::StmtVisitor {
+class ThreadIdxExtractor : public tirx::StmtExprVisitor {
+ public:
+  ffi::Optional<VisitInterrupt> Visit(ffi::AnyView value) override {
+    if (value.as<tvm::ExprNode>()) return std::nullopt;
+    return StmtExprVisitor::Visit(value);
+  }
+
  private:
-  void VisitStmt_(const AttrStmtNode* op) final {
+  ffi::Optional<VisitInterrupt> Visit_(const AttrStmtNode* op) final {
     if (op->attr_key == tirx::attr::thread_extent) {
       IterVar iv = op->node.as_or_throw<IterVar>();
       if (iv->var->name == "threadIdx.x" || iv->thread_tag == "threadIdx.x") {
@@ -218,7 +224,7 @@ class ThreadIdxExtractor : public tirx::StmtVisitor {
         clusterCtaIdx_z_ext = op->value;
       }
     }
-    StmtVisitor::VisitStmt_(op);
+    return StmtExprVisitor::Visit_(op);
   }
 
  public:
@@ -231,13 +237,13 @@ class ThreadIdxExtractor : public tirx::StmtVisitor {
 };
 
 void CodeGenCUDA::PrintExtraAttrs(const PrimFunc& f, std::ostream& os) {
-  ThreadIdxExtractor extractor;
-  extractor(f->body);
+  auto extractor = ffi::make_object<ThreadIdxExtractor>();
+  extractor->Visit(f->body);
   arith::Analyzer analyzer;
   PrimExpr threadIdx_ext = analyzer->Simplify(
-      extractor.threadIdx_x_ext * extractor.threadIdx_y_ext * extractor.threadIdx_z_ext);
+      extractor->threadIdx_x_ext * extractor->threadIdx_y_ext * extractor->threadIdx_z_ext);
   PrimExpr cluster_cta_yz_ext =
-      analyzer->Simplify(extractor.clusterCtaIdx_y_ext * extractor.clusterCtaIdx_z_ext);
+      analyzer->Simplify(extractor->clusterCtaIdx_y_ext * extractor->clusterCtaIdx_z_ext);
   if (const IntImmNode* const cluster_cta_yz_ext_int = cluster_cta_yz_ext.as<IntImmNode>()) {
     cluster_cta_x_is_linear_rank_ = cluster_cta_yz_ext_int->value == 1;
   } else {
@@ -249,12 +255,12 @@ void CodeGenCUDA::PrintExtraAttrs(const PrimFunc& f, std::ostream& os) {
     TVM_FFI_ICHECK_EQ(required_block_size.value(), 1);
     TVM_FFI_ICHECK(!max_registers.has_value())
         << tirx::attr::kRequiredBlockSize << " cannot be combined with maximum registers";
-    const auto* tx = extractor.threadIdx_x_ext.as<IntImmNode>();
-    const auto* ty = extractor.threadIdx_y_ext.as<IntImmNode>();
-    const auto* tz = extractor.threadIdx_z_ext.as<IntImmNode>();
-    const auto* cx = extractor.clusterCtaIdx_x_ext.as<IntImmNode>();
-    const auto* cy = extractor.clusterCtaIdx_y_ext.as<IntImmNode>();
-    const auto* cz = extractor.clusterCtaIdx_z_ext.as<IntImmNode>();
+    const auto* tx = extractor->threadIdx_x_ext.as<IntImmNode>();
+    const auto* ty = extractor->threadIdx_y_ext.as<IntImmNode>();
+    const auto* tz = extractor->threadIdx_z_ext.as<IntImmNode>();
+    const auto* cx = extractor->clusterCtaIdx_x_ext.as<IntImmNode>();
+    const auto* cy = extractor->clusterCtaIdx_y_ext.as<IntImmNode>();
+    const auto* cz = extractor->clusterCtaIdx_z_ext.as<IntImmNode>();
     TVM_FFI_ICHECK(tx && ty && tz && cx && cy && cz)
         << tirx::attr::kRequiredBlockSize << " requires static thread and cluster dimensions";
     os << " __block_size__((" << tx->value << ", " << ty->value << ", " << tz->value << "), ("
@@ -908,13 +914,13 @@ void CodeGenCUDA::AddUtilFunction(const std::string& func_name, const std::strin
   this->util_funcs_.insert({func_name, code});
 }
 
-void CodeGenCUDA::VisitExpr_(const prim::CastNode* op, std::ostream& os) {
+void CodeGenCUDA::Dispatch_(const prim::CastNode* op, std::ostream& os) {
   PrimType from_ty = op->value.ty();
   PrimType target_ty = op->ty.as_or_throw<PrimType>();
   TVM_FFI_ICHECK_EQ(target_ty.lanes(), from_ty.lanes());
 
   // Emit simple C-style type conversion.
-  if (from_ty.IsScalar()) return CodeGenC::VisitExpr_(op, os);
+  if (from_ty.IsScalar()) return CodeGenC::Dispatch_(op, os);
 
   if (IsPackedFloat(target_ty) || IsPackedFloat(from_ty)) {
     std::ostringstream val;
@@ -1013,7 +1019,7 @@ void CodeGenCUDA::PrintCallExtern(Type ret_type, ffi::String global_symbol,
   }
 }
 
-void CodeGenCUDA::VisitExpr_(const CallNode* op, std::ostream& os) {
+void CodeGenCUDA::Dispatch_(const CallNode* op, std::ostream& os) {
   if (auto opt_call_opt = op->op.as<Op>()) {
     Op call_op = opt_call_opt.value();
     // This is only for backward compatibility with __shfl_{up/down}.
@@ -1166,12 +1172,12 @@ void CodeGenCUDA::VisitExpr_(const CallNode* op, std::ostream& os) {
     // "//" and "%" in the index map are translated to FloorDiv/Mod, but the plain Div/Mod are fine.
     // FloorDiv/Mod are supposed to be lowered before they reach codegen, so manually replace them
     // to the plain ones here.
-    class LowerFloorDivMod : public ExprMutator {
+    class LowerFloorDivMod : public tirx::ExprMutator {
      public:
-      Expr VisitExpr_(const prim::FloorDivNode* op) {
+      Expr Dispatch_(const prim::FloorDivNode* op) {
         return prim::Div(this->VisitPrimExpr(op->a), this->VisitPrimExpr(op->b));
       }
-      Expr VisitExpr_(const prim::FloorModNode* op) {
+      Expr Dispatch_(const prim::FloorModNode* op) {
         return prim::Mod(this->VisitPrimExpr(op->a), this->VisitPrimExpr(op->b));
       }
     };
@@ -1268,12 +1274,12 @@ void CodeGenCUDA::VisitExpr_(const CallNode* op, std::ostream& os) {
         IndexMap::FromFunc(2, *index_map_func).Inverse({Range(0, m), Range(0, n)}, analyzer);
     auto indices_16x16 = inverse_index_map->final_indices;
 
-    class LowerFloorDivMod : public ExprMutator {
+    class LowerFloorDivMod : public tirx::ExprMutator {
      public:
-      Expr VisitExpr_(const prim::FloorDivNode* op) {
+      Expr Dispatch_(const prim::FloorDivNode* op) {
         return prim::Div(this->VisitPrimExpr(op->a), this->VisitPrimExpr(op->b));
       }
-      Expr VisitExpr_(const prim::FloorModNode* op) {
+      Expr Dispatch_(const prim::FloorModNode* op) {
         return prim::Mod(this->VisitPrimExpr(op->a), this->VisitPrimExpr(op->b));
       }
     };
@@ -1358,7 +1364,7 @@ void CodeGenCUDA::VisitExpr_(const CallNode* op, std::ostream& os) {
     }
 
     if (!tgt_prim_type || !src_prim_type) {
-      return CodeGenC::VisitExpr_(op, os);
+      return CodeGenC::Dispatch_(op, os);
     }
 
     PrimType tgt_ty = op->ty.as_or_throw<PrimType>();
@@ -1367,10 +1373,10 @@ void CodeGenCUDA::VisitExpr_(const CallNode* op, std::ostream& os) {
 
     // Handle float4_e2m1fn reinterpret
     if (!IsFloat4(src_ty) && !IsFloat4(tgt_ty)) {
-      return CodeGenC::VisitExpr_(op, os);
+      return CodeGenC::Dispatch_(op, os);
     }
     if (src_ty == tgt_ty || tgt_ty.lanes() * tgt_ty.bits() == src_ty.lanes() * src_ty.bits()) {
-      return CodeGenC::VisitExpr_(op, os);
+      return CodeGenC::Dispatch_(op, os);
     }
     TVM_FFI_ICHECK_EQ(tgt_ty.lanes(), src_ty.lanes())
         << "E2M1 float4 reinterpret expects source and target to have the same number of lanes. "
@@ -1395,7 +1401,7 @@ void CodeGenCUDA::VisitExpr_(const CallNode* op, std::ostream& os) {
         // and finally reinterpret the result as fp4x2.
         value =
             Call(PrimType::UInt(16), tirx::builtin::reinterpret(), {value}).as_or_throw<PrimExpr>();
-        tirx::PrimVar temp_var("temp_var", PrimType::UInt(16));
+        PrimVar temp_var("temp_var", PrimType::UInt(16));
         value = prim::Let(temp_var, value,
                           prim::Cast(PrimType::UInt(8),
                                      (temp_var & IntImm(PrimType::UInt(16), 0xF)) |
@@ -1404,7 +1410,7 @@ void CodeGenCUDA::VisitExpr_(const CallNode* op, std::ostream& os) {
         value = prim::Cast(
             PrimType::UInt(16),
             Call(PrimType::UInt(8), tirx::builtin::reinterpret(), {value}).as_or_throw<PrimExpr>());
-        tirx::PrimVar temp_var("temp_var", PrimType::UInt(16));
+        PrimVar temp_var("temp_var", PrimType::UInt(16));
         value = prim::Let(temp_var, value,
                           (temp_var & IntImm(PrimType::UInt(16), 0xF)) |
                               ((temp_var & IntImm(PrimType::UInt(16), 0xF0)) << 4));
@@ -1416,7 +1422,7 @@ void CodeGenCUDA::VisitExpr_(const CallNode* op, std::ostream& os) {
         // and finally reinterpret the result as fp4x4.
         value =
             Call(PrimType::UInt(32), tirx::builtin::reinterpret(), {value}).as_or_throw<PrimExpr>();
-        tirx::PrimVar temp_var("temp_var", PrimType::UInt(32));
+        PrimVar temp_var("temp_var", PrimType::UInt(32));
         value = prim::Let(temp_var, value,
                           prim::Cast(PrimType::UInt(16),
                                      (temp_var & IntImm(PrimType::UInt(32), 0xF)) |
@@ -1427,7 +1433,7 @@ void CodeGenCUDA::VisitExpr_(const CallNode* op, std::ostream& os) {
         value = prim::Cast(PrimType::UInt(32),
                            Call(PrimType::UInt(16), tirx::builtin::reinterpret(), {value})
                                .as_or_throw<PrimExpr>());
-        tirx::PrimVar temp_var("temp_var", PrimType::UInt(32));
+        PrimVar temp_var("temp_var", PrimType::UInt(32));
         value = prim::Let(temp_var, value,
                           (temp_var & IntImm(PrimType::UInt(32), 0xF)) |
                               ((temp_var & IntImm(PrimType::UInt(32), 0xF0)) << 4) |
@@ -1593,7 +1599,7 @@ void CodeGenCUDA::VisitExpr_(const CallNode* op, std::ostream& os) {
   } else if (op->op.same_as(builtin::thread_return())) {
     os << "return";
   } else {
-    CodeGenC::VisitExpr_(op, os);
+    CodeGenC::Dispatch_(op, os);
   }
 }
 
@@ -1618,7 +1624,7 @@ void CodeGenCUDA::VisitStmt_(const AttrStmtNode* op) {
              {prim::StringImm("async"), prim::StringImm("commit_group"), prim::StringImm("")})
             .as_or_throw<PrimExpr>();
     this->PrintIndent();
-    this->VisitExpr(commit_group, this->stream);
+    this->Dispatch(commit_group, this->stream);
     this->stream << ";\n";
     return;
   } else if (op->attr_key == s_tir::attr::async_wait_queue_scope) {
@@ -1636,7 +1642,7 @@ void CodeGenCUDA::VisitStmt_(const AttrStmtNode* op) {
                             prim::StringImm("")})
                           .as_or_throw<PrimExpr>();
     this->PrintIndent();
-    this->VisitExpr(wait_group, this->stream);
+    this->Dispatch(wait_group, this->stream);
     this->stream << ";\n";
     auto inner = op->body.as<AttrStmtNode>();
     TVM_FFI_ICHECK(inner);
@@ -1750,7 +1756,7 @@ void CodeGenCUDA::VisitStmt_(const EvaluateNode* op) {
   }
 }
 
-void CodeGenCUDA::VisitExpr_(const prim::RampNode* op, std::ostream& os) {
+void CodeGenCUDA::Dispatch_(const prim::RampNode* op, std::ostream& os) {
   PrimType op_ty = op->ty.as_or_throw<PrimType>();
   int lanes = op_ty.lanes();
   if (lanes <= 4) {
@@ -1785,7 +1791,7 @@ void CodeGenCUDA::VisitExpr_(const prim::RampNode* op, std::ostream& os) {
   os << sret;
 }
 
-void CodeGenCUDA::VisitExpr_(const prim::BroadcastNode* op, std::ostream& os) {  // NOLINT(*)
+void CodeGenCUDA::Dispatch_(const prim::BroadcastNode* op, std::ostream& os) {  // NOLINT(*)
   PrimType op_ty = op->ty.as_or_throw<PrimType>();
   int lanes = op_ty.lanes();
   if ((op_ty.MatchesCode(DLDataTypeCode::kDLInt, DLDataTypeCode::kDLUInt)) && op_ty.bits() == 8 &&
@@ -1908,11 +1914,11 @@ void CodeGenCUDA::VisitExpr_(const prim::BroadcastNode* op, std::ostream& os) { 
   os << ')';
 }
 
-void CodeGenCUDA::VisitExpr_(const prim::SelectNode* op, std::ostream& os) {
+void CodeGenCUDA::Dispatch_(const prim::SelectNode* op, std::ostream& os) {
   PrimType op_ty = op->ty.as_or_throw<PrimType>();
   // Non-vector cases.
   if (!op_ty.IsFixedLengthVector()) {
-    CodeGenC::VisitExpr_(op, os);
+    CodeGenC::Dispatch_(op, os);
     return;
   }
 
@@ -2017,7 +2023,7 @@ inline void PrintConst(const FloatImmNode* op, std::ostream& os, CodeGenCUDA* p)
   }
 }
 
-void CodeGenCUDA::VisitExpr_(const FloatImmNode* op, std::ostream& os) {  // NOLINT(*)
+void CodeGenCUDA::Dispatch_(const FloatImmNode* op, std::ostream& os) {  // NOLINT(*)
   PrintConst(op, os, this);
 }
 

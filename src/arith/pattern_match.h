@@ -44,7 +44,7 @@
  *    return (max(x, y) + z).Eval();
  *  }
  *
- *  tvm::tirx::Var tx, ty;
+ *  tvm::Var tx, ty;
  *  arith::PVar<IntImm> c;
  *  arith::PVar<Var> v;
  *  // We can match integer and Var, both of which are
@@ -68,7 +68,6 @@
 #include <tvm/ffi/cast.h>
 #include <tvm/ir/prim/builtin.h>
 #include <tvm/ir/prim/expr.h>
-#include <tvm/tirx/analysis.h>
 #include <tvm/tirx/builtin.h>
 
 #include <cmath>
@@ -160,7 +159,7 @@ class PEqualChecker<PrimExpr> {
  public:
   bool operator()(const PrimExpr& lhs, const PrimExpr& rhs) const {
     if (lhs.same_as(rhs)) return true;
-    return tirx::ExprDeepEqual()(lhs, rhs);
+    return prim::ExprDeepEqual()(lhs, rhs);
   }
 };
 
@@ -179,9 +178,9 @@ class PEqualChecker<FloatImm> {
 };
 
 template <>
-class PEqualChecker<tirx::Var> {
+class PEqualChecker<Var> {
  public:
-  bool operator()(const tirx::Var& lhs, const tirx::Var& rhs) const { return lhs.same_as(rhs); }
+  bool operator()(const Var& lhs, const Var& rhs) const { return lhs.same_as(rhs); }
 };
 
 /*!
@@ -841,12 +840,6 @@ inline PCallExpr<PIfThenElseOp, TCond, TA, TB> if_then_else(const Pattern<TCond>
   return PCallExpr<PIfThenElseOp, TCond, TA, TB>(cond.derived(), true_value.derived(),
                                                  false_value.derived());
 }
-
-// vscale
-struct PVscaleOp {
-  static PrimExpr Eval() { return Call(PrimType::Int(32), GetOp(), {}).as_or_throw<PrimExpr>(); }
-  static const Op& GetOp() { return prim::builtin::vscale(); }
-};
 
 template <typename... TPattern>
 class PMatchesOneOf {

@@ -85,13 +85,13 @@ class TIRxOpaqueLower : public StmtExprMutator {
     return body;
   }
 
-  Expr VisitExpr_(const VarNode* op) final {
+  Expr Dispatch_(const VarNode* op) final {
     Var var = ffi::GetRef<Var>(op);
     auto it = unit_loop_vars_.find(var);
     if (it == unit_loop_vars_.end()) {
       // Fall through to the base visitor so buffer-variable remapping from
       // any rebuild in this pass reaches remaining use sites.
-      return StmtExprMutator::VisitExpr_(op);
+      return StmtExprMutator::Dispatch_(op);
     } else {
       PrimExpr expr = it->second;
       PrimType var_ty = var->ty.as_or_throw<PrimType>();
@@ -120,9 +120,7 @@ class TIRxOpaqueLower : public StmtExprMutator {
 
   /*! \brief Convert attr value from annotation map into PrimExpr. */
   PrimExpr ConvertAttrValue(const ffi::String& key, const Any& obj) {
-    if (obj == nullptr) {
-      return PrimExpr();
-    } else if (auto expr = obj.try_cast<PrimExpr>()) {
+    if (auto expr = obj.try_cast<PrimExpr>()) {
       return expr.value();
     } else if (auto str = obj.try_cast<ffi::String>()) {
       return std::move(prim::StringImm(str.value()));
@@ -149,11 +147,17 @@ class TIRxOpaqueLower : public StmtExprMutator {
     for (const auto& kv : annotations) {
       const ffi::String& key = kv.first;
       if (key == "pragma_unroll") {
-        preserved_annotations.Set(key, kv.second);
+        if (kv.second != nullptr) {
+          preserved_annotations.Set(key, kv.second);
+        }
       } else if (tirx::attr::IsPragmaKey(key)) {
+        if (kv.second == nullptr) {
+          continue;
+        }
+
         pragma_attrs->emplace_back(key, ConvertAttrValue(key, kv.second));
       } else {
-        // loop annotations are always preserved (no SBlock annotation dropping here)
+        // Loop annotations are always preserved
         preserved_annotations.Set(key, kv.second);
       }
     }

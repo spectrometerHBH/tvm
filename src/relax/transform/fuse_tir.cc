@@ -17,6 +17,7 @@
  * under the License.
  */
 #include <tvm/ffi/cast.h>
+#include <tvm/ffi/extra/structural_mutate.h>
 #include <tvm/ffi/reflection/registry.h>
 #include <tvm/relax/analysis.h>
 #include <tvm/relax/attrs/op.h>
@@ -51,13 +52,19 @@ class SymbolicMatcher : ExprFunctor<void(const Expr& n, const PrimExpr& other)> 
     }
   }
   void Match(const PrimExpr& param, const PrimExpr& arg) {
-    VisitExpr(param, arg);
-    must_prove_ = analyzer_->Simplify(Substitute(must_prove_, *var_remap_));
+    Dispatch(param, arg);
+    auto f_substitute = [this](const Var& var) -> ffi::Expected<ffi::UnchangedOr<ffi::Any>> {
+      if (auto repl = var_remap_->Get(var)) return ffi::Any(*std::move(repl));
+      return ffi::Unchanged();
+    };
+    must_prove_ =
+        analyzer_->Simplify(ffi::StructuralMap<ffi::WalkOrder::kPreOrder>(must_prove_, f_substitute)
+                                .as_or_throw<PrimExpr>());
     TVM_FFI_ICHECK(!is_zero(must_prove_));
   }
 
  private:
-  void VisitExpr(const Expr& expr, const PrimExpr& other) final {
+  void Dispatch(const Expr& expr, const PrimExpr& other) final {
     PrimExpr node = expr.as_or_throw<PrimExpr>();
     if (node.same_as(other)) {
       return;
@@ -66,16 +73,16 @@ class SymbolicMatcher : ExprFunctor<void(const Expr& n, const PrimExpr& other)> 
           << "Parameter expression " << node << " with dtype " << node.ty()->dtype
           << " cannot match to argument " << other << " with dtype " << other.ty()->dtype;
     } else {
-      ExprFunctor::VisitExpr(expr, other);
+      ExprFunctor::Dispatch(expr, other);
     }
   }
 
 #define TVM_DECLARE_SYMBOLIC_MATCHER_BINOP(OpName)                       \
-  void VisitExpr_(const OpName* op, const PrimExpr& other) {             \
+  void Dispatch_(const OpName* op, const PrimExpr& other) {              \
     const auto* rhs = other.as<OpName>();                                \
     if (rhs) {                                                           \
-      VisitExpr(op->a, rhs->a);                                          \
-      VisitExpr(op->b, rhs->b);                                          \
+      Dispatch(op->a, rhs->a);                                           \
+      Dispatch(op->b, rhs->b);                                           \
     } else {                                                             \
       must_prove_ = must_prove_ && (ffi::GetRef<PrimExpr>(op) == other); \
     }                                                                    \
@@ -99,7 +106,7 @@ class SymbolicMatcher : ExprFunctor<void(const Expr& n, const PrimExpr& other)> 
   TVM_DECLARE_SYMBOLIC_MATCHER_BINOP(prim::FloorDivNode);
   TVM_DECLARE_SYMBOLIC_MATCHER_BINOP(prim::FloorModNode);
 
-  void VisitExpr_(const IntImmNode* op, const PrimExpr& other) {
+  void Dispatch_(const IntImmNode* op, const PrimExpr& other) {
     const auto* rhs = other.as<IntImmNode>();
     if (!rhs || (op->value != rhs->value)) {
       TVM_FFI_THROW(InternalError)
@@ -109,7 +116,7 @@ class SymbolicMatcher : ExprFunctor<void(const Expr& n, const PrimExpr& other)> 
     }
   }
 
-  void VisitExpr_(const FloatImmNode* op, const PrimExpr& other) {
+  void Dispatch_(const FloatImmNode* op, const PrimExpr& other) {
     const auto* rhs = other.as<FloatImmNode>();
     if (!rhs || (op->value != rhs->value)) {
       TVM_FFI_THROW(InternalError) << "Parameter expression " << ffi::GetRef<PrimExpr>(op)
@@ -118,7 +125,7 @@ class SymbolicMatcher : ExprFunctor<void(const Expr& n, const PrimExpr& other)> 
     }
   }
 
-  void VisitExpr_(const prim::CastNode* op, const PrimExpr& other) {
+  void Dispatch_(const prim::CastNode* op, const PrimExpr& other) {
     const auto* rhs = other.as<prim::CastNode>();
     if (!rhs) {
       TVM_FFI_THROW(InternalError)
@@ -126,10 +133,10 @@ class SymbolicMatcher : ExprFunctor<void(const Expr& n, const PrimExpr& other)> 
           << op->ty.as_or_throw<PrimType>()->dtype << " as the argument, "
           << "but was provided with the argument " << other;
     }
-    VisitExpr(op->value, rhs->value);
+    Dispatch(op->value, rhs->value);
   }
 
-  void VisitExpr_(const VarNode* op, const PrimExpr& rhs) {
+  void Dispatch_(const VarNode* op, const PrimExpr& rhs) {
     auto lhs = ffi::GetRef<Var>(op);
     PrimType lhs_ty = op->ty.as_or_throw<PrimType>();
 
@@ -140,17 +147,17 @@ class SymbolicMatcher : ExprFunctor<void(const Expr& n, const PrimExpr& other)> 
           << "Parameter expression " << lhs << " with dtype " << lhs_ty->dtype
           << " cannot match to argument " << rhs << " with dtype " << rhs.ty()->dtype;
     } else if (auto it = var_remap_->find(lhs); it != var_remap_->end()) {
-      VisitExpr((*it).second, rhs);
+      Dispatch((*it).second, rhs);
     } else {
       var_remap_->Set(lhs, rhs);
     }
   }
 
-  void VisitExpr_(const prim::SelectNode* op, const PrimExpr& other) {
+  void Dispatch_(const prim::SelectNode* op, const PrimExpr& other) {
     const auto* rhs = other.as<prim::SelectNode>();
     if (rhs) {
-      VisitExpr(op->true_value, rhs->true_value);
-      VisitExpr(op->false_value, rhs->false_value);
+      Dispatch(op->true_value, rhs->true_value);
+      Dispatch(op->false_value, rhs->false_value);
     } else {
       must_prove_ = must_prove_ && (ffi::GetRef<PrimExpr>(op) == other);
     }
@@ -200,7 +207,7 @@ class FuseTIRBufferSubstitutor : private StmtExprMutator {
   }
 
  private:
-  Expr VisitExpr_(const VarNode* _op) final {
+  Expr Dispatch_(const VarNode* _op) final {
     if (auto it = var_remap_.find(ffi::GetRef<Var>(_op)); it != var_remap_.end()) {
       return (*it).second;
     } else {
@@ -208,8 +215,8 @@ class FuseTIRBufferSubstitutor : private StmtExprMutator {
     }
   }
 
-  Expr VisitExpr_(const TensorLoadNode* _op) final {
-    TensorLoad load = StmtExprMutator::VisitExpr_(_op).as_or_throw<TensorLoad>();
+  Expr Dispatch_(const TensorLoadNode* _op) final {
+    TensorLoad load = StmtExprMutator::Dispatch_(_op).as_or_throw<TensorLoad>();
     const BufferVar& buffer = SubstituteBuffer(load->source.as_or_throw<tvm::tirx::BufferVar>());
     if (buffer.same_as(load->source.as_or_throw<tvm::tirx::BufferVar>())) {
       return load;
@@ -556,7 +563,7 @@ class FusedTIRConstructor : public ExprVisitor {
   void VisitExpr_(const FunctionNode* func) final {
     auto relax_to_tir_var_map =
         RelaxToTIRVarMapCollector::Collect(mod_, ffi::GetRef<Function>(func));
-    std::vector<ffi::Variant<tirx::PrimVar, tirx::BufferVar>> prim_func_params;
+    std::vector<ffi::Variant<PrimVar, tirx::BufferVar>> prim_func_params;
     for (const Var& relax_param : func->params) {
       size_t size_before = prim_func_params.size();
       CollectPrimFuncParams(relax_param, &prim_func_params, relax_to_tir_var_map.Get(relax_param));
@@ -589,7 +596,7 @@ class FusedTIRConstructor : public ExprVisitor {
         tirx::Var param = tirx::Var("p_" + buffer.name(), PointerType::VoidPointerTy());
         func_info_.params.push_back(param);
         func_info_.buffer_map.Set(param, buffer);
-      } else if (auto var = param.as<tirx::PrimVar>()) {
+      } else if (auto var = param.as<PrimVar>()) {
         func_info_.params.push_back(var.value());
       }
     }
@@ -920,7 +927,7 @@ class FusedTIRConstructor : public ExprVisitor {
    * \param out The vector into which to collect the params/buffers
    */
   static void CollectPrimFuncParams(const Var& relax_param,
-                                    std::vector<ffi::Variant<tirx::PrimVar, tirx::BufferVar>>* out,
+                                    std::vector<ffi::Variant<PrimVar, tirx::BufferVar>>* out,
                                     const ffi::Optional<tirx::BufferVar>& tir_buffer_param) {
     auto ty = GetType(relax_param);
 
@@ -946,12 +953,12 @@ class FusedTIRConstructor : public ExprVisitor {
 
     } else if (ty.as<PrimTypeNode>()) {
       // Case 2. The relax param is a scalar, so its canonical Var is a TIR parameter.
-      out->push_back(relax_param.as_or_throw<tirx::PrimVar>());
+      out->push_back(relax_param.as_or_throw<PrimVar>());
 
     } else if (const auto* shape_expr = ty.as<ShapeTypeNode>()) {
       // Case 3. The relax param is a tuple of scalars, each represented as a tirx var
       for (const auto& var : shape_expr->values.value()) {
-        auto prim_var = var.as<tirx::PrimVar>();
+        auto prim_var = var.as<PrimVar>();
         TVM_FFI_ICHECK(prim_var.has_value());
         out->push_back(prim_var.value());
       }
@@ -1221,7 +1228,7 @@ class TIRFuseMutator : public ExprMutator {
         TVM_FFI_ICHECK(shape->values.has_value())
             << "FuseTIR requires all shape input has ty value.";
         for (const PrimExpr& prim_value : shape->values.value()) {
-          TVM_FFI_ICHECK(prim_value.as<tirx::PrimVar>())
+          TVM_FFI_ICHECK(prim_value.as<PrimVar>())
               << "All shape inputs are expected to be single tirx var.";
           arg_list.push_back(prim_value);
         }
